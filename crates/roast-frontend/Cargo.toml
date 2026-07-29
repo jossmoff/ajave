@@ -1,0 +1,11 @@
+[package]
+name = "roast-frontend"
+description = "Bytecode-to-IR frontend: classfile parsing and the stack-to-CFG lifter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roast-ir = { path = "../roast-ir" }
+roast-models = { path = "../roast-models" }
+log.workspace = true

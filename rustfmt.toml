@@ -1,0 +1,4 @@
+# Kept at defaults deliberately. A custom style config is one more thing new
+# contributors have to discover before their first `cargo fmt` stops
+# fighting them; `rustfmt --check` in CI is what actually matters.
+edition = "2021"

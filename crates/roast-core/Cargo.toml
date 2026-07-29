@@ -1,0 +1,11 @@
+[package]
+name = "roast-core"
+description = "The verification core: blackboard, CPA substrate, engine/certifier traits, orchestrator. Language-agnostic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roast-ir = { path = "../roast-ir" }
+roast-models = { path = "../roast-models" }
+log.workspace = true

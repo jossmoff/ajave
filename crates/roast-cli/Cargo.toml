@@ -1,0 +1,19 @@
+[package]
+name = "roast"
+description = "roast: an SV-COMP Java verifier. Compiles/loads a program, runs the engine portfolio, reports a certified verdict."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "roast"
+path = "src/main.rs"
+
+[dependencies]
+roast-ir = { path = "../roast-ir" }
+roast-frontend = { path = "../roast-frontend" }
+roast-core = { path = "../roast-core" }
+roast-engines = { path = "../roast-engines" }
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

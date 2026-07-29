@@ -1,0 +1,9 @@
+[package]
+name = "roast-models"
+description = "Standard-library modelling: what roast assumes java.* calls do, without analysing their bytecode."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roast-ir = { path = "../roast-ir" }
