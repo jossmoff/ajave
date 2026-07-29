@@ -50,7 +50,10 @@ impl Blackboard {
                     .insert(ObligationRef { method, id }, Status::Open);
             }
         }
-        debug!("blackboard: seeded {} reachable obligations", self.statuses.len());
+        debug!(
+            "blackboard: seeded {} reachable obligations",
+            self.statuses.len()
+        );
     }
 
     /// The soundness gate.
@@ -99,10 +102,8 @@ impl Blackboard {
 
         match &artifact {
             Artifact::Status(oref, st) => {
-                let keep = match self.statuses.get(oref) {
-                    Some(existing) if existing.is_final() => false,
-                    _ => true,
-                };
+                let keep =
+                    !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
                 if keep {
                     self.statuses.insert(oref.clone(), st.clone());
                 }

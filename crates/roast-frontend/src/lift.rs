@@ -1067,6 +1067,34 @@ fn lift_insn(
                         stack.push(assign!(ty, Rvalue::Nondet(ty)));
                     }
                 }
+                CallModel::StrCall(t) => {
+                    // Keep as Rvalue::Call so the concrete engine can evaluate
+                    // string/StringBuilder methods against tracked values.
+                    if let Some(obj) = receiver.clone() {
+                        nullcheck!(obj);
+                    }
+                    let is_virtual = op != 0xb8 && op != 0xb7;
+                    let mut all = Vec::new();
+                    if let Some(o) = receiver {
+                        all.push(o);
+                    }
+                    all.extend(args);
+                    let rv = Rvalue::Call {
+                        target,
+                        args: all,
+                        is_virtual,
+                    };
+                    // Use Ty::Ref for String-returning methods (Str value flows
+                    // through the concrete engine's str_store, not the IR type).
+                    let ret_ty = t.map(|ty| if ty == Ty::Str { Ty::Ref } else { ty });
+                    match ret_ty {
+                        Some(ty) => stack.push(assign!(ty, rv)),
+                        None => {
+                            let t = lf.temp(Ty::Int);
+                            stmts.push(Stmt::Assign(t, rv));
+                        }
+                    }
+                }
                 CallModel::Unmodelled => {
                     if let Some(obj) = receiver.clone() {
                         nullcheck!(obj);
@@ -1241,7 +1269,10 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
                 // the method: a missing body would look like an unreachable
                 // callee, which is the kind of silent unsoundness this whole
                 // design tries to make impossible.
-                warn!("lift: could not fully lift {}.{}{}: {e}", cf.this_class, m.name, m.desc);
+                warn!(
+                    "lift: could not fully lift {}.{}{}: {e}",
+                    cf.this_class, m.name, m.desc
+                );
                 prog.bodies.insert(
                     key.clone(),
                     Body {

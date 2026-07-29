@@ -30,6 +30,9 @@ pub enum CallModel {
     Nondet(Option<Ty>),
     /// Not modelled. The lifter diverges rather than guessing.
     Unmodelled,
+    /// String/StringBuilder/CharSequence method: keep as Rvalue::Call so the
+    /// concrete engine can evaluate it against a tracked string value.
+    StrCall(Option<Ty>),
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -47,11 +50,16 @@ fn ret_ty(desc: &str) -> Option<Ty> {
 /// Classes whose instance methods we treat as pure with respect to our state.
 /// String is genuinely immutable. StringBuilder is not, but we never read its
 /// fields, so havocking results is sound *given* that we track nothing about it.
-const PURE_OWNERS: &[&str] = &[
+/// String-related owners whose methods we keep in the IR as `Rvalue::Call`
+/// so the concrete engine can evaluate them against tracked string content.
+pub const STR_OWNERS: &[&str] = &[
     "java/lang/String",
     "java/lang/StringBuilder",
     "java/lang/StringBuffer",
     "java/lang/CharSequence",
+];
+
+const PURE_OWNERS: &[&str] = &[
     "java/lang/Integer",
     "java/lang/Long",
     "java/lang/Short",
@@ -92,6 +100,7 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     if owner == VERIFIER {
         return match name {
             "assume" => CallModel::Assume,
+            "nondetString" => CallModel::Nondet(Some(Ty::Str)),
             n if n.starts_with("nondet") => CallModel::Nondet(ret_ty(desc)),
             _ => CallModel::Unmodelled,
         };
@@ -107,6 +116,10 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     // Assertions are enabled under SV-COMP, so this is a constant.
     if owner == "java/lang/Class" && name == "desiredAssertionStatus" {
         return CallModel::Pure(Some(Ty::Int));
+    }
+
+    if STR_OWNERS.contains(&owner) {
+        return CallModel::StrCall(ret_ty(desc));
     }
 
     if PURE_OWNERS.contains(&owner) {

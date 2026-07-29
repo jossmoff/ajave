@@ -112,7 +112,11 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
     }
 
     let out_dir = std::env::temp_dir().join(format!("roast-build-{}", std::process::id()));
-    info!("compiling {} .java file(s) to {}", java_files.len(), out_dir.display());
+    info!(
+        "compiling {} .java file(s) to {}",
+        java_files.len(),
+        out_dir.display()
+    );
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
     let result = std::process::Command::new("javac")

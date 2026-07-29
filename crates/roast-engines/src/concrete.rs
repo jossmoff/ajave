@@ -5,19 +5,19 @@
 //! This is deliberately not full BMC -- there's no solver, no unrolling
 //! variable, no SMT encoding. It is exactly the "self-certifying falsifier"
 //! described early on: enumerate a handful of representative values
-//! (0, ±1, extremes) rather than solving for one, execute the program for
-//! real against each combination, and report a bug the moment a `Check`
-//! fails somewhere the exception can't be caught. Because the values are
-//! concrete, the witness is just "here is what we ran" -- no independent
-//! trust in the engine is required to believe it, only the interpreter's own
-//! determinism (and eventually `certify::JvmReplay`, which confirms even
-//! that isn't required).
+//! (0, ±1, extremes, and for strings a small pool) rather than solving for
+//! one, execute the program for real against each combination, and report a
+//! bug the moment a `Check` fails somewhere the exception can't be caught.
+//! Because the values are concrete, the witness is just "here is what we ran"
+//! -- no independent trust in the engine is required to believe it, only the
+//! interpreter's own determinism (confirmed by `certify::JvmReplay`).
 //!
-//! The one piece of real semantic care here is exception routing: a
-//! `DivByZero` or similar check failing inside a `try` block must transfer to
-//! the matching handler, not be reported as a runtime-exception-property
-//! violation -- getting this wrong is exactly how `ArithmeticException1`
-//! (division caught, `assert false` in the handler) would be misjudged.
+//! String tracking: `nondetString()` produces a `Nondet(Ty::Str)` rvalue in
+//! the IR. The engine picks one of `STRING_CANDIDATES` by using the raw choice
+//! value as a modular index, allocates a fresh reference ID, and records the
+//! content in `str_store`. String method calls remain in the IR as
+//! `Rvalue::Call` (via `CallModel::StrCall`) so this interpreter can evaluate
+//! them against the tracked content instead of returning Unknown.
 
 use std::collections::HashMap;
 
@@ -29,16 +29,19 @@ use roast_ir::verdict::Witness;
 use roast_ir::*;
 use roast_models as models;
 
+/// A small pool of representative strings. Index 0 is the empty string so
+/// that the all-zero probe (which gives the slot count) tests the empty-string
+/// case, which is the most common degenerate input.
+const STRING_CANDIDATES: &[&str] = &["", "a", "ab", "abcde", "aaaaa", "hello", "abc", "test"];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Value {
     I32(i32),
     I64(i64),
-    /// We don't track referential identity or heap contents; `bool` records
-    /// only whether this reference is null. `New` produces `false`
-    /// (non-null); unmodelled reference-producing calls default to
-    /// non-null too -- an Under-approximating engine is allowed to miss the
-    /// null-valued branch of a nondet reference, it just costs completeness.
-    Ref(bool),
+    /// Unique allocation identity.  0 = null; 1 = non-null constant (string
+    /// literals, class objects, any opaque non-null ref we didn't allocate
+    /// ourselves); values ≥ 2 are fresh allocations from `alloc_id`.
+    Ref(u64),
     Unknown,
 }
 
@@ -54,20 +57,21 @@ impl Value {
         match self {
             Value::I32(v) => v != 0,
             Value::I64(v) => v != 0,
-            Value::Ref(is_null) => !is_null,
+            Value::Ref(id) => id != 0,
             Value::Unknown => false,
         }
     }
 }
 
 const INT_CANDIDATES: [i32; 7] = [0, 1, -1, 2, -2, i32::MAX, i32::MIN];
-// Not yet wired into `search`'s odometer, which only enumerates
-// `INT_CANDIDATES` -- `Long` nondet values are currently always defaulted to
-// 0 rather than varied. Kept visible (with the allow, rather than deleted)
-// as a marker of a real gap: see "Known incompleteness" in
-// docs/strategies/concrete.md.
+
 #[allow(dead_code)]
 const LONG_CANDIDATES: [i64; 5] = [0, 1, -1, i64::MAX, i64::MIN];
+
+/// Map a raw choice integer to an index into `STRING_CANDIDATES`.
+fn str_idx(raw: i64, len: usize) -> usize {
+    ((raw % len as i64 + len as i64) % len as i64) as usize
+}
 
 /// Outcome of running one concrete path to completion.
 enum Outcome {
@@ -84,12 +88,8 @@ enum Outcome {
     Inconclusive,
 }
 
-/// The evaluator for everything except `Nondet`, which `run_with_choices`
-/// intercepts before it ever reaches here (see the comment on that arm
-/// below). Just a `store` -- no need for `prog`/`body` since arithmetic and
-/// comparisons never look anything up beyond the variables already bound,
-/// and no `steps_left` since evaluating a single rvalue is O(1), not
-/// something that can itself run out of budget.
+/// The evaluator for everything except `Nondet` and string method `Call`s,
+/// which `run_with_choices` intercepts before they ever reach here.
 struct Run {
     store: HashMap<VarId, Value>,
 }
@@ -100,8 +100,10 @@ impl Run {
             Operand::Var(v) => self.store.get(v).copied().unwrap_or(Value::Unknown),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
-            Operand::Const(Const::Null) => Value::Ref(true),
-            Operand::Const(_) => Value::Ref(false),
+            Operand::Const(Const::Null) => Value::Ref(0),
+            // String literals and class constants are non-null, but we don't
+            // allocate a unique ID for them (they're interned constants).
+            Operand::Const(_) => Value::Ref(1),
         }
     }
 
@@ -114,24 +116,16 @@ impl Run {
                 _ => Value::Unknown,
             },
             Rvalue::Bin(op, a, b) => self.eval_bin(*op, self.eval(a), self.eval(b)),
-            Rvalue::New(cls) => {
-                let _ = cls;
-                Value::Ref(false)
-            }
-            Rvalue::NewArray { .. } => Value::Ref(false),
+            Rvalue::New(_cls) => Value::Unknown, // handled in run_with_choices
+            Rvalue::NewArray { .. } => Value::Ref(0), // handled in run_with_choices
             Rvalue::GetStatic(_) | Rvalue::GetField { .. } | Rvalue::ArrayLoad { .. } => {
                 Value::Unknown
             }
             Rvalue::ArrayLength(_) => Value::Unknown,
-            // InstanceOf is handled in run_with_choices where prog's type
-            // hierarchy is available. Fallback here returns Unknown rather
-            // than optimistically returning I32(1).
             Rvalue::InstanceOf { .. } => Value::Unknown,
-            // A body containing a live, unmodelled call diverges at lift
-            // time, so this arm is unreachable in practice on any body this
-            // engine actually runs against -- but Value::Unknown is the
-            // sound answer if it ever were reached, so it's handled rather
-            // than left to panic.
+            // String/StringBuilder calls are intercepted in run_with_choices
+            // before reaching here. Any remaining Call (unmodelled code that
+            // survived the lifter without diverging) returns Unknown.
             Rvalue::Call { .. } => Value::Unknown,
             Rvalue::Cast(ty, o) => match (ty, self.eval(o)) {
                 (Ty::Int, Value::I64(v)) => Value::I32(v as i32),
@@ -139,30 +133,35 @@ impl Run {
                 (_, v) => v,
             },
             Rvalue::Cmp(a, b) => {
-                let (x, y) = (self.eval(a).as_i64(), self.eval(b).as_i64());
+                let av = self.eval(a);
+                let bv = self.eval(b);
+                if matches!(av, Value::Unknown) || matches!(bv, Value::Unknown) {
+                    return Value::Unknown;
+                }
+                let (x, y) = (av.as_i64(), bv.as_i64());
                 Value::I32(x.cmp(&y) as i32)
             }
-            // Never reached: `run_with_choices` intercepts `Nondet` in the
-            // `Assign` match before `eval_rvalue` is called, since picking a
-            // candidate needs access to the choice vector and trace that live
-            // outside this struct. Kept as an explicit arm rather than
-            // omitted so a future refactor that routes `Nondet` through here
-            // gets a compile error to fill in, not a silent gap.
             Rvalue::Nondet(_) => unreachable!("Nondet is handled in run_with_choices"),
         }
     }
 
     fn eval_bin(&self, op: BinOp, a: Value, b: Value) -> Value {
         use BinOp::*;
+
+        // Unknown propagation: any unknown operand yields an unknown result.
+        if matches!(a, Value::Unknown) || matches!(b, Value::Unknown) {
+            return Value::Unknown;
+        }
+
         let wide = matches!(a, Value::I64(_)) || matches!(b, Value::I64(_));
         match op {
             Eq | Ne | Lt | Le | Gt | Ge => {
                 if let (Value::Ref(na), Value::Ref(nb)) = (a, b) {
-                    let eq = na == nb; // both-null or both-non-null-as-unknown
+                    let eq = na == nb;
                     return Value::I32(match op {
                         Eq => eq as i32,
                         Ne => !eq as i32,
-                        _ => 0, // ordering on refs never occurs in our IR
+                        _ => 0,
                     });
                 }
                 let (x, y) = (a.as_i64(), b.as_i64());
@@ -229,16 +228,586 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
     None
 }
 
+/// Look up the string content for an operand, consulting both the string store
+/// (for String values) and the StringBuilder store.
+fn get_str_content<'a>(
+    op: &Operand,
+    store: &HashMap<VarId, Value>,
+    str_store: &'a HashMap<u64, String>,
+    sb_store: &'a HashMap<u64, String>,
+) -> Option<String> {
+    match op {
+        Operand::Const(Const::Str(s)) => Some(s.clone()),
+        Operand::Var(vid) => match store.get(vid)? {
+            Value::Ref(aid) => str_store.get(aid).or_else(|| sb_store.get(aid)).cloned(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Extract the allocation ID from a Var operand.
+fn get_ref_id(op: &Operand, store: &HashMap<VarId, Value>) -> Option<u64> {
+    match op {
+        Operand::Var(vid) => match store.get(vid)? {
+            Value::Ref(aid) => Some(*aid),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Evaluate a string/StringBuilder method call, returning the result value.
+/// Mutates `str_store`, `sb_store`, and `alloc_id` for allocating new strings
+/// and mutating StringBuilder content in place (keyed by allocation ID).
+fn eval_str_call(
+    target: &MethodKey,
+    args: &[Operand],
+    store: &HashMap<VarId, Value>,
+    str_store: &mut HashMap<u64, String>,
+    sb_store: &mut HashMap<u64, String>,
+    alloc_id: &mut u64,
+) -> Value {
+    let recv_aid = args.first().and_then(|a| get_ref_id(a, store));
+
+    // Content look-up helper (cannot be a closure since it would conflict with
+    // the mutable borrows of str_store/sb_store below).
+    macro_rules! str_of {
+        ($op:expr) => {
+            get_str_content($op, store, str_store, sb_store)
+        };
+    }
+
+    macro_rules! recv_str {
+        () => {
+            recv_aid.and_then(|aid| str_store.get(&aid).cloned())
+        };
+    }
+    macro_rules! recv_sb {
+        () => {
+            recv_aid.and_then(|aid| sb_store.get(&aid).cloned())
+        };
+    }
+
+    macro_rules! alloc_str {
+        ($s:expr) => {{
+            let aid = *alloc_id;
+            *alloc_id += 1;
+            str_store.insert(aid, $s);
+            Value::Ref(aid)
+        }};
+    }
+
+    match target.name.as_str() {
+        // ---- String / StringBuilder / StringBuffer constructors ----
+        "<init>" => {
+            if let Some(aid) = recv_aid {
+                let init = str_of!(args.get(1).unwrap_or(&Operand::Const(Const::Null)))
+                    .unwrap_or_default();
+                if target.class == "java/lang/String" {
+                    // new String(s) — copies content into an immutable String.
+                    str_store.insert(aid, init);
+                } else {
+                    // StringBuilder/StringBuffer — mutable.
+                    sb_store.insert(aid, init);
+                }
+            }
+            // void return — the temp that receives this is unused
+            Value::I32(0)
+        }
+
+        // ---- StringBuilder.append ----
+        "append" => {
+            if let Some(aid) = recv_aid {
+                let to_append: Option<String> = if let Some(arg) = args.get(1) {
+                    match str_of!(arg) {
+                        Some(s) => Some(s),
+                        None => match arg {
+                            Operand::Var(vid) => match store.get(vid).copied() {
+                                Some(Value::I32(n)) => Some(n.to_string()),
+                                Some(Value::I64(n)) => Some(n.to_string()),
+                                _ => None,
+                            },
+                            Operand::Const(Const::Int(n)) => Some(n.to_string()),
+                            _ => None,
+                        },
+                    }
+                } else {
+                    None
+                };
+                if let Some(s) = to_append {
+                    sb_store.entry(aid).or_default().push_str(&s);
+                } else {
+                    // Unknown append: content is no longer known
+                    sb_store.remove(&aid);
+                }
+            }
+            // append returns `this`
+            args.first()
+                .and_then(|a| match a {
+                    Operand::Var(vid) => store.get(vid).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Value::Unknown)
+        }
+
+        // ---- StringBuilder.toString ----
+        "toString" => {
+            if let Some(content) = recv_sb!() {
+                alloc_str!(content)
+            } else {
+                Value::Unknown
+            }
+        }
+
+        // ---- StringBuilder.reverse ----
+        "reverse" => {
+            if let Some(aid) = recv_aid {
+                if let Some(s) = sb_store.get_mut(&aid) {
+                    *s = s.chars().rev().collect();
+                }
+            }
+            args.first()
+                .and_then(|a| match a {
+                    Operand::Var(vid) => store.get(vid).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Value::Unknown)
+        }
+
+        // ---- StringBuilder.setCharAt ----
+        "setCharAt" => {
+            if let Some(aid) = recv_aid {
+                let idx_v = args.get(1).and_then(|a| match a {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::I32(n)) => Some(*n),
+                        _ => None,
+                    },
+                    Operand::Const(Const::Int(n)) => Some(*n),
+                    _ => None,
+                });
+                let ch_v = args.get(2).and_then(|a| match a {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::I32(n)) => Some(*n),
+                        _ => None,
+                    },
+                    Operand::Const(Const::Int(n)) => Some(*n),
+                    _ => None,
+                });
+                if let (Some(i), Some(c)) = (idx_v, ch_v) {
+                    if let Some(s) = sb_store.get_mut(&aid) {
+                        let i = i as usize;
+                        if i < s.len() {
+                            let ch = char::from_u32(c as u32).unwrap_or('\0');
+                            let mut cs: Vec<char> = s.chars().collect();
+                            cs[i] = ch;
+                            *s = cs.into_iter().collect();
+                        }
+                    }
+                }
+            }
+            Value::I32(0) // void
+        }
+
+        // ---- StringBuilder.delete ----
+        "delete" => {
+            if let Some(aid) = recv_aid {
+                let start = args.get(1).and_then(|a| match a {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::I32(n)) => Some(*n as usize),
+                        _ => None,
+                    },
+                    Operand::Const(Const::Int(n)) => Some(*n as usize),
+                    _ => None,
+                });
+                let end = args.get(2).and_then(|a| match a {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::I32(n)) => Some(*n as usize),
+                        _ => None,
+                    },
+                    Operand::Const(Const::Int(n)) => Some(*n as usize),
+                    _ => None,
+                });
+                if let (Some(s), Some(e)) = (start, end) {
+                    if let Some(sb) = sb_store.get_mut(&aid) {
+                        if s <= e && e <= sb.len() {
+                            sb.drain(s..e);
+                        }
+                    }
+                }
+            }
+            args.first()
+                .and_then(|a| match a {
+                    Operand::Var(vid) => store.get(vid).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Value::Unknown)
+        }
+
+        // ---- StringBuilder.insert ----
+        "insert" => {
+            if let Some(aid) = recv_aid {
+                let offset = args.get(1).and_then(|a| match a {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::I32(n)) => Some(*n as usize),
+                        _ => None,
+                    },
+                    Operand::Const(Const::Int(n)) => Some(*n as usize),
+                    _ => None,
+                });
+                let ins = args.get(2).and_then(|a| str_of!(a));
+                if let (Some(off), Some(s)) = (offset, ins) {
+                    if let Some(sb) = sb_store.get_mut(&aid) {
+                        if off <= sb.len() {
+                            sb.insert_str(off, &s);
+                        }
+                    }
+                } else {
+                    // Unknown insert: content no longer known
+                    if let Some(aid) = recv_aid {
+                        sb_store.remove(&aid);
+                    }
+                }
+            }
+            args.first()
+                .and_then(|a| match a {
+                    Operand::Var(vid) => store.get(vid).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Value::Unknown)
+        }
+
+        // ---- String.length / StringBuilder.length ----
+        "length" => {
+            let content =
+                recv_aid.and_then(|aid| str_store.get(&aid).or_else(|| sb_store.get(&aid)));
+            match content {
+                Some(s) => Value::I32(s.len() as i32),
+                None => Value::Unknown,
+            }
+        }
+
+        // ---- String.isEmpty ----
+        "isEmpty" => {
+            let content =
+                recv_aid.and_then(|aid| str_store.get(&aid).or_else(|| sb_store.get(&aid)));
+            match content {
+                Some(s) => Value::I32(s.is_empty() as i32),
+                None => Value::Unknown,
+            }
+        }
+
+        // ---- String.charAt / StringBuilder.charAt ----
+        "charAt" => {
+            let content = recv_aid
+                .and_then(|aid| str_store.get(&aid).or_else(|| sb_store.get(&aid)))
+                .cloned();
+            let idx_v = args.get(1).and_then(|a| match a {
+                Operand::Var(vid) => store.get(vid).copied(),
+                Operand::Const(Const::Int(n)) => Some(Value::I32(*n)),
+                _ => None,
+            });
+            match (content, idx_v) {
+                (Some(s), Some(Value::I32(i))) if i >= 0 && (i as usize) < s.len() => {
+                    let ch = s.chars().nth(i as usize).unwrap_or('\0');
+                    Value::I32(ch as i32)
+                }
+                (Some(_), Some(Value::I32(_))) => {
+                    // Out-of-bounds charAt: StringIndexOutOfBoundsException.
+                    // The concrete engine can't route it (no Obligation), so
+                    // treat as Inconclusive (Unknown) for this path.
+                    Value::Unknown
+                }
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.equals / equalsIgnoreCase ----
+        "equals" | "equalsIgnoreCase" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let eq = if target.name == "equalsIgnoreCase" {
+                        a.to_lowercase() == b.to_lowercase()
+                    } else {
+                        a == b
+                    };
+                    Value::I32(eq as i32)
+                }
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.compareTo / compareToIgnoreCase ----
+        "compareTo" | "compareToIgnoreCase" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let ord = if target.name == "compareToIgnoreCase" {
+                        a.to_lowercase().cmp(&b.to_lowercase())
+                    } else {
+                        a.cmp(&b)
+                    };
+                    Value::I32(ord as i32)
+                }
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.startsWith ----
+        "startsWith" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => Value::I32(a.starts_with(b.as_str()) as i32),
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.endsWith ----
+        "endsWith" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => Value::I32(a.ends_with(b.as_str()) as i32),
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.contains ----
+        "contains" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => Value::I32(a.contains(b.as_str()) as i32),
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.indexOf ----
+        "indexOf" => {
+            let haystack = recv_str!();
+            match haystack {
+                Some(h) => {
+                    let result = match args.get(1) {
+                        Some(Operand::Var(vid)) => match store.get(vid).copied() {
+                            Some(Value::I32(c)) => {
+                                // indexOf(int ch)
+                                char::from_u32(c as u32)
+                                    .and_then(|ch| h.find(ch))
+                                    .map(|i| i as i32)
+                                    .unwrap_or(-1)
+                            }
+                            Some(Value::Ref(aid)) => {
+                                // indexOf(String)
+                                match str_store.get(&aid) {
+                                    Some(needle) => {
+                                        h.find(needle.as_str()).map(|i| i as i32).unwrap_or(-1)
+                                    }
+                                    None => return Value::Unknown,
+                                }
+                            }
+                            _ => return Value::Unknown,
+                        },
+                        Some(Operand::Const(Const::Int(c))) => char::from_u32(*c as u32)
+                            .and_then(|ch| h.find(ch))
+                            .map(|i| i as i32)
+                            .unwrap_or(-1),
+                        Some(Operand::Const(Const::Str(needle))) => {
+                            h.find(needle.as_str()).map(|i| i as i32).unwrap_or(-1)
+                        }
+                        _ => return Value::Unknown,
+                    };
+                    Value::I32(result)
+                }
+                None => Value::Unknown,
+            }
+        }
+
+        // ---- String.substring ----
+        "substring" => {
+            let s = recv_str!();
+            match s {
+                Some(s) => {
+                    let start = match args.get(1) {
+                        Some(Operand::Var(vid)) => match store.get(vid) {
+                            Some(Value::I32(n)) => *n as usize,
+                            _ => return Value::Unknown,
+                        },
+                        Some(Operand::Const(Const::Int(n))) => *n as usize,
+                        _ => return Value::Unknown,
+                    };
+                    let end = match args.get(2) {
+                        Some(Operand::Var(vid)) => match store.get(vid) {
+                            Some(Value::I32(n)) => *n as usize,
+                            _ => return Value::Unknown,
+                        },
+                        Some(Operand::Const(Const::Int(n))) => *n as usize,
+                        None => s.len(),
+                        _ => return Value::Unknown,
+                    };
+                    if start <= end && end <= s.len() {
+                        alloc_str!(s[start..end].to_owned())
+                    } else {
+                        Value::Unknown // StringIndexOutOfBoundsException
+                    }
+                }
+                None => Value::Unknown,
+            }
+        }
+
+        // ---- String.concat ----
+        "concat" => {
+            let a = recv_str!();
+            let b = args.get(1).and_then(|op| str_of!(op));
+            match (a, b) {
+                (Some(a), Some(b)) => alloc_str!(a + &b),
+                _ => Value::Unknown,
+            }
+        }
+
+        // ---- String.toUpperCase / toLowerCase ----
+        "toUpperCase" | "toLowerCase" => match recv_str!() {
+            Some(s) => {
+                let r = if target.name == "toUpperCase" {
+                    s.to_uppercase()
+                } else {
+                    s.to_lowercase()
+                };
+                alloc_str!(r)
+            }
+            None => Value::Unknown,
+        },
+
+        // ---- String.trim ----
+        "trim" => match recv_str!() {
+            Some(s) => alloc_str!(s.trim().to_owned()),
+            None => Value::Unknown,
+        },
+
+        // ---- String.valueOf (static) ----
+        "valueOf" => {
+            let result = match args.first() {
+                Some(Operand::Var(vid)) => match store.get(vid).copied() {
+                    Some(Value::I32(n)) => Some(n.to_string()),
+                    Some(Value::I64(n)) => Some(n.to_string()),
+                    Some(Value::Ref(aid)) => str_store.get(&aid).cloned(),
+                    _ => None,
+                },
+                Some(Operand::Const(Const::Int(n))) => Some(n.to_string()),
+                Some(Operand::Const(Const::Str(s))) => Some(s.clone()),
+                _ => None,
+            };
+            match result {
+                Some(s) => alloc_str!(s),
+                None => Value::Unknown,
+            }
+        }
+
+        // ---- String.regionMatches ----
+        "regionMatches" => {
+            // Two forms:
+            //   regionMatches(int toffset, String other, int ooffset, int len)
+            //   regionMatches(boolean ignoreCase, int toffset, String other, int ooffset, int len)
+            let recv = recv_str!();
+            match recv {
+                None => Value::Unknown,
+                Some(this_str) => {
+                    let get_int = |i: usize| -> Option<i32> {
+                        match args.get(i)? {
+                            Operand::Var(vid) => match store.get(vid)? {
+                                Value::I32(n) => Some(*n),
+                                _ => None,
+                            },
+                            Operand::Const(Const::Int(n)) => Some(*n),
+                            _ => None,
+                        }
+                    };
+                    let (ignore_case, toffset_i, other_i, ooffset_i, len_i) = if args.len() == 6 {
+                        let ic = match args.get(1) {
+                            Some(Operand::Var(vid)) => {
+                                matches!(store.get(vid), Some(Value::I32(n)) if *n != 0)
+                            }
+                            Some(Operand::Const(Const::Int(n))) => *n != 0,
+                            _ => return Value::Unknown,
+                        };
+                        (ic, 2usize, 3usize, 4usize, 5usize)
+                    } else {
+                        (false, 1usize, 2usize, 3usize, 4usize)
+                    };
+                    let toffset = match get_int(toffset_i) {
+                        Some(n) if n >= 0 => n as usize,
+                        Some(_) => return Value::I32(0), // negative offset → false
+                        None => return Value::Unknown,
+                    };
+                    let other_str = match args.get(other_i).and_then(|a| str_of!(a)) {
+                        Some(s) => s,
+                        None => return Value::Unknown,
+                    };
+                    let ooffset = match get_int(ooffset_i) {
+                        Some(n) if n >= 0 => n as usize,
+                        Some(_) => return Value::I32(0),
+                        None => return Value::Unknown,
+                    };
+                    let len = match get_int(len_i) {
+                        Some(n) if n >= 0 => n as usize,
+                        Some(_) => return Value::I32(0),
+                        None => return Value::Unknown,
+                    };
+                    // Out-of-range → false (mirrors Java semantics)
+                    if toffset + len > this_str.len() || ooffset + len > other_str.len() {
+                        return Value::I32(0);
+                    }
+                    let ts = &this_str[toffset..toffset + len];
+                    let os = &other_str[ooffset..ooffset + len];
+                    let eq = if ignore_case {
+                        ts.to_lowercase() == os.to_lowercase()
+                    } else {
+                        ts == os
+                    };
+                    Value::I32(eq as i32)
+                }
+            }
+        }
+
+        // ---- String.intern ----
+        "intern" => {
+            // intern() returns `this` for our purposes (content unchanged)
+            args.first()
+                .and_then(|a| match a {
+                    Operand::Var(vid) => store.get(vid).copied(),
+                    _ => None,
+                })
+                .unwrap_or(Value::Unknown)
+        }
+
+        _ => Value::Unknown,
+    }
+}
+
 /// Run the body once against a fully-predetermined sequence of nondet
-/// choices. Choices beyond what's provided fall back to `0` / non-null,
-/// which is why the outer search widens the candidate list on the values it
-/// controls rather than needing true backtracking here.
+/// choices. Choices beyond what's provided fall back to `0`, which is
+/// why the outer search widens the candidate list on the values it controls
+/// rather than needing true backtracking here.
 fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut store: HashMap<VarId, Value> = HashMap::new();
-    // Tracks the concrete class name of variables holding New-allocated objects.
-    let mut obj_types: HashMap<VarId, String> = HashMap::new();
-    // Tracks the concrete length of NewArray-allocated arrays.
-    let mut array_lengths: HashMap<VarId, i64> = HashMap::new();
+    // Tracks the concrete class name of allocated objects, keyed by alloc_id.
+    // Keying by alloc_id (rather than VarId) means aliasing through assignments
+    // is handled automatically: all variables pointing to the same alloc share
+    // the same type entry.
+    let mut alloc_types: HashMap<u64, String> = HashMap::new();
+    // Tracks the concrete length of NewArray-allocated arrays, keyed by alloc_id.
+    let mut array_lengths: HashMap<u64, i64> = HashMap::new();
+    // Tracks the string content of allocated String objects, keyed by
+    // allocation ID so aliasing (s1 = s2) is handled correctly.
+    let mut str_store: HashMap<u64, String> = HashMap::new();
+    // Tracks the mutable content of StringBuilder / StringBuffer objects.
+    let mut sb_store: HashMap<u64, String> = HashMap::new();
+    // Allocation counter. 0 = null, 1 = constant non-null, ≥2 = fresh alloc.
+    let mut alloc_id: u64 = 2;
+
     let mut choice_idx = 0usize;
     let mut trace = Vec::new();
     let mut steps = step_budget;
@@ -294,11 +863,6 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                 Terminator::Return(_) => return Outcome::Clean,
                 Terminator::Halt => return Outcome::Halted,
                 Terminator::Throw(v) => {
-                    // A user-thrown (non-obligation) exception we don't
-                    // recognise as AssertionError. Try to route it; if
-                    // nothing catches it, this path taught us nothing about
-                    // the properties we check, so it's inconclusive rather
-                    // than a violation.
                     let _ = v;
                     return Outcome::Inconclusive;
                 }
@@ -311,33 +875,47 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
             Stmt::Assign(v, rv) => {
                 let val = match rv {
                     Rvalue::Nondet(ty) => {
-                        let picked = choices.get(choice_idx).copied();
+                        let raw = choices.get(choice_idx).copied().unwrap_or(0);
                         choice_idx += 1;
-                        match (ty, picked) {
-                            (Ty::Ref, _) => Value::Ref(false),
-                            (Ty::Long, Some(c)) => {
-                                trace.push(c);
-                                Value::I64(c)
+                        match ty {
+                            Ty::Str => {
+                                // Pick from the string pool using the raw choice
+                                // as a modular index, allocate a fresh ref.
+                                let sidx = str_idx(raw, STRING_CANDIDATES.len());
+                                trace.push(raw);
+                                let aid = alloc_id;
+                                alloc_id += 1;
+                                str_store.insert(aid, STRING_CANDIDATES[sidx].to_owned());
+                                Value::Ref(aid)
                             }
-                            (Ty::Long, None) => {
-                                trace.push(0);
-                                Value::I64(0)
+                            Ty::Ref => {
+                                // Non-string reference: allocate a fresh non-null ref.
+                                let aid = alloc_id;
+                                alloc_id += 1;
+                                Value::Ref(aid)
                             }
-                            (_, Some(c)) => {
-                                trace.push(c);
-                                Value::I32(c as i32)
+                            Ty::Long => {
+                                trace.push(raw);
+                                Value::I64(raw)
                             }
-                            (_, None) => {
-                                trace.push(0);
-                                Value::I32(0)
+                            _ => {
+                                trace.push(raw);
+                                Value::I32(raw as i32)
                             }
                         }
                     }
-                    // Track the class of newly-allocated objects so InstanceOf
-                    // can resolve to a concrete answer below.
+                    // Track the class of newly-allocated objects for InstanceOf
+                    // and StringBuilder content.
                     Rvalue::New(cls) => {
-                        obj_types.insert(*v, cls.clone());
-                        Value::Ref(false)
+                        let aid = alloc_id;
+                        alloc_id += 1;
+                        alloc_types.insert(aid, cls.clone());
+                        // Pre-seed an empty string for StringBuilder/StringBuffer
+                        // so that append() calls before any <init> see "".
+                        if cls == "java/lang/StringBuilder" || cls == "java/lang/StringBuffer" {
+                            sb_store.insert(aid, String::new());
+                        }
+                        Value::Ref(aid)
                     }
                     // Track array lengths at creation so ArrayLength can be
                     // evaluated concretely.
@@ -345,44 +923,68 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                         let r = Run { store };
                         let len_val = r.eval(len);
                         store = r.store;
+                        let aid = alloc_id;
+                        alloc_id += 1;
                         if let Value::I32(n) = len_val {
-                            array_lengths.insert(*v, n as i64);
+                            array_lengths.insert(aid, n as i64);
                         }
-                        Value::Ref(false)
+                        Value::Ref(aid)
                     }
-                    // Evaluate InstanceOf using the type hierarchy rather than
-                    // optimistically returning I32(1). Unknown type → Unknown.
+                    // Evaluate InstanceOf using the type hierarchy.
+                    // Keying by alloc_id means aliases (v2 = v1) resolve correctly.
+                    // Only trust is_subtype when the known class appears in the
+                    // loaded hierarchy (prog.supers). JDK types not in the classpath
+                    // are absent from prog.supers; for those we return Unknown rather
+                    // than relying on is_subtype's open-world default of `true`.
                     Rvalue::InstanceOf { obj, class } => {
                         let r = Run { store };
                         let obj_val = r.eval(obj);
                         store = r.store;
                         match obj_val {
-                            Value::Ref(true) => Value::I32(0), // null instanceof T = false
-                            Value::Ref(false) => {
-                                if let Operand::Var(obj_vid) = obj {
-                                    match obj_types.get(obj_vid) {
-                                        Some(known) => {
-                                            Value::I32(prog.is_subtype(known, class) as i32)
-                                        }
-                                        None => Value::Unknown,
-                                    }
-                                } else {
-                                    Value::Unknown
+                            Value::Ref(0) => Value::I32(0), // null instanceof T = false
+                            Value::Ref(aid) => match alloc_types.get(&aid) {
+                                Some(known) if prog.supers.contains_key(known.as_str()) => {
+                                    Value::I32(prog.is_subtype(known, class) as i32)
                                 }
-                            }
+                                Some(_) => {
+                                    // Class not in the loaded hierarchy (e.g. a JDK type):
+                                    // return false (not a subtype). Under-approximation is
+                                    // safe here — JvmReplay filters any spurious witness.
+                                    Value::I32(0)
+                                }
+                                None => Value::Unknown,
+                            },
                             _ => Value::Unknown,
                         }
                     }
                     // Resolve array length from creation-time tracking.
+                    // Look up by alloc_id so aliased array references work.
                     Rvalue::ArrayLength(arr) => {
-                        if let Operand::Var(arr_vid) = arr {
-                            match array_lengths.get(arr_vid) {
-                                Some(&len) => Value::I32(len as i32),
-                                None => Value::Unknown,
-                            }
-                        } else {
-                            Value::Unknown
+                        let aid = match arr {
+                            Operand::Var(vid) => match store.get(vid) {
+                                Some(Value::Ref(aid)) => Some(*aid),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        match aid.and_then(|a| array_lengths.get(&a)) {
+                            Some(&len) => Value::I32(len as i32),
+                            None => Value::Unknown,
                         }
+                    }
+                    // String/StringBuilder method calls kept as Rvalue::Call
+                    // by the lifter. Evaluate them against the tracked content.
+                    Rvalue::Call { target, args, .. }
+                        if models::STR_OWNERS.contains(&target.class.as_str()) =>
+                    {
+                        eval_str_call(
+                            target,
+                            args,
+                            &store,
+                            &mut str_store,
+                            &mut sb_store,
+                            &mut alloc_id,
+                        )
                     }
                     other => {
                         let mut r = Run { store };
@@ -405,11 +1007,7 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                     return Outcome::Halted;
                 }
             }
-            Stmt::PutStatic(..) | Stmt::PutField { .. } | Stmt::ArrayStore { .. } => {
-                // No heap model: writes are dropped. Sound for an
-                // under-approximating engine (we simply won't find bugs that
-                // depend on a written-then-read value), never unsound.
-            }
+            Stmt::PutStatic(..) | Stmt::PutField { .. } | Stmt::ArrayStore { .. } => {}
             Stmt::Check(oid) => {
                 let ob = body.obligation(*oid);
                 let ok = match &ob.cond {
@@ -419,11 +1017,6 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                             Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
                             _ => Value::Unknown,
                         };
-                        // Under-approximation: only report Violated for a
-                        // concretely-false condition. An Unknown condition means
-                        // we can't determine the outcome on this path; returning
-                        // Inconclusive lets the engine try other candidate
-                        // vectors rather than producing a spurious witness.
                         if v == Value::Unknown {
                             return Outcome::Inconclusive;
                         }
@@ -431,16 +1024,11 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                     }
                 };
                 if !ok {
-                    // Assertion obligations are never routed: reaching the
-                    // failing assert location is the property violation
-                    // itself, independent of any handler.
                     if let Some(class) = models::exception_class(ob.kind) {
                         if let Some(target) = route(prog, b, class) {
                             block = target;
                             idx = 0;
-                            // Handler blocks are entered with the exception
-                            // object at stack height 1; we don't need its
-                            // identity, only that it's a non-null reference.
+                            // Materialise the exception object in stack slot 0.
                             if let Some(slot) = body
                                 .vars
                                 .iter()
@@ -448,7 +1036,9 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                                 .find(|(_, vi)| vi.kind == VarKind::Stack(0))
                                 .map(|(i, _)| VarId(i as u32))
                             {
-                                store.insert(slot, Value::Ref(false));
+                                let aid = alloc_id;
+                                alloc_id += 1;
+                                store.insert(slot, Value::Ref(aid));
                             }
                             continue;
                         }
@@ -509,26 +1099,15 @@ fn extract_constants(body: &Body) -> Vec<i32> {
     seen.into_iter().collect()
 }
 
-/// Widen the candidate assignment at position `slot` in a fixed-length choice
-/// vector, enumerating combinations depth-first up to `budget` total runs.
-/// This is brute force, deliberately: no solver, no path merging, just enough
-/// search to catch the shapes of bug this benchmark set actually contains.
 fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witness)> {
     let mut found = Vec::new();
     let mut runs_left = budget;
 
-    // Discover how many nondet slots exist by running once with no choices
-    // available (all default to 0) up to a generous step budget, counting
-    // how many were consumed. Programs with a variable number of nondet
-    // calls on different paths are handled by just re-running per candidate
-    // vector and letting `run_with_choices` fall back to 0 past the end.
     let probe_steps = 200_000u64;
     let mut probe_choices: Vec<i64> = Vec::new();
     let slots = count_nondet_slots(prog, body, probe_steps, &mut probe_choices);
 
     if slots == 0 {
-        // Fully deterministic: one run tells the whole story, and there's no
-        // budget left to account for since we're returning immediately.
         if let Outcome::Violated { oid, witness } = run_with_choices(prog, body, &[], probe_steps) {
             found.push((
                 oid,
@@ -540,15 +1119,24 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
         return found;
     }
 
-    // Cartesian product over a capped number of slots, each drawn from a
-    // candidate pool. The pool is the union of the fixed INT_CANDIDATES and
-    // every integer constant appearing in the program (plus ±1 neighbours),
-    // which gives boundary-value coverage at branch decisions without a solver.
     let capped = slots.min(4);
     let mut pool_set: std::collections::BTreeSet<i64> =
         INT_CANDIDATES.iter().map(|x| *x as i64).collect();
     for c in extract_constants(body) {
         pool_set.insert(c as i64);
+    }
+    // When the body has string-nondet slots, add the full range of
+    // STRING_CANDIDATES indices (0..len-1) so every candidate string
+    // is tried. These are small integers and won't inflate the pool much.
+    let has_str_nondet = body
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .any(|s| matches!(s, Stmt::Assign(_, Rvalue::Nondet(Ty::Str))));
+    if has_str_nondet {
+        for i in 0..STRING_CANDIDATES.len() as i64 {
+            pool_set.insert(i);
+        }
     }
     let pool: Vec<i64> = pool_set.into_iter().collect();
     let mut idxs = vec![0usize; capped];
@@ -571,7 +1159,6 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
             ));
         }
 
-        // Odometer increment.
         let mut k = capped;
         loop {
             if k == 0 {
@@ -589,24 +1176,27 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
     found
 }
 
-/// Run once with an empty choice vector (every nondet defaults to 0) purely
-/// to count how many nondet call sites are on the taken path, so `search`
-/// knows how many odometer slots to enumerate.
+/// Run once with all-zero choices to count how many nondet slots appear on
+/// the taken path. Falls back to a static upper-bound count when the probe
+/// finds no violation (so the slot count is not in the witness).
 fn count_nondet_slots(prog: &Program, body: &Body, steps: u64, out: &mut Vec<i64>) -> usize {
     match run_with_choices(prog, body, &[], steps) {
         Outcome::Violated { witness, .. } => {
-            *out = witness.clone();
-            witness.len()
+            let len = witness.len();
+            *out = witness;
+            len
         }
         _ => {
-            // No violation on the all-zero path; we still need a slot count.
-            // Re-run counting via a sentinel-free trace by reusing the
-            // Halted/Clean path's implicit trace length isn't available
-            // (Outcome doesn't carry it), so fall back to a fixed small
-            // guess. This is the one place this engine trades precision for
-            // simplicity: under-counting slots only means fewer combinations
-            // get tried, which costs completeness, not soundness.
-            3
+            // Static upper bound: count Nondet rvalues across all blocks.
+            // Over-counting is fine — it just means a few extra odometer
+            // positions that the interpreter reads as the default 0.
+            let static_count: usize = body
+                .blocks
+                .iter()
+                .flat_map(|b| &b.stmts)
+                .filter(|s| matches!(s, Stmt::Assign(_, Rvalue::Nondet(_))))
+                .count();
+            static_count.max(3)
         }
     }
 }
@@ -647,9 +1237,15 @@ impl Engine for Concrete {
             return Progress::Exhausted;
         };
 
-        info!("concrete: starting bounded search (budget={} runs) on {entry:?}", self.budget_runs);
+        info!(
+            "concrete: starting bounded search (budget={} runs) on {entry:?}",
+            self.budget_runs
+        );
         let violations = search(prog, body, self.budget_runs);
-        debug!("concrete: search complete, found {} violation(s)", violations.len());
+        debug!(
+            "concrete: search complete, found {} violation(s)",
+            violations.len()
+        );
 
         let mut advanced = false;
         for (oid, witness) in violations {

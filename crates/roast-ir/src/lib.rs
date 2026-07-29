@@ -42,6 +42,10 @@ pub enum Ty {
     Float,
     Double,
     Ref,
+    /// A concrete `java.lang.String` value whose content may be known to
+    /// engines that track strings. Represented as a reference at the JVM level
+    /// but distinguished so the concrete engine can pick from a string pool.
+    Str,
 }
 
 impl Ty {
@@ -400,7 +404,7 @@ impl Program {
                     cur = next.clone();
                 }
                 // Hierarchy runs out before we reach a class we loaded.
-                _ => return self.supers.get(sub).is_none(),
+                _ => return !self.supers.contains_key(sub),
             }
         }
     }

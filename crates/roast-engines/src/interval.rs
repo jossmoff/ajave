@@ -38,6 +38,7 @@
 //! `x in [6, MAX]` state alive by the time the assertion is checked.
 
 use std::collections::BTreeMap;
+use std::ops::{Add, Mul, Neg, Sub};
 
 use roast_core::artifact::ProgramPoint;
 use roast_core::cpa::{Cpa, HasLocation, Lattice};
@@ -79,42 +80,6 @@ impl Interval {
                 hi: hi as i64,
             }
         }
-    }
-    pub fn add(self, o: Interval) -> Interval {
-        if self.is_bottom() || o.is_bottom() {
-            return Interval::bottom();
-        }
-        Interval::clamp(
-            self.lo as i128 + o.lo as i128,
-            self.hi as i128 + o.hi as i128,
-        )
-    }
-    pub fn sub(self, o: Interval) -> Interval {
-        if self.is_bottom() || o.is_bottom() {
-            return Interval::bottom();
-        }
-        Interval::clamp(
-            self.lo as i128 - o.hi as i128,
-            self.hi as i128 - o.lo as i128,
-        )
-    }
-    pub fn mul(self, o: Interval) -> Interval {
-        if self.is_bottom() || o.is_bottom() {
-            return Interval::bottom();
-        }
-        let cands = [
-            self.lo as i128 * o.lo as i128,
-            self.lo as i128 * o.hi as i128,
-            self.hi as i128 * o.lo as i128,
-            self.hi as i128 * o.hi as i128,
-        ];
-        Interval::clamp(*cands.iter().min().unwrap(), *cands.iter().max().unwrap())
-    }
-    pub fn neg(self) -> Interval {
-        if self.is_bottom() {
-            return self;
-        }
-        Interval::clamp(-(self.hi as i128), -(self.lo as i128))
     }
     /// Does this interval definitely, possibly, or never contain `v`?
     pub fn contains(&self, v: i64) -> bool {
@@ -198,6 +163,58 @@ impl Interval {
             _ => b,
         };
         Some((na, nb))
+    }
+}
+
+impl Add for Interval {
+    type Output = Interval;
+    fn add(self, o: Interval) -> Interval {
+        if self.is_bottom() || o.is_bottom() {
+            return Interval::bottom();
+        }
+        Interval::clamp(
+            self.lo as i128 + o.lo as i128,
+            self.hi as i128 + o.hi as i128,
+        )
+    }
+}
+
+impl Sub for Interval {
+    type Output = Interval;
+    fn sub(self, o: Interval) -> Interval {
+        if self.is_bottom() || o.is_bottom() {
+            return Interval::bottom();
+        }
+        Interval::clamp(
+            self.lo as i128 - o.hi as i128,
+            self.hi as i128 - o.lo as i128,
+        )
+    }
+}
+
+impl Mul for Interval {
+    type Output = Interval;
+    fn mul(self, o: Interval) -> Interval {
+        if self.is_bottom() || o.is_bottom() {
+            return Interval::bottom();
+        }
+        let cands = [
+            self.lo as i128 * o.lo as i128,
+            self.lo as i128 * o.hi as i128,
+            self.hi as i128 * o.lo as i128,
+            self.hi as i128 * o.hi as i128,
+        ];
+        Interval::clamp(*cands.iter().min().unwrap(), *cands.iter().max().unwrap())
+    }
+}
+
+impl Neg for Interval {
+    type Output = Interval;
+    fn neg(self) -> Interval {
+        if self.is_bottom() {
+            return self;
+        }
+        Interval::clamp(-(self.hi as i128), -(self.lo as i128))
     }
 }
 
@@ -333,11 +350,11 @@ impl HasLocation for IState {
 /// recover the comparison that produced a since-erased boolean -- see the
 /// module doc for why the branch, not the `Assume`, is where narrowing has to
 /// happen.
-fn find_defining_bin<'a>(
-    body: &'a Body,
+fn find_defining_bin(
+    body: &Body,
     block: roast_ir::BlockId,
     v: VarId,
-) -> Option<(BinOp, &'a Operand, &'a Operand)> {
+) -> Option<(BinOp, &Operand, &Operand)> {
     for s in body.block(block).stmts.iter().rev() {
         if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
             if *dv == v {
@@ -408,20 +425,23 @@ impl Cpa for IntervalCpa {
                 vec![next]
             }
             Edge::Term(block, taken, _) => {
-                if let (Some(is_then), roast_ir::Terminator::Branch { cond, .. }) =
-                    (taken, &body.block(*block).term)
+                if let (
+                    Some(is_then),
+                    roast_ir::Terminator::Branch {
+                        cond: Operand::Var(cv),
+                        ..
+                    },
+                ) = (taken, &body.block(*block).term)
                 {
-                    if let Operand::Var(cv) = cond {
-                        if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
-                            let eff_op = if *is_then { op } else { negate(op) };
-                            let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
-                            if let Some((na, nb)) = Interval::narrow(eff_op, ia, ib) {
-                                if let Operand::Var(av) = a {
-                                    next.set(*av, na);
-                                }
-                                if let Operand::Var(bv) = b {
-                                    next.set(*bv, nb);
-                                }
+                    if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
+                        let eff_op = if *is_then { op } else { negate(op) };
+                        let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
+                        if let Some((na, nb)) = Interval::narrow(eff_op, ia, ib) {
+                            if let Operand::Var(av) = a {
+                                next.set(*av, na);
+                            }
+                            if let Operand::Var(bv) = b {
+                                next.set(*bv, nb);
                             }
                         }
                     }
@@ -449,11 +469,8 @@ impl Cpa for IntervalCpa {
                             if let Operand::Var(cv) = &ob.cond {
                                 if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
                                     let mut narrowed = next.clone();
-                                    let (ia, ib) =
-                                        (next.eval_operand(a), next.eval_operand(b));
-                                    if let Some((na, nb)) =
-                                        Interval::narrow(negate(op), ia, ib)
-                                    {
+                                    let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
+                                    if let Some((na, nb)) = Interval::narrow(negate(op), ia, ib) {
                                         if let Operand::Var(av) = a {
                                             narrowed.set(*av, na);
                                         }

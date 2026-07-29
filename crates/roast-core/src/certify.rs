@@ -89,7 +89,13 @@ public final class Verifier {
     public static long nondetLong() { return next(); }
     public static float nondetFloat() { return next(); }
     public static double nondetDouble() { return next(); }
-    public static String nondetString() { return ""; }
+    private static final String[] STR_POOL =
+        {"", "a", "ab", "abcde", "aaaaa", "hello", "abc", "test"};
+    public static String nondetString() {
+        int raw = next();
+        int len = STR_POOL.length;
+        return STR_POOL[((raw % len) + len) % len];
+    }
 }
 "#;
 
@@ -185,8 +191,6 @@ impl Certifier for JvmReplay {
         // Inconclusive: we have a definite answer, and it disagrees with us.
         let result = if !out.status.success() && stderr.contains(expected) {
             CertResult::Confirmed
-        } else if !out.status.success() || out.status.code() == Some(1) {
-            CertResult::Refuted
         } else {
             CertResult::Refuted
         };

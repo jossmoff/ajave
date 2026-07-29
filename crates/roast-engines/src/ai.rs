@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
-use log::{debug, info};
 use crate::interval::IntervalCpa;
+use log::{debug, info};
 use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
 use roast_core::cpa::{reachability, HasLocation};
@@ -116,7 +116,10 @@ impl Engine for AiEngine {
         }
 
         let safe_count = safe.values().filter(|&&v| v).count();
-        debug!("interval-ai: {safe_count}/{} obligations proved safe by interval analysis", safe.len());
+        debug!(
+            "interval-ai: {safe_count}/{} obligations proved safe by interval analysis",
+            safe.len()
+        );
 
         let mut advanced = false;
         for (oid, is_safe) in safe {
