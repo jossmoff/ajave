@@ -123,7 +123,10 @@ impl Run {
                 Value::Unknown
             }
             Rvalue::ArrayLength(_) => Value::Unknown,
-            Rvalue::InstanceOf { .. } => Value::I32(1),
+            // InstanceOf is handled in run_with_choices where prog's type
+            // hierarchy is available. Fallback here returns Unknown rather
+            // than optimistically returning I32(1).
+            Rvalue::InstanceOf { .. } => Value::Unknown,
             // A body containing a live, unmodelled call diverges at lift
             // time, so this arm is unreachable in practice on any body this
             // engine actually runs against -- but Value::Unknown is the
@@ -232,6 +235,10 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
 /// controls rather than needing true backtracking here.
 fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut store: HashMap<VarId, Value> = HashMap::new();
+    // Tracks the concrete class name of variables holding New-allocated objects.
+    let mut obj_types: HashMap<VarId, String> = HashMap::new();
+    // Tracks the concrete length of NewArray-allocated arrays.
+    let mut array_lengths: HashMap<VarId, i64> = HashMap::new();
     let mut choice_idx = 0usize;
     let mut trace = Vec::new();
     let mut steps = step_budget;
@@ -326,6 +333,57 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                             }
                         }
                     }
+                    // Track the class of newly-allocated objects so InstanceOf
+                    // can resolve to a concrete answer below.
+                    Rvalue::New(cls) => {
+                        obj_types.insert(*v, cls.clone());
+                        Value::Ref(false)
+                    }
+                    // Track array lengths at creation so ArrayLength can be
+                    // evaluated concretely.
+                    Rvalue::NewArray { len, .. } => {
+                        let r = Run { store };
+                        let len_val = r.eval(len);
+                        store = r.store;
+                        if let Value::I32(n) = len_val {
+                            array_lengths.insert(*v, n as i64);
+                        }
+                        Value::Ref(false)
+                    }
+                    // Evaluate InstanceOf using the type hierarchy rather than
+                    // optimistically returning I32(1). Unknown type → Unknown.
+                    Rvalue::InstanceOf { obj, class } => {
+                        let r = Run { store };
+                        let obj_val = r.eval(obj);
+                        store = r.store;
+                        match obj_val {
+                            Value::Ref(true) => Value::I32(0), // null instanceof T = false
+                            Value::Ref(false) => {
+                                if let Operand::Var(obj_vid) = obj {
+                                    match obj_types.get(obj_vid) {
+                                        Some(known) => {
+                                            Value::I32(prog.is_subtype(known, class) as i32)
+                                        }
+                                        None => Value::Unknown,
+                                    }
+                                } else {
+                                    Value::Unknown
+                                }
+                            }
+                            _ => Value::Unknown,
+                        }
+                    }
+                    // Resolve array length from creation-time tracking.
+                    Rvalue::ArrayLength(arr) => {
+                        if let Operand::Var(arr_vid) = arr {
+                            match array_lengths.get(arr_vid) {
+                                Some(&len) => Value::I32(len as i32),
+                                None => Value::Unknown,
+                            }
+                        } else {
+                            Value::Unknown
+                        }
+                    }
                     other => {
                         let mut r = Run { store };
                         let val = r.eval_rvalue(other);
@@ -361,6 +419,14 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                             Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
                             _ => Value::Unknown,
                         };
+                        // Under-approximation: only report Violated for a
+                        // concretely-false condition. An Unknown condition means
+                        // we can't determine the outcome on this path; returning
+                        // Inconclusive lets the engine try other candidate
+                        // vectors rather than producing a spurious witness.
+                        if v == Value::Unknown {
+                            return Outcome::Inconclusive;
+                        }
                         v.nonzero()
                     }
                 };
@@ -399,6 +465,50 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
     }
 }
 
+/// Collect every integer constant that appears as an operand anywhere in the
+/// body. These are the values most likely to be semantically relevant at
+/// branch decisions, so adding them (and their immediate neighbours ±1) to
+/// the candidate pool gives boundary-value coverage without a solver.
+fn extract_constants(body: &Body) -> Vec<i32> {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<i32> = BTreeSet::new();
+    let scan_op = |op: &Operand, s: &mut BTreeSet<i32>| {
+        if let Operand::Const(Const::Int(v)) = op {
+            s.insert(*v);
+            s.insert(v.saturating_add(1));
+            s.insert(v.saturating_sub(1));
+        }
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Assign(_, rv) = stmt {
+                match rv {
+                    Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::ArrayLength(o) => {
+                        scan_op(o, &mut seen)
+                    }
+                    Rvalue::Bin(_, a, b) => {
+                        scan_op(a, &mut seen);
+                        scan_op(b, &mut seen);
+                    }
+                    Rvalue::Cast(_, o) => scan_op(o, &mut seen),
+                    Rvalue::Cmp(a, b) => {
+                        scan_op(a, &mut seen);
+                        scan_op(b, &mut seen);
+                    }
+                    Rvalue::NewArray { len, .. } => scan_op(len, &mut seen),
+                    _ => {}
+                }
+            }
+        }
+        match &block.term {
+            Terminator::Branch { cond, .. } => scan_op(cond, &mut seen),
+            Terminator::Switch { value, .. } => scan_op(value, &mut seen),
+            _ => {}
+        }
+    }
+    seen.into_iter().collect()
+}
+
 /// Widen the candidate assignment at position `slot` in a fixed-length choice
 /// vector, enumerating combinations depth-first up to `budget` total runs.
 /// This is brute force, deliberately: no solver, no path merging, just enough
@@ -431,11 +541,16 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
     }
 
     // Cartesian product over a capped number of slots, each drawn from a
-    // small candidate pool. Capped at a handful of slots to keep this
-    // "minimal": beyond that the combinatorics need real search, which is
-    // exactly where a solver-backed BMC tier belongs instead.
+    // candidate pool. The pool is the union of the fixed INT_CANDIDATES and
+    // every integer constant appearing in the program (plus ±1 neighbours),
+    // which gives boundary-value coverage at branch decisions without a solver.
     let capped = slots.min(4);
-    let pool: Vec<i64> = INT_CANDIDATES.iter().map(|x| *x as i64).collect();
+    let mut pool_set: std::collections::BTreeSet<i64> =
+        INT_CANDIDATES.iter().map(|x| *x as i64).collect();
+    for c in extract_constants(body) {
+        pool_set.insert(c as i64);
+    }
+    let pool: Vec<i64> = pool_set.into_iter().collect();
     let mut idxs = vec![0usize; capped];
 
     'outer: loop {
