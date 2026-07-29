@@ -279,3 +279,832 @@ fn jbmc_arraylength1() {
         "UNKNOWN"
     );
 }
+
+#[test]
+fn jbmc_arithmetic_exception1() {
+    // nondetInt() with no assume, divide 10/i — i=0 reachable. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/ArithmeticException1"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_array_index_out_of_bounds_exception1() {
+    // new int[4], a[size] = 0 where size >= 0 — out-of-bounds reachable. SV-COMP: false.
+    // UNKNOWN: array bounds not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/ArrayIndexOutOfBoundsException1"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_array_index_out_of_bounds_exception2() {
+    // new int[4], a[size] read where size >= 0 — out-of-bounds reachable. SV-COMP: false.
+    // UNKNOWN: array bounds not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/ArrayIndexOutOfBoundsException2"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_array_index_out_of_bounds_exception3() {
+    // new int[4], a[nondetInt()] — negative or >= 4 triggers exception. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/ArrayIndexOutOfBoundsException3"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_buffered_reader_read_line() {
+    // BufferedReader.readLine on nondetString. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/BufferedReaderReadLine"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_char_sequence_bug() {
+    // s.replace('b','c') then assert indexOf('b') != -1. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/CharSequenceBug"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_char_sequence_to_string() {
+    // CharSequence.toString() length check. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/CharSequenceToString"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_class_cast_exception3() {
+    // (B) new A() always throws ClassCastException. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/ClassCastException3"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_regex_matches01() {
+    // Regex match returns true for a matching pattern. SV-COMP: true.
+    // UNKNOWN: regex/string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/RegexMatches01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_regex_matches02() {
+    // Regex match assert failure. SV-COMP: false.
+    // UNKNOWN: regex/string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/RegexMatches02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_regex_substitution01() {
+    // Regex substitution result assertion. SV-COMP: true.
+    // UNKNOWN: regex/string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/RegexSubstitution01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_regex_substitution02() {
+    // Regex substitution assert failure. SV-COMP: false.
+    // UNKNOWN: regex/string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/RegexSubstitution02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_regex_substitution03() {
+    // Regex substitution result assertion. SV-COMP: true.
+    // UNKNOWN: regex/string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/RegexSubstitution03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods01() {
+    // Character.isLetter etc. assertions hold. SV-COMP: true.
+    // UNKNOWN: Character static methods not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods02() {
+    // Character method assert failure. SV-COMP: false.
+    // UNKNOWN: Character static methods not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods03() {
+    // Character method assert failure. SV-COMP: false.
+    // UNKNOWN: Character static methods not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods04() {
+    // Character method assert failure — trivially detectable. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods04"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods05() {
+    // Character method assert failure. SV-COMP: false.
+    // UNKNOWN: Character static methods not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods05"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_static_char_methods06() {
+    // Character method assertions hold. SV-COMP: true.
+    // UNKNOWN: Character static methods not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StaticCharMethods06"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_append01() {
+    // StringBuilder.append chain assertion holds. SV-COMP: true.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderAppend01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_append02() {
+    // StringBuilder.append assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderAppend02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_cap_len01() {
+    // StringBuilder capacity/length assertion holds. SV-COMP: true.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderCapLen01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_cap_len02() {
+    // StringBuilder capacity/length assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderCapLen02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_cap_len03() {
+    // StringBuilder capacity/length assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderCapLen03"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_cap_len04() {
+    // StringBuilder capacity/length assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderCapLen04"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars01() {
+    // StringBuilder char access assertion holds. SV-COMP: true.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars02() {
+    // StringBuilder char access assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars03() {
+    // StringBuilder char access assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars04() {
+    // StringBuilder char access assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars04"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars05() {
+    // StringBuilder char access assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars05"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_chars06() {
+    // StringBuilder char access assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderChars06"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_constructors01() {
+    // StringBuilder constructor assertion holds. SV-COMP: true.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderConstructors01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_constructors02() {
+    // StringBuilder constructor assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderConstructors02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_insert_delete01() {
+    // StringBuilder insert/delete assertion holds. SV-COMP: true.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderInsertDelete01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_insert_delete02() {
+    // StringBuilder insert/delete assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderInsertDelete02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_builder_insert_delete03() {
+    // StringBuilder insert/delete assert failure. SV-COMP: false.
+    // UNKNOWN: StringBuilder not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringBuilderInsertDelete03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_compare01() {
+    // String comparison assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringCompare01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_compare02() {
+    // String comparison assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringCompare02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_compare03() {
+    // String comparison assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringCompare03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_compare04() {
+    // String comparison assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringCompare04"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_compare05() {
+    // String comparison assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringCompare05"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_concatenation01() {
+    // String concatenation assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConcatenation01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_concatenation02() {
+    // String concatenation assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConcatenation02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_concatenation03() {
+    // String concatenation assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConcatenation03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_concatenation04() {
+    // String concatenation assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConcatenation04"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_constructors01() {
+    // String constructor assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConstructors01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_constructors02() {
+    // String constructor assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConstructors02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_constructors03() {
+    // String constructor assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConstructors03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_constructors04() {
+    // String constructor assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConstructors04"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_constructors05() {
+    // String constructor assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringConstructors05"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_contains01() {
+    // String.contains assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringContains01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_contains02() {
+    // String.contains assert failure — trivially detectable. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringContains02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_index_methods01() {
+    // String index methods assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringIndexMethods01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_index_methods02() {
+    // String index methods assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringIndexMethods02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_index_methods03() {
+    // String index methods assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringIndexMethods03"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_index_methods04() {
+    // String index methods assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringIndexMethods04"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_index_methods05() {
+    // String index methods assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringIndexMethods05"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_miscellaneous01() {
+    // String misc assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringMiscellaneous01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_miscellaneous02() {
+    // String misc assert failure. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringMiscellaneous02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_miscellaneous03() {
+    // String misc assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringMiscellaneous03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_miscellaneous04() {
+    // String misc assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringMiscellaneous04"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_start_end01() {
+    // String.startsWith/endsWith assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringStartEnd01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_start_end02() {
+    // String.startsWith/endsWith assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringStartEnd02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_start_end03() {
+    // String.startsWith/endsWith assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringStartEnd03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of01() {
+    // String.valueOf assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of02() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of03() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of04() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf04"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of05() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf05"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of06() {
+    // String.valueOf assert failure — trivially detectable. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf06"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of07() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf07"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of08() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf08"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of09() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf09"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_string_value_of10() {
+    // String.valueOf assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf10"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_sub_string01() {
+    // String.substring assertion holds. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/SubString01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_sub_string02() {
+    // String.substring assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/SubString02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_sub_string03() {
+    // String.substring assert failure. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/SubString03"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_token_test01() {
+    // sentence.split(" ") returns 4 tokens. SV-COMP: true.
+    // UNKNOWN: string split/array content not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/TokenTest01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_token_test02() {
+    // nondetString().split(" ") token assertion. SV-COMP: false.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/TokenTest02"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_validate01() {
+    // Validate fixed input strings — all pass validation. SV-COMP: true.
+    // UNKNOWN: string operations not modelled.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/Validate01"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_validate02() {
+    // Validate nondet strings — invalid input hits assert false. SV-COMP: false.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/Validate02"]),
+        "FALSE"
+    );
+}
+
+#[test]
+fn jbmc_aastore_aaload1() {
+    // Fill object array, assert elements non-null. SV-COMP: true.
+    // UNKNOWN: array element content not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/aastore_aaload1"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_array1() {
+    // int array filled with index values, assert a[7]==7. SV-COMP: true.
+    // UNKNOWN: array element content not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/array1"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_array2() {
+    // Conditional array creation and element access. SV-COMP: true.
+    // UNKNOWN: array element content not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/array2"]),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn jbmc_arrayread1() {
+    // New array element defaults to null; assert readback == null. SV-COMP: true.
+    // UNKNOWN: array element default not tracked.
+    assert_eq!(
+        roast(&["tasks/common", "tasks/jbmc-regression/arrayread1"]),
+        "UNKNOWN"
+    );
+}
