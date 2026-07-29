@@ -1,0 +1,25 @@
+# Roast verdict snapshot — the actual verdict roast produces on each task today.
+# Used by scripts/run-corpus.sh to detect regressions.
+#
+# Rules enforced by CI:
+#   FAIL  — any task that was correct (TRUE/FALSE matching expected) is now wrong or UNKNOWN
+#   FAIL  — any task that was UNKNOWN is now the opposite of expected (new wrong verdict)
+#   NOTE  — any task that was UNKNOWN is now the correct expected verdict (improvement — update this file)
+#   OK    — no change
+#
+# To update after a genuine improvement: re-run scripts/run-corpus.sh --update
+# Format: <roast_verdict> <expected_verdict> <task_yml>
+TRUE    true    tasks/ArithmeticException1/ArithmeticException1.yml
+FALSE   false   tasks/ArithmeticException2/ArithmeticException2.yml
+TRUE    true    tasks/ArithmeticException3/ArithmeticException3.yml
+UNKNOWN true    tasks/BoundedLoop1/BoundedLoop1.yml
+FALSE   false   tasks/BoundedLoop2/BoundedLoop2.yml
+UNKNOWN true    tasks/BranchDivide1/BranchDivide1.yml
+TRUE    true    tasks/IntegerArithmetic1/IntegerArithmetic1.yml
+FALSE   false   tasks/IntegerArithmetic2/IntegerArithmetic2.yml
+FALSE   false   tasks/ModuloZero1/ModuloZero1.yml
+TRUE    true    tasks/NestedBranch1/NestedBranch1.yml
+FALSE   false   tasks/stage00_const/stage00_const.yml
+TRUE    true    tasks/stage01_nondet/stage01_nondet.yml
+TRUE    true    tasks/stage02_branch/stage02_branch.yml
+FALSE   false   tasks/stage04_divzero/stage04_divzero.yml
