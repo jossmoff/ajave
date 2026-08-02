@@ -81,14 +81,50 @@ pub trait UnderApprox {
     }
 }
 
-/// Placeholder for a violation witness. Stage 2 fills this in properly; the
-/// point of declaring it now is that `UnderApprox` cannot be implemented
-/// without producing one.
+/// A single nondeterministic value chosen during execution, with its type
+/// preserved so witness emitters can format it correctly (especially strings).
+#[derive(Clone, Debug)]
+pub enum NondetValue {
+    Int(i32),
+    Long(i64),
+    Bool(bool),
+    Str(String),
+}
+
+impl NondetValue {
+    /// The raw i64 encoding used by JvmReplay's `-Droast.seq` property.
+    pub fn as_raw(&self) -> i64 {
+        match self {
+            NondetValue::Int(v) => *v as i64,
+            NondetValue::Long(v) => *v,
+            NondetValue::Bool(v) => *v as i64,
+            NondetValue::Str(_) => 0, // string index is in the raw sequence separately
+        }
+    }
+}
+
+/// One nondet call site in the witness, carrying the typed value and optional
+/// source location for the witness automaton.
+#[derive(Clone, Debug)]
+pub struct NondetEntry {
+    pub value: NondetValue,
+    /// Which `Verifier.nondet*()` variant was called.
+    pub nondet_method: &'static str,
+    /// Source line from LineNumberTable, if known.
+    pub line: Option<u16>,
+}
+
+/// A violation witness: records the nondeterministic choices an execution made
+/// so they can be (a) replayed on a real JVM, and (b) emitted as a
+/// SV-COMP witness file that external validators can check.
 #[derive(Clone, Debug, Default)]
 pub struct Witness {
     /// Values to be returned by successive `Verifier.nondet*()` calls, in order.
     /// This is all a replay harness needs for the stage 0-2 fragment.
     pub nondet_sequence: Vec<i64>,
+    /// Typed entries for witness file emission. Parallel to `nondet_sequence`
+    /// but carries the original type and source location.
+    pub entries: Vec<NondetEntry>,
 }
 
 #[cfg(test)]

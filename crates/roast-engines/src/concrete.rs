@@ -25,7 +25,7 @@ use log::{debug, info};
 use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
-use roast_ir::verdict::Witness;
+use roast_ir::verdict::{NondetEntry, NondetValue, Witness};
 use roast_ir::*;
 use roast_models as models;
 
@@ -83,6 +83,7 @@ enum Outcome {
     Violated {
         oid: ObligationId,
         witness: Vec<i64>,
+        entries: Vec<NondetEntry>,
     },
     /// Ran out of budget or hit something we can't interpret.
     Inconclusive,
@@ -810,6 +811,7 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
 
     let mut choice_idx = 0usize;
     let mut trace = Vec::new();
+    let mut entries: Vec<NondetEntry> = Vec::new();
     let mut steps = step_budget;
 
     let mut block = body.entry;
@@ -877,29 +879,46 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                     Rvalue::Nondet(ty) => {
                         let raw = choices.get(choice_idx).copied().unwrap_or(0);
                         choice_idx += 1;
+                        // Per-statement line info not yet in the IR; will be
+                        // populated once the lifter carries LineNumberTable data
+                        // through to individual statements.
+                        let line: Option<u16> = None;
                         match ty {
                             Ty::Str => {
-                                // Pick from the string pool using the raw choice
-                                // as a modular index, allocate a fresh ref.
                                 let sidx = str_idx(raw, STRING_CANDIDATES.len());
                                 trace.push(raw);
+                                let chosen = STRING_CANDIDATES[sidx].to_owned();
+                                entries.push(NondetEntry {
+                                    value: NondetValue::Str(chosen.clone()),
+                                    nondet_method: "nondetString",
+                                    line,
+                                });
                                 let aid = alloc_id;
                                 alloc_id += 1;
-                                str_store.insert(aid, STRING_CANDIDATES[sidx].to_owned());
+                                str_store.insert(aid, chosen);
                                 Value::Ref(aid)
                             }
                             Ty::Ref => {
-                                // Non-string reference: allocate a fresh non-null ref.
                                 let aid = alloc_id;
                                 alloc_id += 1;
                                 Value::Ref(aid)
                             }
                             Ty::Long => {
                                 trace.push(raw);
+                                entries.push(NondetEntry {
+                                    value: NondetValue::Long(raw),
+                                    nondet_method: "nondetLong",
+                                    line,
+                                });
                                 Value::I64(raw)
                             }
                             _ => {
                                 trace.push(raw);
+                                entries.push(NondetEntry {
+                                    value: NondetValue::Int(raw as i32),
+                                    nondet_method: "nondetInt",
+                                    line,
+                                });
                                 Value::I32(raw as i32)
                             }
                         }
@@ -1046,6 +1065,7 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
                     return Outcome::Violated {
                         oid: *oid,
                         witness: trace,
+                        entries,
                     };
                 }
             }
@@ -1108,11 +1128,17 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
     let slots = count_nondet_slots(prog, body, probe_steps, &mut probe_choices);
 
     if slots == 0 {
-        if let Outcome::Violated { oid, witness } = run_with_choices(prog, body, &[], probe_steps) {
+        if let Outcome::Violated {
+            oid,
+            witness,
+            entries,
+        } = run_with_choices(prog, body, &[], probe_steps)
+        {
             found.push((
                 oid,
                 Witness {
                     nondet_sequence: witness,
+                    entries,
                 },
             ));
         }
@@ -1148,13 +1174,17 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
         runs_left -= 1;
 
         let choices: Vec<i64> = idxs.iter().map(|i| pool[*i]).collect();
-        if let Outcome::Violated { oid, witness } =
-            run_with_choices(prog, body, &choices, probe_steps)
+        if let Outcome::Violated {
+            oid,
+            witness,
+            entries,
+        } = run_with_choices(prog, body, &choices, probe_steps)
         {
             found.push((
                 oid,
                 Witness {
                     nondet_sequence: witness,
+                    entries,
                 },
             ));
         }
@@ -1181,7 +1211,11 @@ fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witnes
 /// finds no violation (so the slot count is not in the witness).
 fn count_nondet_slots(prog: &Program, body: &Body, steps: u64, out: &mut Vec<i64>) -> usize {
     match run_with_choices(prog, body, &[], steps) {
-        Outcome::Violated { witness, .. } => {
+        Outcome::Violated {
+            witness,
+            entries: _,
+            ..
+        } => {
             let len = witness.len();
             *out = witness;
             len

@@ -14,7 +14,7 @@ use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_core::smt::{SatResult, Solver, SolverFactory, Term};
-use roast_ir::verdict::Witness;
+use roast_ir::verdict::{NondetEntry, NondetValue, Witness};
 use roast_ir::*;
 
 /// Maximum number of solver check-sat calls per run to prevent hangs.
@@ -134,8 +134,8 @@ struct ExploreCtx<'a> {
     body: &'a Body,
     /// Current symbolic state: VarId -> Term.
     vars: HashMap<VarId, Term>,
-    /// (nondet_index, Term, width) in encounter order for witness extraction.
-    nondet_terms: Vec<(usize, Term, u32)>,
+    /// (nondet_index, Term, width, Ty) in encounter order for witness extraction.
+    nondet_terms: Vec<(usize, Term, u32, Ty)>,
     /// Found violations.
     violations: Vec<(ObligationId, Witness)>,
     depth: u32,
@@ -198,7 +198,7 @@ impl<'a> ExploreCtx<'a> {
                 // Ref nondets are not consumed by JvmReplay (the concrete
                 // engine doesn't record them either).
                 if *ty != Ty::Ref {
-                    self.nondet_terms.push((idx, t, w));
+                    self.nondet_terms.push((idx, t, w, *ty));
                 }
                 t
             }
@@ -319,20 +319,37 @@ impl<'a> ExploreCtx<'a> {
     }
 
     fn extract_witness(&mut self) -> Witness {
-        let terms: Vec<(Term, u32)> = self.nondet_terms.iter().map(|(_, t, w)| (*t, *w)).collect();
-        let seq = terms
+        let info: Vec<(Term, u32, Ty)> = self
+            .nondet_terms
             .iter()
-            .map(|(t, w)| {
-                let val = self.solver.get_value_i64(*t).unwrap_or(0);
-                if *w <= 32 {
-                    val as i32 as i64
-                } else {
-                    val
-                }
-            })
+            .map(|(_, t, w, ty)| (*t, *w, *ty))
             .collect();
+        let mut seq = Vec::new();
+        let mut entries = Vec::new();
+        for (t, w, ty) in &info {
+            let val = self.solver.get_value_i64(*t).unwrap_or(0);
+            let raw = if *w <= 32 { val as i32 as i64 } else { val };
+            seq.push(raw);
+            let (value, method) = match ty {
+                Ty::Long => (NondetValue::Long(raw), "nondetLong"),
+                Ty::Str => {
+                    // SMT doesn't model strings; the raw value is the pool index.
+                    let pool = ["", "a", "ab", "abcde", "aaaaa", "hello", "abc", "test"];
+                    let len = pool.len() as i64;
+                    let idx = ((raw % len + len) % len) as usize;
+                    (NondetValue::Str(pool[idx].to_owned()), "nondetString")
+                }
+                _ => (NondetValue::Int(raw as i32), "nondetInt"),
+            };
+            entries.push(NondetEntry {
+                value,
+                nondet_method: method,
+                line: None,
+            });
+        }
         Witness {
             nondet_sequence: seq,
+            entries,
         }
     }
 

@@ -41,6 +41,11 @@ struct Cli {
     /// The RUST_LOG environment variable overrides this flag when set.
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbose: u8,
+
+    /// Write a violation witness (SV-COMP format 2.0 YAML) to this path when
+    /// the verdict is FALSE. BenchExec passes this via `--witness <path>`.
+    #[arg(long = "witness")]
+    witness: Option<PathBuf>,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -255,6 +260,8 @@ fn main() {
         .filter_map(|(oref, st)| match st {
             roast_core::artifact::Status::Violated { by, witness } => Some((
                 oref.clone(),
+                by,
+                witness.clone(),
                 roast_core::artifact::Tagged {
                     seq: 0,
                     producer: *by,
@@ -274,10 +281,14 @@ fn main() {
 
     let mut any_confirmed = false;
     let mut any_unconfirmed = false;
-    for (oref, tagged) in &violated {
+    let mut confirmed_witness: Option<(roast_core::artifact::ObligationRef, roast_ir::verdict::Witness)> = None;
+    for (oref, _by, witness, tagged) in &violated {
         match roast_core::certify::Certifier::certify(&replay, tagged, &prog) {
             roast_core::certify::CertResult::Confirmed => {
                 any_confirmed = true;
+                if confirmed_witness.is_none() {
+                    confirmed_witness = Some((oref.clone(), witness.clone()));
+                }
                 if cli.trace {
                     eprintln!("jvm-replay: confirmed {oref}");
                 }
@@ -317,6 +328,45 @@ fn main() {
     } else {
         v
     };
+
+    // Emit a witness file when the verdict is FALSE and --witness was given.
+    if v == verdict::Verdict::False {
+        if let Some(witness_path) = &cli.witness {
+            if let Some((oref, witness)) = &confirmed_witness {
+                let body = prog.body(&oref.method);
+                let ob = body.map(|b| b.obligation(oref.id));
+                let input_files: Vec<String> = cli
+                    .inputs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                let kind = ob.map(|o| o.kind).unwrap_or(roast_ir::ObligationKind::Assertion);
+                let spec = match kind {
+                    roast_ir::ObligationKind::Assertion => {
+                        "CHECK( init(Main.main()), LTL(G assert) )"
+                    }
+                    _ => {
+                        "CHECK( init(Main.main()), LTL(G ! call(org.sosy_lab.sv_benchmarks.Verifier.assume(false))) )"
+                    }
+                };
+                let yaml = roast_core::witness::emit_violation_yaml(
+                    witness,
+                    &roast_core::witness::TaskInfo {
+                        input_files: &input_files,
+                        specification: spec,
+                    },
+                    &roast_core::witness::ViolationInfo {
+                        kind,
+                        line: ob.and_then(|o| o.line),
+                    },
+                );
+                match std::fs::write(witness_path, &yaml) {
+                    Ok(()) => info!("witness written to {}", witness_path.display()),
+                    Err(e) => warn!("failed to write witness: {e}"),
+                }
+            }
+        }
+    }
 
     info!("final verdict: {v}");
     println!("{v}");

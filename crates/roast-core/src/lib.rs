@@ -19,3 +19,4 @@ pub mod engine;
 pub mod orchestrator;
 pub mod smt;
 pub mod smt_smtlib;
+pub mod witness;
