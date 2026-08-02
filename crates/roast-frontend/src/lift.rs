@@ -1095,6 +1095,42 @@ fn lift_insn(
                         }
                     }
                 }
+                CallModel::EnumInit => {
+                    // Enum.<init>(this, name, ordinal): store ordinal to
+                    // synthetic $$ordinal field so ordinal() can read it.
+                    let this = receiver.unwrap_or_else(|| args.remove(0));
+                    // args layout after receiver removal: [name, ordinal]
+                    let ordinal = if args.len() >= 2 {
+                        args[1].clone()
+                    } else {
+                        Operand::int(0)
+                    };
+                    stmts.push(Stmt::PutField {
+                        obj: this,
+                        field: FieldKey {
+                            class: "java/lang/Enum".into(),
+                            name: models::ENUM_ORDINAL_FIELD.into(),
+                            desc: "I".into(),
+                        },
+                        val: ordinal,
+                    });
+                }
+                CallModel::EnumOrdinal => {
+                    // Enum.ordinal(): read ordinal from synthetic $$ordinal field.
+                    let this = receiver.unwrap_or_else(|| args.remove(0));
+                    nullcheck!(this);
+                    stack.push(assign!(
+                        Ty::Int,
+                        Rvalue::GetField {
+                            obj: this,
+                            field: FieldKey {
+                                class: "java/lang/Enum".into(),
+                                name: models::ENUM_ORDINAL_FIELD.into(),
+                                desc: "I".into(),
+                            },
+                        }
+                    ));
+                }
                 CallModel::Unmodelled => {
                     if let Some(obj) = receiver.clone() {
                         nullcheck!(obj);

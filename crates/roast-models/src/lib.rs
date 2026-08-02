@@ -15,6 +15,10 @@ use roast_ir::Ty;
 
 pub const VERIFIER: &str = "org/sosy_lab/sv_benchmarks/Verifier";
 pub const ASSERTION_ERROR: &str = "java/lang/AssertionError";
+/// Synthetic field name used to store the enum ordinal (set by `Enum.<init>`,
+/// read by `Enum.ordinal()`). Prefixed with `$$` to avoid collisions with
+/// user-defined fields.
+pub const ENUM_ORDINAL_FIELD: &str = "$$ordinal";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallModel {
@@ -33,6 +37,10 @@ pub enum CallModel {
     /// String/StringBuilder/CharSequence method: keep as Rvalue::Call so the
     /// concrete engine can evaluate it against a tracked string value.
     StrCall(Option<Ty>),
+    /// `Enum.<init>(String, int)` — store the ordinal to a synthetic field.
+    EnumInit,
+    /// `Enum.ordinal()` — read the ordinal from a synthetic field.
+    EnumOrdinal,
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -111,6 +119,20 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     }
     if owner == "java/lang/Object" && name == "<init>" {
         return CallModel::NoOp;
+    }
+
+    // Enum support: model the ordinal field that javac's enum <clinit> sets.
+    // <init> is always called via invokespecial on java/lang/Enum directly.
+    // ordinal() is inherited but invoked with the subclass as owner, so we
+    // match it by name+desc for any owner.
+    if owner == "java/lang/Enum" && name == "<init>" {
+        return CallModel::EnumInit;
+    }
+    if name == "ordinal" && desc == "()I" {
+        return CallModel::EnumOrdinal;
+    }
+    if owner == "java/lang/Enum" {
+        return CallModel::Pure(ret_ty(desc));
     }
 
     // Assertions are enabled under SV-COMP, so this is a constant.

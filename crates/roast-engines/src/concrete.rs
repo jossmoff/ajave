@@ -1,25 +1,16 @@
-//! Tier 2, made real: bounded concrete execution over a small candidate set
-//! for every `nondet` value, with exceptional control flow actually routed
-//! through the handlers the frontend already computed.
-//!
-//! This is deliberately not full BMC -- there's no solver, no unrolling
-//! variable, no SMT encoding. It is exactly the "self-certifying falsifier"
-//! described early on: enumerate a handful of representative values
-//! (0, ±1, extremes, and for strings a small pool) rather than solving for
-//! one, execute the program for real against each combination, and report a
-//! bug the moment a `Check` fails somewhere the exception can't be caught.
-//! Because the values are concrete, the witness is just "here is what we ran"
-//! -- no independent trust in the engine is required to believe it, only the
-//! interpreter's own determinism (confirmed by `certify::JvmReplay`).
+//! Concrete interpreter: runs the program once with default (all-zero) nondet
+//! values. This catches trivial bugs quickly without a solver. Value search
+//! (finding the right nondet inputs to trigger a violation) is delegated to
+//! the SMT BMC engine.
 //!
 //! String tracking: `nondetString()` produces a `Nondet(Ty::Str)` rvalue in
-//! the IR. The engine picks one of `STRING_CANDIDATES` by using the raw choice
-//! value as a modular index, allocates a fresh reference ID, and records the
-//! content in `str_store`. String method calls remain in the IR as
-//! `Rvalue::Call` (via `CallModel::StrCall`) so this interpreter can evaluate
-//! them against the tracked content instead of returning Unknown.
+//! the IR. The engine defaults to the empty string, allocates a fresh
+//! reference ID, and records the content in `str_store`. String method calls
+//! remain in the IR as `Rvalue::Call` (via `CallModel::StrCall`) so this
+//! interpreter can evaluate them against the tracked content instead of
+//! returning Unknown.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
 use roast_core::artifact::*;
@@ -28,11 +19,6 @@ use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::verdict::{NondetEntry, NondetValue, Witness};
 use roast_ir::*;
 use roast_models as models;
-
-/// A small pool of representative strings. Index 0 is the empty string so
-/// that the all-zero probe (which gives the slot count) tests the empty-string
-/// case, which is the most common degenerate input.
-const STRING_CANDIDATES: &[&str] = &["", "a", "ab", "abcde", "aaaaa", "hello", "abc", "test"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Value {
@@ -63,30 +49,35 @@ impl Value {
     }
 }
 
-const INT_CANDIDATES: [i32; 7] = [0, 1, -1, 2, -2, i32::MAX, i32::MIN];
-
-#[allow(dead_code)]
-const LONG_CANDIDATES: [i64; 5] = [0, 1, -1, i64::MAX, i64::MIN];
-
-/// Map a raw choice integer to an index into `STRING_CANDIDATES`.
-fn str_idx(raw: i64, len: usize) -> usize {
-    ((raw % len as i64 + len as i64) % len as i64) as usize
-}
-
 /// Outcome of running one concrete path to completion.
 enum Outcome {
     /// Ran to a `Return` with nothing amiss.
     Clean,
+    /// Ran to a `Return` carrying a value.
+    ReturnedValue(Value),
     /// `Verifier.assume` failed: this path is uninteresting, not unsafe.
     Halted,
     /// A `Check` failed with nothing able to catch it.
     Violated {
+        method: MethodKey,
         oid: ObligationId,
         witness: Vec<i64>,
         entries: Vec<NondetEntry>,
     },
     /// Ran out of budget or hit something we can't interpret.
     Inconclusive,
+}
+
+/// Result of inlining a method call.
+enum InlineResult {
+    Returned(Value),
+    Halted,
+    Violated {
+        method: MethodKey,
+        oid: ObligationId,
+        witness: Vec<i64>,
+        entries: Vec<NondetEntry>,
+    },
 }
 
 /// The evaluator for everything except `Nondet` and string method `Call`s,
@@ -788,464 +779,531 @@ fn eval_str_call(
     }
 }
 
-/// Run the body once against a fully-predetermined sequence of nondet
-/// choices. Choices beyond what's provided fall back to `0`, which is
-/// why the outer search widens the candidate list on the values it controls
-/// rather than needing true backtracking here.
-fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
-    let mut store: HashMap<VarId, Value> = HashMap::new();
-    // Tracks the concrete class name of allocated objects, keyed by alloc_id.
-    // Keying by alloc_id (rather than VarId) means aliasing through assignments
-    // is handled automatically: all variables pointing to the same alloc share
-    // the same type entry.
-    let mut alloc_types: HashMap<u64, String> = HashMap::new();
-    // Tracks the concrete length of NewArray-allocated arrays, keyed by alloc_id.
-    let mut array_lengths: HashMap<u64, i64> = HashMap::new();
-    // Tracks the string content of allocated String objects, keyed by
-    // allocation ID so aliasing (s1 = s2) is handled correctly.
-    let mut str_store: HashMap<u64, String> = HashMap::new();
-    // Tracks the mutable content of StringBuilder / StringBuffer objects.
-    let mut sb_store: HashMap<u64, String> = HashMap::new();
-    // Allocation counter. 0 = null, 1 = constant non-null, ≥2 = fresh alloc.
-    let mut alloc_id: u64 = 2;
+/// Shared mutable state for a concrete execution — threaded through call
+/// inlining so field reads/writes and allocations are visible across frames.
+struct ConcreteState<'a> {
+    prog: &'a Program,
+    choices: &'a [i64],
+    choice_idx: usize,
+    trace: Vec<i64>,
+    entries: Vec<NondetEntry>,
+    steps: u64,
+    alloc_id: u64,
+    alloc_types: HashMap<u64, String>,
+    array_lengths: HashMap<u64, i64>,
+    str_store: HashMap<u64, String>,
+    sb_store: HashMap<u64, String>,
+    /// Instance fields: (alloc_id, field_name) -> Value.
+    inst_fields: HashMap<(u64, String), Value>,
+    /// Static fields: (class, field_name) -> Value.
+    static_fields: HashMap<(String, String), Value>,
+    /// Current call depth for bounding inlining.
+    call_depth: u32,
+    /// Classes whose `<clinit>` has already been executed.
+    initialized_classes: HashSet<String>,
+}
 
-    let mut choice_idx = 0usize;
-    let mut trace = Vec::new();
-    let mut entries: Vec<NondetEntry> = Vec::new();
-    let mut steps = step_budget;
+/// Maximum call inlining depth to prevent infinite recursion.
+const MAX_CALL_DEPTH: u32 = 20;
 
-    let mut block = body.entry;
-    let mut idx = 0usize;
-
-    loop {
-        if steps == 0 {
-            return Outcome::Inconclusive;
+impl<'a> ConcreteState<'a> {
+    fn new(prog: &'a Program, choices: &'a [i64], step_budget: u64) -> Self {
+        ConcreteState {
+            prog,
+            choices,
+            choice_idx: 0,
+            trace: Vec::new(),
+            entries: Vec::new(),
+            steps: step_budget,
+            alloc_id: 2,
+            alloc_types: HashMap::new(),
+            array_lengths: HashMap::new(),
+            str_store: HashMap::new(),
+            sb_store: HashMap::new(),
+            inst_fields: HashMap::new(),
+            static_fields: HashMap::new(),
+            call_depth: 0,
+            initialized_classes: HashSet::new(),
         }
-        steps -= 1;
+    }
 
-        let b = body.block(block);
-        if idx >= b.stmts.len() {
-            match &b.term {
-                Terminator::Goto(t) => {
-                    block = *t;
-                    idx = 0;
+    fn eval_op(&self, op: &Operand, store: &HashMap<VarId, Value>) -> Value {
+        match op {
+            Operand::Var(v) => store.get(v).copied().unwrap_or(Value::Unknown),
+            Operand::Const(Const::Int(n)) => Value::I32(*n),
+            Operand::Const(Const::Long(n)) => Value::I64(*n),
+            Operand::Const(Const::Null) => Value::Ref(0),
+            Operand::Const(_) => Value::Ref(1),
+        }
+    }
+
+    /// Run `<clinit>` for `class` if it hasn't been run yet. This initialises
+    /// static fields (enum constants, $assertionsDisabled, etc.) so that
+    /// subsequent `GetStatic` reads return concrete values rather than Unknown.
+    fn ensure_clinit(&mut self, class: &str) {
+        if self.initialized_classes.contains(class) {
+            return;
+        }
+        // Mark as initialized *before* running to prevent infinite recursion
+        // (a <clinit> may reference its own class's statics).
+        self.initialized_classes.insert(class.to_string());
+
+        let clinit_key = MethodKey {
+            class: class.to_string(),
+            name: "<clinit>".to_string(),
+            desc: "()V".to_string(),
+        };
+        if let Some(body) = self.prog.body(&clinit_key) {
+            let body = body.clone();
+            self.call_depth += 1;
+            let _ = self.run_body(&body, HashMap::new());
+            self.call_depth -= 1;
+        }
+    }
+
+    /// Try to inline a user method call. Returns Some(return_value) on success.
+    fn try_inline_call(
+        &mut self,
+        target: &MethodKey,
+        args: &[Operand],
+        caller_store: &HashMap<VarId, Value>,
+    ) -> Option<InlineResult> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return None;
+        }
+        let body = self.prog.body(target)?;
+
+        // Build callee's local store by mapping args to local slots.
+        let mut callee_store: HashMap<VarId, Value> = HashMap::new();
+        let mut slot = 0u16;
+        for arg in args {
+            let val = self.eval_op(arg, caller_store);
+            if let Some((vid_idx, vinfo)) = body
+                .vars
+                .iter()
+                .enumerate()
+                .find(|(_, vi)| matches!(vi.kind, VarKind::Local(s) if s == slot))
+            {
+                callee_store.insert(VarId(vid_idx as u32), val);
+                slot += if vinfo.ty.is_wide() { 2 } else { 1 };
+            } else {
+                slot += 1;
+            }
+        }
+
+        self.call_depth += 1;
+        let result = self.run_body(body, callee_store);
+        self.call_depth -= 1;
+        match result {
+            Outcome::Clean => Some(InlineResult::Returned(Value::Unknown)),
+            Outcome::ReturnedValue(v) => Some(InlineResult::Returned(v)),
+            Outcome::Halted => Some(InlineResult::Halted),
+            Outcome::Violated {
+                method,
+                oid,
+                witness,
+                entries,
+            } => Some(InlineResult::Violated {
+                method,
+                oid,
+                witness,
+                entries,
+            }),
+            Outcome::Inconclusive => None,
+        }
+    }
+
+    /// Execute a body to completion. The `store` is the callee's local variable
+    /// map; heap state is shared through `self`.
+    fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
+        let mut block = body.entry;
+        let mut idx = 0usize;
+
+        loop {
+            if self.steps == 0 {
+                return Outcome::Inconclusive;
+            }
+            self.steps -= 1;
+
+            let b = body.block(block);
+            if idx >= b.stmts.len() {
+                match &b.term {
+                    Terminator::Goto(t) => {
+                        block = *t;
+                        idx = 0;
+                    }
+                    Terminator::Branch { cond, then_, else_ } => {
+                        let taken = store
+                            .get(match cond {
+                                Operand::Var(v) => v,
+                                _ => unreachable!("branch cond is always a temp"),
+                            })
+                            .copied()
+                            .unwrap_or(Value::Unknown)
+                            .nonzero();
+                        block = if taken { *then_ } else { *else_ };
+                        idx = 0;
+                    }
+                    Terminator::Switch {
+                        value,
+                        cases,
+                        default,
+                    } => {
+                        let v = match value {
+                            Operand::Var(vid) => {
+                                store.get(vid).copied().unwrap_or(Value::Unknown)
+                            }
+                            other => Value::I32(match other {
+                                Operand::Const(Const::Int(n)) => *n,
+                                _ => 0,
+                            }),
+                        }
+                        .as_i64() as i32;
+                        block = cases
+                            .iter()
+                            .find(|(k, _)| *k == v)
+                            .map(|(_, t)| *t)
+                            .unwrap_or(*default);
+                        idx = 0;
+                    }
+                    Terminator::Return(ret) => {
+                        if let Some(op) = ret {
+                            let v = self.eval_op(op, &store);
+                            return Outcome::ReturnedValue(v);
+                        }
+                        return Outcome::Clean;
+                    }
+                    Terminator::Halt => return Outcome::Halted,
+                    Terminator::Throw(v) => {
+                        let _ = v;
+                        return Outcome::Inconclusive;
+                    }
+                    Terminator::Diverge(_) => return Outcome::Inconclusive,
                 }
-                Terminator::Branch { cond, then_, else_ } => {
-                    let taken = store
-                        .get(match cond {
+                continue;
+            }
+
+            match &b.stmts[idx] {
+                Stmt::Assign(v, rv) => {
+                    let val = match rv {
+                        Rvalue::Nondet(ty) => {
+                            let raw =
+                                self.choices.get(self.choice_idx).copied().unwrap_or(0);
+                            self.choice_idx += 1;
+                            let line: Option<u16> = None;
+                            match ty {
+                                Ty::Str => {
+                                    self.trace.push(raw);
+                                    let chosen = String::new();
+                                    self.entries.push(NondetEntry {
+                                        value: NondetValue::Str(chosen.clone()),
+                                        nondet_method: "nondetString",
+                                        line,
+                                    });
+                                    let aid = self.alloc_id;
+                                    self.alloc_id += 1;
+                                    self.str_store.insert(aid, chosen);
+                                    Value::Ref(aid)
+                                }
+                                Ty::Ref => {
+                                    let aid = self.alloc_id;
+                                    self.alloc_id += 1;
+                                    Value::Ref(aid)
+                                }
+                                Ty::Long => {
+                                    self.trace.push(raw);
+                                    self.entries.push(NondetEntry {
+                                        value: NondetValue::Long(raw),
+                                        nondet_method: "nondetLong",
+                                        line,
+                                    });
+                                    Value::I64(raw)
+                                }
+                                _ => {
+                                    self.trace.push(raw);
+                                    self.entries.push(NondetEntry {
+                                        value: NondetValue::Int(raw as i32),
+                                        nondet_method: "nondetInt",
+                                        line,
+                                    });
+                                    Value::I32(raw as i32)
+                                }
+                            }
+                        }
+                        Rvalue::New(cls) => {
+                            let aid = self.alloc_id;
+                            self.alloc_id += 1;
+                            self.alloc_types.insert(aid, cls.clone());
+                            if cls == "java/lang/StringBuilder"
+                                || cls == "java/lang/StringBuffer"
+                            {
+                                self.sb_store.insert(aid, String::new());
+                            }
+                            Value::Ref(aid)
+                        }
+                        Rvalue::NewArray { len, .. } => {
+                            let len_val = self.eval_op(len, &store);
+                            let aid = self.alloc_id;
+                            self.alloc_id += 1;
+                            if let Value::I32(n) = len_val {
+                                self.array_lengths.insert(aid, n as i64);
+                            }
+                            Value::Ref(aid)
+                        }
+                        Rvalue::InstanceOf { obj, class } => {
+                            let obj_val = self.eval_op(obj, &store);
+                            match obj_val {
+                                Value::Ref(0) => Value::I32(0),
+                                Value::Ref(aid) => match self.alloc_types.get(&aid) {
+                                    Some(known)
+                                        if self
+                                            .prog
+                                            .supers
+                                            .contains_key(known.as_str()) =>
+                                    {
+                                        Value::I32(
+                                            self.prog.is_subtype(known, class) as i32,
+                                        )
+                                    }
+                                    Some(_) => Value::I32(0),
+                                    None => Value::Unknown,
+                                },
+                                _ => Value::Unknown,
+                            }
+                        }
+                        Rvalue::ArrayLength(arr) => {
+                            let aid = match arr {
+                                Operand::Var(vid) => match store.get(vid) {
+                                    Some(Value::Ref(aid)) => Some(*aid),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            match aid.and_then(|a| self.array_lengths.get(&a)) {
+                                Some(&len) => Value::I32(len as i32),
+                                None => Value::Unknown,
+                            }
+                        }
+                        Rvalue::Call { target, args, .. }
+                            if models::STR_OWNERS.contains(&target.class.as_str()) =>
+                        {
+                            eval_str_call(
+                                target,
+                                args,
+                                &store,
+                                &mut self.str_store,
+                                &mut self.sb_store,
+                                &mut self.alloc_id,
+                            )
+                        }
+                        // Inline user method calls when a body is available.
+                        Rvalue::Call { target, args, .. } => {
+                            match self.try_inline_call(target, args, &store) {
+                                Some(InlineResult::Returned(rv)) => rv,
+                                Some(InlineResult::Halted) => return Outcome::Halted,
+                                Some(InlineResult::Violated {
+                                    method,
+                                    oid,
+                                    witness,
+                                    entries,
+                                }) => {
+                                    return Outcome::Violated {
+                                        method,
+                                        oid,
+                                        witness,
+                                        entries,
+                                    }
+                                }
+                                None => {
+                                    let mut r = Run { store };
+                                    let val = r.eval_rvalue(rv);
+                                    store = r.store;
+                                    val
+                                }
+                            }
+                        }
+                        // Read instance field from heap.
+                        Rvalue::GetField { obj, field } => {
+                            let obj_val = self.eval_op(obj, &store);
+                            match obj_val {
+                                Value::Ref(aid) if aid != 0 => self
+                                    .inst_fields
+                                    .get(&(aid, field.name.clone()))
+                                    .copied()
+                                    .unwrap_or(Value::Unknown),
+                                _ => Value::Unknown,
+                            }
+                        }
+                        // Read static field.
+                        Rvalue::GetStatic(fk) => {
+                            // javac's $assertionsDisabled field: assume
+                            // assertions are enabled (SV-COMP convention).
+                            if fk.name == "$assertionsDisabled" {
+                                Value::I32(0)
+                            } else {
+                                // Ensure <clinit> has run for this class.
+                                self.ensure_clinit(&fk.class);
+                                self.static_fields
+                                    .get(&(fk.class.clone(), fk.name.clone()))
+                                    .copied()
+                                    .unwrap_or(Value::Unknown)
+                            }
+                        }
+                        other => {
+                            let mut r = Run { store };
+                            let val = r.eval_rvalue(other);
+                            store = r.store;
+                            val
+                        }
+                    };
+                    store.insert(*v, val);
+                }
+                Stmt::Assume(op) => {
+                    let v = store
+                        .get(match op {
                             Operand::Var(v) => v,
-                            _ => unreachable!("branch cond is always a temp"),
+                            _ => unreachable!("assume operand is always a temp"),
                         })
                         .copied()
-                        .unwrap_or(Value::Unknown)
-                        .nonzero();
-                    block = if taken { *then_ } else { *else_ };
-                    idx = 0;
-                }
-                Terminator::Switch {
-                    value,
-                    cases,
-                    default,
-                } => {
-                    let v = match value {
-                        Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
-                        other => Value::I32(match other {
-                            Operand::Const(Const::Int(n)) => *n,
-                            _ => 0,
-                        }),
+                        .unwrap_or(Value::Unknown);
+                    if !v.nonzero() {
+                        return Outcome::Halted;
                     }
-                    .as_i64() as i32;
-                    block = cases
-                        .iter()
-                        .find(|(k, _)| *k == v)
-                        .map(|(_, t)| *t)
-                        .unwrap_or(*default);
-                    idx = 0;
                 }
-                Terminator::Return(_) => return Outcome::Clean,
-                Terminator::Halt => return Outcome::Halted,
-                Terminator::Throw(v) => {
-                    let _ = v;
-                    return Outcome::Inconclusive;
-                }
-                Terminator::Diverge(_) => return Outcome::Inconclusive,
-            }
-            continue;
-        }
-
-        match &b.stmts[idx] {
-            Stmt::Assign(v, rv) => {
-                let val = match rv {
-                    Rvalue::Nondet(ty) => {
-                        let raw = choices.get(choice_idx).copied().unwrap_or(0);
-                        choice_idx += 1;
-                        // Per-statement line info not yet in the IR; will be
-                        // populated once the lifter carries LineNumberTable data
-                        // through to individual statements.
-                        let line: Option<u16> = None;
-                        match ty {
-                            Ty::Str => {
-                                let sidx = str_idx(raw, STRING_CANDIDATES.len());
-                                trace.push(raw);
-                                let chosen = STRING_CANDIDATES[sidx].to_owned();
-                                entries.push(NondetEntry {
-                                    value: NondetValue::Str(chosen.clone()),
-                                    nondet_method: "nondetString",
-                                    line,
-                                });
-                                let aid = alloc_id;
-                                alloc_id += 1;
-                                str_store.insert(aid, chosen);
-                                Value::Ref(aid)
-                            }
-                            Ty::Ref => {
-                                let aid = alloc_id;
-                                alloc_id += 1;
-                                Value::Ref(aid)
-                            }
-                            Ty::Long => {
-                                trace.push(raw);
-                                entries.push(NondetEntry {
-                                    value: NondetValue::Long(raw),
-                                    nondet_method: "nondetLong",
-                                    line,
-                                });
-                                Value::I64(raw)
-                            }
-                            _ => {
-                                trace.push(raw);
-                                entries.push(NondetEntry {
-                                    value: NondetValue::Int(raw as i32),
-                                    nondet_method: "nondetInt",
-                                    line,
-                                });
-                                Value::I32(raw as i32)
-                            }
+                // Write instance field to heap.
+                Stmt::PutField { obj, field, val } => {
+                    let obj_val = self.eval_op(obj, &store);
+                    let v = self.eval_op(val, &store);
+                    if let Value::Ref(aid) = obj_val {
+                        if aid != 0 {
+                            self.inst_fields.insert((aid, field.name.clone()), v);
                         }
                     }
-                    // Track the class of newly-allocated objects for InstanceOf
-                    // and StringBuilder content.
-                    Rvalue::New(cls) => {
-                        let aid = alloc_id;
-                        alloc_id += 1;
-                        alloc_types.insert(aid, cls.clone());
-                        // Pre-seed an empty string for StringBuilder/StringBuffer
-                        // so that append() calls before any <init> see "".
-                        if cls == "java/lang/StringBuilder" || cls == "java/lang/StringBuffer" {
-                            sb_store.insert(aid, String::new());
-                        }
-                        Value::Ref(aid)
-                    }
-                    // Track array lengths at creation so ArrayLength can be
-                    // evaluated concretely.
-                    Rvalue::NewArray { len, .. } => {
-                        let r = Run { store };
-                        let len_val = r.eval(len);
-                        store = r.store;
-                        let aid = alloc_id;
-                        alloc_id += 1;
-                        if let Value::I32(n) = len_val {
-                            array_lengths.insert(aid, n as i64);
-                        }
-                        Value::Ref(aid)
-                    }
-                    // Evaluate InstanceOf using the type hierarchy.
-                    // Keying by alloc_id means aliases (v2 = v1) resolve correctly.
-                    // Only trust is_subtype when the known class appears in the
-                    // loaded hierarchy (prog.supers). JDK types not in the classpath
-                    // are absent from prog.supers; for those we return Unknown rather
-                    // than relying on is_subtype's open-world default of `true`.
-                    Rvalue::InstanceOf { obj, class } => {
-                        let r = Run { store };
-                        let obj_val = r.eval(obj);
-                        store = r.store;
-                        match obj_val {
-                            Value::Ref(0) => Value::I32(0), // null instanceof T = false
-                            Value::Ref(aid) => match alloc_types.get(&aid) {
-                                Some(known) if prog.supers.contains_key(known.as_str()) => {
-                                    Value::I32(prog.is_subtype(known, class) as i32)
+                }
+                // Write static field.
+                Stmt::PutStatic(fk, val) => {
+                    let v = self.eval_op(val, &store);
+                    self.static_fields
+                        .insert((fk.class.clone(), fk.name.clone()), v);
+                }
+                Stmt::ArrayStore { .. } => {}
+                Stmt::Check(oid) => {
+                    let ob = body.obligation(*oid);
+                    let ok = match &ob.cond {
+                        Operand::Const(Const::Int(v)) => *v != 0,
+                        other => {
+                            let v = match other {
+                                Operand::Var(vid) => {
+                                    store.get(vid).copied().unwrap_or(Value::Unknown)
                                 }
-                                Some(_) => {
-                                    // Class not in the loaded hierarchy (e.g. a JDK type):
-                                    // return false (not a subtype). Under-approximation is
-                                    // safe here — JvmReplay filters any spurious witness.
-                                    Value::I32(0)
-                                }
-                                None => Value::Unknown,
-                            },
-                            _ => Value::Unknown,
-                        }
-                    }
-                    // Resolve array length from creation-time tracking.
-                    // Look up by alloc_id so aliased array references work.
-                    Rvalue::ArrayLength(arr) => {
-                        let aid = match arr {
-                            Operand::Var(vid) => match store.get(vid) {
-                                Some(Value::Ref(aid)) => Some(*aid),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        match aid.and_then(|a| array_lengths.get(&a)) {
-                            Some(&len) => Value::I32(len as i32),
-                            None => Value::Unknown,
-                        }
-                    }
-                    // String/StringBuilder method calls kept as Rvalue::Call
-                    // by the lifter. Evaluate them against the tracked content.
-                    Rvalue::Call { target, args, .. }
-                        if models::STR_OWNERS.contains(&target.class.as_str()) =>
-                    {
-                        eval_str_call(
-                            target,
-                            args,
-                            &store,
-                            &mut str_store,
-                            &mut sb_store,
-                            &mut alloc_id,
-                        )
-                    }
-                    other => {
-                        let mut r = Run { store };
-                        let val = r.eval_rvalue(other);
-                        store = r.store;
-                        val
-                    }
-                };
-                store.insert(*v, val);
-            }
-            Stmt::Assume(op) => {
-                let v = store
-                    .get(match op {
-                        Operand::Var(v) => v,
-                        _ => unreachable!("assume operand is always a temp"),
-                    })
-                    .copied()
-                    .unwrap_or(Value::Unknown);
-                if !v.nonzero() {
-                    return Outcome::Halted;
-                }
-            }
-            Stmt::PutStatic(..) | Stmt::PutField { .. } | Stmt::ArrayStore { .. } => {}
-            Stmt::Check(oid) => {
-                let ob = body.obligation(*oid);
-                let ok = match &ob.cond {
-                    Operand::Const(Const::Int(v)) => *v != 0,
-                    other => {
-                        let v = match other {
-                            Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
-                            _ => Value::Unknown,
-                        };
-                        if v == Value::Unknown {
-                            return Outcome::Inconclusive;
-                        }
-                        v.nonzero()
-                    }
-                };
-                if !ok {
-                    if let Some(class) = models::exception_class(ob.kind) {
-                        if let Some(target) = route(prog, b, class) {
-                            block = target;
-                            idx = 0;
-                            // Materialise the exception object in stack slot 0.
-                            if let Some(slot) = body
-                                .vars
-                                .iter()
-                                .enumerate()
-                                .find(|(_, vi)| vi.kind == VarKind::Stack(0))
-                                .map(|(i, _)| VarId(i as u32))
-                            {
-                                let aid = alloc_id;
-                                alloc_id += 1;
-                                store.insert(slot, Value::Ref(aid));
+                                _ => Value::Unknown,
+                            };
+                            if v == Value::Unknown {
+                                return Outcome::Inconclusive;
                             }
-                            continue;
+                            v.nonzero()
                         }
-                    }
-                    return Outcome::Violated {
-                        oid: *oid,
-                        witness: trace,
-                        entries,
                     };
+                    if !ok {
+                        if let Some(class) = models::exception_class(ob.kind) {
+                            if let Some(target) = route(self.prog, b, class) {
+                                block = target;
+                                idx = 0;
+                                if let Some(slot) = body
+                                    .vars
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, vi)| vi.kind == VarKind::Stack(0))
+                                    .map(|(i, _)| VarId(i as u32))
+                                {
+                                    let aid = self.alloc_id;
+                                    self.alloc_id += 1;
+                                    store.insert(slot, Value::Ref(aid));
+                                }
+                                continue;
+                            }
+                        }
+                        return Outcome::Violated {
+                            method: body.key.clone(),
+                            oid: *oid,
+                            witness: std::mem::take(&mut self.trace),
+                            entries: std::mem::take(&mut self.entries),
+                        };
+                    }
                 }
+                Stmt::Nop => {}
             }
-            Stmt::Nop => {}
+            idx += 1;
         }
-        idx += 1;
     }
 }
 
-/// Collect every integer constant that appears as an operand anywhere in the
-/// body. These are the values most likely to be semantically relevant at
-/// branch decisions, so adding them (and their immediate neighbours ±1) to
-/// the candidate pool gives boundary-value coverage without a solver.
-fn extract_constants(body: &Body) -> Vec<i32> {
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<i32> = BTreeSet::new();
-    let scan_op = |op: &Operand, s: &mut BTreeSet<i32>| {
-        if let Operand::Const(Const::Int(v)) = op {
-            s.insert(*v);
-            s.insert(v.saturating_add(1));
-            s.insert(v.saturating_sub(1));
-        }
-    };
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let Stmt::Assign(_, rv) = stmt {
-                match rv {
-                    Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::ArrayLength(o) => {
-                        scan_op(o, &mut seen)
-                    }
-                    Rvalue::Bin(_, a, b) => {
-                        scan_op(a, &mut seen);
-                        scan_op(b, &mut seen);
-                    }
-                    Rvalue::Cast(_, o) => scan_op(o, &mut seen),
-                    Rvalue::Cmp(a, b) => {
-                        scan_op(a, &mut seen);
-                        scan_op(b, &mut seen);
-                    }
-                    Rvalue::NewArray { len, .. } => scan_op(len, &mut seen),
-                    _ => {}
-                }
-            }
-        }
-        match &block.term {
-            Terminator::Branch { cond, .. } => scan_op(cond, &mut seen),
-            Terminator::Switch { value, .. } => scan_op(value, &mut seen),
-            _ => {}
-        }
-    }
-    seen.into_iter().collect()
+/// Run the body once against a fully-predetermined sequence of nondet
+/// choices. Choices beyond what's provided fall back to `0`.
+fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
+    let mut state = ConcreteState::new(prog, choices, step_budget);
+    state.run_body(body, HashMap::new())
 }
 
-fn search(prog: &Program, body: &Body, budget: u64) -> Vec<(ObligationId, Witness)> {
+/// Try multiple choice vectors: all-zero plus a set of boolean-biased
+/// patterns. Enough to trigger bugs in programs like MinePump where
+/// specific nondet boolean combinations reach assertion failures.
+fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)> {
+    let step_budget = 200_000u64;
     let mut found = Vec::new();
-    let mut runs_left = budget;
 
-    let probe_steps = 200_000u64;
-    let mut probe_choices: Vec<i64> = Vec::new();
-    let slots = count_nondet_slots(prog, body, probe_steps, &mut probe_choices);
+    // Choice vectors to try. Each entry is used as a repeating pattern
+    // for nondet values (0 = false for booleans, 1 = true).
+    let patterns: &[&[i64]] = &[
+        &[],                    // all-zero default
+        &[1],                   // all-one (all booleans true)
+        &[1, 0],               // alternating true/false
+        &[0, 1],               // alternating false/true
+        &[1, 1, 0],            // mostly true
+        &[1, 0, 0],            // mostly false
+        &[0, 0, 1],            // occasional true
+        &[1, 1, 1, 0],         // three true, one false
+        &[0, 1, 1, 0],         // false-true-true-false
+        &[1, 0, 1, 0],         // alternating
+        &[0, 0, 0, 1],         // mostly false
+        &[1, 1, 0, 0],         // half and half
+    ];
 
-    if slots == 0 {
+    for pattern in patterns {
+        // Expand pattern to cover enough choices (up to 64 nondet calls).
+        let choices: Vec<i64> = if pattern.is_empty() {
+            vec![]
+        } else {
+            pattern.iter().copied().cycle().take(64).collect()
+        };
         if let Outcome::Violated {
+            method,
             oid,
             witness,
             entries,
-        } = run_with_choices(prog, body, &[], probe_steps)
+        } = run_with_choices(prog, body, &choices, step_budget)
         {
             found.push((
+                method,
                 oid,
                 Witness {
                     nondet_sequence: witness,
                     entries,
                 },
             ));
-        }
-        return found;
-    }
-
-    let capped = slots.min(4);
-    let mut pool_set: std::collections::BTreeSet<i64> =
-        INT_CANDIDATES.iter().map(|x| *x as i64).collect();
-    for c in extract_constants(body) {
-        pool_set.insert(c as i64);
-    }
-    // When the body has string-nondet slots, add the full range of
-    // STRING_CANDIDATES indices (0..len-1) so every candidate string
-    // is tried. These are small integers and won't inflate the pool much.
-    let has_str_nondet = body
-        .blocks
-        .iter()
-        .flat_map(|b| &b.stmts)
-        .any(|s| matches!(s, Stmt::Assign(_, Rvalue::Nondet(Ty::Str))));
-    if has_str_nondet {
-        for i in 0..STRING_CANDIDATES.len() as i64 {
-            pool_set.insert(i);
+            break; // One violation is enough
         }
     }
-    let pool: Vec<i64> = pool_set.into_iter().collect();
-    let mut idxs = vec![0usize; capped];
-
-    'outer: loop {
-        if runs_left == 0 {
-            break;
-        }
-        runs_left -= 1;
-
-        let choices: Vec<i64> = idxs.iter().map(|i| pool[*i]).collect();
-        if let Outcome::Violated {
-            oid,
-            witness,
-            entries,
-        } = run_with_choices(prog, body, &choices, probe_steps)
-        {
-            found.push((
-                oid,
-                Witness {
-                    nondet_sequence: witness,
-                    entries,
-                },
-            ));
-        }
-
-        let mut k = capped;
-        loop {
-            if k == 0 {
-                break 'outer;
-            }
-            k -= 1;
-            idxs[k] += 1;
-            if idxs[k] < pool.len() {
-                break;
-            }
-            idxs[k] = 0;
-        }
-    }
-
     found
-}
-
-/// Run once with all-zero choices to count how many nondet slots appear on
-/// the taken path. Falls back to a static upper-bound count when the probe
-/// finds no violation (so the slot count is not in the witness).
-fn count_nondet_slots(prog: &Program, body: &Body, steps: u64, out: &mut Vec<i64>) -> usize {
-    match run_with_choices(prog, body, &[], steps) {
-        Outcome::Violated {
-            witness,
-            entries: _,
-            ..
-        } => {
-            let len = witness.len();
-            *out = witness;
-            len
-        }
-        _ => {
-            // Static upper bound: count Nondet rvalues across all blocks.
-            // Over-counting is fine — it just means a few extra odometer
-            // positions that the interpreter reads as the default 0.
-            let static_count: usize = body
-                .blocks
-                .iter()
-                .flat_map(|b| &b.stmts)
-                .filter(|s| matches!(s, Stmt::Assign(_, Rvalue::Nondet(_))))
-                .count();
-            static_count.max(3)
-        }
-    }
 }
 
 pub struct Concrete {
     done: bool,
-    budget_runs: u64,
 }
 
 impl Concrete {
-    pub fn new(budget_runs: u64) -> Self {
-        Concrete {
-            done: false,
-            budget_runs,
-        }
+    pub fn new() -> Self {
+        Concrete { done: false }
     }
 }
 
@@ -1271,20 +1329,17 @@ impl Engine for Concrete {
             return Progress::Exhausted;
         };
 
-        info!(
-            "concrete: starting bounded search (budget={} runs) on {entry:?}",
-            self.budget_runs
-        );
-        let violations = search(prog, body, self.budget_runs);
+        info!("concrete: probing with default values on {entry:?}");
+        let violations = search(prog, body);
         debug!(
             "concrete: search complete, found {} violation(s)",
             violations.len()
         );
 
         let mut advanced = false;
-        for (oid, witness) in violations {
+        for (method, oid, witness) in violations {
             let oref = ObligationRef {
-                method: entry.clone(),
+                method,
                 id: oid,
             };
             debug!(

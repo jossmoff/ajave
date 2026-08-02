@@ -26,6 +26,7 @@ pub struct Orchestrator {
     pub phase: Phase,
     pub budget: Budget,
     pub trace: Vec<String>,
+    pub assertion_only: bool,
 }
 
 impl Orchestrator {
@@ -36,6 +37,7 @@ impl Orchestrator {
             phase: Phase::Presolve,
             budget: Budget::default(),
             trace: Vec::new(),
+            assertion_only: true,
         }
     }
 
@@ -45,7 +47,7 @@ impl Orchestrator {
             self.engines.len(),
             max_rounds
         );
-        self.bb.seed(prog);
+        self.bb.seed(prog, self.assertion_only);
         for e in self.engines.iter_mut() {
             debug!("orchestrator: initialising engine {}", e.id());
             e.init(prog, &mut self.bb);
@@ -62,6 +64,15 @@ impl Orchestrator {
             for (i, e) in self.engines.iter_mut().enumerate() {
                 if retired[i] {
                     continue;
+                }
+                // Short-circuit: if a violation was already found by a
+                // previous engine in this round, skip remaining engines.
+                if self
+                    .bb
+                    .statuses()
+                    .any(|(_, s)| matches!(s, Status::Violated { .. }))
+                {
+                    break;
                 }
                 match e.step(prog, &mut self.bb, self.budget) {
                     Progress::Advanced => advanced = true,

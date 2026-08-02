@@ -59,6 +59,8 @@ impl SmtLib {
         match s {
             Sort::Bool => "Bool".to_string(),
             Sort::Bv(w) => format!("(_ BitVec {w})"),
+            Sort::Str => "String".to_string(),
+            Sort::Int => "Int".to_string(),
         }
     }
 
@@ -214,6 +216,117 @@ impl Solver for SmtLib {
         self.binop_bool("or", a, b)
     }
 
+    fn int_const(&mut self, value: i64) -> Term {
+        let name = if value < 0 {
+            format!("(- {})", -value)
+        } else {
+            value.to_string()
+        };
+        self.alloc(name, Sort::Int)
+    }
+
+    fn int_to_bv32(&mut self, t: Term) -> Term {
+        // Z3: ((_ int2bv 32) x) — requires non-negative x for predictable results.
+        let tn = self.name(t).to_string();
+        let expr = format!("((_ int2bv 32) {tn})");
+        self.define_term("t", &expr, Sort::Bv(32))
+    }
+
+    fn bv32_to_int(&mut self, t: Term) -> Term {
+        let tn = self.name(t).to_string();
+        let expr = format!("(bv2int {tn})");
+        self.define_term("t", &expr, Sort::Int)
+    }
+
+    fn fresh_str(&mut self, name: &str) -> Term {
+        let sname = format!("{name}_{}", self.next_id);
+        self.send(&format!("(declare-const {sname} String)"));
+        self.alloc(sname, Sort::Str)
+    }
+
+    fn str_const(&mut self, value: &str) -> Term {
+        // Escape for SMT-LIB2 string literals (double up backslashes and quotes).
+        let escaped = value.replace('\\', "\\\\").replace('"', "\"\"");
+        let name = format!("\"{}\"", escaped);
+        self.alloc(name, Sort::Str)
+    }
+
+    fn str_len(&mut self, s: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let expr = format!("(str.len {sn})");
+        self.define_term("t", &expr, Sort::Int)
+    }
+
+    fn str_contains(&mut self, haystack: Term, needle: Term) -> Term {
+        let hn = self.name(haystack).to_string();
+        let nn = self.name(needle).to_string();
+        let expr = format!("(str.contains {hn} {nn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn str_prefixof(&mut self, pre: Term, s: Term) -> Term {
+        let pn = self.name(pre).to_string();
+        let sn = self.name(s).to_string();
+        let expr = format!("(str.prefixof {pn} {sn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn str_suffixof(&mut self, suf: Term, s: Term) -> Term {
+        let sfn = self.name(suf).to_string();
+        let sn = self.name(s).to_string();
+        let expr = format!("(str.suffixof {sfn} {sn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn str_concat(&mut self, a: Term, b: Term) -> Term {
+        let an = self.name(a).to_string();
+        let bn = self.name(b).to_string();
+        let expr = format!("(str.++ {an} {bn})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_substr(&mut self, s: Term, offset: Term, len: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let on = self.name(offset).to_string();
+        let ln = self.name(len).to_string();
+        let expr = format!("(str.substr {sn} {on} {ln})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_indexof(&mut self, s: Term, t: Term, start: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let tn = self.name(t).to_string();
+        let start_n = self.name(start).to_string();
+        let expr = format!("(str.indexof {sn} {tn} {start_n})");
+        self.define_term("t", &expr, Sort::Int)
+    }
+
+    fn str_at(&mut self, s: Term, i: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let in_ = self.name(i).to_string();
+        let expr = format!("(str.at {sn} {in_})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_to_int(&mut self, s: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let expr = format!("(str.to_int {sn})");
+        self.define_term("t", &expr, Sort::Int)
+    }
+
+    fn str_from_int(&mut self, i: Term) -> Term {
+        let in_ = self.name(i).to_string();
+        let expr = format!("(str.from_int {in_})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_eq(&mut self, a: Term, b: Term) -> Term {
+        let an = self.name(a).to_string();
+        let bn = self.name(b).to_string();
+        let expr = format!("(= {an} {bn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
     fn assert(&mut self, t: Term) {
         let tn = self.name(t).to_string();
         self.send(&format!("(assert {tn})"));
@@ -242,6 +355,13 @@ impl Solver for SmtLib {
         self.send(&format!("(get-value ({tn}))"));
         let resp = self.read_line();
         parse_bv_value(&resp)
+    }
+
+    fn get_value_string(&mut self, t: Term) -> Option<String> {
+        let tn = self.name(t).to_string();
+        self.send(&format!("(get-value ({tn}))"));
+        let resp = self.read_line();
+        parse_string_value(&resp)
     }
 }
 
@@ -285,6 +405,18 @@ fn parse_bv_value(resp: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// Parse a string value from an SMT-LIB2 `(get-value ...)` response.
+/// Response format: `((name "value"))`.
+fn parse_string_value(resp: &str) -> Option<String> {
+    let start = resp.rfind('"')?;
+    // Find the matching opening quote by scanning backwards.
+    let inner = &resp[..start];
+    let open = inner.rfind('"')?;
+    let raw = &resp[open + 1..start];
+    // Unescape SMT-LIB2 string: `""` → `"`, `\\` → `\`.
+    Some(raw.replace("\"\"", "\"").replace("\\\\", "\\"))
 }
 
 fn sign_extend_to_i64(val: u64, width: usize) -> i64 {
@@ -372,7 +504,7 @@ impl SolverFactory for SmtLibFactory {
         };
 
         // Preamble
-        solver.send("(set-logic QF_BV)");
+        solver.send("(set-logic ALL)");
         solver.send("(set-option :produce-models true)");
 
         Ok(Box::new(solver))

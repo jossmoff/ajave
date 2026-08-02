@@ -46,6 +46,12 @@ struct Cli {
     /// the verdict is FALSE. BenchExec passes this via `--witness <path>`.
     #[arg(long = "witness")]
     witness: Option<PathBuf>,
+
+    /// Skip JVM replay confirmation of violation witnesses. When set, a FALSE
+    /// verdict is reported as soon as an engine finds one, without checking it
+    /// on a real JVM first.
+    #[arg(long = "no-replay")]
+    no_replay: bool,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -225,7 +231,7 @@ fn main() {
 
     let mut engine_list: Vec<Box<dyn Engine>> = vec![
         Box::new(roast_engines::presolve::Presolve::new()),
-        Box::new(roast_engines::concrete::Concrete::new(2000)),
+        Box::new(roast_engines::concrete::Concrete::new()),
     ];
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
         engine_list.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
@@ -249,11 +255,7 @@ fn main() {
         eprintln!("blackboard rejected: {r}");
     }
 
-    // Nothing published by an engine is final on its own authority. A
-    // Violated status is provisional until `JvmReplay` confirms it against a
-    // real JVM; one that can't be confirmed is downgraded rather than
-    // reported, per the certify::JvmReplay module doc.
-    let replay = roast_core::certify::JvmReplay::new(classpath);
+    // Collect all violated obligations and their witnesses.
     let violated: Vec<_> = orch
         .bb
         .statuses()
@@ -279,40 +281,54 @@ fn main() {
         })
         .collect();
 
-    let mut any_confirmed = false;
-    let mut any_unconfirmed = false;
     let mut confirmed_witness: Option<(roast_core::artifact::ObligationRef, roast_ir::verdict::Witness)> = None;
-    for (oref, _by, witness, tagged) in &violated {
-        match roast_core::certify::Certifier::certify(&replay, tagged, &prog) {
-            roast_core::certify::CertResult::Confirmed => {
-                any_confirmed = true;
-                if confirmed_witness.is_none() {
-                    confirmed_witness = Some((oref.clone(), witness.clone()));
+
+    let v = if cli.no_replay {
+        // Skip JVM replay — trust the engine's witness directly.
+        if let Some((oref, _by, witness, _tagged)) = violated.first() {
+            confirmed_witness = Some((oref.clone(), witness.clone()));
+        }
+        v
+    } else {
+        // Nothing published by an engine is final on its own authority. A
+        // Violated status is provisional until `JvmReplay` confirms it against a
+        // real JVM; one that can't be confirmed is downgraded rather than
+        // reported, per the certify::JvmReplay module doc.
+        let replay = roast_core::certify::JvmReplay::new(classpath);
+        let mut any_confirmed = false;
+        let mut any_unconfirmed = false;
+        for (oref, _by, witness, tagged) in &violated {
+            match roast_core::certify::Certifier::certify(&replay, tagged, &prog) {
+                roast_core::certify::CertResult::Confirmed => {
+                    any_confirmed = true;
+                    if confirmed_witness.is_none() {
+                        confirmed_witness = Some((oref.clone(), witness.clone()));
+                    }
+                    if cli.trace {
+                        eprintln!("jvm-replay: confirmed {oref}");
+                    }
                 }
-                if cli.trace {
-                    eprintln!("jvm-replay: confirmed {oref}");
-                }
-            }
-            other => {
-                any_unconfirmed = true;
-                if cli.trace {
-                    eprintln!("jvm-replay: {other:?} for {oref}");
+                other => {
+                    any_unconfirmed = true;
+                    if cli.trace {
+                        eprintln!("jvm-replay: {other:?} for {oref}");
+                    }
                 }
             }
         }
-    }
 
-    let v = if v == verdict::Verdict::False {
-        if any_confirmed {
-            verdict::Verdict::False
-        } else if any_unconfirmed {
-            eprintln!("downgrading FALSE to UNKNOWN: witness did not replay on a real JVM");
-            verdict::Verdict::Unknown
+        if v == verdict::Verdict::False {
+            if any_confirmed {
+                verdict::Verdict::False
+            } else if any_unconfirmed {
+                eprintln!("downgrading FALSE to UNKNOWN: witness did not replay on a real JVM");
+                verdict::Verdict::Unknown
+            } else {
+                v
+            }
         } else {
             v
         }
-    } else {
-        v
     };
 
     // A body we could not fully lift means an over-approximating TRUE is not

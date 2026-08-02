@@ -12,6 +12,8 @@ pub struct Term(pub u64);
 pub enum Sort {
     Bv(u32),
     Bool,
+    Str,
+    Int,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -68,6 +70,28 @@ pub trait Solver {
     fn and(&mut self, a: Term, b: Term) -> Term;
     fn or(&mut self, a: Term, b: Term) -> Term;
 
+    // -- Int/BV conversion --
+
+    fn int_const(&mut self, value: i64) -> Term;
+    fn int_to_bv32(&mut self, t: Term) -> Term;
+    fn bv32_to_int(&mut self, t: Term) -> Term;
+
+    // -- String theory --
+
+    fn fresh_str(&mut self, name: &str) -> Term;
+    fn str_const(&mut self, value: &str) -> Term;
+    fn str_len(&mut self, s: Term) -> Term;
+    fn str_contains(&mut self, haystack: Term, needle: Term) -> Term;
+    fn str_prefixof(&mut self, pre: Term, s: Term) -> Term;
+    fn str_suffixof(&mut self, suf: Term, s: Term) -> Term;
+    fn str_concat(&mut self, a: Term, b: Term) -> Term;
+    fn str_substr(&mut self, s: Term, offset: Term, len: Term) -> Term;
+    fn str_indexof(&mut self, s: Term, t: Term, start: Term) -> Term;
+    fn str_at(&mut self, s: Term, i: Term) -> Term;
+    fn str_to_int(&mut self, s: Term) -> Term;
+    fn str_from_int(&mut self, i: Term) -> Term;
+    fn str_eq(&mut self, a: Term, b: Term) -> Term;
+
     // -- Solver state --
 
     fn assert(&mut self, t: Term);
@@ -75,6 +99,7 @@ pub trait Solver {
     fn pop(&mut self);
     fn check_sat(&mut self) -> SatResult;
     fn get_value_i64(&mut self, t: Term) -> Option<i64>;
+    fn get_value_string(&mut self, t: Term) -> Option<String>;
 }
 
 pub trait SolverFactory: Send {

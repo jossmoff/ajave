@@ -50,37 +50,6 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// Marker for an analysis that over-approximates reachable states.
-/// It may prove safety; it may never claim a bug.
-pub trait OverApprox {
-    /// `true` means "proved safe". `false` means "don't know" — never "unsafe".
-    fn proves_safe(&self) -> bool;
-
-    fn verdict(&self) -> Verdict {
-        if self.proves_safe() {
-            Verdict::True
-        } else {
-            Verdict::Unknown
-        }
-    }
-}
-
-/// Marker for an analysis that under-approximates reachable states.
-/// It may exhibit a bug; it may never claim safety.
-pub trait UnderApprox {
-    /// A witness is required, not optional. An unreplayable FALSE is worth zero
-    /// points, so we do not have a representation for "found a bug, no witness".
-    fn witness(&self) -> Option<&Witness>;
-
-    fn verdict(&self) -> Verdict {
-        if self.witness().is_some() {
-            Verdict::False
-        } else {
-            Verdict::Unknown
-        }
-    }
-}
-
 /// A single nondeterministic value chosen during execution, with its type
 /// preserved so witness emitters can format it correctly (especially strings).
 #[derive(Clone, Debug)]

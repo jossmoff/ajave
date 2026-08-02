@@ -62,6 +62,7 @@ package org.sosy_lab.sv_benchmarks;
 public final class Verifier {
     private static final int[] SEQ;
     private static int idx = 0;
+    private static int strIdx = 0;
     static {
         String s = System.getProperty("roast.seq", "");
         if (s.isEmpty()) {
@@ -73,9 +74,6 @@ public final class Verifier {
         }
     }
     private static int next() {
-        // Past the recorded sequence: fall back to 0, matching the
-        // interpreter's own out-of-choices default, so a witness shorter
-        // than the real run's nondet count still replays consistently.
         return idx < SEQ.length ? SEQ[idx++] : 0;
     }
     public static void assume(boolean condition) {
@@ -89,12 +87,10 @@ public final class Verifier {
     public static long nondetLong() { return next(); }
     public static float nondetFloat() { return next(); }
     public static double nondetDouble() { return next(); }
-    private static final String[] STR_POOL =
-        {"", "a", "ab", "abcde", "aaaaa", "hello", "abc", "test"};
     public static String nondetString() {
-        int raw = next();
-        int len = STR_POOL.length;
-        return STR_POOL[((raw % len) + len) % len];
+        String val = System.getProperty("roast.str." + strIdx, "");
+        strIdx++;
+        return val;
     }
 }
 "#;
@@ -162,11 +158,22 @@ impl Certifier for JvmReplay {
             .map(|v| v.to_string())
             .collect();
 
-        let out = std::process::Command::new(&self.java)
-            .args(["-ea", "-cp", &cp])
-            .arg(format!("-Droast.seq={}", seq.join(",")))
-            .arg("Main")
-            .output();
+        let mut cmd = std::process::Command::new(&self.java);
+        cmd.args(["-ea", "-cp", &cp]);
+        cmd.arg(format!("-Droast.seq={}", seq.join(",")));
+
+        // Pass string nondet values as individual system properties so the
+        // shadow Verifier uses the exact strings from the witness.
+        let mut str_idx = 0usize;
+        for entry in &witness.entries {
+            if let roast_ir::verdict::NondetValue::Str(s) = &entry.value {
+                cmd.arg(format!("-Droast.str.{str_idx}={s}"));
+                str_idx += 1;
+            }
+        }
+
+        cmd.arg("Main");
+        let out = cmd.output();
 
         let out = match out {
             Ok(o) => o,
@@ -196,26 +203,5 @@ impl Certifier for JvmReplay {
         };
         debug!("jvm-replay: {oref:?} -> {result:?}");
         result
-    }
-}
-
-/// Checks a candidate invariant is initial-and-preserved. Small enough to
-/// review by hand, which is the whole point of separating it from the engine
-/// that proposed the invariant.
-pub struct InductiveCheck;
-
-impl Certifier for InductiveCheck {
-    fn name(&self) -> &'static str {
-        "inductive-check"
-    }
-
-    fn certify(&self, artifact: &Tagged, _prog: &Program) -> CertResult {
-        match &artifact.artifact {
-            Artifact::Invariant(inv) if inv.status == InvStatus::Candidate => {
-                // TODO(stage 7): discharge `init => I` and `I /\ T => I'`.
-                CertResult::Inconclusive
-            }
-            _ => CertResult::Inconclusive,
-        }
     }
 }

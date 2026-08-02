@@ -41,18 +41,27 @@ impl Blackboard {
     /// matter what the engines proved -- it would be permanently blocked on
     /// obligations nothing ever analyses, which is exactly the bug that
     /// showed up the first time this ran end to end.
-    pub fn seed(&mut self, prog: &Program) {
+    pub fn seed(&mut self, prog: &Program, assertion_only: bool) {
         let reachable: std::collections::HashSet<_> =
             prog.reachable_from_entry().into_iter().collect();
         for (method, id) in prog.obligations() {
-            if reachable.contains(&method) {
-                self.statuses
-                    .insert(ObligationRef { method, id }, Status::Open);
+            if !reachable.contains(&method) {
+                continue;
             }
+            if assertion_only {
+                let body = prog.body(&method).unwrap();
+                let ob = body.obligation(id);
+                if !ob.kind.is_assertion() {
+                    continue;
+                }
+            }
+            self.statuses
+                .insert(ObligationRef { method, id }, Status::Open);
         }
         debug!(
-            "blackboard: seeded {} reachable obligations",
-            self.statuses.len()
+            "blackboard: seeded {} reachable obligations{}",
+            self.statuses.len(),
+            if assertion_only { " (assertion-only)" } else { "" }
         );
     }
 
