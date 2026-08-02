@@ -1013,11 +1013,10 @@ fn jbmc_string_value_of03() {
 
 #[test]
 fn jbmc_string_value_of04() {
-    // String.valueOf assert failure. SV-COMP: false.
-    // UNKNOWN: string operations not modelled.
+    // String.valueOf(nondetBoolean()): valueOf(false) → "false" ≠ "true".
     assert_eq!(
         roast(&["tasks/common", "tasks/jbmc-regression/StringValueOf04"]),
-        "UNKNOWN"
+        "FALSE"
     );
 }
 

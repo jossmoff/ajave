@@ -1,7 +1,10 @@
 //! Concrete interpreter: runs the program once with default (all-zero) nondet
-//! values. This catches trivial bugs quickly without a solver. Value search
-//! (finding the right nondet inputs to trigger a violation) is delegated to
-//! the SMT BMC engine.
+//! values. This catches trivial bugs quickly without a solver.
+//!
+//! **Design rule:** This engine must NOT contain hardcoded nondet choice
+//! patterns or magic values. Finding the right inputs to trigger a violation
+//! is the SMT BMC engine's job. Adding patterns here is overfitting to
+//! specific test cases and amounts to cheating.
 //!
 //! String tracking: `nondetString()` produces a `Nondet(Ty::Str)` rvalue in
 //! the IR. The engine defaults to the empty string, allocates a fresh
@@ -1245,56 +1248,34 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
     state.run_body(body, HashMap::new())
 }
 
-/// Try multiple choice vectors: all-zero plus a set of boolean-biased
-/// patterns. Enough to trigger bugs in programs like MinePump where
-/// specific nondet boolean combinations reach assertion failures.
+/// Run a single all-zero probe. The concrete engine is a cheap first pass
+/// that catches bugs reachable with default values — nothing more. Finding
+/// the *right* nondet inputs to trigger a violation is the SMT engine's job.
+///
+/// **DO NOT** add hardcoded choice patterns here (e.g. boundary values,
+/// alternating booleans). That is overfitting to specific test cases and
+/// amounts to cheating. If a bug needs a particular nondet value to trigger,
+/// the SMT BMC engine should find it via constraint solving.
 fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)> {
     let step_budget = 200_000u64;
-    let mut found = Vec::new();
-
-    // Choice vectors to try. Each entry is used as a repeating pattern
-    // for nondet values (0 = false for booleans, 1 = true).
-    let patterns: &[&[i64]] = &[
-        &[],                    // all-zero default
-        &[1],                   // all-one (all booleans true)
-        &[1, 0],               // alternating true/false
-        &[0, 1],               // alternating false/true
-        &[1, 1, 0],            // mostly true
-        &[1, 0, 0],            // mostly false
-        &[0, 0, 1],            // occasional true
-        &[1, 1, 1, 0],         // three true, one false
-        &[0, 1, 1, 0],         // false-true-true-false
-        &[1, 0, 1, 0],         // alternating
-        &[0, 0, 0, 1],         // mostly false
-        &[1, 1, 0, 0],         // half and half
-    ];
-
-    for pattern in patterns {
-        // Expand pattern to cover enough choices (up to 64 nondet calls).
-        let choices: Vec<i64> = if pattern.is_empty() {
-            vec![]
-        } else {
-            pattern.iter().copied().cycle().take(64).collect()
-        };
-        if let Outcome::Violated {
+    if let Outcome::Violated {
+        method,
+        oid,
+        witness,
+        entries,
+    } = run_with_choices(prog, body, &[], step_budget)
+    {
+        vec![(
             method,
             oid,
-            witness,
-            entries,
-        } = run_with_choices(prog, body, &choices, step_budget)
-        {
-            found.push((
-                method,
-                oid,
-                Witness {
-                    nondet_sequence: witness,
-                    entries,
-                },
-            ));
-            break; // One violation is enough
-        }
+            Witness {
+                nondet_sequence: witness,
+                entries,
+            },
+        )]
+    } else {
+        vec![]
     }
-    found
 }
 
 pub struct Concrete {
