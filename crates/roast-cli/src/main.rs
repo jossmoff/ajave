@@ -218,11 +218,17 @@ fn main() {
         obligations.len()
     );
 
-    let engine_list: Vec<Box<dyn Engine>> = vec![
+    let mut engine_list: Vec<Box<dyn Engine>> = vec![
         Box::new(roast_engines::presolve::Presolve::new()),
         Box::new(roast_engines::concrete::Concrete::new(2000)),
-        Box::new(roast_engines::ai::AiEngine::new()),
     ];
+    if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
+        engine_list.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
+            Box::new(factory),
+            200,
+        )));
+    }
+    engine_list.push(Box::new(roast_engines::ai::AiEngine::new()));
     let mut orch = Orchestrator::new(engine_list);
     let v = orch.run(&prog, 16);
 

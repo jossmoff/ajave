@@ -10,3 +10,4 @@ pub mod ai;
 pub mod concrete;
 pub mod interval;
 pub mod presolve;
+pub mod smt_bmc;

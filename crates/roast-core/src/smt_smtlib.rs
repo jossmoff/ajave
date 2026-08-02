@@ -1,0 +1,404 @@
+//! SMT-LIB2 process-based solver backend.
+//!
+//! Spawns a solver binary (z3, bitwuzla, cvc5) and communicates via stdin/stdout
+//! using the SMT-LIB2 text protocol. Zero C++ build dependencies; solver-agnostic
+//! at runtime.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+use log::{debug, trace};
+
+use crate::smt::{SatResult, Solver, SolverFactory, Sort, Term};
+
+pub struct SmtLib {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+    term_names: HashMap<u64, String>,
+    term_sorts: HashMap<u64, Sort>,
+}
+
+impl SmtLib {
+    fn send(&mut self, cmd: &str) {
+        trace!("smt>> {cmd}");
+        let _ = writeln!(self.stdin, "{cmd}");
+        let _ = self.stdin.flush();
+    }
+
+    fn read_line(&mut self) -> String {
+        let mut line = String::new();
+        let _ = self.stdout.read_line(&mut line);
+        let result = line.trim().to_string();
+        trace!("smt<< {result}");
+        result
+    }
+
+    fn alloc(&mut self, name: String, sort: Sort) -> Term {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.term_names.insert(id, name);
+        self.term_sorts.insert(id, sort);
+        Term(id)
+    }
+
+    fn name(&self, t: Term) -> &str {
+        self.term_names
+            .get(&t.0)
+            .map(|s| s.as_str())
+            .unwrap_or("??")
+    }
+
+    fn sort(&self, t: Term) -> Sort {
+        self.term_sorts.get(&t.0).copied().unwrap_or(Sort::Bv(32))
+    }
+
+    fn sort_str_dynamic(s: Sort) -> String {
+        match s {
+            Sort::Bool => "Bool".to_string(),
+            Sort::Bv(w) => format!("(_ BitVec {w})"),
+        }
+    }
+
+    fn define_term(&mut self, prefix: &str, expr: &str, sort: Sort) -> Term {
+        let name = format!("{prefix}_{}", self.next_id);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!("(define-const {name} {sort_s} {expr})"));
+        self.alloc(name, sort)
+    }
+
+    fn binop(&mut self, op: &str, a: Term, b: Term) -> Term {
+        let sort = self.sort(a);
+        let an = self.name(a).to_string();
+        let bn = self.name(b).to_string();
+        let expr = format!("({op} {an} {bn})");
+        self.define_term("t", &expr, sort)
+    }
+
+    fn binop_bool(&mut self, op: &str, a: Term, b: Term) -> Term {
+        let an = self.name(a).to_string();
+        let bn = self.name(b).to_string();
+        let expr = format!("({op} {an} {bn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+}
+
+impl Solver for SmtLib {
+    fn name(&self) -> &'static str {
+        "smtlib"
+    }
+
+    fn fresh_bv(&mut self, name: &str, width: u32) -> Term {
+        let sort = Sort::Bv(width);
+        let sname = format!("{name}_{}", self.next_id);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!("(declare-const {sname} {sort_s})"));
+        self.alloc(sname, sort)
+    }
+
+    fn bv_const(&mut self, value: i64, width: u32) -> Term {
+        let sort = Sort::Bv(width);
+        // Convert to unsigned representation for SMT-LIB2 bitvector literal.
+        let uval = match width {
+            32 => (value as i32 as u32) as u64,
+            64 => value as u64,
+            _ => (value as u64) & ((1u64 << width) - 1),
+        };
+        let hex_digits = (width as usize) / 4;
+        let name = format!("#x{uval:0>hex_digits$x}");
+        self.alloc(name, sort)
+    }
+
+    fn bool_const(&mut self, value: bool) -> Term {
+        let name = if value { "true" } else { "false" }.to_string();
+        self.alloc(name, Sort::Bool)
+    }
+
+    fn bvadd(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvadd", a, b)
+    }
+    fn bvsub(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvsub", a, b)
+    }
+    fn bvmul(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvmul", a, b)
+    }
+    fn bvsdiv(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvsdiv", a, b)
+    }
+    fn bvsrem(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvsrem", a, b)
+    }
+    fn bvneg(&mut self, a: Term) -> Term {
+        let an = self.name(a).to_string();
+        let sort = self.sort(a);
+        let expr = format!("(bvneg {an})");
+        self.define_term("t", &expr, sort)
+    }
+
+    fn bvand(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvand", a, b)
+    }
+    fn bvor(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvor", a, b)
+    }
+    fn bvxor(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvxor", a, b)
+    }
+    fn bvshl(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvshl", a, b)
+    }
+    fn bvashr(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvashr", a, b)
+    }
+    fn bvlshr(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvlshr", a, b)
+    }
+
+    fn bveq(&mut self, a: Term, b: Term) -> Term {
+        // SMT-LIB2 uses `=` for equality, which returns Bool
+        self.binop_bool("=", a, b)
+    }
+    fn bvslt(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("bvslt", a, b)
+    }
+    fn bvsle(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("bvsle", a, b)
+    }
+    fn bvsgt(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("bvsgt", a, b)
+    }
+    fn bvsge(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("bvsge", a, b)
+    }
+
+    fn sign_extend(&mut self, t: Term, extra_bits: u32) -> Term {
+        let tn = self.name(t).to_string();
+        let sort = match self.sort(t) {
+            Sort::Bv(w) => Sort::Bv(w + extra_bits),
+            s => s,
+        };
+        let expr = format!("((_ sign_extend {extra_bits}) {tn})");
+        self.define_term("t", &expr, sort)
+    }
+
+    fn extract(&mut self, t: Term, hi: u32, lo: u32) -> Term {
+        let tn = self.name(t).to_string();
+        let width = hi - lo + 1;
+        let expr = format!("((_ extract {hi} {lo}) {tn})");
+        self.define_term("t", &expr, Sort::Bv(width))
+    }
+
+    fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term {
+        let cn = self.name(cond).to_string();
+        let tn = self.name(then_).to_string();
+        let en = self.name(else_).to_string();
+        let sort = self.sort(then_);
+        let expr = format!("(ite {cn} {tn} {en})");
+        self.define_term("t", &expr, sort)
+    }
+
+    fn not(&mut self, t: Term) -> Term {
+        let tn = self.name(t).to_string();
+        let expr = format!("(not {tn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn and(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("and", a, b)
+    }
+
+    fn or(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("or", a, b)
+    }
+
+    fn assert(&mut self, t: Term) {
+        let tn = self.name(t).to_string();
+        self.send(&format!("(assert {tn})"));
+    }
+
+    fn push(&mut self) {
+        self.send("(push 1)");
+    }
+
+    fn pop(&mut self) {
+        self.send("(pop 1)");
+    }
+
+    fn check_sat(&mut self) -> SatResult {
+        self.send("(check-sat)");
+        let resp = self.read_line();
+        match resp.as_str() {
+            "sat" => SatResult::Sat,
+            "unsat" => SatResult::Unsat,
+            _ => SatResult::Unknown,
+        }
+    }
+
+    fn get_value_i64(&mut self, t: Term) -> Option<i64> {
+        let tn = self.name(t).to_string();
+        self.send(&format!("(get-value ({tn}))"));
+        let resp = self.read_line();
+        parse_bv_value(&resp)
+    }
+}
+
+impl Drop for SmtLib {
+    fn drop(&mut self) {
+        let _ = writeln!(self.stdin, "(exit)");
+        let _ = self.stdin.flush();
+        let _ = self.child.wait();
+    }
+}
+
+/// Parse a bitvector value from an SMT-LIB2 `(get-value ...)` response.
+/// Handles formats: `#xHEX`, `#bBIN`, `(_ bvN M)`, `(- ...)` for negative.
+fn parse_bv_value(resp: &str) -> Option<i64> {
+    // Response format: ((name value))
+    // Find the value part after the term name.
+    let inner = resp.trim_start_matches('(').trim_end_matches(')');
+    // Find the last token group — could be `#xABCD`, `#b0101`, `(_ bv42 32)`.
+    if let Some(pos) = inner.find("#x") {
+        let hex = inner[pos + 2..].trim_end_matches(')').trim_end_matches(' ');
+        let val = u64::from_str_radix(hex, 16).ok()?;
+        // Determine width from hex digit count to do sign extension.
+        let digits = hex.len();
+        let width = digits * 4;
+        return Some(sign_extend_to_i64(val, width));
+    }
+    if let Some(pos) = inner.find("#b") {
+        let bin = inner[pos + 2..].trim_end_matches(')').trim_end_matches(' ');
+        let val = u64::from_str_radix(bin, 2).ok()?;
+        let width = bin.len();
+        return Some(sign_extend_to_i64(val, width));
+    }
+    // (_ bvN W) format
+    if let Some(pos) = inner.find("(_ bv") {
+        let rest = &inner[pos + 5..];
+        let parts: Vec<&str> = rest.trim_end_matches(')').split_whitespace().collect();
+        if parts.len() >= 2 {
+            let val: u64 = parts[0].parse().ok()?;
+            let width: usize = parts[1].parse().ok()?;
+            return Some(sign_extend_to_i64(val, width));
+        }
+    }
+    None
+}
+
+fn sign_extend_to_i64(val: u64, width: usize) -> i64 {
+    if width >= 64 {
+        val as i64
+    } else if width == 0 {
+        0
+    } else {
+        let sign_bit = 1u64 << (width - 1);
+        if val & sign_bit != 0 {
+            // Sign-extend: fill upper bits with 1s.
+            let mask = !((1u64 << width) - 1);
+            (val | mask) as i64
+        } else {
+            val as i64
+        }
+    }
+}
+
+pub struct SmtLibFactory {
+    solver_binary: String,
+    extra_args: Vec<String>,
+}
+
+impl SmtLibFactory {
+    /// Read solver config from environment. Returns `None` if the solver binary
+    /// is not found on PATH.
+    pub fn from_env() -> Option<Self> {
+        let binary = std::env::var("ROAST_SMT_SOLVER").unwrap_or_else(|_| "z3".to_string());
+
+        // Check if binary exists on PATH.
+        let check = Command::new("which")
+            .arg(&binary)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match check {
+            Ok(s) if s.success() => {}
+            _ => {
+                debug!("smt: solver binary '{binary}' not found on PATH, skipping SMT engine");
+                return None;
+            }
+        }
+
+        let extra_args = default_args(&binary);
+        debug!("smt: using solver '{binary}' with args {extra_args:?}");
+        Some(SmtLibFactory {
+            solver_binary: binary,
+            extra_args,
+        })
+    }
+}
+
+fn default_args(binary: &str) -> Vec<String> {
+    // Strip path to get just the binary name for matching.
+    let name = binary.rsplit('/').next().unwrap_or(binary);
+    match name {
+        "z3" => vec!["-in".into(), "-smt2".into()],
+        "bitwuzla" => vec!["--smt2".into()],
+        "cvc5" => vec!["--lang".into(), "smt2".into(), "--incremental".into()],
+        _ => vec![],
+    }
+}
+
+impl SolverFactory for SmtLibFactory {
+    fn create(&self) -> Result<Box<dyn Solver>, String> {
+        let mut child = Command::new(&self.solver_binary)
+            .args(&self.extra_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("failed to spawn {}: {e}", self.solver_binary))?;
+
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+
+        let mut solver = SmtLib {
+            child,
+            stdin: BufWriter::new(stdin),
+            stdout: BufReader::new(stdout),
+            next_id: 0,
+            term_names: HashMap::new(),
+            term_sorts: HashMap::new(),
+        };
+
+        // Preamble
+        solver.send("(set-logic QF_BV)");
+        solver.send("(set-option :produce-models true)");
+
+        Ok(Box::new(solver))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_value() {
+        assert_eq!(parse_bv_value("((x_0 #x00000001))"), Some(1));
+        assert_eq!(parse_bv_value("((x_0 #xffffffff))"), Some(-1));
+        assert_eq!(parse_bv_value("((x_0 #x000003e8))"), Some(1000));
+    }
+
+    #[test]
+    fn parse_bv_decimal() {
+        assert_eq!(parse_bv_value("((x_0 (_ bv1000 32)))"), Some(1000));
+    }
+
+    #[test]
+    fn sign_extend_works() {
+        assert_eq!(sign_extend_to_i64(0xFFFFFFFF, 32), -1i64);
+        assert_eq!(sign_extend_to_i64(1, 32), 1i64);
+        assert_eq!(sign_extend_to_i64(0x80000000, 32), i32::MIN as i64);
+    }
+}
