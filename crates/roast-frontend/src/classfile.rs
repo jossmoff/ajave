@@ -73,6 +73,8 @@ pub enum Cp {
     Method(u16, u16),
     IfaceMethod(u16, u16),
     NameAndType(u16, u16),
+    /// `invokedynamic`: bootstrap_method_attr_index, name_and_type_index.
+    InvokeDynamic(u16, u16),
     Other,
     /// The dead second slot of a Long or Double. Present so that pool indices
     /// line up with the spec's 1-based, gappy numbering.
@@ -114,6 +116,15 @@ pub struct Field {
     pub access: u16,
 }
 
+/// A bootstrap method entry from the BootstrapMethods attribute.
+#[derive(Clone, Debug)]
+pub struct BootstrapMethod {
+    /// CP index of the MethodHandle_info.
+    pub method_ref: u16,
+    /// CP indices of the static arguments.
+    pub args: Vec<u16>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassFile {
     pub cp: Vec<Cp>,
@@ -122,6 +133,7 @@ pub struct ClassFile {
     pub interfaces: Vec<String>,
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
+    pub bootstrap_methods: Vec<BootstrapMethod>,
 }
 
 /// A resolved member reference: owner class, member name, descriptor.
@@ -196,9 +208,14 @@ impl ClassFile {
                     r.skip(2)?;
                     Cp::Other
                 }
-                17 | 18 => {
+                17 => {
                     r.skip(4)?;
                     Cp::Other
+                }
+                18 => {
+                    let bsm = r.u2()?;
+                    let nat = r.u2()?;
+                    Cp::InvokeDynamic(bsm, nat)
                 }
                 t => return Err(format!("unknown constant pool tag {t}")),
             };
@@ -256,6 +273,28 @@ impl ClassFile {
             });
         }
 
+        // Parse class-level attributes for BootstrapMethods.
+        let mut bootstrap_methods = Vec::new();
+        let nattr = r.u2()?;
+        for _ in 0..nattr {
+            let aname = cp_utf8(&cp, r.u2()?)?;
+            let alen = r.u4()? as usize;
+            if aname == "BootstrapMethods" {
+                let nbsm = r.u2()?;
+                for _ in 0..nbsm {
+                    let method_ref = r.u2()?;
+                    let nargs = r.u2()?;
+                    let mut args = Vec::with_capacity(nargs as usize);
+                    for _ in 0..nargs {
+                        args.push(r.u2()?);
+                    }
+                    bootstrap_methods.push(BootstrapMethod { method_ref, args });
+                }
+            } else {
+                r.skip(alen)?;
+            }
+        }
+
         let this_class = cp_class_name(&cp, this_idx)?;
         let super_class = if super_idx == 0 {
             None
@@ -270,6 +309,7 @@ impl ClassFile {
             interfaces,
             fields,
             methods,
+            bootstrap_methods,
         })
     }
 
@@ -290,6 +330,26 @@ impl ClassFile {
             name: cp_utf8(&self.cp, name_idx)?,
             desc: cp_utf8(&self.cp, desc_idx)?,
         })
+    }
+
+    /// Resolve an `invokedynamic` CP entry.
+    /// Returns `(name, desc, bootstrap_method_index, &bootstrap_args)`.
+    pub fn invoke_dynamic(&self, idx: u16) -> R<(String, String, &BootstrapMethod)> {
+        let (bsm_idx, nat_idx) = match self.cp.get(idx as usize) {
+            Some(Cp::InvokeDynamic(a, b)) => (*a, *b),
+            _ => return Err(format!("cp[{idx}] is not InvokeDynamic")),
+        };
+        let (name_idx, desc_idx) = match self.cp.get(nat_idx as usize) {
+            Some(Cp::NameAndType(a, b)) => (*a, *b),
+            _ => return Err(format!("cp[{nat_idx}] is not a NameAndType")),
+        };
+        let bsm = self.bootstrap_methods.get(bsm_idx as usize)
+            .ok_or_else(|| format!("bootstrap method index {bsm_idx} out of bounds"))?;
+        Ok((
+            cp_utf8(&self.cp, name_idx)?,
+            cp_utf8(&self.cp, desc_idx)?,
+            bsm,
+        ))
     }
 
     pub fn class_name(&self, idx: u16) -> R<String> {

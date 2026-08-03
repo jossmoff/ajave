@@ -152,14 +152,12 @@ fn body_uses_havoced_ops(body: &Body) -> bool {
                 Stmt::Assign(_, rv) => match rv {
                     Rvalue::GetStatic(_)
                     | Rvalue::GetField { .. }
-                    | Rvalue::ArrayLoad { .. }
-                    | Rvalue::ArrayLength(_)
-                    | Rvalue::NewArray { .. }
                     | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. } => return true,
+                    | Rvalue::Call { .. }
+                    | Rvalue::Havoc(_) => return true,
                     _ => {}
                 },
-                Stmt::PutField { .. } | Stmt::ArrayStore { .. } => return true,
+                Stmt::PutField { .. } => return true,
                 _ => {}
             }
         }
@@ -385,7 +383,7 @@ fn encode_rvalue_smt2(
 ) -> String {
     match rv {
         Rvalue::Use(o) => encode_operand_smt2(o, var_map, var_indices),
-        Rvalue::Nondet(_ty) => {
+        Rvalue::Nondet(_ty, _) | Rvalue::Havoc(_ty) => {
             // For CHC, nondets are universally quantified — they're already
             // covered by the forall in the source variables. We use a fresh
             // variable name that won't conflict.

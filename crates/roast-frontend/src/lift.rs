@@ -671,8 +671,13 @@ fn lift_insn(
             Some(Cp::Long(v)) => stack.push(Operand::Const(Const::Long(*v))),
             Some(Cp::Float(v)) => stack.push(Operand::Const(Const::Float(*v))),
             Some(Cp::Double(v)) => stack.push(Operand::Const(Const::Double(*v))),
-            // Strings are references we model no state for; havoc is sound.
-            Some(Cp::Str(_)) => stack.push(assign!(Ty::Ref, Rvalue::Nondet(Ty::Ref))),
+            Some(Cp::Str(idx)) => {
+                let s = match lf.cf.cp.get(*idx as usize) {
+                    Some(Cp::Utf8(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                stack.push(Operand::Const(Const::Str(s)));
+            }
             Some(Cp::Class(_)) => stack.push(Operand::Const(Const::Class("<class>".into()))),
             _ => return Err(format!("unsupported ldc at {off}")),
         },
@@ -1055,16 +1060,38 @@ fn lift_insn(
             match models::model_for(&r.owner, &r.name, &r.desc) {
                 CallModel::Assume => stmts.push(Stmt::Assume(args[0].clone())),
                 CallModel::NoOp => {}
-                CallModel::Nondet(t) => {
+                CallModel::Nondet(t, jvm_byte) => {
                     let ty = t.unwrap_or(Ty::Int);
-                    stack.push(assign!(ty, Rvalue::Nondet(ty)));
+                    stack.push(assign!(ty, Rvalue::Nondet(ty, Some(jvm_byte))));
                 }
                 CallModel::Pure(t) => {
                     if let Some(obj) = receiver.clone() {
                         nullcheck!(obj);
                     }
                     if let Some(ty) = t {
-                        stack.push(assign!(ty, Rvalue::Nondet(ty)));
+                        stack.push(assign!(ty, Rvalue::Havoc(ty)));
+                    }
+                }
+                CallModel::MathCall(t) => {
+                    // Keep as Rvalue::Call so the SMT engine can model
+                    // Math/Integer/Long methods precisely.
+                    let is_virtual = op != 0xb8 && op != 0xb7;
+                    let mut all = Vec::new();
+                    if let Some(o) = receiver {
+                        all.push(o);
+                    }
+                    all.extend(args);
+                    let rv = Rvalue::Call {
+                        target,
+                        args: all,
+                        is_virtual,
+                    };
+                    match t {
+                        Some(ty) => stack.push(assign!(ty, rv)),
+                        None => {
+                            let tmp = lf.temp(Ty::Int);
+                            stmts.push(Stmt::Assign(tmp, rv));
+                        }
                     }
                 }
                 CallModel::StrCall(t) => {
@@ -1131,6 +1158,49 @@ fn lift_insn(
                         }
                     ));
                 }
+                CallModel::BoxStore(ty) => {
+                    // T.valueOf(primitive): allocate a new ref and store the
+                    // argument into a synthetic $$value field.
+                    let val = args.into_iter().next().unwrap_or(Operand::int(0));
+                    let obj = lf.temp(Ty::Ref);
+                    stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                    stmts.push(Stmt::PutField {
+                        obj: Operand::Var(obj),
+                        field: FieldKey {
+                            class: target.class.clone(),
+                            name: models::BOX_VALUE_FIELD.into(),
+                            desc: ty.descriptor().into(),
+                        },
+                        val,
+                    });
+                    stack.push(Operand::Var(obj));
+                }
+                CallModel::Unbox(ty) => {
+                    // T.*Value(): read the $$value field from the receiver.
+                    let this = receiver.unwrap_or_else(|| args.remove(0));
+                    nullcheck!(this);
+                    stack.push(assign!(
+                        ty,
+                        Rvalue::GetField {
+                            obj: this,
+                            field: FieldKey {
+                                class: target.class.clone(),
+                                name: models::BOX_VALUE_FIELD.into(),
+                                desc: ty.descriptor().into(),
+                            },
+                        }
+                    ));
+                }
+                CallModel::StaticBinOp(op) => {
+                    // Static binary method: result = arg0 op arg1.
+                    let a = args.get(0).cloned().unwrap_or(Operand::int(0));
+                    let b = args.get(1).cloned().unwrap_or(Operand::int(0));
+                    stack.push(assign!(Ty::Int, Rvalue::Bin(op, a, b)));
+                }
+                CallModel::AssertionsEnabled => {
+                    // SV-COMP: assertions always enabled → return 1.
+                    stack.push(Operand::int(1));
+                }
                 CallModel::Unmodelled => {
                     if let Some(obj) = receiver.clone() {
                         nullcheck!(obj);
@@ -1156,9 +1226,20 @@ fn lift_insn(
                 }
             }
         }
-        // Lambdas and Java 9+ string concatenation. Rare in this benchmark set
-        // (4 of 176 tasks), so it stays a divergence for now.
-        0xba => return Err("invokedynamic not modelled".into()),
+        // invokedynamic: lambdas, string concatenation, method references.
+        // Model as havoc of return type (sound over-approximation).
+        0xba => {
+            let (name, desc, _bsm) = lf.cf.invoke_dynamic(n.imm as u16)?;
+            let (argc, ret) = parse_desc(&desc);
+            // invokedynamic has no receiver — all args come from stack.
+            for _ in 0..argc {
+                pop!();
+            }
+            debug!("invokedynamic: {name} {desc}");
+            if let Some(ty) = ret {
+                stack.push(assign!(ty, Rvalue::Havoc(ty)));
+            }
+        }
 
         // Allocation.
         0xbb => {
@@ -1193,7 +1274,7 @@ fn lift_insn(
                 let id = lf.obligation(ObligationKind::NegArraySize, nonneg, off);
                 stmts.push(Stmt::Check(id));
             }
-            stack.push(assign!(Ty::Ref, Rvalue::Nondet(Ty::Ref)));
+            stack.push(assign!(Ty::Ref, Rvalue::Nondet(Ty::Ref, None)));
         }
         0xbe => {
             let arr = pop!();

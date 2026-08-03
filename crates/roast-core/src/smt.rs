@@ -14,6 +14,8 @@ pub enum Sort {
     Bool,
     Str,
     Int,
+    /// `(Array (_ BitVec idx_width) (_ BitVec elem_width))`
+    Array { idx: u32, elem: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +63,7 @@ pub trait Solver {
     // -- Conversion --
 
     fn sign_extend(&mut self, t: Term, extra_bits: u32) -> Term;
+    fn zero_extend(&mut self, t: Term, extra_bits: u32) -> Term;
     fn extract(&mut self, t: Term, hi: u32, lo: u32) -> Term;
 
     // -- Boolean / control --
@@ -91,6 +94,17 @@ pub trait Solver {
     fn str_to_int(&mut self, s: Term) -> Term;
     fn str_from_int(&mut self, i: Term) -> Term;
     fn str_eq(&mut self, a: Term, b: Term) -> Term;
+
+    // -- Array theory --
+
+    /// Create a fresh unconstrained array: `(Array (_ BitVec 32) (_ BitVec elem_width))`.
+    fn fresh_array(&mut self, name: &str, elem_width: u32) -> Term;
+    /// Create a constant array where every element is `val`.
+    fn const_array(&mut self, val: Term, elem_width: u32) -> Term;
+    /// `(select arr idx)` — read element at index.
+    fn array_select(&mut self, arr: Term, idx: Term) -> Term;
+    /// `(store arr idx val)` — write element at index, returning new array.
+    fn array_store(&mut self, arr: Term, idx: Term, val: Term) -> Term;
 
     // -- Solver state --
 

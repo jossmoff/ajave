@@ -431,7 +431,7 @@ fn encode_rvalue_lia(
 
     match rv {
         Rvalue::Use(o) => encode_operand_lia(o, var_exprs),
-        Rvalue::Nondet(_) => {
+        Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
             // Fresh unconstrained variable — the forall-quantifier in the
             // enclosing clause effectively makes this nondeterministic.
             let id = FRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

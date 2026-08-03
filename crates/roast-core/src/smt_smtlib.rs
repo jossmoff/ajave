@@ -61,6 +61,9 @@ impl SmtLib {
             Sort::Bv(w) => format!("(_ BitVec {w})"),
             Sort::Str => "String".to_string(),
             Sort::Int => "Int".to_string(),
+            Sort::Array { idx, elem } => {
+                format!("(Array (_ BitVec {idx}) (_ BitVec {elem}))")
+            }
         }
     }
 
@@ -183,6 +186,16 @@ impl Solver for SmtLib {
             s => s,
         };
         let expr = format!("((_ sign_extend {extra_bits}) {tn})");
+        self.define_term("t", &expr, sort)
+    }
+
+    fn zero_extend(&mut self, t: Term, extra_bits: u32) -> Term {
+        let tn = self.name(t).to_string();
+        let sort = match self.sort(t) {
+            Sort::Bv(w) => Sort::Bv(w + extra_bits),
+            s => s,
+        };
+        let expr = format!("((_ zero_extend {extra_bits}) {tn})");
         self.define_term("t", &expr, sort)
     }
 
@@ -325,6 +338,42 @@ impl Solver for SmtLib {
         let bn = self.name(b).to_string();
         let expr = format!("(= {an} {bn})");
         self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn fresh_array(&mut self, name: &str, elem_width: u32) -> Term {
+        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sname = format!("{name}_{}", self.next_id);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!("(declare-const {sname} {sort_s})"));
+        self.alloc(sname, sort)
+    }
+
+    fn const_array(&mut self, val: Term, elem_width: u32) -> Term {
+        let vn = self.name(val).to_string();
+        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sort_s = Self::sort_str_dynamic(sort);
+        let expr = format!("((as const {sort_s}) {vn})");
+        self.define_term("carr", &expr, sort)
+    }
+
+    fn array_select(&mut self, arr: Term, idx: Term) -> Term {
+        let an = self.name(arr).to_string();
+        let in_ = self.name(idx).to_string();
+        let elem_width = match self.sort(arr) {
+            Sort::Array { elem, .. } => elem,
+            _ => 32,
+        };
+        let expr = format!("(select {an} {in_})");
+        self.define_term("t", &expr, Sort::Bv(elem_width))
+    }
+
+    fn array_store(&mut self, arr: Term, idx: Term, val: Term) -> Term {
+        let an = self.name(arr).to_string();
+        let in_ = self.name(idx).to_string();
+        let vn = self.name(val).to_string();
+        let sort = self.sort(arr);
+        let expr = format!("(store {an} {in_} {vn})");
+        self.define_term("t", &expr, sort)
     }
 
     fn assert(&mut self, t: Term) {

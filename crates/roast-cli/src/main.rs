@@ -52,6 +52,10 @@ struct Cli {
     /// on a real JVM first.
     #[arg(long = "no-replay")]
     no_replay: bool,
+
+    /// Print the assumptions (nondet values) used in violation witnesses.
+    #[arg(long = "show-witness")]
+    show_witness: bool,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -404,6 +408,47 @@ fn main() {
                     Ok(()) => info!("witness written to {}", witness_path.display()),
                     Err(e) => warn!("failed to write witness: {e}"),
                 }
+            }
+        }
+    }
+
+    // Print witness assumptions when --show-witness is set.
+    if cli.show_witness {
+        if let Some((oref, witness)) = &confirmed_witness {
+            let body = prog.body(&oref.method);
+            let ob = body.map(|b| b.obligation(oref.id));
+            eprintln!("--- witness for {}#{} ---", oref.method, oref.id.0);
+            if let Some(ob) = ob {
+                eprintln!("  obligation: {:?}{}", ob.kind,
+                    ob.line.map(|l| format!(" (line {})", l)).unwrap_or_default());
+            }
+            for (i, entry) in witness.entries.iter().enumerate() {
+                eprintln!("  {}(): {} = {}",
+                    entry.nondet_method,
+                    i,
+                    match &entry.value {
+                        roast_ir::verdict::NondetValue::Int(v) => format!("{v}"),
+                        roast_ir::verdict::NondetValue::Long(v) => format!("{v}L"),
+                        roast_ir::verdict::NondetValue::Bool(v) => format!("{v}"),
+                        roast_ir::verdict::NondetValue::Str(s) => format!("{s:?}"),
+                    });
+            }
+            eprintln!("---");
+        } else if !violated.is_empty() {
+            eprintln!("--- witness found but not confirmed by JVM replay ---");
+            if let Some((_, _, w, _)) = violated.first() {
+                for (i, entry) in w.entries.iter().enumerate() {
+                    eprintln!("  {}(): {} = {}",
+                        entry.nondet_method,
+                        i,
+                        match &entry.value {
+                            roast_ir::verdict::NondetValue::Int(v) => format!("{v}"),
+                            roast_ir::verdict::NondetValue::Long(v) => format!("{v}L"),
+                            roast_ir::verdict::NondetValue::Bool(v) => format!("{v}"),
+                            roast_ir::verdict::NondetValue::Str(s) => format!("{s:?}"),
+                        });
+                }
+                eprintln!("---");
             }
         }
     }

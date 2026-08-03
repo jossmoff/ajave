@@ -60,20 +60,20 @@ impl JvmReplay {
 package org.sosy_lab.sv_benchmarks;
 
 public final class Verifier {
-    private static final int[] SEQ;
+    private static final long[] SEQ;
     private static int idx = 0;
     private static int strIdx = 0;
     static {
         String s = System.getProperty("roast.seq", "");
         if (s.isEmpty()) {
-            SEQ = new int[0];
+            SEQ = new long[0];
         } else {
             String[] parts = s.split(",");
-            SEQ = new int[parts.length];
-            for (int i = 0; i < parts.length; i++) SEQ[i] = Integer.parseInt(parts[i].trim());
+            SEQ = new long[parts.length];
+            for (int i = 0; i < parts.length; i++) SEQ[i] = Long.parseLong(parts[i].trim());
         }
     }
-    private static int next() {
+    private static long next() {
         return idx < SEQ.length ? SEQ[idx++] : 0;
     }
     public static void assume(boolean condition) {
@@ -83,7 +83,7 @@ public final class Verifier {
     public static byte nondetByte() { return (byte) next(); }
     public static char nondetChar() { return (char) next(); }
     public static short nondetShort() { return (short) next(); }
-    public static int nondetInt() { return next(); }
+    public static int nondetInt() { return (int) next(); }
     public static long nondetLong() { return next(); }
     public static float nondetFloat() { return next(); }
     public static double nondetDouble() { return next(); }

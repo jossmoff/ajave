@@ -188,6 +188,13 @@ impl<'a> Env<'a> {
         self.path_conds.insert(target, merged);
     }
 
+    fn operand_width(op: &Operand) -> u32 {
+        match op {
+            Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => 64,
+            _ => 32,
+        }
+    }
+
     fn encode_operand(&mut self, op: &Operand) -> Term {
         match op {
             Operand::Var(v) => self.vars.get(v).copied().unwrap_or_else(|| {
@@ -199,14 +206,16 @@ impl<'a> Env<'a> {
             Operand::Const(Const::Long(n)) => self.solver.bv_const(*n, 64),
             Operand::Const(Const::Null) => self.solver.bv_const(0, 32),
             Operand::Const(Const::Str(_)) => self.solver.bv_const(1, 32),
-            Operand::Const(_) => self.solver.fresh_bv("const", 32),
+            Operand::Const(Const::Float(f)) => self.solver.bv_const(f.to_bits() as i64, 32),
+            Operand::Const(Const::Double(d)) => self.solver.bv_const(d.to_bits() as i64, 64),
+            Operand::Const(_) => self.solver.bv_const(0, 32),
         }
     }
 
     fn encode_rvalue(&mut self, rv: &Rvalue) -> Term {
         match rv {
             Rvalue::Use(o) => self.encode_operand(o),
-            Rvalue::Nondet(ty) => {
+            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) => {
                 let w = width_of(ty);
                 self.fresh("nd", w)
             }
@@ -226,6 +235,16 @@ impl<'a> Env<'a> {
             Rvalue::Cmp(a, b) => {
                 let at = self.encode_operand(a);
                 let bt = self.encode_operand(b);
+                // Handle width mismatch: sign-extend shorter operand.
+                let aw = Self::operand_width(a);
+                let bw = Self::operand_width(b);
+                let (at, bt) = if aw < bw {
+                    (self.solver.sign_extend(at, bw - aw), bt)
+                } else if bw < aw {
+                    (at, self.solver.sign_extend(bt, aw - bw))
+                } else {
+                    (at, bt)
+                };
                 let lt = self.solver.bvslt(at, bt);
                 let eq = self.solver.bveq(at, bt);
                 let m1 = self.solver.bv_const(-1, 32);
@@ -254,6 +273,18 @@ impl<'a> Env<'a> {
     fn encode_binop(&mut self, op: BinOp, a: &Operand, b: &Operand) -> Term {
         let at = self.encode_operand(a);
         let bt = self.encode_operand(b);
+        // Normalise widths: sign-extend shorter operand (except shifts).
+        let aw = Self::operand_width(a);
+        let bw = Self::operand_width(b);
+        let (at, bt) = if !matches!(op, BinOp::Shl | BinOp::Shr | BinOp::UShr) && aw != bw {
+            if aw < bw {
+                (self.solver.sign_extend(at, bw - aw), bt)
+            } else {
+                (at, self.solver.sign_extend(bt, aw - bw))
+            }
+        } else {
+            (at, bt)
+        };
         let one = self.solver.bv_const(1, 32);
         let zero = self.solver.bv_const(0, 32);
         match op {
@@ -265,9 +296,26 @@ impl<'a> Env<'a> {
             BinOp::And => self.solver.bvand(at, bt),
             BinOp::Or => self.solver.bvor(at, bt),
             BinOp::Xor => self.solver.bvxor(at, bt),
-            BinOp::Shl => self.solver.bvshl(at, bt),
-            BinOp::Shr => self.solver.bvashr(at, bt),
-            BinOp::UShr => self.solver.bvlshr(at, bt),
+            BinOp::Shl | BinOp::Shr | BinOp::UShr => {
+                // JVM: shift amount is masked — 0x1F for int, 0x3F for long.
+                let aw = Self::operand_width(a);
+                let mask = if aw == 64 { 0x3F } else { 0x1F };
+                let mask_t = self.solver.bv_const(mask, 32);
+                let bt = self.solver.bvand(bt, mask_t);
+                // Shift amount is always int (32-bit) but shifted value
+                // may be long (64-bit). Zero-extend shift amount to match.
+                let bt = if aw == 64 {
+                    self.solver.zero_extend(bt, 32)
+                } else {
+                    bt
+                };
+                match op {
+                    BinOp::Shl => self.solver.bvshl(at, bt),
+                    BinOp::Shr => self.solver.bvashr(at, bt),
+                    BinOp::UShr => self.solver.bvlshr(at, bt),
+                    _ => unreachable!(),
+                }
+            }
             BinOp::Eq => {
                 let c = self.solver.bveq(at, bt);
                 self.solver.ite(c, one, zero)

@@ -53,6 +53,16 @@ impl Ty {
     pub fn is_wide(self) -> bool {
         matches!(self, Ty::Long | Ty::Double)
     }
+    /// JVM type descriptor character(s).
+    pub fn descriptor(self) -> &'static str {
+        match self {
+            Ty::Int => "I",
+            Ty::Long => "J",
+            Ty::Float => "F",
+            Ty::Double => "D",
+            Ty::Ref | Ty::Str => "Ljava/lang/Object;",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,10 +175,16 @@ pub enum Rvalue {
     Use(Operand),
     Bin(BinOp, Operand, Operand),
     Neg(Operand),
-    /// A fresh unconstrained value of the given type. This is how
-    /// `Verifier.nondet*()` is modelled — and also how any unmodelled pure
-    /// call degrades soundly, since havoc over-approximates every result.
-    Nondet(Ty),
+    /// A fresh unconstrained value from `Verifier.nondet*()`. These are
+    /// genuine nondeterministic inputs and appear in violation witnesses.
+    /// The optional `u8` is the JVM type descriptor byte (e.g. `b'S'` for
+    /// short, `b'Z'` for boolean) so engines can constrain the range.
+    Nondet(Ty, Option<u8>),
+    /// A fresh unconstrained value from a modelled-as-pure library call
+    /// (e.g. `Boolean.booleanValue()`). Semantically identical to `Nondet`
+    /// but NOT recorded in witnesses, since these calls are deterministic
+    /// on a real JVM and have no `Verifier.nondet*()` counterpart.
+    Havoc(Ty),
     GetStatic(FieldKey),
     GetField {
         obj: Operand,
@@ -502,7 +518,8 @@ impl fmt::Display for Rvalue {
             Rvalue::Use(o) => write!(f, "{o}"),
             Rvalue::Bin(op, a, b) => write!(f, "{a} {} {b}", op.symbol()),
             Rvalue::Neg(a) => write!(f, "-{a}"),
-            Rvalue::Nondet(t) => write!(f, "nondet<{t:?}>()"),
+            Rvalue::Nondet(t, _) => write!(f, "nondet<{t:?}>()"),
+            Rvalue::Havoc(t) => write!(f, "havoc<{t:?}>()"),
             Rvalue::GetStatic(k) => write!(f, "{}.{}", k.class, k.name),
             Rvalue::GetField { obj, field } => write!(f, "{obj}.{}", field.name),
             Rvalue::ArrayLoad { arr, idx } => write!(f, "{arr}[{idx}]"),

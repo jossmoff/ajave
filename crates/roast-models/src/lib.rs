@@ -19,6 +19,8 @@ pub const ASSERTION_ERROR: &str = "java/lang/AssertionError";
 /// read by `Enum.ordinal()`). Prefixed with `$$` to avoid collisions with
 /// user-defined fields.
 pub const ENUM_ORDINAL_FIELD: &str = "$$ordinal";
+/// Synthetic field name used to store the boxed primitive value.
+pub const BOX_VALUE_FIELD: &str = "$$value";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallModel {
@@ -31,7 +33,8 @@ pub enum CallModel {
     /// because we do not model the value precisely.
     Pure(Option<Ty>),
     /// `Verifier.nondet*()` — an unconstrained value by definition.
-    Nondet(Option<Ty>),
+    /// The `u8` is the JVM return-type descriptor byte (e.g. `b'S'` for short).
+    Nondet(Option<Ty>, u8),
     /// Not modelled. The lifter diverges rather than guessing.
     Unmodelled,
     /// String/StringBuilder/CharSequence method: keep as Rvalue::Call so the
@@ -41,6 +44,20 @@ pub enum CallModel {
     EnumInit,
     /// `Enum.ordinal()` — read the ordinal from a synthetic field.
     EnumOrdinal,
+    /// `Boolean.valueOf(z)` / `Integer.valueOf(i)` etc. — box a primitive.
+    /// Allocates a new ref and stores the argument into a synthetic `$$value` field.
+    BoxStore(Ty),
+    /// `Boolean.booleanValue()` / `Integer.intValue()` etc. — unbox.
+    /// Reads the `$$value` field from the receiver.
+    Unbox(Ty),
+    /// A static method whose result is a binary operation on its two arguments.
+    /// E.g. `Boolean.logicalAnd(a, b)` → `a & b`.
+    StaticBinOp(roast_ir::BinOp),
+    /// Math/Integer/Long method that the SMT engine can model precisely.
+    /// Kept as `Rvalue::Call` so the BMC sees it (unlike `Pure` which becomes `Havoc`).
+    MathCall(Option<Ty>),
+    /// `Class.desiredAssertionStatus()` — always returns true (1) under SV-COMP.
+    AssertionsEnabled,
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -77,11 +94,62 @@ const PURE_OWNERS: &[&str] = &[
     "java/lang/Float",
     "java/lang/Double",
     "java/lang/Math",
+    "java/lang/StrictMath",
     "java/lang/Object",
     "java/util/Objects",
     "java/util/regex/Pattern",
     "java/util/regex/Matcher",
     "java/util/Arrays",
+    // Collections — methods that read or iterate don't affect our tracked state.
+    "java/util/Collections",
+    "java/util/List",
+    "java/util/ArrayList",
+    "java/util/LinkedList",
+    "java/util/Map",
+    "java/util/HashMap",
+    "java/util/TreeMap",
+    "java/util/LinkedHashMap",
+    "java/util/Set",
+    "java/util/HashSet",
+    "java/util/TreeSet",
+    "java/util/LinkedHashSet",
+    "java/util/Iterator",
+    "java/util/ListIterator",
+    "java/util/Map$Entry",
+    "java/util/AbstractList",
+    "java/util/AbstractMap",
+    "java/util/AbstractSet",
+    "java/util/AbstractCollection",
+    // Deque/Queue
+    "java/util/Queue",
+    "java/util/Deque",
+    "java/util/ArrayDeque",
+    "java/util/Stack",
+    "java/util/Vector",
+    // Utility
+    "java/util/Optional",
+    "java/util/Random",
+    "java/util/Scanner",
+    "java/util/StringTokenizer",
+    // Concurrent (rarely property-relevant)
+    "java/util/concurrent/atomic/AtomicInteger",
+    "java/util/concurrent/atomic/AtomicLong",
+    "java/util/concurrent/atomic/AtomicBoolean",
+    // I/O (side-effects are not property-relevant)
+    "java/io/PrintStream",
+    "java/io/PrintWriter",
+    "java/io/InputStream",
+    "java/io/OutputStream",
+    "java/io/BufferedReader",
+    "java/io/InputStreamReader",
+    // System
+    "java/lang/System",
+    "java/lang/Class",
+    "java/lang/Runtime",
+    "java/lang/Thread",
+    "java/lang/Comparable",
+    "java/lang/Number",
+    "java/lang/Iterable",
 ];
 
 /// Constructors with no effect we care about: the whole `Throwable` family,
@@ -108,8 +176,11 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     if owner == VERIFIER {
         return match name {
             "assume" => CallModel::Assume,
-            "nondetString" => CallModel::Nondet(Some(Ty::Str)),
-            n if n.starts_with("nondet") => CallModel::Nondet(ret_ty(desc)),
+            "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
+            n if n.starts_with("nondet") => {
+                let jvm_byte = desc.as_bytes().get(desc.rfind(')').unwrap_or(0) + 1).copied().unwrap_or(b'I');
+                CallModel::Nondet(ret_ty(desc), jvm_byte)
+            }
             _ => CallModel::Unmodelled,
         };
     }
@@ -118,6 +189,10 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return CallModel::NoOp;
     }
     if owner == "java/lang/Object" && name == "<init>" {
+        return CallModel::NoOp;
+    }
+    // Constructors of pure/collection classes: no tracked state to set up.
+    if name == "<init>" && PURE_OWNERS.contains(&owner) {
         return CallModel::NoOp;
     }
 
@@ -135,25 +210,170 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return CallModel::Pure(ret_ty(desc));
     }
 
-    // Assertions are enabled under SV-COMP, so this is a constant.
+    // Assertions are always enabled under SV-COMP rules.
+    // desiredAssertionStatus() returns true (1), so $assertionsDisabled = false (0).
+    // Modelling this as a constant rather than Havoc avoids tainting the
+    // assertion-enabled branch and lets the BMC check assertions precisely.
     if owner == "java/lang/Class" && name == "desiredAssertionStatus" {
-        return CallModel::Pure(Some(Ty::Int));
+        return CallModel::AssertionsEnabled;
     }
 
     if STR_OWNERS.contains(&owner) {
         return CallModel::StrCall(ret_ty(desc));
     }
 
+    // Boxing: T.valueOf(primitive) → BoxStore, T.primitiveValue() → Unbox.
+    // This models the value flowing through the boxed object so that
+    // unboxing returns the same value that was boxed, rather than havoc.
+    if let Some(model) = box_model(owner, name, desc) {
+        return model;
+    }
+
+    // Math/Integer/Long methods the SMT engine can model precisely.
+    if is_math_call(owner, name) {
+        return CallModel::MathCall(ret_ty(desc));
+    }
+
     if PURE_OWNERS.contains(&owner) {
         return CallModel::Pure(ret_ty(desc));
     }
 
-    // Printing is observable to a human, not to the property.
-    if owner.starts_with("java/io/PrintStream") || owner.starts_with("java/lang/System") {
-        return CallModel::Pure(ret_ty(desc));
-    }
-
     CallModel::Unmodelled
+}
+
+/// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.
+fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+    match owner {
+        "java/lang/Boolean" => match name {
+            "valueOf" if desc == "(Z)Ljava/lang/Boolean;" => Some(CallModel::BoxStore(Ty::Int)),
+            "booleanValue" if desc == "()Z" => Some(CallModel::Unbox(Ty::Int)),
+            "logicalAnd" => Some(CallModel::StaticBinOp(roast_ir::BinOp::And)),
+            "logicalOr" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Or)),
+            "logicalXor" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Xor)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            _ => None,
+        },
+        "java/lang/Integer" => match name {
+            "valueOf" if desc == "(I)Ljava/lang/Integer;" => Some(CallModel::BoxStore(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            _ => None,
+        },
+        "java/lang/Long" => match name {
+            "valueOf" if desc == "(J)Ljava/lang/Long;" => Some(CallModel::BoxStore(Ty::Long)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Long)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            _ => None,
+        },
+        "java/lang/Short" => match name {
+            "valueOf" if desc == "(S)Ljava/lang/Short;" => Some(CallModel::BoxStore(Ty::Int)),
+            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            _ => None,
+        },
+        "java/lang/Byte" => match name {
+            "valueOf" if desc == "(B)Ljava/lang/Byte;" => Some(CallModel::BoxStore(Ty::Int)),
+            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            // toUnsignedInt/Long are unary — keep as Pure/Havoc for now.
+            _ => None,
+        },
+        "java/lang/Character" => match name {
+            "valueOf" if desc == "(C)Ljava/lang/Character;" => Some(CallModel::BoxStore(Ty::Int)),
+            "charValue" if desc == "()C" => Some(CallModel::Unbox(Ty::Int)),
+            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            _ => None,
+        },
+        "java/lang/Double" => match name {
+            "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Int)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            _ => None,
+        },
+        "java/lang/Float" => match name {
+            "valueOf" if desc == "(F)Ljava/lang/Float;" => Some(CallModel::BoxStore(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Check whether a Math/Integer/Long static method should be kept as a Call
+/// so the SMT engine can model it precisely instead of havocing.
+fn is_math_call(owner: &str, name: &str) -> bool {
+    match owner {
+        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+            name,
+            "abs" | "min" | "max" | "addExact" | "subtractExact"
+                | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
+        ),
+        "java/lang/Integer" => matches!(
+            name,
+            "parseInt" | "max" | "min" | "sum"
+                | "reverse" | "reverseBytes" | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros" | "bitCount" | "highestOneBit"
+                | "lowestOneBit" | "signum" | "toUnsignedLong"
+                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
+                | "hashCode" | "compare"
+        ),
+        "java/lang/Long" => matches!(
+            name,
+            "parseLong" | "max" | "min" | "sum" | "signum"
+                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
+                | "hashCode" | "compare"
+        ),
+        "java/lang/Character" => matches!(
+            name,
+            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
+                | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
+                | "isSupplementaryCodePoint" | "isHighSurrogate" | "isLowSurrogate"
+                | "isSurrogate" | "isSurrogatePair" | "isValidCodePoint"
+                | "toUpperCase" | "toLowerCase" | "toTitleCase"
+                | "getNumericValue" | "getType" | "digit" | "forDigit"
+                | "charCount" | "codePointAt" | "codePointBefore" | "codePointCount"
+                | "compare" | "hashCode" | "reverseBytes"
+                | "highSurrogate" | "lowSurrogate" | "toCodePoint" | "toChars"
+                | "isISOControl" | "isMirrored" | "isDefined" | "isTitleCase"
+                | "isJavaIdentifierStart" | "isJavaIdentifierPart"
+                | "isUnicodeIdentifierStart" | "isUnicodeIdentifierPart"
+        ),
+        "java/lang/Short" => matches!(
+            name,
+            "parseShort" | "compare" | "hashCode" | "reverseBytes"
+                | "toUnsignedInt" | "toUnsignedLong"
+        ),
+        "java/lang/Byte" => matches!(
+            name,
+            "parseByte" | "compare" | "hashCode"
+                | "toUnsignedInt" | "toUnsignedLong"
+        ),
+        "java/lang/Boolean" => matches!(
+            name,
+            "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
+        ),
+        _ => false,
+    }
 }
 
 /// Does a `new` of this class need field tracking? Exception objects do not:

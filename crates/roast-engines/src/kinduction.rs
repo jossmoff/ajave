@@ -190,14 +190,12 @@ fn body_uses_havoced_ops(body: &Body) -> bool {
                 Stmt::Assign(_, rv) => match rv {
                     Rvalue::GetStatic(_)
                     | Rvalue::GetField { .. }
-                    | Rvalue::ArrayLoad { .. }
-                    | Rvalue::ArrayLength(_)
-                    | Rvalue::NewArray { .. }
                     | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. } => return true,
+                    | Rvalue::Call { .. }
+                    | Rvalue::Havoc(_) => return true,
                     _ => {}
                 },
-                Stmt::PutField { .. } | Stmt::ArrayStore { .. } => return true,
+                Stmt::PutField { .. } => return true,
                 _ => {}
             }
         }
