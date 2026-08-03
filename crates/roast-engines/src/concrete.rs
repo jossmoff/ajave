@@ -1655,6 +1655,7 @@ impl<'a> ConcreteState<'a> {
                 }
                 // Write static field.
                 Stmt::PutStatic(fk, val) => {
+                    self.ensure_clinit(&fk.class);
                     let v = self.eval_op(val, &store);
                     self.static_fields
                         .insert((fk.class.clone(), fk.name.clone()), v);

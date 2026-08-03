@@ -1691,7 +1691,6 @@ impl<'a> ExploreCtx<'a> {
             self.all_paths_complete = false;
             return;
         }
-
         let b = self.body.block(block_id);
 
         // Process statements from stmt_idx onwards.
@@ -1799,8 +1798,8 @@ impl<'a> ExploreCtx<'a> {
                     // Check if violation is reachable: path_constraints ∧ cond == 0.
                     let violation_cond = self.zero_constraint(cond);
                     let res = self.check_sat_with_path_and(violation_cond);
-                    log::trace!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?}",
-                        oid, self.body.key, ob.kind, is_tainted, self.path_tainted, res);
+                    log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
+                        oid, self.body.key, ob.kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
                     if res == SatResult::Sat && !is_tainted {
                         // Only record violations for untainted conditions;
                         // tainted SAT results may be spurious.
@@ -1819,6 +1818,7 @@ impl<'a> ExploreCtx<'a> {
                     self.solver.pop();
                 }
                 Stmt::PutStatic(fk, val) => {
+                    self.ensure_clinit(&fk.class);
                     let k = Self::field_key(fk);
                     let t = self.encode_operand(val);
                     self.statics.insert(k.clone(), t);
@@ -1938,53 +1938,115 @@ impl<'a> ExploreCtx<'a> {
                     self.explore_block_until(join, 0, stop_at);
                 } else {
                     // No join point found — fall back to path forking.
-                    // Path constraints replace push/pop: each branch adds
-                    // its condition to path_constraints, which is restored
-                    // via save/restore_state (truncation).
+                    // Like diamond merge, we explore both sides and ITE-merge
+                    // their states so that return values and field side effects
+                    // compose correctly across inlined method boundaries.
                     self.fork_count += 1;
-                    // Then branch: cond != 0
-                    if self.budget_left() {
-                        let saved = self.save_state();
-                        if cond_tainted {
-                            self.path_tainted = true;
-                        }
-                        // When the condition is tainted, the BV encoding may be
-                        // semantically wrong (e.g. float ops modeled as BV).
-                        // Don't add path constraints or prune — explore both
-                        // sides unconditionally to avoid unsound pruning.
-                        if !cond_tainted {
-                            self.path_constraints.push(cond_nz);
-                            let feas = self.check_sat_with_path();
-                            if feas == SatResult::Unsat {
-                                self.restore_state(saved);
-                            } else {
-                                self.explore_block_until(*then_, 0, stop_at);
-                                self.restore_state(saved);
-                            }
-                        } else {
-                            self.explore_block_until(*then_, 0, stop_at);
-                            self.restore_state(saved);
-                        }
-                    }
+                    log::trace!("smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
+                        block_id.0, self.body.key, then_.0, else_.0, stop_at.map(|b| b.0));
 
-                    // Else branch: cond == 0
+                    let saved = self.save_state();
+                    let ir_before = self.inline_return;
+                    let irt_before = self.inline_return_tainted;
+
+                    // --- then branch: cond != 0 ---
+                    let mut then_explored = false;
+                    if cond_tainted {
+                        self.path_tainted = true;
+                    }
+                    if !cond_tainted {
+                        self.path_constraints.push(cond_nz);
+                        let feas = self.check_sat_with_path();
+                        log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
+                            then_.0, self.body.key, feas, cond_tainted);
+                        if feas != SatResult::Unsat {
+                            self.explore_block_until(*then_, 0, stop_at);
+                            then_explored = true;
+                        }
+                    } else {
+                        self.explore_block_until(*then_, 0, stop_at);
+                        then_explored = true;
+                    }
+                    let then_state = self.save_state();
+                    let then_ir = self.inline_return;
+                    let then_irt = self.inline_return_tainted;
+                    self.restore_state(saved.clone());
+
+                    // --- else branch: cond == 0 ---
+                    let mut else_explored = false;
+                    self.inline_return = ir_before;
+                    self.inline_return_tainted = irt_before;
                     if self.budget_left() {
-                        let saved = self.save_state();
                         if cond_tainted {
                             self.path_tainted = true;
                         }
                         if !cond_tainted {
                             self.path_constraints.push(cond_bool);
                             let feas = self.check_sat_with_path();
-                            if feas == SatResult::Unsat {
-                                self.restore_state(saved);
-                            } else {
+                            if feas != SatResult::Unsat {
                                 self.explore_block_until(*else_, 0, stop_at);
-                                self.restore_state(saved);
+                                else_explored = true;
                             }
                         } else {
                             self.explore_block_until(*else_, 0, stop_at);
-                            self.restore_state(saved);
+                            else_explored = true;
+                        }
+                    }
+                    let else_state = self.save_state();
+                    let else_ir = self.inline_return;
+                    let else_irt = self.inline_return_tainted;
+
+                    // ITE-merge state from both fork arms so that field writes,
+                    // static updates, and return values compose correctly.
+                    if then_explored && else_explored {
+                        self.restore_state(saved);
+                        let base_len = self.nondet_terms.len();
+                        for nd in &then_state.nondet_terms[base_len..] {
+                            self.nondet_terms.push(nd.clone());
+                        }
+                        for nd in &else_state.nondet_terms[base_len..] {
+                            self.nondet_terms.push(nd.clone());
+                        }
+                        self.merge_states_ite(cond_nz, &then_state, &else_state);
+                    } else if then_explored {
+                        self.restore_state(saved);
+                        let base_len = self.nondet_terms.len();
+                        for nd in &then_state.nondet_terms[base_len..] {
+                            self.nondet_terms.push(nd.clone());
+                        }
+                        self.merge_states_ite(cond_nz, &then_state, &else_state);
+                    } else if else_explored {
+                        self.restore_state(saved);
+                        let base_len = self.nondet_terms.len();
+                        for nd in &else_state.nondet_terms[base_len..] {
+                            self.nondet_terms.push(nd.clone());
+                        }
+                        self.merge_states_ite(cond_nz, &then_state, &else_state);
+                    } else {
+                        self.restore_state(saved);
+                    }
+
+                    // ITE-merge inline return values.
+                    match (then_explored, else_explored, then_ir, else_ir) {
+                        (true, true, Some(t), Some(e)) if t != e => {
+                            self.inline_return = Some(self.solver.ite(cond_nz, t, e));
+                            self.inline_return_tainted = then_irt || else_irt;
+                        }
+                        (true, true, Some(t), Some(_)) => {
+                            self.inline_return = Some(t);
+                            self.inline_return_tainted = then_irt || else_irt;
+                        }
+                        (true, false, _, _) => {
+                            self.inline_return = then_ir.or(ir_before);
+                            self.inline_return_tainted = then_irt;
+                        }
+                        (false, true, _, _) => {
+                            self.inline_return = else_ir.or(ir_before);
+                            self.inline_return_tainted = else_irt;
+                        }
+                        _ => {
+                            self.inline_return = ir_before;
+                            self.inline_return_tainted = irt_before;
                         }
                     }
                 }
@@ -2083,13 +2145,19 @@ impl<'a> ExploreCtx<'a> {
                         self.explore_block_until(join, 0, stop_at);
                     }
                 } else {
-                    // No join point — fall back to fork-based exploration.
+                    // No join point — fork-based with ITE-merge of full state.
+                    let saved = self.save_state();
+                    let ir_before = self.inline_return;
+                    let irt_before = self.inline_return_tainted;
+                    let mut case_saved: Vec<(Term, SavedState, Option<Term>, bool)> = Vec::new();
+
                     for (case_val, target) in cases {
                         if !self.budget_left() {
                             break;
                         }
                         self.fork_count += 1;
-                        let saved = self.save_state();
+                        self.inline_return = ir_before;
+                        self.inline_return_tainted = irt_before;
                         if value_tainted {
                             self.path_tainted = true;
                         }
@@ -2097,11 +2165,17 @@ impl<'a> ExploreCtx<'a> {
                         let eq = self.solver.bveq(vt, cv);
                         self.path_constraints.push(eq);
                         self.explore_block_until(*target, 0, stop_at);
-                        self.restore_state(saved);
+                        let cs = self.save_state();
+                        let c_ir = self.inline_return;
+                        let c_irt = self.inline_return_tainted;
+                        case_saved.push((eq, cs, c_ir, c_irt));
+                        self.restore_state(saved.clone());
                     }
 
+                    // Default arm
+                    self.inline_return = ir_before;
+                    self.inline_return_tainted = irt_before;
                     if self.budget_left() {
-                        let saved = self.save_state();
                         if value_tainted {
                             self.path_tainted = true;
                         }
@@ -2112,8 +2186,55 @@ impl<'a> ExploreCtx<'a> {
                             self.path_constraints.push(neq);
                         }
                         self.explore_block_until(*default, 0, stop_at);
-                        self.restore_state(saved);
                     }
+                    let mut merged = self.save_state();
+                    let mut merged_ir = self.inline_return;
+                    let mut any_irt = self.inline_return_tainted;
+                    self.restore_state(saved);
+
+                    // Preserve nondets from all arms.
+                    let base_len = self.nondet_terms.len();
+                    for (_, cs, _, _) in &case_saved {
+                        for nd in &cs.nondet_terms[base_len..] {
+                            if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
+                                self.nondet_terms.push(nd.clone());
+                            }
+                        }
+                    }
+                    for nd in &merged.nondet_terms[base_len..] {
+                        if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
+                            self.nondet_terms.push(nd.clone());
+                        }
+                    }
+
+                    // ITE-merge: cascade case states over default.
+                    for (eq, cs, c_ir, c_irt) in case_saved.iter().rev() {
+                        self.merge_saved_into(&mut merged, *eq, cs);
+                        any_irt = any_irt || *c_irt;
+                        match (*c_ir, merged_ir) {
+                            (Some(c), Some(m)) if c != m => {
+                                merged_ir = Some(self.solver.ite(*eq, c, m));
+                            }
+                            (Some(c), None) => { merged_ir = Some(c); }
+                            _ => {}
+                        }
+                    }
+
+                    // Apply merged state
+                    self.vars = merged.vars;
+                    self.str_vars = merged.str_vars;
+                    self.tainted = merged.tainted;
+                    self.float_tainted = merged.float_tainted;
+                    self.path_tainted = merged.path_tainted;
+                    self.statics = merged.statics;
+                    self.static_str = merged.static_str;
+                    self.static_tainted = merged.static_tainted;
+                    self.field_arrays = merged.field_arrays;
+                    self.field_tainted = merged.field_tainted;
+                    self.array_map = merged.array_map;
+                    self.type_array = merged.type_array;
+                    self.inline_return = merged_ir.or(ir_before);
+                    self.inline_return_tainted = any_irt;
                 }
             }
             // Path ends.
