@@ -7,7 +7,14 @@
 //! change. See `docs/strategies/` for the write-up of each one.
 
 pub mod ai;
+pub mod cegar;
+pub mod chc;
 pub mod concrete;
+pub mod imc;
+pub mod interpolation;
 pub mod interval;
+pub mod kinduction;
+pub mod predicate;
 pub mod presolve;
 pub mod smt_bmc;
+pub mod smt_encode;

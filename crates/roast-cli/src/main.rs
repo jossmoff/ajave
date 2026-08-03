@@ -234,12 +234,36 @@ fn main() {
         Box::new(roast_engines::concrete::Concrete::new()),
     ];
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
+        let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
         engine_list.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
             Box::new(factory),
             200,
         )));
+        if let Some(f2) = factory2 {
+            engine_list.push(Box::new(roast_engines::kinduction::KInduction::new(
+                Box::new(f2),
+            )));
+        }
     }
     engine_list.push(Box::new(roast_engines::ai::AiEngine::new()));
+    {
+        let chc = roast_engines::chc::ChcEngine::new();
+        if chc.available() {
+            engine_list.push(Box::new(chc));
+        }
+    }
+    {
+        let imc = roast_engines::imc::ImcEngine::new();
+        if imc.available() {
+            engine_list.push(Box::new(imc));
+        }
+    }
+    {
+        let cegar = roast_engines::cegar::CegarEngine::new();
+        if cegar.available() {
+            engine_list.push(Box::new(cegar));
+        }
+    }
     let mut orch = Orchestrator::new(engine_list);
     let v = orch.run(&prog, 16);
 

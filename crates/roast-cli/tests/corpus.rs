@@ -105,15 +105,15 @@ fn arithmetic_exception3() {
 #[test]
 fn branch_divide1() {
     // Branch guards x != 0 before 100/x. SV-COMP: true.
-    // UNKNOWN: interval domain does not yet track branch-guarded zero exclusion.
-    assert_eq!(roast(&["tasks/common", "tasks/BranchDivide1"]), "UNKNOWN");
+    // Proved by k-induction (loop-free method, base case exhaustive).
+    assert_eq!(roast(&["tasks/common", "tasks/BranchDivide1"]), "TRUE");
 }
 
 #[test]
 fn bounded_loop1() {
     // Deterministic loop: sum += 2 five times, assert sum == 10. SV-COMP: true.
-    // UNKNOWN: loop convergence not yet proven by interval domain.
-    assert_eq!(roast(&["tasks/common", "tasks/BoundedLoop1"]), "UNKNOWN");
+    // Proved by k-induction/CHC.
+    assert_eq!(roast(&["tasks/common", "tasks/BoundedLoop1"]), "TRUE");
 }
 
 #[test]
