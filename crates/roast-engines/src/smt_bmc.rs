@@ -1677,6 +1677,544 @@ impl<'a> ExploreCtx<'a> {
         candidates.first().map(|&b| BlockId(b))
     }
 
+    /// Apply a merged SavedState to self (used after switch ITE-merge).
+    fn apply_merged_state(&mut self, s: SavedState) {
+        self.vars = s.vars;
+        self.str_vars = s.str_vars;
+        self.tainted = s.tainted;
+        self.float_tainted = s.float_tainted;
+        self.path_tainted = s.path_tainted;
+        self.statics = s.statics;
+        self.static_str = s.static_str;
+        self.static_tainted = s.static_tainted;
+        self.field_arrays = s.field_arrays;
+        self.field_tainted = s.field_tainted;
+        self.array_map = s.array_map;
+        self.type_array = s.type_array;
+    }
+
+    /// Collect nondets from branch states, deduplicating by index.
+    fn collect_nondets_dedup(&mut self, states: &[&SavedState]) {
+        let base_len = self.nondet_terms.len();
+        for state in states {
+            for nd in &state.nondet_terms[base_len..] {
+                if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
+                    self.nondet_terms.push(nd.clone());
+                }
+            }
+        }
+    }
+
+    /// Collect nondets from two branch states (no dedup needed for binary branches).
+    fn collect_nondets_binary(&mut self, a: &SavedState, b: &SavedState) {
+        let base_len = self.nondet_terms.len();
+        for nd in &a.nondet_terms[base_len..] {
+            self.nondet_terms.push(nd.clone());
+        }
+        for nd in &b.nondet_terms[base_len..] {
+            self.nondet_terms.push(nd.clone());
+        }
+    }
+
+    /// Process a slice of statements. Returns false if exploration should stop
+    /// (path pruned or budget exhausted).
+    fn handle_stmts(&mut self, stmts: &[Stmt]) -> bool {
+        for stmt in stmts {
+            if !self.budget_left() {
+                self.all_paths_complete = false;
+                return false;
+            }
+            match stmt {
+                Stmt::Assign(v, rv) => {
+                    if !self.handle_assign(*v, rv) {
+                        continue; // inlined call — skip to next stmt
+                    }
+                }
+                Stmt::Assume(op) => {
+                    if !self.handle_assume(op) {
+                        return false;
+                    }
+                }
+                Stmt::Check(oid) => self.handle_check(*oid),
+                Stmt::PutStatic(fk, val) => self.handle_put_static(fk, val),
+                Stmt::PutField { field, val, obj } => self.handle_put_field(field, val, obj),
+                Stmt::ArrayStore { arr, idx, val } => {
+                    let ref_term = self.encode_operand(arr);
+                    let idx_term = self.encode_operand(idx);
+                    let val_term = self.encode_operand(val);
+                    self.array_store_update(ref_term, idx_term, val_term);
+                }
+                Stmt::Nop => {}
+            }
+        }
+        true
+    }
+
+    /// Handle an Assign statement. Returns false if the call was inlined
+    /// (caller should `continue` to the next statement).
+    fn handle_assign(&mut self, v: VarId, rv: &Rvalue) -> bool {
+        let is_tainted = self.rvalue_tainted(rv);
+        let (t, str_term) = match rv {
+            Rvalue::Call { target, args, .. }
+                if roast_models::STR_OWNERS.contains(&target.class.as_str()) =>
+            {
+                match self.encode_str_call(target, args) {
+                    Some((bv, st)) => (bv, st),
+                    None => (self.encode_rvalue(rv), None),
+                }
+            }
+            Rvalue::Call { target, args, is_virtual } => {
+                if self.math_call_modelled(target) {
+                    (self.encode_math_call(target, args), None)
+                } else if self.try_inline_call(target, args, v, *is_virtual) {
+                    return false;
+                } else {
+                    (self.encode_rvalue(rv), None)
+                }
+            }
+            Rvalue::Use(Operand::Var(src)) => {
+                let st = self.str_vars.get(src).copied();
+                (self.encode_rvalue(rv), st)
+            }
+            Rvalue::Nondet(Ty::Str, _) => {
+                let bv = self.encode_rvalue(rv);
+                let st = self.nondet_terms.last().and_then(|(_, _, _, _, s)| *s);
+                (bv, st)
+            }
+            Rvalue::Havoc(Ty::Str) => {
+                let bv = self.encode_rvalue(rv);
+                let st = Some(self.solver.fresh_str("hvs"));
+                (bv, st)
+            }
+            Rvalue::GetStatic(fk) => {
+                let k = Self::field_key(fk);
+                let st = self.static_str.get(&k).copied();
+                (self.encode_rvalue(rv), st)
+            }
+            Rvalue::GetField { .. } => (self.encode_rvalue(rv), None),
+            _ => (self.encode_rvalue(rv), None),
+        };
+        self.vars.insert(v, t);
+        if let Some(st) = str_term {
+            self.str_vars.insert(v, st);
+        } else {
+            self.str_vars.remove(&v);
+        }
+        if is_tainted {
+            self.tainted.insert(v);
+        } else {
+            self.tainted.remove(&v);
+        }
+        if self.rvalue_float_tainted(rv) {
+            self.float_tainted.insert(v);
+        } else {
+            self.float_tainted.remove(&v);
+        }
+        true
+    }
+
+    /// Handle an Assume statement. Returns false if the path is infeasible
+    /// (caller should stop exploration).
+    fn handle_assume(&mut self, op: &Operand) -> bool {
+        let tainted = self.operand_tainted(op);
+        if tainted {
+            self.path_tainted = true;
+        }
+        if !tainted {
+            let t = self.encode_operand(op);
+            let c = self.nonzero_constraint(t);
+            self.path_constraints.push(c);
+            let res = self.check_sat_with_path();
+            if res == SatResult::Unsat {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Handle a Check statement (obligation verification).
+    fn handle_check(&mut self, oid: ObligationId) {
+        let ob_cond = self.body.obligation(oid).cond.clone();
+        let ob_kind = self.body.obligation(oid).kind;
+        let is_tainted = self.operand_tainted(&ob_cond);
+        let cond = self.encode_operand(&ob_cond);
+        let violation_cond = self.zero_constraint(cond);
+        let res = self.check_sat_with_path_and(violation_cond);
+        log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
+            oid, self.body.key, ob_kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
+        if res == SatResult::Sat && !is_tainted {
+            let witness = self.extract_witness();
+            self.violations.push((self.body.key.clone(), oid, witness));
+        }
+        if res != SatResult::Unsat && (is_tainted || self.path_tainted) {
+            self.skipped_obligations.insert(oid);
+        }
+        self.solver.pop();
+    }
+
+    /// Handle a PutStatic statement.
+    fn handle_put_static(&mut self, fk: &FieldKey, val: &Operand) {
+        self.ensure_clinit(&fk.class);
+        let k = Self::field_key(fk);
+        let t = self.encode_operand(val);
+        self.statics.insert(k.clone(), t);
+        if self.operand_tainted(val) {
+            self.static_tainted.insert(k.clone());
+        } else {
+            self.static_tainted.remove(&k);
+        }
+        if let Some(st) = match val {
+            Operand::Var(v) => self.str_vars.get(v).copied(),
+            Operand::Const(Const::Str(s)) => Some(self.solver.str_const(s)),
+            _ => None,
+        } {
+            self.static_str.insert(k, st);
+        } else {
+            self.static_str.remove(&k);
+        }
+    }
+
+    /// Handle a PutField statement.
+    fn handle_put_field(&mut self, field: &FieldKey, val: &Operand, obj: &Operand) {
+        let k = Self::field_key(field);
+        let obj_term = self.encode_operand(obj);
+        let val_term = self.encode_operand(val);
+        let w = Self::field_elem_width(&field.desc);
+        let arr = self.get_field_array(&k, w);
+        let new_arr = self.solver.array_store(arr, obj_term, val_term);
+        self.field_arrays.insert(k.clone(), new_arr);
+        if self.operand_tainted(val) {
+            self.field_tainted.insert(k.clone());
+        } else {
+            self.field_tainted.remove(&k);
+        }
+    }
+
+    /// Handle a Goto terminator with loop back-edge detection.
+    fn handle_goto(&mut self, block_id: BlockId, target: BlockId, stop_at: Option<BlockId>) {
+        if target.0 <= block_id.0 {
+            let loop_key = (self.body.key.to_string(), target.0);
+            let count = self.loop_visits.entry(loop_key).or_insert(0);
+            *count += 1;
+            if *count > MAX_LOOP_UNROLL {
+                self.all_paths_complete = false;
+            } else {
+                self.explore_block_until(target, 0, stop_at);
+            }
+        } else {
+            self.explore_block_until(target, 0, stop_at);
+        }
+    }
+
+    /// Handle a Branch terminator: tries diamond merge first, falls back to fork.
+    fn handle_branch(
+        &mut self,
+        block_id: BlockId,
+        cond: Operand,
+        then_: BlockId,
+        else_: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        let cond_tainted = self.operand_tainted(&cond);
+        let ct = self.encode_operand(&cond);
+        let zero = self.solver.bv_const(0, 32);
+        let cond_bool = self.solver.bveq(ct, zero);
+        let cond_nz = self.solver.not(cond_bool);
+
+        if let Some(join) = self.find_join(then_, else_) {
+            self.handle_branch_diamond(cond_tainted, cond_nz, cond_bool, then_, else_, join, stop_at);
+        } else {
+            self.handle_branch_fork(block_id, cond_tainted, cond_nz, cond_bool, then_, else_, stop_at);
+        }
+    }
+
+    /// Diamond merge for binary branch: explore both sides to join, ITE-merge.
+    fn handle_branch_diamond(
+        &mut self,
+        cond_tainted: bool,
+        cond_nz: Term,
+        cond_bool: Term,
+        then_: BlockId,
+        else_: BlockId,
+        join: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        // --- then side ---
+        let saved = self.save_state();
+        if cond_tainted { self.path_tainted = true; }
+        if !cond_tainted { self.path_constraints.push(cond_nz); }
+        self.explore_block_until(then_, 0, Some(join));
+        let then_state = self.save_state();
+        self.restore_state(saved);
+
+        // --- else side ---
+        let saved = self.save_state();
+        if cond_tainted { self.path_tainted = true; }
+        if !cond_tainted { self.path_constraints.push(cond_bool); }
+        self.explore_block_until(else_, 0, Some(join));
+        let else_state = self.save_state();
+        self.restore_state(saved);
+
+        self.collect_nondets_binary(&then_state, &else_state);
+        self.merge_states_ite(cond_nz, &then_state, &else_state);
+        self.explore_block_until(join, 0, stop_at);
+    }
+
+    /// Fork-based branch: explore both sides independently, ITE-merge state.
+    fn handle_branch_fork(
+        &mut self,
+        block_id: BlockId,
+        cond_tainted: bool,
+        cond_nz: Term,
+        cond_bool: Term,
+        then_: BlockId,
+        else_: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        self.fork_count += 1;
+        log::trace!("smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
+            block_id.0, self.body.key, then_.0, else_.0, stop_at.map(|b| b.0));
+
+        let saved = self.save_state();
+        let ir_before = self.inline_return;
+        let irt_before = self.inline_return_tainted;
+
+        // --- then branch ---
+        let mut then_explored = false;
+        if cond_tainted { self.path_tainted = true; }
+        if !cond_tainted {
+            self.path_constraints.push(cond_nz);
+            let feas = self.check_sat_with_path();
+            log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
+                then_.0, self.body.key, feas, cond_tainted);
+            if feas != SatResult::Unsat {
+                self.explore_block_until(then_, 0, stop_at);
+                then_explored = true;
+            }
+        } else {
+            self.explore_block_until(then_, 0, stop_at);
+            then_explored = true;
+        }
+        let then_state = self.save_state();
+        let then_ir = self.inline_return;
+        let then_irt = self.inline_return_tainted;
+        self.restore_state(saved.clone());
+
+        // --- else branch ---
+        let mut else_explored = false;
+        self.inline_return = ir_before;
+        self.inline_return_tainted = irt_before;
+        if self.budget_left() {
+            if cond_tainted { self.path_tainted = true; }
+            if !cond_tainted {
+                self.path_constraints.push(cond_bool);
+                let feas = self.check_sat_with_path();
+                if feas != SatResult::Unsat {
+                    self.explore_block_until(else_, 0, stop_at);
+                    else_explored = true;
+                }
+            } else {
+                self.explore_block_until(else_, 0, stop_at);
+                else_explored = true;
+            }
+        }
+        let else_state = self.save_state();
+        let else_ir = self.inline_return;
+        let else_irt = self.inline_return_tainted;
+
+        // ITE-merge state from both fork arms.
+        if then_explored || else_explored {
+            self.restore_state(saved);
+            let base_len = self.nondet_terms.len();
+            if then_explored {
+                for nd in &then_state.nondet_terms[base_len..] {
+                    self.nondet_terms.push(nd.clone());
+                }
+            }
+            if else_explored {
+                for nd in &else_state.nondet_terms[base_len..] {
+                    self.nondet_terms.push(nd.clone());
+                }
+            }
+            self.merge_states_ite(cond_nz, &then_state, &else_state);
+        } else {
+            self.restore_state(saved);
+        }
+
+        // ITE-merge inline return values.
+        match (then_explored, else_explored, then_ir, else_ir) {
+            (true, true, Some(t), Some(e)) if t != e => {
+                self.inline_return = Some(self.solver.ite(cond_nz, t, e));
+                self.inline_return_tainted = then_irt || else_irt;
+            }
+            (true, true, Some(t), Some(_)) => {
+                self.inline_return = Some(t);
+                self.inline_return_tainted = then_irt || else_irt;
+            }
+            (true, false, _, _) => {
+                self.inline_return = then_ir.or(ir_before);
+                self.inline_return_tainted = then_irt;
+            }
+            (false, true, _, _) => {
+                self.inline_return = else_ir.or(ir_before);
+                self.inline_return_tainted = else_irt;
+            }
+            _ => {
+                self.inline_return = ir_before;
+                self.inline_return_tainted = irt_before;
+            }
+        }
+    }
+
+    /// Handle a Switch terminator: tries diamond merge first, falls back to fork.
+    fn handle_switch(
+        &mut self,
+        value: Operand,
+        cases: Vec<(i32, BlockId)>,
+        default: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        let value_tainted = self.operand_tainted(&value);
+        let vt = self.encode_operand(&value);
+
+        let mut all_targets: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
+        all_targets.push(default);
+
+        if let Some(join) = self.find_join_multi(&all_targets) {
+            self.handle_switch_diamond(value_tainted, vt, &cases, default, join, stop_at);
+        } else {
+            self.handle_switch_fork(value_tainted, vt, &cases, default, stop_at);
+        }
+    }
+
+    /// Diamond merge for switch: explore each case to join, ITE-cascade merge.
+    fn handle_switch_diamond(
+        &mut self,
+        value_tainted: bool,
+        vt: Term,
+        cases: &[(i32, BlockId)],
+        default: BlockId,
+        join: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        let case_conds: Vec<(i32, BlockId, Term)> = cases
+            .iter()
+            .map(|(cv, t)| {
+                let c = self.solver.bv_const(*cv as i64, 32);
+                let eq = self.solver.bveq(vt, c);
+                (*cv, *t, eq)
+            })
+            .collect();
+
+        let mut case_saved: Vec<(Term, SavedState)> = Vec::new();
+        for &(_, target, cond_eq) in &case_conds {
+            if !self.budget_left() { break; }
+            let saved = self.save_state();
+            if value_tainted { self.path_tainted = true; }
+            self.path_constraints.push(cond_eq);
+            self.explore_block_until(target, 0, Some(join));
+            case_saved.push((cond_eq, self.save_state()));
+            self.restore_state(saved);
+        }
+
+        if !self.budget_left() { return; }
+
+        // Default case
+        let saved = self.save_state();
+        if value_tainted { self.path_tainted = true; }
+        for &(_, _, cond_eq) in &case_conds {
+            let neq = self.solver.not(cond_eq);
+            self.path_constraints.push(neq);
+        }
+        self.explore_block_until(default, 0, Some(join));
+        let mut merged = self.save_state();
+        self.restore_state(saved);
+
+        // Collect nondets from all cases.
+        let state_refs: Vec<&SavedState> = case_saved.iter().map(|(_, s)| s).collect();
+        self.collect_nondets_dedup(&state_refs);
+        self.collect_nondets_dedup(&[&merged]);
+
+        // ITE-cascade merge over default.
+        for (cond_eq, cs) in case_saved.iter().rev() {
+            self.merge_saved_into(&mut merged, *cond_eq, cs);
+        }
+        self.apply_merged_state(merged);
+        self.explore_block_until(join, 0, stop_at);
+    }
+
+    /// Fork-based switch: explore each case independently, ITE-cascade merge.
+    fn handle_switch_fork(
+        &mut self,
+        value_tainted: bool,
+        vt: Term,
+        cases: &[(i32, BlockId)],
+        default: BlockId,
+        stop_at: Option<BlockId>,
+    ) {
+        let saved = self.save_state();
+        let ir_before = self.inline_return;
+        let irt_before = self.inline_return_tainted;
+        let mut case_saved: Vec<(Term, SavedState, Option<Term>, bool)> = Vec::new();
+
+        for &(case_val, target) in cases {
+            if !self.budget_left() { break; }
+            self.fork_count += 1;
+            self.inline_return = ir_before;
+            self.inline_return_tainted = irt_before;
+            if value_tainted { self.path_tainted = true; }
+            let cv = self.solver.bv_const(case_val as i64, 32);
+            let eq = self.solver.bveq(vt, cv);
+            self.path_constraints.push(eq);
+            self.explore_block_until(target, 0, stop_at);
+            let cs = self.save_state();
+            let c_ir = self.inline_return;
+            let c_irt = self.inline_return_tainted;
+            case_saved.push((eq, cs, c_ir, c_irt));
+            self.restore_state(saved.clone());
+        }
+
+        // Default arm
+        self.inline_return = ir_before;
+        self.inline_return_tainted = irt_before;
+        if self.budget_left() {
+            if value_tainted { self.path_tainted = true; }
+            for &(case_val, _) in cases {
+                let cv = self.solver.bv_const(case_val as i64, 32);
+                let eq = self.solver.bveq(vt, cv);
+                let neq = self.solver.not(eq);
+                self.path_constraints.push(neq);
+            }
+            self.explore_block_until(default, 0, stop_at);
+        }
+        let mut merged = self.save_state();
+        let mut merged_ir = self.inline_return;
+        let mut any_irt = self.inline_return_tainted;
+        self.restore_state(saved);
+
+        // Collect nondets from all arms.
+        let state_refs: Vec<&SavedState> = case_saved.iter().map(|(_, s, _, _)| s).collect();
+        self.collect_nondets_dedup(&state_refs);
+        self.collect_nondets_dedup(&[&merged]);
+
+        // ITE-cascade merge over default.
+        for (eq, cs, c_ir, c_irt) in case_saved.iter().rev() {
+            self.merge_saved_into(&mut merged, *eq, cs);
+            any_irt = any_irt || *c_irt;
+            match (*c_ir, merged_ir) {
+                (Some(c), Some(m)) if c != m => {
+                    merged_ir = Some(self.solver.ite(*eq, c, m));
+                }
+                (Some(c), None) => { merged_ir = Some(c); }
+                _ => {}
+            }
+        }
+
+        self.apply_merged_state(merged);
+        self.inline_return = merged_ir.or(ir_before);
+        self.inline_return_tainted = any_irt;
+    }
+
     /// Explore a block's statements and terminator, stopping if `stop_at` is reached.
     fn explore_block(&mut self, block_id: BlockId, stmt_idx: usize) {
         self.explore_block_until(block_id, stmt_idx, None);
@@ -1691,569 +2229,38 @@ impl<'a> ExploreCtx<'a> {
             self.all_paths_complete = false;
             return;
         }
-        let b = self.body.block(block_id);
 
-        // Process statements from stmt_idx onwards.
-        for idx in stmt_idx..b.stmts.len() {
-            if !self.budget_left() {
-                self.all_paths_complete = false;
-                return;
-            }
-            match &b.stmts[idx] {
-                Stmt::Assign(v, rv) => {
-                    let is_tainted = self.rvalue_tainted(rv);
-                    // Try to encode string calls via the string theory,
-                    // or inline user method calls.
-                    let (t, str_term) = match rv {
-                        Rvalue::Call { target, args, .. }
-                            if roast_models::STR_OWNERS.contains(&target.class.as_str()) =>
-                        {
-                            match self.encode_str_call(target, args) {
-                                Some((bv, st)) => (bv, st),
-                                None => (self.encode_rvalue(rv), None),
-                            }
-                        }
-                        Rvalue::Call {
-                            target,
-                            args,
-                            is_virtual,
-                        } => {
-                            // Math/Integer/Long static methods.
-                            if self.math_call_modelled(target) {
-                                (self.encode_math_call(target, args), None)
-                            } else if self.try_inline_call(target, args, *v, *is_virtual) {
-                                continue;
-                            } else {
-                                (self.encode_rvalue(rv), None)
-                            }
-                        }
-                        Rvalue::Use(Operand::Var(src)) => {
-                            // Propagate string content through copies.
-                            let st = self.str_vars.get(src).copied();
-                            (self.encode_rvalue(rv), st)
-                        }
-                        Rvalue::Nondet(Ty::Str, _) => {
-                            let bv = self.encode_rvalue(rv);
-                            // The last pushed nondet_term has the str_term.
-                            let st = self.nondet_terms.last().and_then(|(_, _, _, _, s)| *s);
-                            (bv, st)
-                        }
-                        Rvalue::Havoc(Ty::Str) => {
-                            let bv = self.encode_rvalue(rv);
-                            let st = Some(self.solver.fresh_str("hvs"));
-                            (bv, st)
-                        }
-                        Rvalue::GetStatic(fk) => {
-                            let k = Self::field_key(fk);
-                            let st = self.static_str.get(&k).copied();
-                            (self.encode_rvalue(rv), st)
-                        }
-                        Rvalue::GetField { .. } => {
-                            // Instance field string content is not tracked
-                            // per-object for now (would need Array of Strings).
-                            (self.encode_rvalue(rv), None)
-                        }
-                        _ => (self.encode_rvalue(rv), None),
-                    };
-                    self.vars.insert(*v, t);
-                    if let Some(st) = str_term {
-                        self.str_vars.insert(*v, st);
-                    } else {
-                        self.str_vars.remove(v);
-                    }
-                    if is_tainted {
-                        self.tainted.insert(*v);
-                    } else {
-                        self.tainted.remove(v);
-                    }
-                    if self.rvalue_float_tainted(rv) {
-                        self.float_tainted.insert(*v);
-                    } else {
-                        self.float_tainted.remove(v);
-                    }
-                }
-                Stmt::Assume(op) => {
-                    let tainted = self.operand_tainted(op);
-                    if tainted {
-                        self.path_tainted = true;
-                    }
-                    // Only add path constraint and prune when the
-                    // condition is untainted. Tainted BV encodings
-                    // (e.g. float ops) can be semantically wrong and
-                    // cause unsound pruning of feasible paths.
-                    if !tainted {
-                        let t = self.encode_operand(op);
-                        let c = self.nonzero_constraint(t);
-                        self.path_constraints.push(c);
-                        let res = self.check_sat_with_path();
-                        if res == SatResult::Unsat {
-                            return;
-                        }
-                    }
-                }
-                Stmt::Check(oid) => {
-                    let is_tainted = self.operand_tainted(&self.body.obligation(*oid).cond);
-                    let ob = self.body.obligation(*oid);
-                    let cond = self.encode_operand(&ob.cond);
-                    // Check if violation is reachable: path_constraints ∧ cond == 0.
-                    let violation_cond = self.zero_constraint(cond);
-                    let res = self.check_sat_with_path_and(violation_cond);
-                    log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
-                        oid, self.body.key, ob.kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
-                    if res == SatResult::Sat && !is_tainted {
-                        // Only record violations for untainted conditions;
-                        // tainted SAT results may be spurious.
-                        // JvmReplay confirms all violations, so we don't
-                        // need to check path_tainted here (Under direction).
-                        let witness = self.extract_witness();
-                        self.violations
-                            .push((self.body.key.clone(), *oid, witness));
-                    }
-                    if res != SatResult::Unsat && (is_tainted || self.path_tainted) {
-                        // Tainted condition or tainted path with non-UNSAT
-                        // result: we can't prove this obligation safe for
-                        // the exhaustive discharge (Over direction).
-                        self.skipped_obligations.insert(*oid);
-                    }
-                    self.solver.pop();
-                }
-                Stmt::PutStatic(fk, val) => {
-                    self.ensure_clinit(&fk.class);
-                    let k = Self::field_key(fk);
-                    let t = self.encode_operand(val);
-                    self.statics.insert(k.clone(), t);
-                    if self.operand_tainted(val) {
-                        self.static_tainted.insert(k.clone());
-                    } else {
-                        self.static_tainted.remove(&k);
-                    }
-                    if let Some(st) = match val {
-                        Operand::Var(v) => self.str_vars.get(v).copied(),
-                        Operand::Const(Const::Str(s)) => Some(self.solver.str_const(s)),
-                        _ => None,
-                    } {
-                        self.static_str.insert(k, st);
-                    } else {
-                        self.static_str.remove(&k);
-                    }
-                }
-                Stmt::PutField { field, val, obj } => {
-                    let k = Self::field_key(field);
-                    let obj_term = self.encode_operand(obj);
-                    let val_term = self.encode_operand(val);
-                    let w = Self::field_elem_width(&field.desc);
-                    let arr = self.get_field_array(&k, w);
-                    let new_arr = self.solver.array_store(arr, obj_term, val_term);
-                    self.field_arrays.insert(k.clone(), new_arr);
-                    if self.operand_tainted(val) {
-                        self.field_tainted.insert(k.clone());
-                    } else {
-                        self.field_tainted.remove(&k);
-                    }
-                }
-                Stmt::ArrayStore { arr, idx, val } => {
-                    let ref_term = self.encode_operand(arr);
-                    let idx_term = self.encode_operand(idx);
-                    let val_term = self.encode_operand(val);
-                    self.array_store_update(ref_term, idx_term, val_term);
-                }
-                Stmt::Nop => {}
-            }
+        // Clone statements and terminator to avoid borrowing self.body
+        // while calling &mut self methods.
+        let stmts = self.body.block(block_id).stmts[stmt_idx..].to_vec();
+        let term = self.body.block(block_id).term.clone();
+
+        if !self.handle_stmts(&stmts) {
+            return;
         }
 
         if !self.budget_left() {
             return;
         }
 
-        // Process terminator.
         self.depth += 1;
-        match &b.term {
-            Terminator::Goto(t) => {
-                // Back-edge detection: if the goto target is at or before
-                // the current block, it's a loop back-edge. Bound unrolling.
-                if t.0 <= block_id.0 {
-                    let loop_key = (self.body.key.to_string(), t.0);
-                    let count = self.loop_visits.entry(loop_key).or_insert(0);
-                    *count += 1;
-                    if *count > MAX_LOOP_UNROLL {
-                        self.all_paths_complete = false;
-                    } else {
-                        self.explore_block_until(*t, 0, stop_at);
-                    }
-                } else {
-                    self.explore_block_until(*t, 0, stop_at);
-                }
-            }
+        match &term {
+            Terminator::Goto(t) => self.handle_goto(block_id, *t, stop_at),
             Terminator::Branch { cond, then_, else_ } => {
-                let cond_tainted = self.operand_tainted(cond);
-                let ct = self.encode_operand(cond);
-                let zero = self.solver.bv_const(0, 32);
-                let cond_bool = self.solver.bveq(ct, zero);
-                let cond_nz = self.solver.not(cond_bool); // true when cond != 0
-
-                // Diamond optimisation: if both branches converge to the
-                // same block, explore each side up to the join point and
-                // merge with ITE instead of forking into independent paths.
-                // This turns exponential path explosion into linear work.
-                if let Some(join) = self.find_join(*then_, *else_) {
-                    // --- then side ---
-                    let saved = self.save_state();
-                    if cond_tainted {
-                        self.path_tainted = true;
-                    }
-                    // Don't push tainted path constraints — the BV encoding
-                    // may be semantically wrong and cause unsound pruning.
-                    if !cond_tainted {
-                        self.path_constraints.push(cond_nz);
-                    }
-                    self.explore_block_until(*then_, 0, Some(join));
-                    let then_state = self.save_state();
-                    self.restore_state(saved);
-
-                    // --- else side ---
-                    let saved = self.save_state();
-                    if cond_tainted {
-                        self.path_tainted = true;
-                    }
-                    if !cond_tainted {
-                        self.path_constraints.push(cond_bool);
-                    }
-                    self.explore_block_until(*else_, 0, Some(join));
-                    let else_state = self.save_state();
-                    self.restore_state(saved);
-
-                    // Preserve nondets from both sides.
-                    let base_len = self.nondet_terms.len();
-                    for nd in &then_state.nondet_terms[base_len..] {
-                        self.nondet_terms.push(nd.clone());
-                    }
-                    for nd in &else_state.nondet_terms[base_len..] {
-                        self.nondet_terms.push(nd.clone());
-                    }
-
-                    // --- merge with ITE ---
-                    self.merge_states_ite(cond_nz, &then_state, &else_state);
-
-                    // Continue from join point
-                    self.explore_block_until(join, 0, stop_at);
-                } else {
-                    // No join point found — fall back to path forking.
-                    // Like diamond merge, we explore both sides and ITE-merge
-                    // their states so that return values and field side effects
-                    // compose correctly across inlined method boundaries.
-                    self.fork_count += 1;
-                    log::trace!("smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
-                        block_id.0, self.body.key, then_.0, else_.0, stop_at.map(|b| b.0));
-
-                    let saved = self.save_state();
-                    let ir_before = self.inline_return;
-                    let irt_before = self.inline_return_tainted;
-
-                    // --- then branch: cond != 0 ---
-                    let mut then_explored = false;
-                    if cond_tainted {
-                        self.path_tainted = true;
-                    }
-                    if !cond_tainted {
-                        self.path_constraints.push(cond_nz);
-                        let feas = self.check_sat_with_path();
-                        log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
-                            then_.0, self.body.key, feas, cond_tainted);
-                        if feas != SatResult::Unsat {
-                            self.explore_block_until(*then_, 0, stop_at);
-                            then_explored = true;
-                        }
-                    } else {
-                        self.explore_block_until(*then_, 0, stop_at);
-                        then_explored = true;
-                    }
-                    let then_state = self.save_state();
-                    let then_ir = self.inline_return;
-                    let then_irt = self.inline_return_tainted;
-                    self.restore_state(saved.clone());
-
-                    // --- else branch: cond == 0 ---
-                    let mut else_explored = false;
-                    self.inline_return = ir_before;
-                    self.inline_return_tainted = irt_before;
-                    if self.budget_left() {
-                        if cond_tainted {
-                            self.path_tainted = true;
-                        }
-                        if !cond_tainted {
-                            self.path_constraints.push(cond_bool);
-                            let feas = self.check_sat_with_path();
-                            if feas != SatResult::Unsat {
-                                self.explore_block_until(*else_, 0, stop_at);
-                                else_explored = true;
-                            }
-                        } else {
-                            self.explore_block_until(*else_, 0, stop_at);
-                            else_explored = true;
-                        }
-                    }
-                    let else_state = self.save_state();
-                    let else_ir = self.inline_return;
-                    let else_irt = self.inline_return_tainted;
-
-                    // ITE-merge state from both fork arms so that field writes,
-                    // static updates, and return values compose correctly.
-                    if then_explored && else_explored {
-                        self.restore_state(saved);
-                        let base_len = self.nondet_terms.len();
-                        for nd in &then_state.nondet_terms[base_len..] {
-                            self.nondet_terms.push(nd.clone());
-                        }
-                        for nd in &else_state.nondet_terms[base_len..] {
-                            self.nondet_terms.push(nd.clone());
-                        }
-                        self.merge_states_ite(cond_nz, &then_state, &else_state);
-                    } else if then_explored {
-                        self.restore_state(saved);
-                        let base_len = self.nondet_terms.len();
-                        for nd in &then_state.nondet_terms[base_len..] {
-                            self.nondet_terms.push(nd.clone());
-                        }
-                        self.merge_states_ite(cond_nz, &then_state, &else_state);
-                    } else if else_explored {
-                        self.restore_state(saved);
-                        let base_len = self.nondet_terms.len();
-                        for nd in &else_state.nondet_terms[base_len..] {
-                            self.nondet_terms.push(nd.clone());
-                        }
-                        self.merge_states_ite(cond_nz, &then_state, &else_state);
-                    } else {
-                        self.restore_state(saved);
-                    }
-
-                    // ITE-merge inline return values.
-                    match (then_explored, else_explored, then_ir, else_ir) {
-                        (true, true, Some(t), Some(e)) if t != e => {
-                            self.inline_return = Some(self.solver.ite(cond_nz, t, e));
-                            self.inline_return_tainted = then_irt || else_irt;
-                        }
-                        (true, true, Some(t), Some(_)) => {
-                            self.inline_return = Some(t);
-                            self.inline_return_tainted = then_irt || else_irt;
-                        }
-                        (true, false, _, _) => {
-                            self.inline_return = then_ir.or(ir_before);
-                            self.inline_return_tainted = then_irt;
-                        }
-                        (false, true, _, _) => {
-                            self.inline_return = else_ir.or(ir_before);
-                            self.inline_return_tainted = else_irt;
-                        }
-                        _ => {
-                            self.inline_return = ir_before;
-                            self.inline_return_tainted = irt_before;
-                        }
-                    }
-                }
+                self.handle_branch(block_id, cond.clone(), *then_, *else_, stop_at);
             }
-            Terminator::Switch {
-                value,
-                cases,
-                default,
-            } => {
-                let value_tainted = self.operand_tainted(value);
-                let vt = self.encode_operand(value);
-
-                // Collect all switch targets for join-point detection.
-                let mut all_targets: Vec<BlockId> =
-                    cases.iter().map(|(_, t)| *t).collect();
-                all_targets.push(*default);
-
-                if let Some(join) = self.find_join_multi(&all_targets) {
-                    // Diamond merge for switch: explore each case up to the
-                    // join, capture state, then ITE-merge all cases.
-
-                    let case_conds: Vec<(i32, BlockId, Term)> = cases
-                        .iter()
-                        .map(|(cv, t)| {
-                            let c = self.solver.bv_const(*cv as i64, 32);
-                            let eq = self.solver.bveq(vt, c);
-                            (*cv, *t, eq)
-                        })
-                        .collect();
-
-                    let mut case_saved: Vec<(Term, SavedState)> = Vec::new();
-                    for &(_, target, cond_eq) in &case_conds {
-                        if !self.budget_left() {
-                            break;
-                        }
-                        let saved = self.save_state();
-                        if value_tainted {
-                            self.path_tainted = true;
-                        }
-                        self.path_constraints.push(cond_eq);
-                        self.explore_block_until(target, 0, Some(join));
-                        case_saved.push((cond_eq, self.save_state()));
-                        self.restore_state(saved);
-                    }
-
-                    // Default case
-                    if self.budget_left() {
-                        let saved = self.save_state();
-                        if value_tainted {
-                            self.path_tainted = true;
-                        }
-                        for &(_, _, cond_eq) in &case_conds {
-                            let neq = self.solver.not(cond_eq);
-                            self.path_constraints.push(neq);
-                        }
-                        self.explore_block_until(*default, 0, Some(join));
-                        let mut merged = self.save_state();
-                        self.restore_state(saved);
-
-                        // Preserve nondets from all cases.
-                        let base_len = self.nondet_terms.len();
-                        for (_, cs) in &case_saved {
-                            for nd in &cs.nondet_terms[base_len..] {
-                                if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
-                                    self.nondet_terms.push(nd.clone());
-                                }
-                            }
-                        }
-                        for nd in &merged.nondet_terms[base_len..] {
-                            if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
-                                self.nondet_terms.push(nd.clone());
-                            }
-                        }
-
-                        // ITE-merge each case on top of the default (cascade).
-                        for (cond_eq, cs) in case_saved.iter().rev() {
-                            // Merge cs into merged using ITE(cond_eq, cs, merged).
-                            self.merge_saved_into(&mut merged, *cond_eq, cs);
-                        }
-
-                        // Apply merged state
-                        self.vars = merged.vars;
-                        self.str_vars = merged.str_vars;
-                        self.tainted = merged.tainted;
-                        self.float_tainted = merged.float_tainted;
-                        self.path_tainted = merged.path_tainted;
-                        self.statics = merged.statics;
-                        self.static_str = merged.static_str;
-                        self.static_tainted = merged.static_tainted;
-                        self.field_arrays = merged.field_arrays;
-                        self.field_tainted = merged.field_tainted;
-                        self.array_map = merged.array_map;
-                        self.type_array = merged.type_array;
-
-                        // Continue from join
-                        self.explore_block_until(join, 0, stop_at);
-                    }
-                } else {
-                    // No join point — fork-based with ITE-merge of full state.
-                    let saved = self.save_state();
-                    let ir_before = self.inline_return;
-                    let irt_before = self.inline_return_tainted;
-                    let mut case_saved: Vec<(Term, SavedState, Option<Term>, bool)> = Vec::new();
-
-                    for (case_val, target) in cases {
-                        if !self.budget_left() {
-                            break;
-                        }
-                        self.fork_count += 1;
-                        self.inline_return = ir_before;
-                        self.inline_return_tainted = irt_before;
-                        if value_tainted {
-                            self.path_tainted = true;
-                        }
-                        let cv = self.solver.bv_const(*case_val as i64, 32);
-                        let eq = self.solver.bveq(vt, cv);
-                        self.path_constraints.push(eq);
-                        self.explore_block_until(*target, 0, stop_at);
-                        let cs = self.save_state();
-                        let c_ir = self.inline_return;
-                        let c_irt = self.inline_return_tainted;
-                        case_saved.push((eq, cs, c_ir, c_irt));
-                        self.restore_state(saved.clone());
-                    }
-
-                    // Default arm
-                    self.inline_return = ir_before;
-                    self.inline_return_tainted = irt_before;
-                    if self.budget_left() {
-                        if value_tainted {
-                            self.path_tainted = true;
-                        }
-                        for (case_val, _) in cases {
-                            let cv = self.solver.bv_const(*case_val as i64, 32);
-                            let eq = self.solver.bveq(vt, cv);
-                            let neq = self.solver.not(eq);
-                            self.path_constraints.push(neq);
-                        }
-                        self.explore_block_until(*default, 0, stop_at);
-                    }
-                    let mut merged = self.save_state();
-                    let mut merged_ir = self.inline_return;
-                    let mut any_irt = self.inline_return_tainted;
-                    self.restore_state(saved);
-
-                    // Preserve nondets from all arms.
-                    let base_len = self.nondet_terms.len();
-                    for (_, cs, _, _) in &case_saved {
-                        for nd in &cs.nondet_terms[base_len..] {
-                            if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
-                                self.nondet_terms.push(nd.clone());
-                            }
-                        }
-                    }
-                    for nd in &merged.nondet_terms[base_len..] {
-                        if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
-                            self.nondet_terms.push(nd.clone());
-                        }
-                    }
-
-                    // ITE-merge: cascade case states over default.
-                    for (eq, cs, c_ir, c_irt) in case_saved.iter().rev() {
-                        self.merge_saved_into(&mut merged, *eq, cs);
-                        any_irt = any_irt || *c_irt;
-                        match (*c_ir, merged_ir) {
-                            (Some(c), Some(m)) if c != m => {
-                                merged_ir = Some(self.solver.ite(*eq, c, m));
-                            }
-                            (Some(c), None) => { merged_ir = Some(c); }
-                            _ => {}
-                        }
-                    }
-
-                    // Apply merged state
-                    self.vars = merged.vars;
-                    self.str_vars = merged.str_vars;
-                    self.tainted = merged.tainted;
-                    self.float_tainted = merged.float_tainted;
-                    self.path_tainted = merged.path_tainted;
-                    self.statics = merged.statics;
-                    self.static_str = merged.static_str;
-                    self.static_tainted = merged.static_tainted;
-                    self.field_arrays = merged.field_arrays;
-                    self.field_tainted = merged.field_tainted;
-                    self.array_map = merged.array_map;
-                    self.type_array = merged.type_array;
-                    self.inline_return = merged_ir.or(ir_before);
-                    self.inline_return_tainted = any_irt;
-                }
+            Terminator::Switch { value, cases, default } => {
+                self.handle_switch(value.clone(), cases.clone(), *default, stop_at);
             }
-            // Path ends.
             Terminator::Return(Some(val)) => {
-                // Capture return value for try_inline_call propagation.
                 if self.call_depth > 0 {
                     self.inline_return = Some(self.encode_operand(val));
-                    // Sticky: once tainted on any path, stays tainted.
                     self.inline_return_tainted = self.inline_return_tainted
                         || self.operand_tainted(val) || self.path_tainted;
                 }
             }
             Terminator::Return(None) | Terminator::Halt => {}
-            Terminator::Throw(_) => {
-                // Exception handlers are not followed — obligations in catch
-                // blocks are unreached. Mark incomplete to prevent false discharge.
-                self.all_paths_complete = false;
-            }
-            Terminator::Diverge(_) => {
+            Terminator::Throw(_) | Terminator::Diverge(_) => {
                 self.all_paths_complete = false;
             }
         }
