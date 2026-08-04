@@ -25,6 +25,7 @@ use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
 use crate::body_analysis::body_uses_havoced_ops;
+use crate::smt_text::{self, BitvectorTheory, SmtTheory};
 
 pub struct ChcEngine {
     solver_binary: String,
@@ -241,24 +242,21 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
-                    let expr = encode_rvalue_smt2(rv, &var_map, &var_indices);
+                    let expr = smt_text::encode_rvalue(&BitvectorTheory, rv, &var_map);
                     var_map.insert(vid.0 as usize, expr);
                 }
                 Stmt::Assume(op) => {
-                    let expr = encode_operand_smt2(op, &var_map, &var_indices);
-                    constraints.push(format!(
-                        "(not (= {} #x00000000))",
-                        expr
-                    ));
+                    let expr = smt_text::encode_operand(&BitvectorTheory, op, &var_map);
+                    constraints.push(BitvectorTheory.encode_nonzero(&expr));
                 }
                 Stmt::Check(oid) => {
                     if obligations.contains(oid) {
                         // Emit error rule: if this block is reachable and
                         // the safety condition is zero, error is reachable.
                         let ob = body.obligation(*oid);
-                        let cond_expr = encode_operand_smt2(&ob.cond, &var_map, &var_indices);
+                        let cond_expr = smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
                         let mut error_conds = constraints.clone();
-                        error_conds.push(format!("(= {} #x00000000)", cond_expr));
+                        error_conds.push(BitvectorTheory.encode_is_zero(&cond_expr));
                         error_conds.push(block_app(block.id.0));
 
                         let body_expr = if error_conds.len() == 1 {
@@ -309,18 +307,18 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
                 out.push_str(&mk_trans(t.0, &[]));
             }
             Terminator::Branch { cond, then_, else_ } => {
-                let cond_expr = encode_operand_smt2(cond, &var_map, &var_indices);
-                let nz = format!("(not (= {} #x00000000))", cond_expr);
-                let z = format!("(= {} #x00000000)", cond_expr);
+                let cond_expr = smt_text::encode_operand(&BitvectorTheory, cond, &var_map);
+                let nz = BitvectorTheory.encode_nonzero(&cond_expr);
+                let z = BitvectorTheory.encode_is_zero(&cond_expr);
                 out.push_str(&mk_trans(then_.0, &[nz]));
                 out.push_str(&mk_trans(else_.0, &[z]));
             }
             Terminator::Switch { value, cases, default } => {
-                let val_expr = encode_operand_smt2(value, &var_map, &var_indices);
+                let val_expr = smt_text::encode_operand(&BitvectorTheory, value, &var_map);
                 let mut neg_cases = Vec::new();
                 for (cv, target) in cases {
-                    let cv_hex = format!("#x{:08x}", *cv as u32);
-                    let eq = format!("(= {} {})", val_expr, cv_hex);
+                    let cv_encoded = BitvectorTheory.encode_int(*cv);
+                    let eq = format!("(= {} {})", val_expr, cv_encoded);
                     out.push_str(&mk_trans(target.0, &[eq.clone()]));
                     neg_cases.push(format!("(not {})", eq));
                 }
@@ -337,104 +335,6 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
     out
 }
 
-/// Encode an operand as an SMT-LIB2 expression.
-fn encode_operand_smt2(
-    op: &Operand,
-    var_map: &HashMap<usize, String>,
-    _var_indices: &[(usize, u32)],
-) -> String {
-    match op {
-        Operand::Var(v) => var_map
-            .get(&(v.0 as usize))
-            .cloned()
-            .unwrap_or_else(|| format!("v{}", v.0)),
-        Operand::Const(Const::Int(n)) => format!("#x{:08x}", *n as u32),
-        Operand::Const(Const::Long(n)) => format!("#x{:016x}", *n as u64),
-        Operand::Const(Const::Null) => "#x00000000".to_string(),
-        Operand::Const(Const::Str(_)) => "#x00000001".to_string(),
-        Operand::Const(_) => "#x00000000".to_string(),
-    }
-}
-
-/// Encode an rvalue as an SMT-LIB2 expression.
-fn encode_rvalue_smt2(
-    rv: &Rvalue,
-    var_map: &HashMap<usize, String>,
-    var_indices: &[(usize, u32)],
-) -> String {
-    match rv {
-        Rvalue::Use(o) => encode_operand_smt2(o, var_map, var_indices),
-        Rvalue::Nondet(_ty, _) | Rvalue::Havoc(_ty) => {
-            // For CHC, nondets are universally quantified — they're already
-            // covered by the forall in the source variables. We use a fresh
-            // variable name that won't conflict.
-            format!("v{}", var_indices.len()) // effectively unconstrained
-        }
-        Rvalue::Bin(op, a, b) => {
-            let ae = encode_operand_smt2(a, var_map, var_indices);
-            let be = encode_operand_smt2(b, var_map, var_indices);
-            match op {
-                BinOp::Add => format!("(bvadd {} {})", ae, be),
-                BinOp::Sub => format!("(bvsub {} {})", ae, be),
-                BinOp::Mul => format!("(bvmul {} {})", ae, be),
-                BinOp::Div => format!("(bvsdiv {} {})", ae, be),
-                BinOp::Rem => format!("(bvsrem {} {})", ae, be),
-                BinOp::And => format!("(bvand {} {})", ae, be),
-                BinOp::Or => format!("(bvor {} {})", ae, be),
-                BinOp::Xor => format!("(bvxor {} {})", ae, be),
-                BinOp::Shl => format!("(bvshl {} {})", ae, be),
-                BinOp::Shr => format!("(bvashr {} {})", ae, be),
-                BinOp::UShr => format!("(bvlshr {} {})", ae, be),
-                BinOp::Eq => format!(
-                    "(ite (= {} {}) #x00000001 #x00000000)",
-                    ae, be
-                ),
-                BinOp::Ne => format!(
-                    "(ite (not (= {} {})) #x00000001 #x00000000)",
-                    ae, be
-                ),
-                BinOp::Lt => format!(
-                    "(ite (bvslt {} {}) #x00000001 #x00000000)",
-                    ae, be
-                ),
-                BinOp::Le => format!(
-                    "(ite (bvsle {} {}) #x00000001 #x00000000)",
-                    ae, be
-                ),
-                BinOp::Gt => format!(
-                    "(ite (bvsgt {} {}) #x00000001 #x00000000)",
-                    ae, be
-                ),
-                BinOp::Ge => format!(
-                    "(ite (bvsge {} {}) #x00000001 #x00000000)",
-                    ae, be
-                ),
-            }
-        }
-        Rvalue::Neg(o) => {
-            let e = encode_operand_smt2(o, var_map, var_indices);
-            format!("(bvneg {})", e)
-        }
-        Rvalue::Cast(ty, o) => {
-            let e = encode_operand_smt2(o, var_map, var_indices);
-            match ty {
-                Ty::Long => format!("((_ sign_extend 32) {})", e),
-                Ty::Int => format!("((_ extract 31 0) {})", e),
-                _ => e,
-            }
-        }
-        Rvalue::Cmp(a, b) => {
-            let ae = encode_operand_smt2(a, var_map, var_indices);
-            let be = encode_operand_smt2(b, var_map, var_indices);
-            format!(
-                "(ite (bvslt {} {}) #xffffffff (ite (= {} {}) #x00000000 #x00000001))",
-                ae, be, ae, be
-            )
-        }
-        // Heap operations: havoc (fresh unconstrained variable).
-        _ => format!("v{}", var_indices.len()),
-    }
-}
 
 /// Run the CHC solver and parse results.
 fn run_chc_solver(

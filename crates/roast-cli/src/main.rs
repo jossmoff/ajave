@@ -154,6 +154,224 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
     Ok((classes, out_dir.display().to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Engine portfolio construction
+// ---------------------------------------------------------------------------
+
+fn build_engine_portfolio() -> Vec<Box<dyn Engine>> {
+    let mut engines: Vec<Box<dyn Engine>> = vec![
+        Box::new(roast_engines::presolve::Presolve::new()),
+        Box::new(roast_engines::concrete::Concrete::new()),
+    ];
+    if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
+        let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
+        engines.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
+            Box::new(factory),
+            200,
+        )));
+        if let Some(f2) = factory2 {
+            engines.push(Box::new(roast_engines::kinduction::KInduction::new(
+                Box::new(f2),
+            )));
+        }
+    }
+    engines.push(Box::new(roast_engines::ai::AiEngine::new()));
+    {
+        let chc = roast_engines::chc::ChcEngine::new();
+        if chc.available() {
+            engines.push(Box::new(chc));
+        }
+    }
+    {
+        let imc = roast_engines::imc::ImcEngine::new();
+        if imc.available() {
+            engines.push(Box::new(imc));
+        }
+    }
+    {
+        let cegar = roast_engines::cegar::CegarEngine::new();
+        if cegar.available() {
+            engines.push(Box::new(cegar));
+        }
+    }
+    engines
+}
+
+// ---------------------------------------------------------------------------
+// Violation confirmation via JVM replay
+// ---------------------------------------------------------------------------
+
+struct ViolationInfo {
+    obligation_ref: roast_core::artifact::ObligationRef,
+    witness: roast_ir::verdict::Witness,
+    tagged: roast_core::artifact::Tagged,
+}
+
+fn collect_violations(orchestrator: &Orchestrator) -> Vec<ViolationInfo> {
+    orchestrator
+        .bb
+        .statuses()
+        .filter_map(|(obligation_ref, status)| match status {
+            roast_core::artifact::Status::Violated { by, witness } => Some(ViolationInfo {
+                obligation_ref: obligation_ref.clone(),
+                witness: witness.clone(),
+                tagged: roast_core::artifact::Tagged {
+                    seq: 0,
+                    producer: *by,
+                    direction: roast_core::artifact::Direction::Under,
+                    artifact: roast_core::artifact::Artifact::Status(
+                        obligation_ref.clone(),
+                        roast_core::artifact::Status::Violated {
+                            by: *by,
+                            witness: witness.clone(),
+                        },
+                    ),
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn confirm_violations(
+    violations: &[ViolationInfo],
+    classpath: &str,
+    program: &Program,
+    trace: bool,
+) -> Option<(roast_core::artifact::ObligationRef, verdict::Witness)> {
+    let replay = roast_core::certify::JvmReplay::new(classpath.to_string());
+    let mut any_confirmed = false;
+    let mut confirmed = None;
+
+    for violation in violations {
+        match roast_core::certify::Certifier::certify(&replay, &violation.tagged, program) {
+            roast_core::certify::CertResult::Confirmed => {
+                any_confirmed = true;
+                if confirmed.is_none() {
+                    confirmed = Some((
+                        violation.obligation_ref.clone(),
+                        violation.witness.clone(),
+                    ));
+                }
+                if trace {
+                    eprintln!("jvm-replay: confirmed {}", violation.obligation_ref);
+                }
+            }
+            other => {
+                if trace {
+                    eprintln!("jvm-replay: {other:?} for {}", violation.obligation_ref);
+                }
+            }
+        }
+    }
+
+    if !any_confirmed && !violations.is_empty() {
+        eprintln!("downgrading FALSE to UNKNOWN: witness did not replay on a real JVM");
+    }
+
+    confirmed
+}
+
+// ---------------------------------------------------------------------------
+// Witness emission
+// ---------------------------------------------------------------------------
+
+fn emit_witness_file(
+    witness_path: &Path,
+    obligation_ref: &roast_core::artifact::ObligationRef,
+    witness: &verdict::Witness,
+    program: &Program,
+    inputs: &[PathBuf],
+) {
+    let body = program.body(&obligation_ref.method);
+    let obligation = body.map(|b| b.obligation(obligation_ref.id));
+    let input_files: Vec<String> = inputs.iter().map(|p| p.display().to_string()).collect();
+    let kind = obligation
+        .map(|o| o.kind)
+        .unwrap_or(roast_ir::ObligationKind::Assertion);
+    let spec = match kind {
+        roast_ir::ObligationKind::Assertion => {
+            "CHECK( init(Main.main()), LTL(G assert) )"
+        }
+        _ => {
+            "CHECK( init(Main.main()), LTL(G ! call(org.sosy_lab.sv_benchmarks.Verifier.assume(false))) )"
+        }
+    };
+    let yaml = roast_core::witness::emit_violation_yaml(
+        witness,
+        &roast_core::witness::TaskInfo {
+            input_files: &input_files,
+            specification: spec,
+        },
+        &roast_core::witness::ViolationInfo {
+            kind,
+            line: obligation.and_then(|o| o.line),
+        },
+    );
+    match std::fs::write(witness_path, &yaml) {
+        Ok(()) => info!("witness written to {}", witness_path.display()),
+        Err(e) => warn!("failed to write witness: {e}"),
+    }
+}
+
+fn print_witness(
+    obligation_ref: &roast_core::artifact::ObligationRef,
+    witness: &verdict::Witness,
+    program: &Program,
+) {
+    let body = program.body(&obligation_ref.method);
+    let obligation = body.map(|b| b.obligation(obligation_ref.id));
+    eprintln!(
+        "--- witness for {}#{} ---",
+        obligation_ref.method, obligation_ref.id.0
+    );
+    if let Some(obligation) = obligation {
+        eprintln!(
+            "  obligation: {:?}{}",
+            obligation.kind,
+            obligation
+                .line
+                .map(|l| format!(" (line {})", l))
+                .unwrap_or_default()
+        );
+    }
+    for (i, entry) in witness.entries.iter().enumerate() {
+        eprintln!(
+            "  {}(): {} = {}",
+            entry.nondet_method,
+            i,
+            format_nondet_value(&entry.value)
+        );
+    }
+    eprintln!("---");
+}
+
+fn print_unconfirmed_witness(witness: &verdict::Witness) {
+    eprintln!("--- witness found but not confirmed by JVM replay ---");
+    for (i, entry) in witness.entries.iter().enumerate() {
+        eprintln!(
+            "  {}(): {} = {}",
+            entry.nondet_method,
+            i,
+            format_nondet_value(&entry.value)
+        );
+    }
+    eprintln!("---");
+}
+
+fn format_nondet_value(value: &verdict::NondetValue) -> String {
+    match value {
+        verdict::NondetValue::Int(v) => format!("{v}"),
+        verdict::NondetValue::Long(v) => format!("{v}L"),
+        verdict::NondetValue::Bool(v) => format!("{v}"),
+        verdict::NondetValue::Str(s) => format!("{s:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 fn main() {
     let cli = Cli::parse();
 
@@ -177,9 +395,6 @@ fn main() {
     let (class_files, classpath) = match compile_if_needed(&cli.inputs) {
         Ok(r) => r,
         Err(e) => {
-            // A build failure is not evidence of anything about the program's
-            // safety. Report it plainly and stop, rather than lifting nothing
-            // and silently producing a wrong verdict.
             eprintln!("{e}");
             println!("UNKNOWN");
             std::process::exit(0);
@@ -191,6 +406,7 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Load and lift class files.
     info!("loading {} class file(s)", class_files.len());
     let mut prog = Program::default();
     let mut load_errors = Vec::new();
@@ -233,226 +449,77 @@ fn main() {
         obligations.len()
     );
 
-    let mut engine_list: Vec<Box<dyn Engine>> = vec![
-        Box::new(roast_engines::presolve::Presolve::new()),
-        Box::new(roast_engines::concrete::Concrete::new()),
-    ];
-    if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
-        let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
-        engine_list.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
-            Box::new(factory),
-            200,
-        )));
-        if let Some(f2) = factory2 {
-            engine_list.push(Box::new(roast_engines::kinduction::KInduction::new(
-                Box::new(f2),
-            )));
-        }
-    }
-    engine_list.push(Box::new(roast_engines::ai::AiEngine::new()));
-    {
-        let chc = roast_engines::chc::ChcEngine::new();
-        if chc.available() {
-            engine_list.push(Box::new(chc));
-        }
-    }
-    {
-        let imc = roast_engines::imc::ImcEngine::new();
-        if imc.available() {
-            engine_list.push(Box::new(imc));
-        }
-    }
-    {
-        let cegar = roast_engines::cegar::CegarEngine::new();
-        if cegar.available() {
-            engine_list.push(Box::new(cegar));
-        }
-    }
-    let mut orch = Orchestrator::new(engine_list);
-    let v = orch.run(&prog, 16);
+    // Run the engine portfolio.
+    let engines = build_engine_portfolio();
+    let mut orchestrator = Orchestrator::new(engines);
+    let verdict = orchestrator.run(&prog, 16);
 
     if cli.trace {
-        for line in &orch.trace {
+        for line in &orchestrator.trace {
             eprintln!("{line}");
         }
-        for (oref, st) in orch.bb.statuses() {
-            eprintln!("  {oref} -> {st:?}");
+        for (obligation_ref, status) in orchestrator.bb.statuses() {
+            eprintln!("  {obligation_ref} -> {status:?}");
         }
     }
-    for r in &orch.bb.rejections {
+    for r in &orchestrator.bb.rejections {
         eprintln!("blackboard rejected: {r}");
     }
 
-    // Collect all violated obligations and their witnesses.
-    let violated: Vec<_> = orch
-        .bb
-        .statuses()
-        .filter_map(|(oref, st)| match st {
-            roast_core::artifact::Status::Violated { by, witness } => Some((
-                oref.clone(),
-                by,
-                witness.clone(),
-                roast_core::artifact::Tagged {
-                    seq: 0,
-                    producer: *by,
-                    direction: roast_core::artifact::Direction::Under,
-                    artifact: roast_core::artifact::Artifact::Status(
-                        oref.clone(),
-                        roast_core::artifact::Status::Violated {
-                            by: *by,
-                            witness: witness.clone(),
-                        },
-                    ),
-                },
-            )),
-            _ => None,
-        })
-        .collect();
-
-    let mut confirmed_witness: Option<(roast_core::artifact::ObligationRef, roast_ir::verdict::Witness)> = None;
-
-    let v = if cli.no_replay {
-        // Skip JVM replay — trust the engine's witness directly.
-        if let Some((oref, _by, witness, _tagged)) = violated.first() {
-            confirmed_witness = Some((oref.clone(), witness.clone()));
-        }
-        v
+    // Confirm violations via JVM replay.
+    let violations = collect_violations(&orchestrator);
+    let confirmed_witness = if cli.no_replay {
+        violations.first().map(|v| (v.obligation_ref.clone(), v.witness.clone()))
+    } else if !violations.is_empty() && verdict == verdict::Verdict::False {
+        confirm_violations(&violations, &classpath, &prog, cli.trace)
     } else {
-        // Nothing published by an engine is final on its own authority. A
-        // Violated status is provisional until `JvmReplay` confirms it against a
-        // real JVM; one that can't be confirmed is downgraded rather than
-        // reported, per the certify::JvmReplay module doc.
-        let replay = roast_core::certify::JvmReplay::new(classpath);
-        let mut any_confirmed = false;
-        let mut any_unconfirmed = false;
-        for (oref, _by, witness, tagged) in &violated {
-            match roast_core::certify::Certifier::certify(&replay, tagged, &prog) {
-                roast_core::certify::CertResult::Confirmed => {
-                    any_confirmed = true;
-                    if confirmed_witness.is_none() {
-                        confirmed_witness = Some((oref.clone(), witness.clone()));
-                    }
-                    if cli.trace {
-                        eprintln!("jvm-replay: confirmed {oref}");
-                    }
-                }
-                other => {
-                    any_unconfirmed = true;
-                    if cli.trace {
-                        eprintln!("jvm-replay: {other:?} for {oref}");
-                    }
-                }
-            }
-        }
+        None
+    };
 
-        if v == verdict::Verdict::False {
-            if any_confirmed {
-                verdict::Verdict::False
-            } else if any_unconfirmed {
-                eprintln!("downgrading FALSE to UNKNOWN: witness did not replay on a real JVM");
-                verdict::Verdict::Unknown
-            } else {
-                v
-            }
+    // Determine final verdict.
+    let verdict = if verdict == verdict::Verdict::False {
+        if cli.no_replay || confirmed_witness.is_some() {
+            verdict::Verdict::False
+        } else if !violations.is_empty() {
+            verdict::Verdict::Unknown
         } else {
-            v
+            verdict
         }
+    } else {
+        verdict
     };
 
     // A body we could not fully lift means an over-approximating TRUE is not
-    // ours to claim, whatever the engines concluded. Only bodies actually
-    // reachable from the entry point matter.
+    // ours to claim, whatever the engines concluded.
     let all_lifted = prog
         .reachable_from_entry()
         .iter()
         .all(|k| prog.body(k).map(|b| b.is_fully_lifted()).unwrap_or(false));
-    let v = if v == verdict::Verdict::True && !all_lifted {
+    let verdict = if verdict == verdict::Verdict::True && !all_lifted {
         eprintln!("downgrading TRUE to UNKNOWN: program contains unlifted regions");
         verdict::Verdict::Unknown
     } else {
-        v
+        verdict
     };
 
-    // Emit a witness file when the verdict is FALSE and --witness was given.
-    if v == verdict::Verdict::False {
+    // Emit witness file when the verdict is FALSE and --witness was given.
+    if verdict == verdict::Verdict::False {
         if let Some(witness_path) = &cli.witness {
-            if let Some((oref, witness)) = &confirmed_witness {
-                let body = prog.body(&oref.method);
-                let ob = body.map(|b| b.obligation(oref.id));
-                let input_files: Vec<String> = cli
-                    .inputs
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect();
-                let kind = ob.map(|o| o.kind).unwrap_or(roast_ir::ObligationKind::Assertion);
-                let spec = match kind {
-                    roast_ir::ObligationKind::Assertion => {
-                        "CHECK( init(Main.main()), LTL(G assert) )"
-                    }
-                    _ => {
-                        "CHECK( init(Main.main()), LTL(G ! call(org.sosy_lab.sv_benchmarks.Verifier.assume(false))) )"
-                    }
-                };
-                let yaml = roast_core::witness::emit_violation_yaml(
-                    witness,
-                    &roast_core::witness::TaskInfo {
-                        input_files: &input_files,
-                        specification: spec,
-                    },
-                    &roast_core::witness::ViolationInfo {
-                        kind,
-                        line: ob.and_then(|o| o.line),
-                    },
-                );
-                match std::fs::write(witness_path, &yaml) {
-                    Ok(()) => info!("witness written to {}", witness_path.display()),
-                    Err(e) => warn!("failed to write witness: {e}"),
-                }
+            if let Some((obligation_ref, witness)) = &confirmed_witness {
+                emit_witness_file(witness_path, obligation_ref, witness, &prog, &cli.inputs);
             }
         }
     }
 
     // Print witness assumptions when --show-witness is set.
     if cli.show_witness {
-        if let Some((oref, witness)) = &confirmed_witness {
-            let body = prog.body(&oref.method);
-            let ob = body.map(|b| b.obligation(oref.id));
-            eprintln!("--- witness for {}#{} ---", oref.method, oref.id.0);
-            if let Some(ob) = ob {
-                eprintln!("  obligation: {:?}{}", ob.kind,
-                    ob.line.map(|l| format!(" (line {})", l)).unwrap_or_default());
-            }
-            for (i, entry) in witness.entries.iter().enumerate() {
-                eprintln!("  {}(): {} = {}",
-                    entry.nondet_method,
-                    i,
-                    match &entry.value {
-                        roast_ir::verdict::NondetValue::Int(v) => format!("{v}"),
-                        roast_ir::verdict::NondetValue::Long(v) => format!("{v}L"),
-                        roast_ir::verdict::NondetValue::Bool(v) => format!("{v}"),
-                        roast_ir::verdict::NondetValue::Str(s) => format!("{s:?}"),
-                    });
-            }
-            eprintln!("---");
-        } else if !violated.is_empty() {
-            eprintln!("--- witness found but not confirmed by JVM replay ---");
-            if let Some((_, _, w, _)) = violated.first() {
-                for (i, entry) in w.entries.iter().enumerate() {
-                    eprintln!("  {}(): {} = {}",
-                        entry.nondet_method,
-                        i,
-                        match &entry.value {
-                            roast_ir::verdict::NondetValue::Int(v) => format!("{v}"),
-                            roast_ir::verdict::NondetValue::Long(v) => format!("{v}L"),
-                            roast_ir::verdict::NondetValue::Bool(v) => format!("{v}"),
-                            roast_ir::verdict::NondetValue::Str(s) => format!("{s:?}"),
-                        });
-                }
-                eprintln!("---");
-            }
+        if let Some((obligation_ref, witness)) = &confirmed_witness {
+            print_witness(obligation_ref, witness, &prog);
+        } else if !violations.is_empty() {
+            print_unconfirmed_witness(&violations[0].witness);
         }
     }
 
-    info!("final verdict: {v}");
-    println!("{v}");
+    info!("final verdict: {verdict}");
+    println!("{verdict}");
 }

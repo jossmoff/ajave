@@ -21,3 +21,4 @@ pub mod predicate;
 pub mod presolve;
 pub mod smt_bmc;
 pub mod smt_encode;
+pub mod smt_text;

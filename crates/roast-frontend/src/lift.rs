@@ -347,10 +347,10 @@ fn ty_of_field_desc(desc: &str) -> Ty {
 
 /// Is this operand a category-2 (long/double) value? Needed by `dup2`, whose
 /// behaviour depends on the width of what's already on the stack.
-fn is_wide_operand(op: &Operand, lf: &Lifter) -> bool {
+fn is_wide_operand(op: &Operand, lifter: &Lifter) -> bool {
     match op {
         Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
-        Operand::Var(v) => lf.vars[v.0 as usize].ty.is_wide(),
+        Operand::Var(v) => lifter.vars[v.0 as usize].ty.is_wide(),
         _ => false,
     }
 }
@@ -374,7 +374,7 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         desc: desc.to_string(),
     };
 
-    let mut lf = Lifter {
+    let mut lifter = Lifter {
         cf,
         vars: Vec::new(),
         local_map: HashMap::new(),
@@ -447,7 +447,7 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
 
         let mut stmts: Vec<Stmt> = Vec::new();
         let mut stack: Vec<Operand> = (0..entry_h)
-            .map(|d| Operand::Var(lf.stack_slot(d)))
+            .map(|d| Operand::Var(lifter.stack_slot(d)))
             .collect();
         let mut term: Option<Terminator> = None;
         let mut succs: Vec<(usize, u16)> = Vec::new();
@@ -455,14 +455,15 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         let mut ii = index[&start];
         while ii < insns.len() && insns[ii].off < end {
             let n = insns[ii].clone();
-            match lift_insn(
-                &mut lf,
-                &n,
-                &mut stack,
-                &mut stmts,
-                &block_of,
-                code.bytes.len(),
-            ) {
+            let mut context = InsnContext {
+                lifter: &mut lifter,
+                stack: &mut stack,
+                stmts: &mut stmts,
+                block_of: &block_of,
+                insn: &n,
+                code_len: code.bytes.len(),
+            };
+            match context.lift() {
                 Ok(Some((t, s))) => {
                     term = Some(t);
                     succs = s;
@@ -495,13 +496,13 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
                 | Terminator::Halt
                 | Terminator::Diverge(_)
         ) {
-            spill(&mut lf, &mut stmts, &stack);
+            spill(&mut lifter, &mut stmts, &stack);
         }
 
         // Exceptional successors: every handler covering any instruction in
         // this block.
         let mut exceptional = Vec::new();
-        for h in &lf.handlers.clone() {
+        for h in &lifter.handlers.clone() {
             let covers = (h.start as usize) < end && start < (h.end as usize);
             if !covers {
                 continue;
@@ -552,8 +553,8 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         key,
         entry: BlockId(0),
         blocks,
-        vars: lf.vars,
-        obligations: lf.obligations,
+        vars: lifter.vars,
+        obligations: lifter.obligations,
     })
 }
 
@@ -567,771 +568,936 @@ fn diverging_block(id: BlockId, off: u16, reason: String) -> Block {
     }
 }
 
-fn spill(lf: &mut Lifter, stmts: &mut Vec<Stmt>, stack: &[Operand]) {
+fn spill(lifter: &mut Lifter, stmts: &mut Vec<Stmt>, stack: &[Operand]) {
     let mut temps: Vec<(u16, Operand)> = Vec::new();
     for (d, op) in stack.iter().enumerate() {
-        let canonical = lf.stack_slot(d as u16);
+        let canonical = lifter.stack_slot(d as u16);
         if let Operand::Var(v) = op {
             if *v == canonical {
                 continue;
             }
         }
-        let t = lf.temp(Ty::Int);
-        lf.copy_class(t, op);
+        let t = lifter.temp(Ty::Int);
+        lifter.copy_class(t, op);
         stmts.push(Stmt::Assign(t, Rvalue::Use(op.clone())));
         temps.push((d as u16, Operand::Var(t)));
     }
     for (d, t) in temps {
-        let canonical = lf.stack_slot(d);
-        lf.copy_class(canonical, &t);
+        let canonical = lifter.stack_slot(d);
+        lifter.copy_class(canonical, &t);
         stmts.push(Stmt::Assign(canonical, Rvalue::Use(t)));
     }
 }
 
 type LiftOut = Option<(Terminator, Vec<(usize, u16)>)>;
 
-fn lift_insn(
-    lf: &mut Lifter,
-    n: &Insn,
-    stack: &mut Vec<Operand>,
-    stmts: &mut Vec<Stmt>,
-    block_of: &HashMap<usize, BlockId>,
+// ---------------------------------------------------------------------------
+// Instruction lifting context — replaces the former macro-heavy `lift_insn`.
+// ---------------------------------------------------------------------------
+
+struct InsnContext<'a, 'b> {
+    lifter: &'a mut Lifter<'b>,
+    stack: &'a mut Vec<Operand>,
+    stmts: &'a mut Vec<Stmt>,
+    block_of: &'a HashMap<usize, BlockId>,
+    insn: &'a Insn,
     code_len: usize,
-) -> Result<LiftOut, String> {
-    let op = n.op;
-    let off = n.off as u16;
+}
 
-    macro_rules! pop {
-        () => {
-            stack.pop().ok_or_else(|| "stack underflow".to_string())?
+impl<'a, 'b> InsnContext<'a, 'b> {
+    fn pop(&mut self) -> Result<Operand, String> {
+        self.stack.pop().ok_or_else(|| "stack underflow".to_string())
+    }
+
+    fn assign(&mut self, ty: Ty, rvalue: Rvalue) -> Operand {
+        let temp = self.lifter.temp(ty);
+        self.stmts.push(Stmt::Assign(temp, rvalue));
+        Operand::Var(temp)
+    }
+
+    fn nullcheck(&mut self, obj: &Operand) {
+        let guard = self.assign(
+            Ty::Int,
+            Rvalue::Bin(BinOp::Ne, obj.clone(), Operand::Const(Const::Null)),
+        );
+        let id = self.lifter.obligation(ObligationKind::NullDeref, guard, self.insn.off as u16);
+        self.stmts.push(Stmt::Check(id));
+    }
+
+    fn boundscheck(&mut self, arr: &Operand, idx: &Operand) {
+        let len = self.assign(Ty::Int, Rvalue::ArrayLength(arr.clone()));
+        let lo = self.assign(
+            Ty::Int,
+            Rvalue::Bin(BinOp::Ge, idx.clone(), Operand::int(0)),
+        );
+        let hi = self.assign(Ty::Int, Rvalue::Bin(BinOp::Lt, idx.clone(), len));
+        let in_bounds = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
+        let id = self.lifter.obligation(ObligationKind::ArrayBounds, in_bounds, self.insn.off as u16);
+        self.stmts.push(Stmt::Check(id));
+    }
+
+    fn branch(&mut self, cond: Operand) -> Result<LiftOut, String> {
+        let then_block = *self.block_of.get(&self.insn.targets[0]).ok_or("bad branch target")?;
+        let next = self.insn.off + self.insn.len;
+        if next >= self.code_len {
+            return Err("conditional branch at end of code".into());
+        }
+        let else_block = *self
+            .block_of
+            .get(&next)
+            .ok_or_else(|| format!("no block at fallthrough {next}"))?;
+        let height = self.stack.len() as u16;
+        Ok(Some((
+            Terminator::Branch {
+                cond,
+                then_: then_block,
+                else_: else_block,
+            },
+            vec![(then_block.0 as usize, height), (else_block.0 as usize, height)],
+        )))
+    }
+
+    // -----------------------------------------------------------------------
+    // Top-level dispatch
+    // -----------------------------------------------------------------------
+
+    fn lift(&mut self) -> Result<LiftOut, String> {
+        match self.insn.op {
+            0x00 => Ok(None),
+            0x01..=0x14 => self.lift_const_load(),
+            0x15..=0x2d => self.lift_local_load(),
+            0x2e..=0x35 => self.lift_array_load(),
+            0x36..=0x4e => self.lift_store(),
+            0x4f..=0x56 => self.lift_array_store(),
+            0x57..=0x5f => self.lift_stack_shuffle(),
+            0x60..=0x98 => self.lift_arithmetic(),
+            0x99..=0xab | 0xc6..=0xc8 => self.lift_branch_or_jump(),
+            0xac..=0xb1 => self.lift_return(),
+            0xb2..=0xb5 => self.lift_field(),
+            0xb6..=0xba => self.lift_invoke(),
+            0xbb..=0xc5 => self.lift_allocation(),
+            other => Err(format!("unsupported opcode 0x{other:02x} at {}", self.insn.off)),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants and constant-pool loads (0x01..=0x14)
+    // -----------------------------------------------------------------------
+
+    fn lift_const_load(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            0x01 => self.stack.push(Operand::Const(Const::Null)),
+            0x02..=0x08 => self.stack.push(Operand::int(op as i32 - 3)),
+            0x09 | 0x0a => self.stack.push(Operand::Const(Const::Long(op as i64 - 9))),
+            0x0b..=0x0d => self.stack.push(Operand::Const(Const::Float(op as f32 - 11.0))),
+            0x0e | 0x0f => self.stack.push(Operand::Const(Const::Double(op as f64 - 14.0))),
+            0x10 | 0x11 => self.stack.push(Operand::int(self.insn.imm)),
+            0x12..=0x14 => match self.lifter.cf.constant(self.insn.imm as u16) {
+                Some(Cp::Int(v)) => self.stack.push(Operand::Const(Const::Int(*v))),
+                Some(Cp::Long(v)) => self.stack.push(Operand::Const(Const::Long(*v))),
+                Some(Cp::Float(v)) => self.stack.push(Operand::Const(Const::Float(*v))),
+                Some(Cp::Double(v)) => self.stack.push(Operand::Const(Const::Double(*v))),
+                Some(Cp::Str(idx)) => {
+                    let s = match self.lifter.cf.cp.get(*idx as usize) {
+                        Some(Cp::Utf8(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    self.stack.push(Operand::Const(Const::Str(s)));
+                }
+                Some(Cp::Class(_)) => self.stack.push(Operand::Const(Const::Class("<class>".into()))),
+                _ => return Err(format!("unsupported ldc at {}", self.insn.off)),
+            },
+            _ => unreachable!(),
+        }
+        Ok(None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Local variable loads (0x15..=0x2d)
+    // -----------------------------------------------------------------------
+
+    fn lift_local_load(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            0x15..=0x19 => {
+                let ty = [Ty::Int, Ty::Long, Ty::Float, Ty::Double, Ty::Ref][(op - 0x15) as usize];
+                let v = self.lifter.local(self.insn.imm as u16, ty);
+                self.stack.push(Operand::Var(v));
+            }
+            0x1a..=0x2d => {
+                let (base, ty) = match op {
+                    0x1a..=0x1d => (0x1a, Ty::Int),
+                    0x1e..=0x21 => (0x1e, Ty::Long),
+                    0x22..=0x25 => (0x22, Ty::Float),
+                    0x26..=0x29 => (0x26, Ty::Double),
+                    _ => (0x2a, Ty::Ref),
+                };
+                let v = self.lifter.local((op - base) as u16, ty);
+                self.stack.push(Operand::Var(v));
+            }
+            _ => unreachable!(),
+        }
+        Ok(None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Array loads (0x2e..=0x35)
+    // -----------------------------------------------------------------------
+
+    fn lift_array_load(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        let idx = self.pop()?;
+        let arr = self.pop()?;
+        self.nullcheck(&arr);
+        self.boundscheck(&arr, &idx);
+        let ty = match op {
+            0x2f => Ty::Long,
+            0x30 => Ty::Float,
+            0x31 => Ty::Double,
+            0x32 => Ty::Ref,
+            _ => Ty::Int,
         };
-    }
-    macro_rules! assign {
-        ($ty:expr, $rv:expr) => {{
-            let t = lf.temp($ty);
-            stmts.push(Stmt::Assign(t, $rv));
-            Operand::Var(t)
-        }};
-    }
-    macro_rules! nullcheck {
-        ($obj:expr) => {{
-            let g = assign!(
-                Ty::Int,
-                Rvalue::Bin(BinOp::Ne, $obj.clone(), Operand::Const(Const::Null))
-            );
-            let id = lf.obligation(ObligationKind::NullDeref, g, off);
-            stmts.push(Stmt::Check(id));
-        }};
-    }
-    macro_rules! boundscheck {
-        ($arr:expr, $idx:expr) => {{
-            let len = assign!(Ty::Int, Rvalue::ArrayLength($arr.clone()));
-            let lo = assign!(
-                Ty::Int,
-                Rvalue::Bin(BinOp::Ge, $idx.clone(), Operand::int(0))
-            );
-            let hi = assign!(Ty::Int, Rvalue::Bin(BinOp::Lt, $idx.clone(), len));
-            let inb = assign!(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
-            let id = lf.obligation(ObligationKind::ArrayBounds, inb, off);
-            stmts.push(Stmt::Check(id));
-        }};
-    }
-    macro_rules! branch {
-        ($cond:expr) => {{
-            let then_ = *block_of.get(&n.targets[0]).ok_or("bad branch target")?;
-            let next = n.off + n.len;
-            if next >= code_len {
-                return Err("conditional branch at end of code".into());
-            }
-            let else_ = *block_of
-                .get(&next)
-                .ok_or_else(|| format!("no block at fallthrough {next}"))?;
-            let h = stack.len() as u16;
-            return Ok(Some((
-                Terminator::Branch {
-                    cond: $cond,
-                    then_,
-                    else_,
-                },
-                vec![(then_.0 as usize, h), (else_.0 as usize, h)],
-            )));
-        }};
+        let result = self.assign(ty, Rvalue::ArrayLoad { arr, idx });
+        self.stack.push(result);
+        Ok(None)
     }
 
-    match op {
-        0x00 => {}
-        0x01 => stack.push(Operand::Const(Const::Null)),
-        0x02..=0x08 => stack.push(Operand::int(op as i32 - 3)),
-        0x09 | 0x0a => stack.push(Operand::Const(Const::Long(op as i64 - 9))),
-        0x0b..=0x0d => stack.push(Operand::Const(Const::Float(op as f32 - 11.0))),
-        0x0e | 0x0f => stack.push(Operand::Const(Const::Double(op as f64 - 14.0))),
-        0x10 | 0x11 => stack.push(Operand::int(n.imm)),
-        0x12..=0x14 => match lf.cf.constant(n.imm as u16) {
-            Some(Cp::Int(v)) => stack.push(Operand::Const(Const::Int(*v))),
-            Some(Cp::Long(v)) => stack.push(Operand::Const(Const::Long(*v))),
-            Some(Cp::Float(v)) => stack.push(Operand::Const(Const::Float(*v))),
-            Some(Cp::Double(v)) => stack.push(Operand::Const(Const::Double(*v))),
-            Some(Cp::Str(idx)) => {
-                let s = match lf.cf.cp.get(*idx as usize) {
-                    Some(Cp::Utf8(s)) => s.clone(),
-                    _ => String::new(),
+    // -----------------------------------------------------------------------
+    // Stores (0x36..=0x4e)
+    // -----------------------------------------------------------------------
+
+    fn lift_store(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            0x36..=0x3a => {
+                let ty = [Ty::Int, Ty::Long, Ty::Float, Ty::Double, Ty::Ref][(op - 0x36) as usize];
+                let val = self.pop()?;
+                let v = self.lifter.local(self.insn.imm as u16, ty);
+                self.lifter.copy_class(v, &val);
+                self.stmts.push(Stmt::Assign(v, Rvalue::Use(val)));
+            }
+            0x3b..=0x4e => {
+                let (base, ty) = match op {
+                    0x3b..=0x3e => (0x3b, Ty::Int),
+                    0x3f..=0x42 => (0x3f, Ty::Long),
+                    0x43..=0x46 => (0x43, Ty::Float),
+                    0x47..=0x4a => (0x47, Ty::Double),
+                    _ => (0x4b, Ty::Ref),
                 };
-                stack.push(Operand::Const(Const::Str(s)));
+                let val = self.pop()?;
+                let v = self.lifter.local((op - base) as u16, ty);
+                self.lifter.copy_class(v, &val);
+                self.stmts.push(Stmt::Assign(v, Rvalue::Use(val)));
             }
-            Some(Cp::Class(_)) => stack.push(Operand::Const(Const::Class("<class>".into()))),
-            _ => return Err(format!("unsupported ldc at {off}")),
-        },
+            _ => unreachable!(),
+        }
+        Ok(None)
+    }
 
-        // Loads.
-        0x15..=0x19 => {
-            let ty = [Ty::Int, Ty::Long, Ty::Float, Ty::Double, Ty::Ref][(op - 0x15) as usize];
-            let v = lf.local(n.imm as u16, ty);
-            stack.push(Operand::Var(v));
-        }
-        0x1a..=0x2d => {
-            let (base, ty) = match op {
-                0x1a..=0x1d => (0x1a, Ty::Int),
-                0x1e..=0x21 => (0x1e, Ty::Long),
-                0x22..=0x25 => (0x22, Ty::Float),
-                0x26..=0x29 => (0x26, Ty::Double),
-                _ => (0x2a, Ty::Ref),
-            };
-            let v = lf.local((op - base) as u16, ty);
-            stack.push(Operand::Var(v));
-        }
+    // -----------------------------------------------------------------------
+    // Array stores (0x4f..=0x56)
+    // -----------------------------------------------------------------------
 
-        // Array loads.
-        0x2e..=0x35 => {
-            let idx = pop!();
-            let arr = pop!();
-            nullcheck!(arr);
-            boundscheck!(arr, idx);
-            let ty = match op {
-                0x2f => Ty::Long,
-                0x30 => Ty::Float,
-                0x31 => Ty::Double,
-                0x32 => Ty::Ref,
-                _ => Ty::Int,
-            };
-            stack.push(assign!(ty, Rvalue::ArrayLoad { arr, idx }));
-        }
+    fn lift_array_store(&mut self) -> Result<LiftOut, String> {
+        let val = self.pop()?;
+        let idx = self.pop()?;
+        let arr = self.pop()?;
+        self.nullcheck(&arr);
+        self.boundscheck(&arr, &idx);
+        self.stmts.push(Stmt::ArrayStore { arr, idx, val });
+        Ok(None)
+    }
 
-        // Stores.
-        0x36..=0x3a => {
-            let ty = [Ty::Int, Ty::Long, Ty::Float, Ty::Double, Ty::Ref][(op - 0x36) as usize];
-            let val = pop!();
-            let v = lf.local(n.imm as u16, ty);
-            lf.copy_class(v, &val);
-            stmts.push(Stmt::Assign(v, Rvalue::Use(val)));
-        }
-        0x3b..=0x4e => {
-            let (base, ty) = match op {
-                0x3b..=0x3e => (0x3b, Ty::Int),
-                0x3f..=0x42 => (0x3f, Ty::Long),
-                0x43..=0x46 => (0x43, Ty::Float),
-                0x47..=0x4a => (0x47, Ty::Double),
-                _ => (0x4b, Ty::Ref),
-            };
-            let val = pop!();
-            let v = lf.local((op - base) as u16, ty);
-            lf.copy_class(v, &val);
-            stmts.push(Stmt::Assign(v, Rvalue::Use(val)));
-        }
+    // -----------------------------------------------------------------------
+    // Stack shuffling (0x57..=0x5f)
+    // -----------------------------------------------------------------------
 
-        // Array stores.
-        0x4f..=0x56 => {
-            let val = pop!();
-            let idx = pop!();
-            let arr = pop!();
-            nullcheck!(arr);
-            boundscheck!(arr, idx);
-            stmts.push(Stmt::ArrayStore { arr, idx, val });
-        }
-
-        // Stack shuffling.
-        0x57 | 0x58 => {
-            pop!();
-        }
-        0x59 => {
-            let t = stack.last().cloned().ok_or("dup on empty stack")?;
-            stack.push(t);
-        }
-        0x5a => {
-            let a = pop!();
-            let b = pop!();
-            stack.push(a.clone());
-            stack.push(b);
-            stack.push(a);
-        }
-        0x5b => {
-            let a = pop!();
-            let b = pop!();
-            let c = pop!();
-            stack.push(a.clone());
-            stack.push(c);
-            stack.push(b);
-            stack.push(a);
-        }
-        // dup2 depends on the width of the top value. With one entry per
-        // value in our abstract stack, a category-2 top (long/double)
-        // degrades to a plain dup; a category-1 top duplicates the *pair*
-        // beneath it. Getting this wrong silently mislifts every `dup2` over
-        // two ints (e.g. `arr[i]++`-shaped bytecode) without diverging --
-        // exactly the class of bug the "loud failure over silent wrong"
-        // design is meant to catch, and this one slipped through initially.
-        0x5c => {
-            let top = stack.last().ok_or("dup2 on empty stack")?.clone();
-            if is_wide_operand(&top, lf) {
-                stack.push(top);
-            } else {
-                let b = pop!(); // value1 (top)
-                let a = pop!(); // value2
-                stack.push(a.clone());
-                stack.push(b.clone());
-                stack.push(a);
-                stack.push(b);
+    fn lift_stack_shuffle(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            0x57 | 0x58 => {
+                self.pop()?;
             }
+            0x59 => {
+                let t = self.stack.last().cloned().ok_or("dup on empty stack")?;
+                self.stack.push(t);
+            }
+            0x5a => {
+                let a = self.pop()?;
+                let b = self.pop()?;
+                self.stack.push(a.clone());
+                self.stack.push(b);
+                self.stack.push(a);
+            }
+            0x5b => {
+                let a = self.pop()?;
+                let b = self.pop()?;
+                let c = self.pop()?;
+                self.stack.push(a.clone());
+                self.stack.push(c);
+                self.stack.push(b);
+                self.stack.push(a);
+            }
+            // dup2 depends on the width of the top value. With one entry per
+            // value in our abstract stack, a category-2 top (long/double)
+            // degrades to a plain dup; a category-1 top duplicates the *pair*
+            // beneath it. Getting this wrong silently mislifts every `dup2` over
+            // two ints (e.g. `arr[i]++`-shaped bytecode) without diverging --
+            // exactly the class of bug the "loud failure over silent wrong"
+            // design is meant to catch, and this one slipped through initially.
+            0x5c => {
+                let top = self.stack.last().ok_or("dup2 on empty stack")?.clone();
+                if is_wide_operand(&top, self.lifter) {
+                    self.stack.push(top);
+                } else {
+                    let b = self.pop()?; // value1 (top)
+                    let a = self.pop()?; // value2
+                    self.stack.push(a.clone());
+                    self.stack.push(b.clone());
+                    self.stack.push(a);
+                    self.stack.push(b);
+                }
+            }
+            0x5f => {
+                let a = self.pop()?;
+                let b = self.pop()?;
+                self.stack.push(a);
+                self.stack.push(b);
+            }
+            _ => return Err(format!("unsupported stack op 0x{op:02x}")),
         }
-        0x5f => {
-            let a = pop!();
-            let b = pop!();
-            stack.push(a);
-            stack.push(b);
-        }
+        Ok(None)
+    }
 
-        // Add / sub / mul / neg across the four numeric types.
-        0x60..=0x6b | 0x74..=0x77 => {
-            let ty = arith_ty(op);
-            if (0x74..=0x77).contains(&op) {
-                let a = pop!();
-                stack.push(assign!(ty, Rvalue::Neg(a)));
-            } else {
-                let b = pop!();
-                let a = pop!();
-                let bop = match op {
-                    0x60..=0x63 => BinOp::Add,
-                    0x64..=0x67 => BinOp::Sub,
-                    _ => BinOp::Mul,
+    // -----------------------------------------------------------------------
+    // Arithmetic, conversions, comparisons (0x60..=0x98)
+    // -----------------------------------------------------------------------
+
+    fn lift_arithmetic(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        let off = self.insn.off as u16;
+        match op {
+            // Add / sub / mul / neg across the four numeric types.
+            0x60..=0x6b | 0x74..=0x77 => {
+                let ty = arith_ty(op);
+                if (0x74..=0x77).contains(&op) {
+                    let a = self.pop()?;
+                    let result = self.assign(ty, Rvalue::Neg(a));
+                    self.stack.push(result);
+                } else {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let binop = match op {
+                        0x60..=0x63 => BinOp::Add,
+                        0x64..=0x67 => BinOp::Sub,
+                        _ => BinOp::Mul,
+                    };
+                    let result = self.assign(ty, Rvalue::Bin(binop, a, b));
+                    self.stack.push(result);
+                }
+            }
+            // Integral division and remainder carry the implicit obligation.
+            0x6c | 0x6d | 0x70 | 0x71 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ty = if matches!(op, 0x6d | 0x71) {
+                    Ty::Long
+                } else {
+                    Ty::Int
                 };
-                stack.push(assign!(ty, Rvalue::Bin(bop, a, b)));
+                let zero = if ty == Ty::Long {
+                    Operand::Const(Const::Long(0))
+                } else {
+                    Operand::int(0)
+                };
+                let guard = self.assign(Ty::Int, Rvalue::Bin(BinOp::Ne, b.clone(), zero));
+                let id = self.lifter.obligation(ObligationKind::DivByZero, guard, off);
+                self.stmts.push(Stmt::Check(id));
+                let binop = if matches!(op, 0x6c | 0x6d) {
+                    BinOp::Div
+                } else {
+                    BinOp::Rem
+                };
+                let result = self.assign(ty, Rvalue::Bin(binop, a, b));
+                self.stack.push(result);
             }
-        }
-        // Integral division and remainder carry the implicit obligation.
-        0x6c | 0x6d | 0x70 | 0x71 => {
-            let b = pop!();
-            let a = pop!();
-            let ty = if matches!(op, 0x6d | 0x71) {
-                Ty::Long
-            } else {
-                Ty::Int
-            };
-            let zero = if ty == Ty::Long {
-                Operand::Const(Const::Long(0))
-            } else {
-                Operand::int(0)
-            };
-            let guard = assign!(Ty::Int, Rvalue::Bin(BinOp::Ne, b.clone(), zero));
-            let id = lf.obligation(ObligationKind::DivByZero, guard, off);
-            stmts.push(Stmt::Check(id));
-            let bop = if matches!(op, 0x6c | 0x6d) {
-                BinOp::Div
-            } else {
-                BinOp::Rem
-            };
-            stack.push(assign!(ty, Rvalue::Bin(bop, a, b)));
-        }
-        // Floating division and remainder cannot throw.
-        0x6e | 0x6f | 0x72 | 0x73 => {
-            let b = pop!();
-            let a = pop!();
-            let ty = arith_ty(op);
-            let bop = if matches!(op, 0x6e | 0x6f) {
-                BinOp::Div
-            } else {
-                BinOp::Rem
-            };
-            stack.push(assign!(ty, Rvalue::Bin(bop, a, b)));
-        }
-        // Shifts and bitwise ops.
-        0x78..=0x83 => {
-            let b = pop!();
-            let a = pop!();
-            let ty = if op % 2 == 1 { Ty::Long } else { Ty::Int };
-            let bop = match op {
-                0x78 | 0x79 => BinOp::Shl,
-                0x7a | 0x7b => BinOp::Shr,
-                0x7c | 0x7d => BinOp::UShr,
-                0x7e | 0x7f => BinOp::And,
-                0x80 | 0x81 => BinOp::Or,
-                _ => BinOp::Xor,
-            };
-            stack.push(assign!(ty, Rvalue::Bin(bop, a, b)));
-        }
-        0x84 => {
-            let slot = ((n.imm >> 16) & 0xffff) as u16;
-            let delta = if n.wide {
-                (n.imm & 0xffff) as u16 as i16 as i32
-            } else {
-                (n.imm as i16) as i32
-            };
-            let v = lf.local(slot, Ty::Int);
-            let sum = assign!(
-                Ty::Int,
-                Rvalue::Bin(BinOp::Add, Operand::Var(v), Operand::int(delta))
-            );
-            stmts.push(Stmt::Assign(v, Rvalue::Use(sum)));
-        }
-        // Primitive conversions.
-        0x85..=0x93 => {
-            let a = pop!();
-            let ty = match op {
-                0x85 | 0x8c | 0x8f => Ty::Long,
-                0x86 | 0x89 | 0x90 => Ty::Float,
-                0x87 | 0x8a | 0x8d => Ty::Double,
-                _ => Ty::Int,
-            };
-            stack.push(assign!(ty, Rvalue::Cast(ty, a)));
-        }
-        // lcmp / fcmp / dcmp.
-        0x94..=0x98 => {
-            let b = pop!();
-            let a = pop!();
-            stack.push(assign!(Ty::Int, Rvalue::Cmp(a, b)));
-        }
-
-        // Branches.
-        0x99..=0x9e => {
-            let a = pop!();
-            let bop = [
-                BinOp::Eq,
-                BinOp::Ne,
-                BinOp::Lt,
-                BinOp::Ge,
-                BinOp::Gt,
-                BinOp::Le,
-            ][(op - 0x99) as usize];
-            let cond = assign!(Ty::Int, Rvalue::Bin(bop, a, Operand::int(0)));
-            spill(lf, stmts, stack);
-            branch!(cond);
-        }
-        0x9f..=0xa4 => {
-            let b = pop!();
-            let a = pop!();
-            let bop = [
-                BinOp::Eq,
-                BinOp::Ne,
-                BinOp::Lt,
-                BinOp::Ge,
-                BinOp::Gt,
-                BinOp::Le,
-            ][(op - 0x9f) as usize];
-            let cond = assign!(Ty::Int, Rvalue::Bin(bop, a, b));
-            spill(lf, stmts, stack);
-            branch!(cond);
-        }
-        0xa5 | 0xa6 => {
-            let b = pop!();
-            let a = pop!();
-            let bop = if op == 0xa5 { BinOp::Eq } else { BinOp::Ne };
-            let cond = assign!(Ty::Int, Rvalue::Bin(bop, a, b));
-            spill(lf, stmts, stack);
-            branch!(cond);
-        }
-        0xc6 | 0xc7 => {
-            let a = pop!();
-            let bop = if op == 0xc6 { BinOp::Eq } else { BinOp::Ne };
-            let cond = assign!(Ty::Int, Rvalue::Bin(bop, a, Operand::Const(Const::Null)));
-            spill(lf, stmts, stack);
-            branch!(cond);
-        }
-        0xa7 | 0xc8 => {
-            let t = *block_of.get(&n.targets[0]).ok_or("bad goto target")?;
-            spill(lf, stmts, stack);
-            return Ok(Some((
-                Terminator::Goto(t),
-                vec![(t.0 as usize, stack.len() as u16)],
-            )));
-        }
-        // Switches.
-        0xaa | 0xab => {
-            let value = pop!();
-            let default = *block_of.get(&n.targets[0]).ok_or("bad switch default")?;
-            let mut cases = Vec::new();
-            let h = stack.len() as u16;
-            let mut succs = vec![(default.0 as usize, h)];
-            for (k, t) in n.keys.iter().zip(n.targets.iter().skip(1)) {
-                let b = *block_of.get(t).ok_or("bad switch case")?;
-                cases.push((*k, b));
-                succs.push((b.0 as usize, h));
+            // Floating division and remainder cannot throw.
+            0x6e | 0x6f | 0x72 | 0x73 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ty = arith_ty(op);
+                let binop = if matches!(op, 0x6e | 0x6f) {
+                    BinOp::Div
+                } else {
+                    BinOp::Rem
+                };
+                let result = self.assign(ty, Rvalue::Bin(binop, a, b));
+                self.stack.push(result);
             }
-            spill(lf, stmts, stack);
-            return Ok(Some((
-                Terminator::Switch {
-                    value,
-                    cases,
-                    default,
-                },
-                succs,
-            )));
+            // Shifts and bitwise ops.
+            0x78..=0x83 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ty = if op % 2 == 1 { Ty::Long } else { Ty::Int };
+                let binop = match op {
+                    0x78 | 0x79 => BinOp::Shl,
+                    0x7a | 0x7b => BinOp::Shr,
+                    0x7c | 0x7d => BinOp::UShr,
+                    0x7e | 0x7f => BinOp::And,
+                    0x80 | 0x81 => BinOp::Or,
+                    _ => BinOp::Xor,
+                };
+                let result = self.assign(ty, Rvalue::Bin(binop, a, b));
+                self.stack.push(result);
+            }
+            // iinc
+            0x84 => {
+                let slot = ((self.insn.imm >> 16) & 0xffff) as u16;
+                let delta = if self.insn.wide {
+                    (self.insn.imm & 0xffff) as u16 as i16 as i32
+                } else {
+                    (self.insn.imm as i16) as i32
+                };
+                let v = self.lifter.local(slot, Ty::Int);
+                let sum = self.assign(
+                    Ty::Int,
+                    Rvalue::Bin(BinOp::Add, Operand::Var(v), Operand::int(delta)),
+                );
+                self.stmts.push(Stmt::Assign(v, Rvalue::Use(sum)));
+            }
+            // Primitive conversions.
+            0x85..=0x93 => {
+                let a = self.pop()?;
+                let ty = match op {
+                    0x85 | 0x8c | 0x8f => Ty::Long,
+                    0x86 | 0x89 | 0x90 => Ty::Float,
+                    0x87 | 0x8a | 0x8d => Ty::Double,
+                    _ => Ty::Int,
+                };
+                let result = self.assign(ty, Rvalue::Cast(ty, a));
+                self.stack.push(result);
+            }
+            // lcmp / fcmp / dcmp.
+            0x94..=0x98 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = self.assign(Ty::Int, Rvalue::Cmp(a, b));
+                self.stack.push(result);
+            }
+            _ => unreachable!(),
         }
+        Ok(None)
+    }
 
-        // Returns.
-        0xb1 => return Ok(Some((Terminator::Return(None), vec![]))),
-        0xac..=0xb0 => {
-            let v = pop!();
-            return Ok(Some((Terminator::Return(Some(v)), vec![])));
+    // -----------------------------------------------------------------------
+    // Branches, gotos, switches (0x99..=0xab, 0xc6..=0xc8)
+    // -----------------------------------------------------------------------
+
+    fn lift_branch_or_jump(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            0x99..=0x9e => {
+                let a = self.pop()?;
+                let binop = [
+                    BinOp::Eq,
+                    BinOp::Ne,
+                    BinOp::Lt,
+                    BinOp::Ge,
+                    BinOp::Gt,
+                    BinOp::Le,
+                ][(op - 0x99) as usize];
+                let cond = self.assign(Ty::Int, Rvalue::Bin(binop, a, Operand::int(0)));
+                spill(self.lifter, self.stmts, self.stack);
+                self.branch(cond)
+            }
+            0x9f..=0xa4 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let binop = [
+                    BinOp::Eq,
+                    BinOp::Ne,
+                    BinOp::Lt,
+                    BinOp::Ge,
+                    BinOp::Gt,
+                    BinOp::Le,
+                ][(op - 0x9f) as usize];
+                let cond = self.assign(Ty::Int, Rvalue::Bin(binop, a, b));
+                spill(self.lifter, self.stmts, self.stack);
+                self.branch(cond)
+            }
+            0xa5 | 0xa6 => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let binop = if op == 0xa5 { BinOp::Eq } else { BinOp::Ne };
+                let cond = self.assign(Ty::Int, Rvalue::Bin(binop, a, b));
+                spill(self.lifter, self.stmts, self.stack);
+                self.branch(cond)
+            }
+            0xc6 | 0xc7 => {
+                let a = self.pop()?;
+                let binop = if op == 0xc6 { BinOp::Eq } else { BinOp::Ne };
+                let cond = self.assign(Ty::Int, Rvalue::Bin(binop, a, Operand::Const(Const::Null)));
+                spill(self.lifter, self.stmts, self.stack);
+                self.branch(cond)
+            }
+            0xa7 | 0xc8 => {
+                let target = *self.block_of.get(&self.insn.targets[0]).ok_or("bad goto target")?;
+                spill(self.lifter, self.stmts, self.stack);
+                Ok(Some((
+                    Terminator::Goto(target),
+                    vec![(target.0 as usize, self.stack.len() as u16)],
+                )))
+            }
+            // Switches.
+            0xaa | 0xab => {
+                let value = self.pop()?;
+                let default = *self.block_of.get(&self.insn.targets[0]).ok_or("bad switch default")?;
+                let mut cases = Vec::new();
+                let height = self.stack.len() as u16;
+                let mut succs = vec![(default.0 as usize, height)];
+                for (k, t) in self.insn.keys.iter().zip(self.insn.targets.iter().skip(1)) {
+                    let b = *self.block_of.get(t).ok_or("bad switch case")?;
+                    cases.push((*k, b));
+                    succs.push((b.0 as usize, height));
+                }
+                spill(self.lifter, self.stmts, self.stack);
+                Ok(Some((
+                    Terminator::Switch {
+                        value,
+                        cases,
+                        default,
+                    },
+                    succs,
+                )))
+            }
+            _ => unreachable!(),
         }
+    }
 
-        // Static fields.
-        0xb2 => {
-            let r = lf.cf.member_ref(n.imm as u16)?;
-            if r.name == "$assertionsDisabled" {
-                // javac guards every `assert` with this synthetic flag.
-                // SV-COMP runs with -ea, so it is pinned to false deliberately.
-                stack.push(Operand::int(0));
-            } else {
+    // -----------------------------------------------------------------------
+    // Returns (0xac..=0xb1)
+    // -----------------------------------------------------------------------
+
+    fn lift_return(&mut self) -> Result<LiftOut, String> {
+        if self.insn.op == 0xb1 {
+            Ok(Some((Terminator::Return(None), vec![])))
+        } else {
+            let v = self.pop()?;
+            Ok(Some((Terminator::Return(Some(v)), vec![])))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Static and instance fields (0xb2..=0xb5)
+    // -----------------------------------------------------------------------
+
+    fn lift_field(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        match op {
+            // getstatic
+            0xb2 => {
+                let r = self.lifter.cf.member_ref(self.insn.imm as u16)?;
+                if r.name == "$assertionsDisabled" {
+                    // javac guards every `assert` with this synthetic flag.
+                    // SV-COMP runs with -ea, so it is pinned to false deliberately.
+                    self.stack.push(Operand::int(0));
+                } else {
+                    let ty = ty_of_field_desc(&r.desc);
+                    let key = FieldKey {
+                        class: r.owner,
+                        name: r.name,
+                        desc: r.desc,
+                    };
+                    let result = self.assign(ty, Rvalue::GetStatic(key));
+                    self.stack.push(result);
+                }
+            }
+            // putstatic
+            0xb3 => {
+                let r = self.lifter.cf.member_ref(self.insn.imm as u16)?;
+                let v = self.pop()?;
+                self.stmts.push(Stmt::PutStatic(
+                    FieldKey {
+                        class: r.owner,
+                        name: r.name,
+                        desc: r.desc,
+                    },
+                    v,
+                ));
+            }
+            // getfield
+            0xb4 => {
+                let r = self.lifter.cf.member_ref(self.insn.imm as u16)?;
+                let obj = self.pop()?;
+                self.nullcheck(&obj);
                 let ty = ty_of_field_desc(&r.desc);
-                let k = FieldKey {
+                let field = FieldKey {
                     class: r.owner,
                     name: r.name,
                     desc: r.desc,
                 };
-                stack.push(assign!(ty, Rvalue::GetStatic(k)));
+                let result = self.assign(ty, Rvalue::GetField { obj, field });
+                self.stack.push(result);
             }
-        }
-        0xb3 => {
-            let r = lf.cf.member_ref(n.imm as u16)?;
-            let v = pop!();
-            stmts.push(Stmt::PutStatic(
-                FieldKey {
-                    class: r.owner,
-                    name: r.name,
-                    desc: r.desc,
-                },
-                v,
-            ));
-        }
-        // Instance fields.
-        0xb4 => {
-            let r = lf.cf.member_ref(n.imm as u16)?;
-            let obj = pop!();
-            nullcheck!(obj);
-            let ty = ty_of_field_desc(&r.desc);
-            let field = FieldKey {
-                class: r.owner,
-                name: r.name,
-                desc: r.desc,
-            };
-            stack.push(assign!(ty, Rvalue::GetField { obj, field }));
-        }
-        0xb5 => {
-            let r = lf.cf.member_ref(n.imm as u16)?;
-            let val = pop!();
-            let obj = pop!();
-            nullcheck!(obj);
-            stmts.push(Stmt::PutField {
-                obj,
-                field: FieldKey {
-                    class: r.owner,
-                    name: r.name,
-                    desc: r.desc,
-                },
-                val,
-            });
-        }
-
-        // Calls.
-        0xb6..=0xb9 => {
-            let r = lf.cf.member_ref(n.imm as u16)?;
-            let (argc, ret) = parse_desc(&r.desc);
-            let mut args = Vec::new();
-            for _ in 0..argc {
-                args.push(pop!());
+            // putfield
+            0xb5 => {
+                let r = self.lifter.cf.member_ref(self.insn.imm as u16)?;
+                let val = self.pop()?;
+                let obj = self.pop()?;
+                self.nullcheck(&obj);
+                self.stmts.push(Stmt::PutField {
+                    obj,
+                    field: FieldKey {
+                        class: r.owner,
+                        name: r.name,
+                        desc: r.desc,
+                    },
+                    val,
+                });
             }
-            args.reverse();
-            let receiver = if op == 0xb8 { None } else { Some(pop!()) };
+            _ => unreachable!(),
+        }
+        Ok(None)
+    }
 
-            let target = MethodKey {
-                class: r.owner.clone(),
-                name: r.name.clone(),
-                desc: r.desc.clone(),
-            };
+    // -----------------------------------------------------------------------
+    // Method invocations (0xb6..=0xba)
+    // -----------------------------------------------------------------------
 
-            match models::model_for(&r.owner, &r.name, &r.desc) {
-                CallModel::Assume => stmts.push(Stmt::Assume(args[0].clone())),
-                CallModel::NoOp => {}
-                CallModel::Nondet(t, jvm_byte) => {
-                    let ty = t.unwrap_or(Ty::Int);
-                    stack.push(assign!(ty, Rvalue::Nondet(ty, Some(jvm_byte))));
+    fn lift_invoke(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+
+        // invokedynamic is handled separately.
+        if op == 0xba {
+            return self.lift_invokedynamic();
+        }
+
+        let r = self.lifter.cf.member_ref(self.insn.imm as u16)?;
+        let (argc, ret) = parse_desc(&r.desc);
+        let mut args = Vec::new();
+        for _ in 0..argc {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let receiver = if op == 0xb8 { None } else { Some(self.pop()?) };
+
+        let target = MethodKey {
+            class: r.owner.clone(),
+            name: r.name.clone(),
+            desc: r.desc.clone(),
+        };
+
+        match models::model_for(&r.owner, &r.name, &r.desc) {
+            CallModel::Assume => self.stmts.push(Stmt::Assume(args[0].clone())),
+            CallModel::NoOp => {}
+            CallModel::Nondet(t, jvm_byte) => {
+                let ty = t.unwrap_or(Ty::Int);
+                let result = self.assign(ty, Rvalue::Nondet(ty, Some(jvm_byte)));
+                self.stack.push(result);
+            }
+            CallModel::Pure(t) => {
+                if let Some(obj) = receiver.clone() {
+                    self.nullcheck(&obj);
                 }
-                CallModel::Pure(t) => {
-                    if let Some(obj) = receiver.clone() {
-                        nullcheck!(obj);
+                if let Some(ty) = t {
+                    let result = self.assign(ty, Rvalue::Havoc(ty));
+                    self.stack.push(result);
+                }
+            }
+            CallModel::MathCall(t) => {
+                // Keep as Rvalue::Call so the SMT engine can model
+                // Math/Integer/Long methods precisely.
+                let is_virtual = op != 0xb8 && op != 0xb7;
+                let mut all = Vec::new();
+                if let Some(o) = receiver {
+                    all.push(o);
+                }
+                all.extend(args);
+                let rvalue = Rvalue::Call {
+                    target,
+                    args: all,
+                    is_virtual,
+                };
+                match t {
+                    Some(ty) => {
+                        let result = self.assign(ty, rvalue);
+                        self.stack.push(result);
                     }
-                    if let Some(ty) = t {
-                        stack.push(assign!(ty, Rvalue::Havoc(ty)));
+                    None => {
+                        let tmp = self.lifter.temp(Ty::Int);
+                        self.stmts.push(Stmt::Assign(tmp, rvalue));
                     }
                 }
-                CallModel::MathCall(t) => {
-                    // Keep as Rvalue::Call so the SMT engine can model
-                    // Math/Integer/Long methods precisely.
-                    let is_virtual = op != 0xb8 && op != 0xb7;
-                    let mut all = Vec::new();
-                    if let Some(o) = receiver {
-                        all.push(o);
+            }
+            CallModel::StrCall(t) => {
+                // Keep as Rvalue::Call so the concrete engine can evaluate
+                // string/StringBuilder methods against tracked values.
+                if let Some(obj) = receiver.clone() {
+                    self.nullcheck(&obj);
+                }
+                let is_virtual = op != 0xb8 && op != 0xb7;
+                let mut all = Vec::new();
+                if let Some(o) = receiver {
+                    all.push(o);
+                }
+                all.extend(args);
+                let rvalue = Rvalue::Call {
+                    target,
+                    args: all,
+                    is_virtual,
+                };
+                // Use Ty::Ref for String-returning methods (Str value flows
+                // through the concrete engine's str_store, not the IR type).
+                let ret_ty = t.map(|ty| if ty == Ty::Str { Ty::Ref } else { ty });
+                match ret_ty {
+                    Some(ty) => {
+                        let result = self.assign(ty, rvalue);
+                        self.stack.push(result);
                     }
-                    all.extend(args);
-                    let rv = Rvalue::Call {
-                        target,
-                        args: all,
-                        is_virtual,
-                    };
-                    match t {
-                        Some(ty) => stack.push(assign!(ty, rv)),
-                        None => {
-                            let tmp = lf.temp(Ty::Int);
-                            stmts.push(Stmt::Assign(tmp, rv));
-                        }
+                    None => {
+                        let tmp = self.lifter.temp(Ty::Int);
+                        self.stmts.push(Stmt::Assign(tmp, rvalue));
                     }
                 }
-                CallModel::StrCall(t) => {
-                    // Keep as Rvalue::Call so the concrete engine can evaluate
-                    // string/StringBuilder methods against tracked values.
-                    if let Some(obj) = receiver.clone() {
-                        nullcheck!(obj);
-                    }
-                    let is_virtual = op != 0xb8 && op != 0xb7;
-                    let mut all = Vec::new();
-                    if let Some(o) = receiver {
-                        all.push(o);
-                    }
-                    all.extend(args);
-                    let rv = Rvalue::Call {
-                        target,
-                        args: all,
-                        is_virtual,
-                    };
-                    // Use Ty::Ref for String-returning methods (Str value flows
-                    // through the concrete engine's str_store, not the IR type).
-                    let ret_ty = t.map(|ty| if ty == Ty::Str { Ty::Ref } else { ty });
-                    match ret_ty {
-                        Some(ty) => stack.push(assign!(ty, rv)),
-                        None => {
-                            let t = lf.temp(Ty::Int);
-                            stmts.push(Stmt::Assign(t, rv));
-                        }
-                    }
-                }
-                CallModel::EnumInit => {
-                    // Enum.<init>(this, name, ordinal): store ordinal to
-                    // synthetic $$ordinal field so ordinal() can read it.
-                    let this = receiver.unwrap_or_else(|| args.remove(0));
-                    // args layout after receiver removal: [name, ordinal]
-                    let ordinal = if args.len() >= 2 {
-                        args[1].clone()
-                    } else {
-                        Operand::int(0)
-                    };
-                    stmts.push(Stmt::PutField {
+            }
+            CallModel::EnumInit => {
+                // Enum.<init>(this, name, ordinal): store ordinal to
+                // synthetic $$ordinal field so ordinal() can read it.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                // args layout after receiver removal: [name, ordinal]
+                let ordinal = if args.len() >= 2 {
+                    args[1].clone()
+                } else {
+                    Operand::int(0)
+                };
+                self.stmts.push(Stmt::PutField {
+                    obj: this,
+                    field: FieldKey {
+                        class: "java/lang/Enum".into(),
+                        name: models::ENUM_ORDINAL_FIELD.into(),
+                        desc: "I".into(),
+                    },
+                    val: ordinal,
+                });
+            }
+            CallModel::EnumOrdinal => {
+                // Enum.ordinal(): read ordinal from synthetic $$ordinal field.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                self.nullcheck(&this);
+                let result = self.assign(
+                    Ty::Int,
+                    Rvalue::GetField {
                         obj: this,
                         field: FieldKey {
                             class: "java/lang/Enum".into(),
                             name: models::ENUM_ORDINAL_FIELD.into(),
                             desc: "I".into(),
                         },
-                        val: ordinal,
-                    });
-                }
-                CallModel::EnumOrdinal => {
-                    // Enum.ordinal(): read ordinal from synthetic $$ordinal field.
-                    let this = receiver.unwrap_or_else(|| args.remove(0));
-                    nullcheck!(this);
-                    stack.push(assign!(
-                        Ty::Int,
-                        Rvalue::GetField {
-                            obj: this,
-                            field: FieldKey {
-                                class: "java/lang/Enum".into(),
-                                name: models::ENUM_ORDINAL_FIELD.into(),
-                                desc: "I".into(),
-                            },
-                        }
-                    ));
-                }
-                CallModel::BoxStore(ty) => {
-                    // T.valueOf(primitive): allocate a new ref and store the
-                    // argument into a synthetic $$value field.
-                    let val = args.into_iter().next().unwrap_or(Operand::int(0));
-                    let obj = lf.temp(Ty::Ref);
-                    stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
-                    stmts.push(Stmt::PutField {
-                        obj: Operand::Var(obj),
+                    },
+                );
+                self.stack.push(result);
+            }
+            CallModel::BoxStore(ty) => {
+                // T.valueOf(primitive): allocate a new ref and store the
+                // argument into a synthetic $$value field.
+                let val = args.into_iter().next().unwrap_or(Operand::int(0));
+                let obj = self.lifter.temp(Ty::Ref);
+                self.stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                self.stmts.push(Stmt::PutField {
+                    obj: Operand::Var(obj),
+                    field: FieldKey {
+                        class: target.class.clone(),
+                        name: models::BOX_VALUE_FIELD.into(),
+                        desc: ty.descriptor().into(),
+                    },
+                    val,
+                });
+                self.stack.push(Operand::Var(obj));
+            }
+            CallModel::Unbox(ty) => {
+                // T.*Value(): read the $$value field from the receiver.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                self.nullcheck(&this);
+                let result = self.assign(
+                    ty,
+                    Rvalue::GetField {
+                        obj: this,
                         field: FieldKey {
                             class: target.class.clone(),
                             name: models::BOX_VALUE_FIELD.into(),
                             desc: ty.descriptor().into(),
                         },
-                        val,
-                    });
-                    stack.push(Operand::Var(obj));
+                    },
+                );
+                self.stack.push(result);
+            }
+            CallModel::StaticBinOp(binop) => {
+                // Static binary method: result = arg0 op arg1.
+                let a = args.get(0).cloned().unwrap_or(Operand::int(0));
+                let b = args.get(1).cloned().unwrap_or(Operand::int(0));
+                let result = self.assign(Ty::Int, Rvalue::Bin(binop, a, b));
+                self.stack.push(result);
+            }
+            CallModel::AssertionsEnabled => {
+                // SV-COMP: assertions always enabled → return 1.
+                self.stack.push(Operand::int(1));
+            }
+            CallModel::Unmodelled => {
+                if let Some(obj) = receiver.clone() {
+                    self.nullcheck(&obj);
                 }
-                CallModel::Unbox(ty) => {
-                    // T.*Value(): read the $$value field from the receiver.
-                    let this = receiver.unwrap_or_else(|| args.remove(0));
-                    nullcheck!(this);
-                    stack.push(assign!(
-                        ty,
-                        Rvalue::GetField {
-                            obj: this,
-                            field: FieldKey {
-                                class: target.class.clone(),
-                                name: models::BOX_VALUE_FIELD.into(),
-                                desc: ty.descriptor().into(),
-                            },
-                        }
-                    ));
+                let is_virtual = op != 0xb8 && op != 0xb7;
+                let mut all = Vec::new();
+                if let Some(o) = receiver {
+                    all.push(o);
                 }
-                CallModel::StaticBinOp(op) => {
-                    // Static binary method: result = arg0 op arg1.
-                    let a = args.get(0).cloned().unwrap_or(Operand::int(0));
-                    let b = args.get(1).cloned().unwrap_or(Operand::int(0));
-                    stack.push(assign!(Ty::Int, Rvalue::Bin(op, a, b)));
-                }
-                CallModel::AssertionsEnabled => {
-                    // SV-COMP: assertions always enabled → return 1.
-                    stack.push(Operand::int(1));
-                }
-                CallModel::Unmodelled => {
-                    if let Some(obj) = receiver.clone() {
-                        nullcheck!(obj);
+                all.extend(args);
+                let rvalue = Rvalue::Call {
+                    target,
+                    args: all,
+                    is_virtual,
+                };
+                match ret {
+                    Some(ty) => {
+                        let result = self.assign(ty, rvalue);
+                        self.stack.push(result);
                     }
-                    let is_virtual = op != 0xb8 && op != 0xb7;
-                    let mut all = Vec::new();
-                    if let Some(o) = receiver {
-                        all.push(o);
-                    }
-                    all.extend(args);
-                    let rv = Rvalue::Call {
-                        target,
-                        args: all,
-                        is_virtual,
-                    };
-                    match ret {
-                        Some(ty) => stack.push(assign!(ty, rv)),
-                        None => {
-                            let t = lf.temp(Ty::Int);
-                            stmts.push(Stmt::Assign(t, rv));
-                        }
+                    None => {
+                        let tmp = self.lifter.temp(Ty::Int);
+                        self.stmts.push(Stmt::Assign(tmp, rvalue));
                     }
                 }
             }
         }
-        // invokedynamic: lambdas, string concatenation, method references.
-        // Model as havoc of return type (sound over-approximation).
-        0xba => {
-            let (name, desc, _bsm) = lf.cf.invoke_dynamic(n.imm as u16)?;
-            let (argc, ret) = parse_desc(&desc);
-            // invokedynamic has no receiver — all args come from stack.
-            for _ in 0..argc {
-                pop!();
-            }
-            debug!("invokedynamic: {name} {desc}");
-            if let Some(ty) = ret {
-                stack.push(assign!(ty, Rvalue::Havoc(ty)));
-            }
-        }
-
-        // Allocation.
-        0xbb => {
-            let cls = lf.cf.class_name(n.imm as u16)?;
-            let t = lf.temp(Ty::Ref);
-            stmts.push(Stmt::Assign(t, Rvalue::New(cls.clone())));
-            lf.new_classes.insert(t, cls);
-            stack.push(Operand::Var(t));
-        }
-        0xbc | 0xbd => {
-            let len = pop!();
-            let nonneg = assign!(
-                Ty::Int,
-                Rvalue::Bin(BinOp::Ge, len.clone(), Operand::int(0))
-            );
-            let id = lf.obligation(ObligationKind::NegArraySize, nonneg, off);
-            stmts.push(Stmt::Check(id));
-            let elem = if op == 0xbd {
-                lf.cf
-                    .class_name(n.imm as u16)
-                    .unwrap_or_else(|_| "?".into())
-            } else {
-                primitive_array_elem(n.imm).to_string()
-            };
-            stack.push(assign!(Ty::Ref, Rvalue::NewArray { elem, len }));
-        }
-        0xc5 => {
-            let dims = n.keys.first().copied().unwrap_or(1).max(1);
-            for _ in 0..dims {
-                let len = pop!();
-                let nonneg = assign!(Ty::Int, Rvalue::Bin(BinOp::Ge, len, Operand::int(0)));
-                let id = lf.obligation(ObligationKind::NegArraySize, nonneg, off);
-                stmts.push(Stmt::Check(id));
-            }
-            stack.push(assign!(Ty::Ref, Rvalue::Nondet(Ty::Ref, None)));
-        }
-        0xbe => {
-            let arr = pop!();
-            nullcheck!(arr);
-            stack.push(assign!(Ty::Int, Rvalue::ArrayLength(arr)));
-        }
-        0xc0 => {
-            let obj = pop!();
-            let class = lf.cf.class_name(n.imm as u16)?;
-            let isinst = assign!(
-                Ty::Int,
-                Rvalue::InstanceOf {
-                    obj: obj.clone(),
-                    class
-                }
-            );
-            let isnull = assign!(
-                Ty::Int,
-                Rvalue::Bin(BinOp::Eq, obj.clone(), Operand::Const(Const::Null))
-            );
-            // A cast of null always succeeds.
-            let ok = assign!(Ty::Int, Rvalue::Bin(BinOp::Or, isnull, isinst));
-            let id = lf.obligation(ObligationKind::ClassCast, ok, off);
-            stmts.push(Stmt::Check(id));
-            stack.push(obj);
-        }
-        0xc1 => {
-            let obj = pop!();
-            let class = lf.cf.class_name(n.imm as u16)?;
-            stack.push(assign!(Ty::Int, Rvalue::InstanceOf { obj, class }));
-        }
-        // Single-threaded benchmark set: monitors are no-ops beyond the check.
-        0xc2 | 0xc3 => {
-            let obj = pop!();
-            nullcheck!(obj);
-        }
-
-        0xbf => {
-            let v = pop!();
-            let thrown = match &v {
-                Operand::Var(id) => lf.new_classes.get(id).cloned(),
-                _ => None,
-            };
-            if thrown.as_deref() == Some(models::ASSERTION_ERROR) {
-                // The assert property is exactly "is an AssertionError throw
-                // reachable". A safety condition of `false` says: violated if
-                // control ever gets here.
-                let id = lf.obligation(ObligationKind::Assertion, Operand::int(0), off);
-                stmts.push(Stmt::Check(id));
-            }
-            return Ok(Some((Terminator::Throw(v), vec![])));
-        }
-
-        other => return Err(format!("unsupported opcode 0x{other:02x} at {off}")),
+        Ok(None)
     }
 
-    Ok(None)
+    fn lift_invokedynamic(&mut self) -> Result<LiftOut, String> {
+        // invokedynamic: lambdas, string concatenation, method references.
+        // Model as havoc of return type (sound over-approximation).
+        let (name, desc, _bootstrap_method) = self.lifter.cf.invoke_dynamic(self.insn.imm as u16)?;
+        let (argc, ret) = parse_desc(&desc);
+        // invokedynamic has no receiver — all args come from stack.
+        for _ in 0..argc {
+            self.pop()?;
+        }
+        debug!("invokedynamic: {name} {desc}");
+        if let Some(ty) = ret {
+            let result = self.assign(ty, Rvalue::Havoc(ty));
+            self.stack.push(result);
+        }
+        Ok(None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Allocation, instanceof, checkcast, monitors, athrow (0xbb..=0xc5, 0xbf)
+    // -----------------------------------------------------------------------
+
+    fn lift_allocation(&mut self) -> Result<LiftOut, String> {
+        let op = self.insn.op;
+        let off = self.insn.off as u16;
+        match op {
+            // new
+            0xbb => {
+                let cls = self.lifter.cf.class_name(self.insn.imm as u16)?;
+                let t = self.lifter.temp(Ty::Ref);
+                self.stmts.push(Stmt::Assign(t, Rvalue::New(cls.clone())));
+                self.lifter.new_classes.insert(t, cls);
+                self.stack.push(Operand::Var(t));
+            }
+            // newarray / anewarray
+            0xbc | 0xbd => {
+                let len = self.pop()?;
+                let nonneg = self.assign(
+                    Ty::Int,
+                    Rvalue::Bin(BinOp::Ge, len.clone(), Operand::int(0)),
+                );
+                let id = self.lifter.obligation(ObligationKind::NegArraySize, nonneg, off);
+                self.stmts.push(Stmt::Check(id));
+                let elem = if op == 0xbd {
+                    self.lifter
+                        .cf
+                        .class_name(self.insn.imm as u16)
+                        .unwrap_or_else(|_| "?".into())
+                } else {
+                    primitive_array_elem(self.insn.imm).to_string()
+                };
+                let result = self.assign(Ty::Ref, Rvalue::NewArray { elem, len });
+                self.stack.push(result);
+            }
+            // multianewarray
+            0xc5 => {
+                let dims = self.insn.keys.first().copied().unwrap_or(1).max(1);
+                for _ in 0..dims {
+                    let len = self.pop()?;
+                    let nonneg = self.assign(Ty::Int, Rvalue::Bin(BinOp::Ge, len, Operand::int(0)));
+                    let id = self.lifter.obligation(ObligationKind::NegArraySize, nonneg, off);
+                    self.stmts.push(Stmt::Check(id));
+                }
+                let result = self.assign(Ty::Ref, Rvalue::Nondet(Ty::Ref, None));
+                self.stack.push(result);
+            }
+            // arraylength
+            0xbe => {
+                let arr = self.pop()?;
+                self.nullcheck(&arr);
+                let result = self.assign(Ty::Int, Rvalue::ArrayLength(arr));
+                self.stack.push(result);
+            }
+            // athrow
+            0xbf => {
+                let v = self.pop()?;
+                let thrown = match &v {
+                    Operand::Var(id) => self.lifter.new_classes.get(id).cloned(),
+                    _ => None,
+                };
+                if thrown.as_deref() == Some(models::ASSERTION_ERROR) {
+                    // The assert property is exactly "is an AssertionError throw
+                    // reachable". A safety condition of `false` says: violated if
+                    // control ever gets here.
+                    let id = self.lifter.obligation(ObligationKind::Assertion, Operand::int(0), off);
+                    self.stmts.push(Stmt::Check(id));
+                }
+                return Ok(Some((Terminator::Throw(v), vec![])));
+            }
+            // checkcast
+            0xc0 => {
+                let obj = self.pop()?;
+                let class = self.lifter.cf.class_name(self.insn.imm as u16)?;
+                let is_instance = self.assign(
+                    Ty::Int,
+                    Rvalue::InstanceOf {
+                        obj: obj.clone(),
+                        class,
+                    },
+                );
+                let is_null = self.assign(
+                    Ty::Int,
+                    Rvalue::Bin(BinOp::Eq, obj.clone(), Operand::Const(Const::Null)),
+                );
+                // A cast of null always succeeds.
+                let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::Or, is_null, is_instance));
+                let id = self.lifter.obligation(ObligationKind::ClassCast, ok, off);
+                self.stmts.push(Stmt::Check(id));
+                self.stack.push(obj);
+            }
+            // instanceof
+            0xc1 => {
+                let obj = self.pop()?;
+                let class = self.lifter.cf.class_name(self.insn.imm as u16)?;
+                let result = self.assign(Ty::Int, Rvalue::InstanceOf { obj, class });
+                self.stack.push(result);
+            }
+            // monitorenter / monitorexit — single-threaded: no-ops beyond the nullcheck.
+            0xc2 | 0xc3 => {
+                let obj = self.pop()?;
+                self.nullcheck(&obj);
+            }
+            _ => return Err(format!("unsupported alloc opcode 0x{op:02x}")),
+        }
+        Ok(None)
+    }
 }
 
 /// Numeric opcodes are laid out int/long/float/double in blocks of four.

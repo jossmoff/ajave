@@ -12,6 +12,8 @@ use std::process::{Command, Stdio};
 
 use log::{debug, trace};
 
+use crate::smt_text::{self, LiaTheory, SmtTheory};
+
 /// Result of an interpolation query.
 #[derive(Debug)]
 pub enum InterpolationResult {
@@ -240,6 +242,7 @@ pub fn encode_body_lia(
 ) -> LiaEncoding {
     use roast_ir::*;
 
+    let theory = LiaTheory::new(prefix);
     let n_vars = body.vars.len();
 
     // Variable declarations: pre-state and post-state.
@@ -263,19 +266,19 @@ pub fn encode_body_lia(
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
-                    let expr = encode_rvalue_lia(rv, &var_exprs, prefix);
+                    let expr = smt_text::encode_rvalue(&theory, rv, &var_exprs);
                     var_exprs[vid.0 as usize] = expr;
                 }
                 Stmt::Assume(op) => {
-                    let expr = encode_operand_lia(op, &var_exprs);
-                    path_conds.push(format!("(not (= {} 0))", expr));
+                    let expr = smt_text::encode_operand(&theory, op, &var_exprs);
+                    path_conds.push(theory.encode_nonzero(&expr));
                 }
                 Stmt::Check(oid) => {
                     if obligations.contains(oid) {
                         let ob = body.obligation(*oid);
-                        let cond_expr = encode_operand_lia(&ob.cond, &var_exprs);
+                        let cond_expr = smt_text::encode_operand(&theory, &ob.cond, &var_exprs);
                         let mut econds = path_conds.clone();
-                        econds.push(format!("(= {} 0)", cond_expr));
+                        econds.push(theory.encode_is_zero(&cond_expr));
                         let error_cond = if econds.is_empty() {
                             "true".to_string()
                         } else if econds.len() == 1 {
@@ -320,12 +323,12 @@ pub fn encode_body_lia(
                 }
             }
             Terminator::Branch { cond, .. } => {
-                let cond_expr = encode_operand_lia(cond, &var_exprs);
+                let cond_expr = smt_text::encode_operand(&theory, cond, &var_exprs);
                 let assigns = mk_assign(&var_exprs);
 
                 // Then branch: condition is nonzero.
                 let mut then_conds = path_conds.clone();
-                then_conds.push(format!("(not (= {} 0))", cond_expr));
+                then_conds.push(theory.encode_nonzero(&cond_expr));
                 then_conds.extend(assigns.iter().cloned());
                 if !then_conds.is_empty() {
                     block_clauses.push(format!("(and {})", then_conds.join(" ")));
@@ -333,7 +336,7 @@ pub fn encode_body_lia(
 
                 // Else branch: condition is zero.
                 let mut else_conds = path_conds.clone();
-                else_conds.push(format!("(= {} 0)", cond_expr));
+                else_conds.push(theory.encode_is_zero(&cond_expr));
                 else_conds.extend(assigns);
                 if !else_conds.is_empty() {
                     block_clauses.push(format!("(and {})", else_conds.join(" ")));
@@ -344,7 +347,7 @@ pub fn encode_body_lia(
                 cases,
                 default: _,
             } => {
-                let val_expr = encode_operand_lia(value, &var_exprs);
+                let val_expr = smt_text::encode_operand(&theory, value, &var_exprs);
                 let assigns = mk_assign(&var_exprs);
                 let mut neg_cases = Vec::new();
 
@@ -395,92 +398,6 @@ pub struct LiaEncoding {
     pub n_vars: usize,
 }
 
-fn encode_operand_lia(op: &roast_ir::Operand, var_exprs: &[String]) -> String {
-    match op {
-        roast_ir::Operand::Var(v) => var_exprs
-            .get(v.0 as usize)
-            .cloned()
-            .unwrap_or_else(|| format!("v{}", v.0)),
-        roast_ir::Operand::Const(roast_ir::Const::Int(n)) => {
-            if *n < 0 {
-                format!("(- {})", -(*n as i64))
-            } else {
-                n.to_string()
-            }
-        }
-        roast_ir::Operand::Const(roast_ir::Const::Long(n)) => {
-            if *n < 0 {
-                format!("(- {})", -n)
-            } else {
-                n.to_string()
-            }
-        }
-        roast_ir::Operand::Const(roast_ir::Const::Null) => "0".to_string(),
-        roast_ir::Operand::Const(roast_ir::Const::Str(_)) => "1".to_string(),
-        roast_ir::Operand::Const(_) => "0".to_string(),
-    }
-}
-
-fn encode_rvalue_lia(
-    rv: &roast_ir::Rvalue,
-    var_exprs: &[String],
-    prefix: &str,
-) -> String {
-    use roast_ir::*;
-    static FRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    match rv {
-        Rvalue::Use(o) => encode_operand_lia(o, var_exprs),
-        Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
-            // Fresh unconstrained variable — the forall-quantifier in the
-            // enclosing clause effectively makes this nondeterministic.
-            let id = FRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            format!("{prefix}nd{id}")
-        }
-        Rvalue::Bin(op, a, b) => {
-            let ae = encode_operand_lia(a, var_exprs);
-            let be = encode_operand_lia(b, var_exprs);
-            match op {
-                BinOp::Add => format!("(+ {} {})", ae, be),
-                BinOp::Sub => format!("(- {} {})", ae, be),
-                BinOp::Mul => format!("(* {} {})", ae, be),
-                // Division/remainder: integer division in LIA.
-                BinOp::Div => format!("(div {} {})", ae, be),
-                BinOp::Rem => format!("(mod {} {})", ae, be),
-                // Comparisons: encode as ite returning 0/1.
-                BinOp::Eq => format!("(ite (= {} {}) 1 0)", ae, be),
-                BinOp::Ne => format!("(ite (not (= {} {})) 1 0)", ae, be),
-                BinOp::Lt => format!("(ite (< {} {}) 1 0)", ae, be),
-                BinOp::Le => format!("(ite (<= {} {}) 1 0)", ae, be),
-                BinOp::Gt => format!("(ite (> {} {}) 1 0)", ae, be),
-                BinOp::Ge => format!("(ite (>= {} {}) 1 0)", ae, be),
-                // Bitwise operations: not in LIA, use fresh unconstrained.
-                _ => {
-                    let id = FRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    format!("{prefix}bw{id}")
-                }
-            }
-        }
-        Rvalue::Neg(o) => {
-            let e = encode_operand_lia(o, var_exprs);
-            format!("(- 0 {})", e)
-        }
-        Rvalue::Cast(_, o) => encode_operand_lia(o, var_exprs),
-        Rvalue::Cmp(a, b) => {
-            let ae = encode_operand_lia(a, var_exprs);
-            let be = encode_operand_lia(b, var_exprs);
-            format!(
-                "(ite (< {} {}) (- 1) (ite (= {} {}) 0 1))",
-                ae, be, ae, be
-            )
-        }
-        // Heap operations: fresh unconstrained (havoc).
-        _ => {
-            let id = FRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            format!("{prefix}hv{id}")
-        }
-    }
-}
 
 /// Extract predicate atoms from an interpolant formula string.
 ///
