@@ -19,16 +19,24 @@ pub struct SmtLib {
     next_id: u64,
     term_names: HashMap<u64, String>,
     term_sorts: HashMap<u64, Sort>,
+    /// Cache for bv_const: (value, width) -> Term to avoid creating duplicates.
+    bv_const_cache: HashMap<(i64, u32), Term>,
+    /// Cache for bool constants.
+    bool_true: Option<Term>,
+    bool_false: Option<Term>,
 }
 
 impl SmtLib {
+    /// Send a command without flushing. Commands are batched in the BufWriter
+    /// and only flushed before operations that read a response.
     fn send(&mut self, cmd: &str) {
         trace!("smt>> {cmd}");
         let _ = writeln!(self.stdin, "{cmd}");
-        let _ = self.stdin.flush();
     }
 
+    /// Flush buffered commands and read a response line from the solver.
     fn read_line(&mut self) -> String {
+        let _ = self.stdin.flush();
         let mut line = String::new();
         let _ = self.stdout.read_line(&mut line);
         let result = line.trim().to_string();
@@ -55,38 +63,70 @@ impl SmtLib {
         self.term_sorts.get(&t.0).copied().unwrap_or(Sort::Bv(32))
     }
 
-    fn sort_str_dynamic(s: Sort) -> String {
+    fn sort_str(s: Sort) -> &'static str {
         match s {
-            Sort::Bool => "Bool".to_string(),
+            Sort::Bool => "Bool",
+            Sort::Bv(32) => "(_ BitVec 32)",
+            Sort::Bv(64) => "(_ BitVec 64)",
+            Sort::Str => "String",
+            Sort::Int => "Int",
+            Sort::Array { idx: 32, elem: 32 } => "(Array (_ BitVec 32) (_ BitVec 32))",
+            Sort::Array { idx: 32, elem: 64 } => "(Array (_ BitVec 32) (_ BitVec 64))",
+            _ => "", // fallback handled below
+        }
+    }
+
+    fn sort_str_dynamic(s: Sort) -> String {
+        let cached = Self::sort_str(s);
+        if !cached.is_empty() {
+            return cached.to_string();
+        }
+        match s {
             Sort::Bv(w) => format!("(_ BitVec {w})"),
-            Sort::Str => "String".to_string(),
-            Sort::Int => "Int".to_string(),
             Sort::Array { idx, elem } => {
                 format!("(Array (_ BitVec {idx}) (_ BitVec {elem}))")
             }
+            _ => unreachable!(),
         }
     }
 
     fn define_term(&mut self, prefix: &str, expr: &str, sort: Sort) -> Term {
-        let name = format!("{prefix}_{}", self.next_id);
-        let sort_s = Self::sort_str_dynamic(sort);
-        self.send(&format!("(define-const {name} {sort_s} {expr})"));
+        let id = self.next_id;
+        let name = format!("{prefix}_{id}");
+        let cached = Self::sort_str(sort);
+        if !cached.is_empty() {
+            self.send(&format!("(define-const {name} {cached} {expr})"));
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            self.send(&format!("(define-const {name} {sort_s} {expr})"));
+        }
         self.alloc(name, sort)
     }
 
     fn binop(&mut self, op: &str, a: Term, b: Term) -> Term {
         let sort = self.sort(a);
-        let an = self.name(a).to_string();
-        let bn = self.name(b).to_string();
-        let expr = format!("({op} {an} {bn})");
-        self.define_term("t", &expr, sort)
+        // Build inline: (define-const t_N <sort> (<op> <a> <b>))
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        let bn = self.name(b);
+        let cached = Self::sort_str(sort);
+        if !cached.is_empty() {
+            self.send(&format!("(define-const {name} {cached} ({op} {an} {bn}))"));
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            self.send(&format!("(define-const {name} {sort_s} ({op} {an} {bn}))"));
+        }
+        self.alloc(name, sort)
     }
 
     fn binop_bool(&mut self, op: &str, a: Term, b: Term) -> Term {
-        let an = self.name(a).to_string();
-        let bn = self.name(b).to_string();
-        let expr = format!("({op} {an} {bn})");
-        self.define_term("t", &expr, Sort::Bool)
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        let bn = self.name(b);
+        self.send(&format!("(define-const {name} Bool ({op} {an} {bn}))"));
+        self.alloc(name, Sort::Bool)
     }
 }
 
@@ -98,12 +138,20 @@ impl Solver for SmtLib {
     fn fresh_bv(&mut self, name: &str, width: u32) -> Term {
         let sort = Sort::Bv(width);
         let sname = format!("{name}_{}", self.next_id);
-        let sort_s = Self::sort_str_dynamic(sort);
-        self.send(&format!("(declare-const {sname} {sort_s})"));
+        let cached = Self::sort_str(sort);
+        if !cached.is_empty() {
+            self.send(&format!("(declare-const {sname} {cached})"));
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            self.send(&format!("(declare-const {sname} {sort_s})"));
+        }
         self.alloc(sname, sort)
     }
 
     fn bv_const(&mut self, value: i64, width: u32) -> Term {
+        if let Some(&t) = self.bv_const_cache.get(&(value, width)) {
+            return t;
+        }
         let sort = Sort::Bv(width);
         // Convert to unsigned representation for SMT-LIB2 bitvector literal.
         let uval = match width {
@@ -113,12 +161,27 @@ impl Solver for SmtLib {
         };
         let hex_digits = (width as usize) / 4;
         let name = format!("#x{uval:0>hex_digits$x}");
-        self.alloc(name, sort)
+        let t = self.alloc(name, sort);
+        self.bv_const_cache.insert((value, width), t);
+        t
     }
 
     fn bool_const(&mut self, value: bool) -> Term {
-        let name = if value { "true" } else { "false" }.to_string();
-        self.alloc(name, Sort::Bool)
+        if value {
+            if let Some(t) = self.bool_true {
+                return t;
+            }
+            let t = self.alloc("true".to_string(), Sort::Bool);
+            self.bool_true = Some(t);
+            t
+        } else {
+            if let Some(t) = self.bool_false {
+                return t;
+            }
+            let t = self.alloc("false".to_string(), Sort::Bool);
+            self.bool_false = Some(t);
+            t
+        }
     }
 
     fn bvadd(&mut self, a: Term, b: Term) -> Term {
@@ -207,12 +270,20 @@ impl Solver for SmtLib {
     }
 
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term {
-        let cn = self.name(cond).to_string();
-        let tn = self.name(then_).to_string();
-        let en = self.name(else_).to_string();
         let sort = self.sort(then_);
-        let expr = format!("(ite {cn} {tn} {en})");
-        self.define_term("t", &expr, sort)
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let cn = self.name(cond);
+        let tn = self.name(then_);
+        let en = self.name(else_);
+        let cached = Self::sort_str(sort);
+        if !cached.is_empty() {
+            self.send(&format!("(define-const {name} {cached} (ite {cn} {tn} {en}))"));
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            self.send(&format!("(define-const {name} {sort_s} (ite {cn} {tn} {en}))"));
+        }
+        self.alloc(name, sort)
     }
 
     fn not(&mut self, t: Term) -> Term {
@@ -343,16 +414,26 @@ impl Solver for SmtLib {
     fn fresh_array(&mut self, name: &str, elem_width: u32) -> Term {
         let sort = Sort::Array { idx: 32, elem: elem_width };
         let sname = format!("{name}_{}", self.next_id);
-        let sort_s = Self::sort_str_dynamic(sort);
-        self.send(&format!("(declare-const {sname} {sort_s})"));
+        let cached = Self::sort_str(sort);
+        if !cached.is_empty() {
+            self.send(&format!("(declare-const {sname} {cached})"));
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            self.send(&format!("(declare-const {sname} {sort_s})"));
+        }
         self.alloc(sname, sort)
     }
 
     fn const_array(&mut self, val: Term, elem_width: u32) -> Term {
         let vn = self.name(val).to_string();
         let sort = Sort::Array { idx: 32, elem: elem_width };
-        let sort_s = Self::sort_str_dynamic(sort);
-        let expr = format!("((as const {sort_s}) {vn})");
+        let cached = Self::sort_str(sort);
+        let expr = if !cached.is_empty() {
+            format!("((as const {cached}) {vn})")
+        } else {
+            let sort_s = Self::sort_str_dynamic(sort);
+            format!("((as const {sort_s}) {vn})")
+        };
         self.define_term("carr", &expr, sort)
     }
 
@@ -416,6 +497,7 @@ impl Solver for SmtLib {
 
 impl Drop for SmtLib {
     fn drop(&mut self) {
+        let _ = self.stdin.flush();
         let _ = writeln!(self.stdin, "(exit)");
         let _ = self.stdin.flush();
         let _ = self.child.wait();
@@ -550,6 +632,9 @@ impl SolverFactory for SmtLibFactory {
             next_id: 0,
             term_names: HashMap::new(),
             term_sorts: HashMap::new(),
+            bv_const_cache: HashMap::new(),
+            bool_true: None,
+            bool_false: None,
         };
 
         // Preamble
