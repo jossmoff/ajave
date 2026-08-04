@@ -83,6 +83,14 @@ enum InlineResult {
     },
 }
 
+/// Result of evaluating a Check obligation.
+enum CheckResult {
+    /// Route to an exception handler block.
+    Route(BlockId),
+    /// Exit run_body with this outcome.
+    Exit(Outcome),
+}
+
 /// The evaluator for everything except `Nondet` and string method `Call`s,
 /// which `run_with_choices` intercepts before they ever reach here.
 struct Run {
@@ -1352,6 +1360,234 @@ impl<'a> ConcreteState<'a> {
 
     /// Execute a body to completion. The `store` is the callee's local variable
     /// map; heap state is shared through `self`.
+    /// Evaluate an rvalue in the context of a concrete store.
+    /// Returns `Ok(value)` for the computed result, or `Err(outcome)` for early termination.
+    fn eval_assign(&mut self, rv: &Rvalue, store: &mut HashMap<VarId, Value>) -> Result<Value, Outcome> {
+        match rv {
+            Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
+            Rvalue::Havoc(ty) => Ok(self.eval_havoc(ty)),
+            Rvalue::New(cls) => {
+                let aid = self.alloc_id;
+                self.alloc_id += 1;
+                self.alloc_types.insert(aid, cls.clone());
+                if cls == "java/lang/StringBuilder" || cls == "java/lang/StringBuffer" {
+                    self.sb_store.insert(aid, String::new());
+                }
+                Ok(Value::Ref(aid))
+            }
+            Rvalue::NewArray { len, .. } => {
+                let len_val = self.eval_op(len, store);
+                let aid = self.alloc_id;
+                self.alloc_id += 1;
+                if let Value::I32(n) = len_val {
+                    self.array_lengths.insert(aid, n as i64);
+                }
+                Ok(Value::Ref(aid))
+            }
+            Rvalue::InstanceOf { obj, class } => {
+                let obj_val = self.eval_op(obj, store);
+                Ok(match obj_val {
+                    Value::Ref(0) => Value::I32(0),
+                    Value::Ref(aid) => match self.alloc_types.get(&aid) {
+                        Some(known) if self.prog.supers.contains_key(known.as_str()) => {
+                            Value::I32(self.prog.is_subtype(known, class) as i32)
+                        }
+                        Some(_) => Value::I32(0),
+                        None => Value::Unknown,
+                    },
+                    _ => Value::Unknown,
+                })
+            }
+            Rvalue::ArrayLength(arr) => {
+                let aid = match arr {
+                    Operand::Var(vid) => match store.get(vid) {
+                        Some(Value::Ref(aid)) => Some(*aid),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Ok(match aid.and_then(|a| self.array_lengths.get(&a)) {
+                    Some(&len) => Value::I32(len as i32),
+                    None => Value::Unknown,
+                })
+            }
+            Rvalue::Call { target, args, .. }
+                if is_concrete_math_call(&target.class, &target.name) =>
+            {
+                Ok(eval_math_call(target, args, store))
+            }
+            Rvalue::Call { target, args, .. }
+                if models::STR_OWNERS.contains(&target.class.as_str()) =>
+            {
+                Ok(eval_str_call(
+                    target, args, store,
+                    &mut self.str_store, &mut self.sb_store, &mut self.alloc_id,
+                ))
+            }
+            Rvalue::Call { target, args, .. } => {
+                match self.try_inline_call(target, args, store) {
+                    Some(InlineResult::Returned(rv)) => Ok(rv),
+                    Some(InlineResult::Halted) => Err(Outcome::Halted),
+                    Some(InlineResult::Violated { method, oid, witness, entries }) => {
+                        Err(Outcome::Violated { method, oid, witness, entries })
+                    }
+                    None => {
+                        let mut r = Run { store: std::mem::take(store) };
+                        let val = r.eval_rvalue(rv);
+                        *store = r.store;
+                        Ok(val)
+                    }
+                }
+            }
+            Rvalue::GetField { obj, field } => {
+                let obj_val = self.eval_op(obj, store);
+                Ok(match obj_val {
+                    Value::Ref(aid) if aid != 0 => self
+                        .inst_fields
+                        .get(&(aid, field.name.clone()))
+                        .copied()
+                        .unwrap_or(Value::Unknown),
+                    _ => Value::Unknown,
+                })
+            }
+            Rvalue::GetStatic(fk) => {
+                if fk.name == "$assertionsDisabled" {
+                    return Ok(Value::I32(0));
+                }
+                self.ensure_clinit(&fk.class);
+                Ok(self.static_fields
+                    .get(&(fk.class.clone(), fk.name.clone()))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        if self.prog.bodies.keys().any(|k| k.class == fk.class) {
+                            match fk.desc.as_bytes().first() {
+                                Some(b'J') => Value::I64(0),
+                                Some(b'L') | Some(b'[') => Value::Ref(0),
+                                _ => Value::I32(0),
+                            }
+                        } else {
+                            Value::Unknown
+                        }
+                    }))
+            }
+            other => {
+                let mut r = Run { store: std::mem::take(store) };
+                let val = r.eval_rvalue(other);
+                *store = r.store;
+                Ok(val)
+            }
+        }
+    }
+
+    /// Evaluate a Nondet rvalue: pick a choice and record in trace.
+    fn eval_nondet(&mut self, ty: &Ty) -> Value {
+        let raw = self.choices.get(self.choice_idx).copied().unwrap_or(0);
+        self.choice_idx += 1;
+        let line: Option<u16> = None;
+        match ty {
+            Ty::Str => {
+                self.trace.push(raw);
+                let chosen = String::new();
+                self.entries.push(NondetEntry {
+                    value: NondetValue::Str(chosen.clone()),
+                    nondet_method: "nondetString",
+                    line,
+                });
+                let aid = self.alloc_id;
+                self.alloc_id += 1;
+                self.str_store.insert(aid, chosen);
+                Value::Ref(aid)
+            }
+            Ty::Ref => {
+                let aid = self.alloc_id;
+                self.alloc_id += 1;
+                Value::Ref(aid)
+            }
+            Ty::Long => {
+                self.trace.push(raw);
+                self.entries.push(NondetEntry {
+                    value: NondetValue::Long(raw),
+                    nondet_method: "nondetLong",
+                    line,
+                });
+                Value::I64(raw)
+            }
+            _ => {
+                self.trace.push(raw);
+                self.entries.push(NondetEntry {
+                    value: NondetValue::Int(raw as i32),
+                    nondet_method: "nondetInt",
+                    line,
+                });
+                Value::I32(raw as i32)
+            }
+        }
+    }
+
+    /// Evaluate a Havoc rvalue: default value without witness recording.
+    fn eval_havoc(&mut self, ty: &Ty) -> Value {
+        match ty {
+            Ty::Long => Value::I64(0),
+            Ty::Str | Ty::Ref => {
+                let aid = self.alloc_id;
+                self.alloc_id += 1;
+                if *ty == Ty::Str {
+                    self.str_store.insert(aid, String::new());
+                }
+                Value::Ref(aid)
+            }
+            _ => Value::I32(0),
+        }
+    }
+
+    /// Evaluate a Check obligation. Returns `Some(outcome)` for early exit,
+    /// `None` to continue, or `Some(Outcome::Goto(target))` for exception routing.
+    fn eval_check(
+        &mut self,
+        body: &Body,
+        block: &Block,
+        oid: ObligationId,
+        store: &mut HashMap<VarId, Value>,
+    ) -> Option<CheckResult> {
+        let ob = body.obligation(oid);
+        let ok = match &ob.cond {
+            Operand::Const(Const::Int(v)) => *v != 0,
+            other => {
+                let v = match other {
+                    Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
+                    _ => Value::Unknown,
+                };
+                if v == Value::Unknown {
+                    return Some(CheckResult::Exit(Outcome::Inconclusive));
+                }
+                v.nonzero()
+            }
+        };
+        if !ok {
+            if let Some(class) = models::exception_class(ob.kind) {
+                if let Some(target) = route(self.prog, block, class) {
+                    if let Some(slot) = body
+                        .vars.iter().enumerate()
+                        .find(|(_, vi)| vi.kind == VarKind::Stack(0))
+                        .map(|(i, _)| VarId(i as u32))
+                    {
+                        let aid = self.alloc_id;
+                        self.alloc_id += 1;
+                        store.insert(slot, Value::Ref(aid));
+                    }
+                    return Some(CheckResult::Route(target));
+                }
+            }
+            return Some(CheckResult::Exit(Outcome::Violated {
+                method: body.key.clone(),
+                oid,
+                witness: std::mem::take(&mut self.trace),
+                entries: std::mem::take(&mut self.entries),
+            }));
+        }
+        None
+    }
+
     fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
         let mut block = body.entry;
         let mut idx = 0usize;
@@ -1365,10 +1601,7 @@ impl<'a> ConcreteState<'a> {
             let b = body.block(block);
             if idx >= b.stmts.len() {
                 match &b.term {
-                    Terminator::Goto(t) => {
-                        block = *t;
-                        idx = 0;
-                    }
+                    Terminator::Goto(t) => { block = *t; idx = 0; }
                     Terminator::Branch { cond, then_, else_ } => {
                         let cv = store
                             .get(match cond {
@@ -1377,32 +1610,19 @@ impl<'a> ConcreteState<'a> {
                             })
                             .copied()
                             .unwrap_or(Value::Unknown);
-                        if cv == Value::Unknown {
-                            return Outcome::Inconclusive;
-                        }
+                        if cv == Value::Unknown { return Outcome::Inconclusive; }
                         block = if cv.nonzero() { *then_ } else { *else_ };
                         idx = 0;
                     }
-                    Terminator::Switch {
-                        value,
-                        cases,
-                        default,
-                    } => {
+                    Terminator::Switch { value, cases, default } => {
                         let v = match value {
-                            Operand::Var(vid) => {
-                                store.get(vid).copied().unwrap_or(Value::Unknown)
-                            }
+                            Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
                             other => Value::I32(match other {
                                 Operand::Const(Const::Int(n)) => *n,
                                 _ => 0,
                             }),
-                        }
-                        .as_i64() as i32;
-                        block = cases
-                            .iter()
-                            .find(|(k, _)| *k == v)
-                            .map(|(_, t)| *t)
-                            .unwrap_or(*default);
+                        }.as_i64() as i32;
+                        block = cases.iter().find(|(k, _)| *k == v).map(|(_, t)| *t).unwrap_or(*default);
                         idx = 0;
                     }
                     Terminator::Return(ret) => {
@@ -1413,223 +1633,18 @@ impl<'a> ConcreteState<'a> {
                         return Outcome::Clean;
                     }
                     Terminator::Halt => return Outcome::Halted,
-                    Terminator::Throw(v) => {
-                        let _ = v;
-                        return Outcome::Inconclusive;
-                    }
-                    Terminator::Diverge(_) => return Outcome::Inconclusive,
+                    Terminator::Throw(_) | Terminator::Diverge(_) => return Outcome::Inconclusive,
                 }
                 continue;
             }
 
-            match &b.stmts[idx] {
+            let stmt = b.stmts[idx].clone();
+            match &stmt {
                 Stmt::Assign(v, rv) => {
-                    let val = match rv {
-                        Rvalue::Nondet(ty, _) => {
-                            let raw =
-                                self.choices.get(self.choice_idx).copied().unwrap_or(0);
-                            self.choice_idx += 1;
-                            let line: Option<u16> = None;
-                            match ty {
-                                Ty::Str => {
-                                    self.trace.push(raw);
-                                    let chosen = String::new();
-                                    self.entries.push(NondetEntry {
-                                        value: NondetValue::Str(chosen.clone()),
-                                        nondet_method: "nondetString",
-                                        line,
-                                    });
-                                    let aid = self.alloc_id;
-                                    self.alloc_id += 1;
-                                    self.str_store.insert(aid, chosen);
-                                    Value::Ref(aid)
-                                }
-                                Ty::Ref => {
-                                    let aid = self.alloc_id;
-                                    self.alloc_id += 1;
-                                    Value::Ref(aid)
-                                }
-                                Ty::Long => {
-                                    self.trace.push(raw);
-                                    self.entries.push(NondetEntry {
-                                        value: NondetValue::Long(raw),
-                                        nondet_method: "nondetLong",
-                                        line,
-                                    });
-                                    Value::I64(raw)
-                                }
-                                _ => {
-                                    self.trace.push(raw);
-                                    self.entries.push(NondetEntry {
-                                        value: NondetValue::Int(raw as i32),
-                                        nondet_method: "nondetInt",
-                                        line,
-                                    });
-                                    Value::I32(raw as i32)
-                                }
-                            }
-                        }
-                        Rvalue::Havoc(ty) => {
-                            // Modelling havoc — return a default value without
-                            // recording it in the witness (no Verifier.nondet*()
-                            // counterpart on the real JVM).
-                            match ty {
-                                Ty::Long => Value::I64(0),
-                                Ty::Str | Ty::Ref => {
-                                    let aid = self.alloc_id;
-                                    self.alloc_id += 1;
-                                    if *ty == Ty::Str {
-                                        self.str_store.insert(aid, String::new());
-                                    }
-                                    Value::Ref(aid)
-                                }
-                                _ => Value::I32(0),
-                            }
-                        }
-                        Rvalue::New(cls) => {
-                            let aid = self.alloc_id;
-                            self.alloc_id += 1;
-                            self.alloc_types.insert(aid, cls.clone());
-                            if cls == "java/lang/StringBuilder"
-                                || cls == "java/lang/StringBuffer"
-                            {
-                                self.sb_store.insert(aid, String::new());
-                            }
-                            Value::Ref(aid)
-                        }
-                        Rvalue::NewArray { len, .. } => {
-                            let len_val = self.eval_op(len, &store);
-                            let aid = self.alloc_id;
-                            self.alloc_id += 1;
-                            if let Value::I32(n) = len_val {
-                                self.array_lengths.insert(aid, n as i64);
-                            }
-                            Value::Ref(aid)
-                        }
-                        Rvalue::InstanceOf { obj, class } => {
-                            let obj_val = self.eval_op(obj, &store);
-                            match obj_val {
-                                Value::Ref(0) => Value::I32(0),
-                                Value::Ref(aid) => match self.alloc_types.get(&aid) {
-                                    Some(known)
-                                        if self
-                                            .prog
-                                            .supers
-                                            .contains_key(known.as_str()) =>
-                                    {
-                                        Value::I32(
-                                            self.prog.is_subtype(known, class) as i32,
-                                        )
-                                    }
-                                    Some(_) => Value::I32(0),
-                                    None => Value::Unknown,
-                                },
-                                _ => Value::Unknown,
-                            }
-                        }
-                        Rvalue::ArrayLength(arr) => {
-                            let aid = match arr {
-                                Operand::Var(vid) => match store.get(vid) {
-                                    Some(Value::Ref(aid)) => Some(*aid),
-                                    _ => None,
-                                },
-                                _ => None,
-                            };
-                            match aid.and_then(|a| self.array_lengths.get(&a)) {
-                                Some(&len) => Value::I32(len as i32),
-                                None => Value::Unknown,
-                            }
-                        }
-                        // Math/Integer/Long/Character method calls.
-                        Rvalue::Call { target, args, .. }
-                            if is_concrete_math_call(&target.class, &target.name) =>
-                        {
-                            eval_math_call(target, args, &store)
-                        }
-                        Rvalue::Call { target, args, .. }
-                            if models::STR_OWNERS.contains(&target.class.as_str()) =>
-                        {
-                            eval_str_call(
-                                target,
-                                args,
-                                &store,
-                                &mut self.str_store,
-                                &mut self.sb_store,
-                                &mut self.alloc_id,
-                            )
-                        }
-                        // Inline user method calls when a body is available.
-                        Rvalue::Call { target, args, .. } => {
-                            match self.try_inline_call(target, args, &store) {
-                                Some(InlineResult::Returned(rv)) => rv,
-                                Some(InlineResult::Halted) => return Outcome::Halted,
-                                Some(InlineResult::Violated {
-                                    method,
-                                    oid,
-                                    witness,
-                                    entries,
-                                }) => {
-                                    return Outcome::Violated {
-                                        method,
-                                        oid,
-                                        witness,
-                                        entries,
-                                    }
-                                }
-                                None => {
-                                    let mut r = Run { store };
-                                    let val = r.eval_rvalue(rv);
-                                    store = r.store;
-                                    val
-                                }
-                            }
-                        }
-                        // Read instance field from heap.
-                        Rvalue::GetField { obj, field } => {
-                            let obj_val = self.eval_op(obj, &store);
-                            match obj_val {
-                                Value::Ref(aid) if aid != 0 => self
-                                    .inst_fields
-                                    .get(&(aid, field.name.clone()))
-                                    .copied()
-                                    .unwrap_or(Value::Unknown),
-                                _ => Value::Unknown,
-                            }
-                        }
-                        // Read static field.
-                        Rvalue::GetStatic(fk) => {
-                            // javac's $assertionsDisabled field: assume
-                            // assertions are enabled (SV-COMP convention).
-                            if fk.name == "$assertionsDisabled" {
-                                Value::I32(0)
-                            } else {
-                                // Ensure <clinit> has run for this class.
-                                self.ensure_clinit(&fk.class);
-                                self.static_fields
-                                    .get(&(fk.class.clone(), fk.name.clone()))
-                                    .copied()
-                                    .unwrap_or_else(|| {
-                                        // Program fields default to 0/null after clinit.
-                                        if self.prog.bodies.keys().any(|k| k.class == fk.class) {
-                                            match fk.desc.as_bytes().first() {
-                                                Some(b'J') => Value::I64(0),
-                                                Some(b'L') | Some(b'[') => Value::Ref(0),
-                                                _ => Value::I32(0),
-                                            }
-                                        } else {
-                                            Value::Unknown
-                                        }
-                                    })
-                            }
-                        }
-                        other => {
-                            let mut r = Run { store };
-                            let val = r.eval_rvalue(other);
-                            store = r.store;
-                            val
-                        }
-                    };
-                    store.insert(*v, val);
+                    match self.eval_assign(rv, &mut store) {
+                        Ok(val) => { store.insert(*v, val); }
+                        Err(outcome) => return outcome,
+                    }
                 }
                 Stmt::Assume(op) => {
                     let v = store
@@ -1639,11 +1654,8 @@ impl<'a> ConcreteState<'a> {
                         })
                         .copied()
                         .unwrap_or(Value::Unknown);
-                    if !v.nonzero() {
-                        return Outcome::Halted;
-                    }
+                    if !v.nonzero() { return Outcome::Halted; }
                 }
-                // Write instance field to heap.
                 Stmt::PutField { obj, field, val } => {
                     let obj_val = self.eval_op(obj, &store);
                     let v = self.eval_op(val, &store);
@@ -1653,56 +1665,22 @@ impl<'a> ConcreteState<'a> {
                         }
                     }
                 }
-                // Write static field.
                 Stmt::PutStatic(fk, val) => {
                     self.ensure_clinit(&fk.class);
                     let v = self.eval_op(val, &store);
-                    self.static_fields
-                        .insert((fk.class.clone(), fk.name.clone()), v);
+                    self.static_fields.insert((fk.class.clone(), fk.name.clone()), v);
                 }
                 Stmt::ArrayStore { .. } => {}
                 Stmt::Check(oid) => {
-                    let ob = body.obligation(*oid);
-                    let ok = match &ob.cond {
-                        Operand::Const(Const::Int(v)) => *v != 0,
-                        other => {
-                            let v = match other {
-                                Operand::Var(vid) => {
-                                    store.get(vid).copied().unwrap_or(Value::Unknown)
-                                }
-                                _ => Value::Unknown,
-                            };
-                            if v == Value::Unknown {
-                                return Outcome::Inconclusive;
-                            }
-                            v.nonzero()
-                        }
-                    };
-                    if !ok {
-                        if let Some(class) = models::exception_class(ob.kind) {
-                            if let Some(target) = route(self.prog, b, class) {
+                    if let Some(result) = self.eval_check(body, b, *oid, &mut store) {
+                        match result {
+                            CheckResult::Route(target) => {
                                 block = target;
                                 idx = 0;
-                                if let Some(slot) = body
-                                    .vars
-                                    .iter()
-                                    .enumerate()
-                                    .find(|(_, vi)| vi.kind == VarKind::Stack(0))
-                                    .map(|(i, _)| VarId(i as u32))
-                                {
-                                    let aid = self.alloc_id;
-                                    self.alloc_id += 1;
-                                    store.insert(slot, Value::Ref(aid));
-                                }
                                 continue;
                             }
+                            CheckResult::Exit(outcome) => return outcome,
                         }
-                        return Outcome::Violated {
-                            method: body.key.clone(),
-                            oid: *oid,
-                            witness: std::mem::take(&mut self.trace),
-                            entries: std::mem::take(&mut self.entries),
-                        };
                     }
                 }
                 Stmt::Nop => {}
