@@ -6,6 +6,7 @@
 //! `roast-cli` -- nothing in this crate or `roast-core` should need to
 //! change. See `docs/strategies/` for the write-up of each one.
 
+pub mod body_analysis;
 pub mod ai;
 pub mod cegar;
 pub mod chc;

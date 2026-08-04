@@ -24,6 +24,8 @@ use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
+use crate::body_analysis::body_uses_havoced_ops;
+
 pub struct ChcEngine {
     solver_binary: String,
     done: bool,
@@ -142,27 +144,6 @@ impl Engine for ChcEngine {
             Progress::Stalled
         }
     }
-}
-
-/// Check if a body uses operations that the CHC encoding havoces.
-fn body_uses_havoced_ops(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(_, rv) => match rv {
-                    Rvalue::GetStatic(_)
-                    | Rvalue::GetField { .. }
-                    | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
-                    _ => {}
-                },
-                Stmt::PutField { .. } => return true,
-                _ => {}
-            }
-        }
-    }
-    false
 }
 
 /// Width of a type in bits.

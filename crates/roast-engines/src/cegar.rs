@@ -16,6 +16,7 @@ use roast_core::cpa::{reachability, HasLocation};
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
+use crate::body_analysis::{body_uses_havoced_ops, find_defining_bin};
 use crate::interpolation::{
     encode_body_lia, find_interpolation_solver, InterpolationSolver,
 };
@@ -360,37 +361,6 @@ fn operand_to_pred_operand(op: &Operand) -> Option<PredicateOperand> {
         Operand::Const(Const::Long(n)) => Some(PredicateOperand::Const(*n)),
         _ => None,
     }
-}
-
-fn find_defining_bin(body: &Body, block: BlockId, v: VarId) -> Option<(BinOp, &Operand, &Operand)> {
-    for s in body.block(block).stmts.iter().rev() {
-        if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
-            if *dv == v {
-                return Some((*op, a, b));
-            }
-        }
-    }
-    None
-}
-
-fn body_uses_havoced_ops(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(_, rv) => match rv {
-                    Rvalue::GetStatic(_)
-                    | Rvalue::GetField { .. }
-                    | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
-                    _ => {}
-                },
-                Stmt::PutField { .. } => return true,
-                _ => {}
-            }
-        }
-    }
-    false
 }
 
 fn collect_free_vars_combined(a: &str, b: &str, declarations: &str) -> Vec<String> {

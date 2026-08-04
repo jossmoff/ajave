@@ -24,6 +24,7 @@ use roast_core::engine::{Budget, Engine, Progress};
 use roast_core::smt::{SatResult, SolverFactory};
 use roast_ir::*;
 
+use crate::body_analysis::{body_has_loops, body_uses_havoced_ops};
 use crate::smt_encode;
 
 pub struct KInduction {
@@ -179,48 +180,4 @@ impl KInduction {
             _ => Ok(false),
         }
     }
-}
-
-/// Check if a body uses operations that the SMT encoder havoces (heap, arrays, calls).
-/// If so, the Bounded base case from BMC is not precise enough for k-induction.
-fn body_uses_havoced_ops(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(_, rv) => match rv {
-                    Rvalue::GetStatic(_)
-                    | Rvalue::GetField { .. }
-                    | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
-                    _ => {}
-                },
-                Stmt::PutField { .. } => return true,
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
-/// Check if a method body has any back-edges (loops).
-fn body_has_loops(body: &Body) -> bool {
-    for block in &body.blocks {
-        let succs = match &block.term {
-            Terminator::Goto(t) => vec![*t],
-            Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
-            Terminator::Switch { cases, default, .. } => {
-                let mut v: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
-                v.push(*default);
-                v
-            }
-            _ => vec![],
-        };
-        for s in succs {
-            if s.0 <= block.id.0 {
-                return true; // back-edge found
-            }
-        }
-    }
-    false
 }

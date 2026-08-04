@@ -19,6 +19,8 @@ use roast_core::artifact::ProgramPoint;
 use roast_core::cpa::{Cpa, HasLocation, Lattice, MergeResult};
 use roast_ir::*;
 
+use crate::body_analysis::{find_defining_bin, negate_binop};
+
 /// A predicate is a comparison between a variable and a constant or two variables.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Predicate {
@@ -450,29 +452,6 @@ fn predicate_matches_comparison(
         _ => false,
     };
     pred.op == comp && lhs_matches && rhs_matches
-}
-
-fn find_defining_bin(body: &Body, block: BlockId, v: VarId) -> Option<(BinOp, &Operand, &Operand)> {
-    for s in body.block(block).stmts.iter().rev() {
-        if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
-            if *dv == v {
-                return Some((*op, a, b));
-            }
-        }
-    }
-    None
-}
-
-fn negate_binop(op: BinOp) -> BinOp {
-    match op {
-        BinOp::Eq => BinOp::Ne,
-        BinOp::Ne => BinOp::Eq,
-        BinOp::Lt => BinOp::Ge,
-        BinOp::Le => BinOp::Gt,
-        BinOp::Gt => BinOp::Le,
-        BinOp::Ge => BinOp::Lt,
-        other => other,
-    }
 }
 
 /// Extract predicates from interpolant formulas for CEGAR refinement.

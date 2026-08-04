@@ -23,6 +23,7 @@ use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
+use crate::body_analysis::body_uses_havoced_ops;
 use crate::interpolation::{
     encode_body_lia, find_interpolation_solver, InterpolationResult, InterpolationSolver,
 };
@@ -330,23 +331,3 @@ fn collect_free_vars(formula: &str, declarations: &str) -> Vec<String> {
     vars
 }
 
-/// Check if a body uses operations that are havoced in the encoding.
-fn body_uses_havoced_ops(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(_, rv) => match rv {
-                    Rvalue::GetStatic(_)
-                    | Rvalue::GetField { .. }
-                    | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
-                    _ => {}
-                },
-                Stmt::PutField { .. } => return true,
-                _ => {}
-            }
-        }
-    }
-    false
-}

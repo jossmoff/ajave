@@ -42,7 +42,9 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use roast_core::artifact::ProgramPoint;
 use roast_core::cpa::{Cpa, HasLocation, Lattice};
-use roast_ir::{BinOp, Body, Const, Edge, Operand, Program, Rvalue, Stmt, VarId};
+use roast_ir::{BinOp, Const, Edge, Operand, Program, Rvalue, Stmt, VarId};
+
+use crate::body_analysis::{find_defining_bin, negate_binop};
 
 pub const NEG_INF: i64 = i32::MIN as i64;
 pub const POS_INF: i64 = i32::MAX as i64;
@@ -347,37 +349,6 @@ impl HasLocation for IState {
 
 /// Find the statement in `body`'s block that defines `v` as `Bin(op, a, b)`,
 /// searching backward from the end of the block. This is how branch edges
-/// recover the comparison that produced a since-erased boolean -- see the
-/// module doc for why the branch, not the `Assume`, is where narrowing has to
-/// happen.
-fn find_defining_bin(
-    body: &Body,
-    block: roast_ir::BlockId,
-    v: VarId,
-) -> Option<(BinOp, &Operand, &Operand)> {
-    for s in body.block(block).stmts.iter().rev() {
-        if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
-            if *dv == v {
-                return Some((*op, a, b));
-            }
-        }
-    }
-    None
-}
-
-fn negate(op: BinOp) -> BinOp {
-    use BinOp::*;
-    match op {
-        Eq => Ne,
-        Ne => Eq,
-        Lt => Ge,
-        Le => Gt,
-        Gt => Le,
-        Ge => Lt,
-        other => other,
-    }
-}
-
 pub struct IntervalCpa;
 
 impl Cpa for IntervalCpa {
@@ -434,7 +405,7 @@ impl Cpa for IntervalCpa {
                 ) = (taken, &body.block(*block).term)
                 {
                     if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
-                        let eff_op = if *is_then { op } else { negate(op) };
+                        let eff_op = if *is_then { op } else { negate_binop(op) };
                         let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
                         if let Some((na, nb)) = Interval::narrow(eff_op, ia, ib) {
                             if let Operand::Var(av) = a {
@@ -449,7 +420,7 @@ impl Cpa for IntervalCpa {
                 // Exceptional-edge narrowing: the handler is reachable only
                 // when a Check in the source block *fails* (the exception is
                 // thrown). Narrow by the join of each Check's failure state
-                // (negate(op) applied to its operands). If every failure
+                // (negate_binop(op) applied to its operands). If every failure
                 // branch is infeasible the path is pruned entirely.
                 //
                 // Explicit Throw terminators are excluded: those are
@@ -470,7 +441,7 @@ impl Cpa for IntervalCpa {
                                 if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
                                     let mut narrowed = next.clone();
                                     let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
-                                    if let Some((na, nb)) = Interval::narrow(negate(op), ia, ib) {
+                                    if let Some((na, nb)) = Interval::narrow(negate_binop(op), ia, ib) {
                                         if let Operand::Var(av) = a {
                                             narrowed.set(*av, na);
                                         }
