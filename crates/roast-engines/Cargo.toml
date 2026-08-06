@@ -10,3 +10,4 @@ roast-ir = { path = "../roast-ir" }
 roast-models = { path = "../roast-models" }
 roast-core = { path = "../roast-core" }
 log.workspace = true
+cvc5.workspace = true

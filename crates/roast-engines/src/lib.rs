@@ -7,6 +7,7 @@
 //! change. See `docs/strategies/` for the write-up of each one.
 
 pub mod body_analysis;
+pub mod body_shape;
 pub mod ai;
 pub mod cegar;
 pub mod chc;
@@ -17,6 +18,7 @@ pub mod imc;
 pub mod interpolation;
 pub mod interval;
 pub mod kinduction;
+pub mod nra;
 pub mod predicate;
 pub mod presolve;
 pub mod smt_bmc;

@@ -194,6 +194,7 @@ fn build_engine_portfolio() -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(cegar));
         }
     }
+    engines.push(Box::new(roast_engines::nra::NraEngine::new()));
     engines
 }
 

@@ -327,6 +327,10 @@ fn is_math_call(owner: &str, name: &str) -> bool {
             name,
             "abs" | "min" | "max" | "addExact" | "subtractExact"
                 | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
+                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+                | "exp" | "log" | "log10" | "pow" | "sqrt" | "round"
+                | "ceil" | "floor" | "toRadians" | "toDegrees"
+                | "sinh" | "cosh" | "tanh"
         ),
         "java/lang/Integer" => matches!(
             name,
@@ -374,6 +378,19 @@ fn is_math_call(owner: &str, name: &str) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+/// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
+pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
+    matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
+        && matches!(
+            name,
+            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+                | "exp" | "log" | "log10" | "pow" | "sqrt"
+                | "sinh" | "cosh" | "tanh"
+                | "ceil" | "floor" | "toRadians" | "toDegrees" | "round"
+        )
 }
 
 /// Does a `new` of this class need field tracking? Exception objects do not:

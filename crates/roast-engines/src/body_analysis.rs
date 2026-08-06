@@ -1,6 +1,7 @@
 //! Shared body-analysis utilities used by multiple engines.
 
 use roast_ir::{BinOp, BlockId, Body, Operand, Rvalue, Stmt, Terminator, VarId};
+use roast_models;
 
 /// Returns `true` if the body uses operations that are havoced (unmodelled)
 /// in the simplified SMT/LIA encoding: field access, instance-of checks,
@@ -20,6 +21,21 @@ pub fn body_uses_havoced_ops(body: &Body) -> bool {
                 },
                 Stmt::PutField { .. } => return true,
                 _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` if the body calls transcendental Math methods (sin, cos, exp,
+/// log, pow, sqrt, etc.) that require a nonlinear real arithmetic solver.
+pub fn body_uses_transcendental_math(body: &Body) -> bool {
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Assign(_, Rvalue::Call { target, .. }) = stmt {
+                if roast_models::is_transcendental_math(&target.class, &target.name) {
+                    return true;
+                }
             }
         }
     }
