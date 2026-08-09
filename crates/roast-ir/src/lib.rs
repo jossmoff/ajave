@@ -25,7 +25,7 @@
 
 pub mod verdict;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -390,6 +390,9 @@ pub struct Program {
     pub supers: HashMap<String, String>,
     /// class -> declared interfaces.
     pub interfaces: HashMap<String, Vec<String>>,
+    /// Set of (class, field_name, field_desc) for fields declared by each class.
+    /// Used to resolve field references to the declaring class.
+    pub declared_fields: HashSet<(String, String, String)>,
     pub entry: Option<MethodKey>,
 }
 
@@ -398,11 +401,56 @@ impl Program {
         self.bodies.get(k)
     }
 
+    /// Resolve a field reference to the class that actually declares it.
+    /// Javac may emit `getfield A3.some_member` when `some_member` is declared
+    /// in A1 (a parent of A3). We walk up the hierarchy to find the declaring
+    /// class so that field reads and writes use the same SMT array.
+    pub fn resolve_field_class(&self, class: &str, name: &str, desc: &str) -> String {
+        let mut cur = class.to_string();
+        loop {
+            if self.declared_fields.contains(&(cur.clone(), name.to_string(), desc.to_string())) {
+                return cur;
+            }
+            match self.supers.get(&cur) {
+                Some(sup) => cur = sup.clone(),
+                None => return class.to_string(), // not found, use original
+            }
+        }
+    }
+
     /// Is `sub` a subtype of `sup`, as far as the loaded hierarchy shows?
     /// Unknown classes answer `true`: not knowing must not let us rule an
     /// exceptional edge out.
     pub fn is_subtype(&self, sub: &str, sup: &str) -> bool {
         if sub == sup || sup == "java/lang/Object" {
+            return true;
+        }
+        // Object is the root — it's only a subtype of itself (handled above).
+        if sub == "java/lang/Object" {
+            return false;
+        }
+        // Array covariance: [X is a subtype of [Y iff X <: Y (for ref types).
+        // Any array type is a subtype of Object (handled above), Cloneable, Serializable.
+        if sub.starts_with('[') && sup.starts_with('[') {
+            let sub_elem = &sub[1..];
+            let sup_elem = &sup[1..];
+            // Both are reference arrays: [Lfoo; <: [Lbar; iff foo <: bar
+            if let (Some(s), Some(t)) = (
+                sub_elem.strip_prefix('L').and_then(|s| s.strip_suffix(';')),
+                sup_elem.strip_prefix('L').and_then(|s| s.strip_suffix(';')),
+            ) {
+                return self.is_subtype(s, t);
+            }
+            // Both are arrays of same dimension — recurse
+            if sub_elem.starts_with('[') && sup_elem.starts_with('[') {
+                return self.is_subtype(sub_elem, sup_elem);
+            }
+            return false;
+        }
+        // Any array type is also a subtype of Cloneable and Serializable
+        if sub.starts_with('[')
+            && (sup == "java/lang/Cloneable" || sup == "java/io/Serializable")
+        {
             return true;
         }
         let mut cur = sub.to_string();
@@ -440,10 +488,10 @@ impl Program {
         out
     }
 
-    /// Bodies transitively reachable from the entry point. `<clinit>` and
-    /// `<init>` are deliberately *not* roots: we model class initialisation
-    /// away (see `ASSERTIONS_DISABLED` in the lifter), so their unlifted
-    /// bodies must not poison an otherwise complete proof.
+    /// Bodies transitively reachable from the entry point. Follows:
+    /// - Direct and virtual call targets
+    /// - `<clinit>` triggered by `new`, `getstatic`, `putstatic`
+    /// - Virtual dispatch across unloaded parent classes
     pub fn reachable_from_entry(&self) -> Vec<MethodKey> {
         let Some(entry) = &self.entry else {
             return self.bodies.keys().cloned().collect();
@@ -460,8 +508,49 @@ impl Program {
             };
             for b in &body.blocks {
                 for s in &b.stmts {
-                    if let Stmt::Assign(_, Rvalue::Call { target, .. }) = s {
-                        work.push(target.clone());
+                    match s {
+                        Stmt::Assign(_, Rvalue::Call { target, is_virtual, .. }) => {
+                            work.push(target.clone());
+                            if *is_virtual {
+                                for r in self.devirtualise(target) {
+                                    work.push(r);
+                                }
+                            }
+                            // If the call target's class has no loaded body,
+                            // check for overrides among loaded subclasses.
+                            if !self.bodies.contains_key(target) {
+                                for r in self.devirtualise(target) {
+                                    work.push(r);
+                                }
+                            }
+                        }
+                        // new X triggers X.<clinit>
+                        Stmt::Assign(_, Rvalue::New(class)) => {
+                            let clinit = MethodKey {
+                                class: class.clone(),
+                                name: "<clinit>".into(),
+                                desc: "()V".into(),
+                            };
+                            work.push(clinit);
+                        }
+                        // getstatic/putstatic trigger class.<clinit>
+                        Stmt::Assign(_, Rvalue::GetStatic(fk)) => {
+                            let clinit = MethodKey {
+                                class: fk.class.clone(),
+                                name: "<clinit>".into(),
+                                desc: "()V".into(),
+                            };
+                            work.push(clinit);
+                        }
+                        Stmt::PutStatic(fk, _) => {
+                            let clinit = MethodKey {
+                                class: fk.class.clone(),
+                                name: "<clinit>".into(),
+                                desc: "()V".into(),
+                            };
+                            work.push(clinit);
+                        }
+                        _ => {}
                     }
                 }
             }

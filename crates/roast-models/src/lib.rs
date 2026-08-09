@@ -135,9 +135,9 @@ const PURE_OWNERS: &[&str] = &[
     "java/util/concurrent/atomic/AtomicInteger",
     "java/util/concurrent/atomic/AtomicLong",
     "java/util/concurrent/atomic/AtomicBoolean",
-    // I/O (side-effects are not property-relevant)
+    // I/O — PrintWriter is excluded: securibench benchmarks subclass it
+    // with mock objects that contain assertion obligations.
     "java/io/PrintStream",
-    "java/io/PrintWriter",
     "java/io/InputStream",
     "java/io/OutputStream",
     "java/io/BufferedReader",
@@ -251,6 +251,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "logicalOr" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Or)),
             "logicalXor" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Xor)),
             "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Integer" => match name {
@@ -261,14 +263,20 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
             "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
-            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Long" => match name {
             "valueOf" if desc == "(J)Ljava/lang/Long;" => Some(CallModel::BoxStore(Ty::Long)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Long)),
-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
-            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Long)),
+            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Long)),
+            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Long)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Long)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Long)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            // Long.toString disabled — bv32_to_int truncates 64-bit values
             _ => None,
         },
         "java/lang/Short" => match name {
@@ -278,7 +286,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
-            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Byte" => match name {
@@ -289,22 +298,23 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
-            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
-            // toUnsignedInt/Long are unary — keep as Pure/Havoc for now.
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Character" => match name {
             "valueOf" if desc == "(C)Ljava/lang/Character;" => Some(CallModel::BoxStore(Ty::Int)),
             "charValue" if desc == "()C" => Some(CallModel::Unbox(Ty::Int)),
-            "compare" => Some(CallModel::StaticBinOp(roast_ir::BinOp::Sub)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Double" => match name {
-            "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Int)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+            "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Double)),
+            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Double)),
+            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Double)),
+            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Double)),
+            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Double)),
             _ => None,
         },
         "java/lang/Float" => match name {
@@ -335,32 +345,35 @@ fn is_math_call(owner: &str, name: &str) -> bool {
         "java/lang/Integer" => matches!(
             name,
             "parseInt" | "max" | "min" | "sum"
-                | "reverse" | "reverseBytes" | "numberOfLeadingZeros"
-                | "numberOfTrailingZeros" | "bitCount" | "highestOneBit"
+                | "reverseBytes" | "highestOneBit"
                 | "lowestOneBit" | "signum" | "toUnsignedLong"
                 | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
                 | "hashCode" | "compare"
+                | "rotateLeft" | "rotateRight"
+                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                | "reverse"
         ),
         "java/lang/Long" => matches!(
             name,
             "parseLong" | "max" | "min" | "sum" | "signum"
                 | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
                 | "hashCode" | "compare"
+                | "reverseBytes" | "highestOneBit" | "lowestOneBit"
+                | "rotateLeft" | "rotateRight"
+                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                | "reverse"
         ),
         "java/lang/Character" => matches!(
             name,
             "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
                 | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
-                | "isSupplementaryCodePoint" | "isHighSurrogate" | "isLowSurrogate"
-                | "isSurrogate" | "isSurrogatePair" | "isValidCodePoint"
-                | "toUpperCase" | "toLowerCase" | "toTitleCase"
-                | "getNumericValue" | "getType" | "digit" | "forDigit"
-                | "charCount" | "codePointAt" | "codePointBefore" | "codePointCount"
+                | "isSupplementaryCodePoint" | "isValidCodePoint"
+                | "toUpperCase" | "toLowerCase"
+                | "digit" | "forDigit"
+                | "charCount" | "toCodePoint"
                 | "compare" | "hashCode" | "reverseBytes"
-                | "highSurrogate" | "lowSurrogate" | "toCodePoint" | "toChars"
-                | "isISOControl" | "isMirrored" | "isDefined" | "isTitleCase"
+                | "isISOControl"
                 | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                | "isUnicodeIdentifierStart" | "isUnicodeIdentifierPart"
         ),
         "java/lang/Short" => matches!(
             name,

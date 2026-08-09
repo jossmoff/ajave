@@ -969,14 +969,51 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             // Primitive conversions.
             0x85..=0x93 => {
                 let a = self.pop()?;
-                let ty = match op {
-                    0x85 | 0x8c | 0x8f => Ty::Long,
-                    0x86 | 0x89 | 0x90 => Ty::Float,
-                    0x87 | 0x8a | 0x8d => Ty::Double,
-                    _ => Ty::Int,
-                };
-                let result = self.assign(ty, Rvalue::Cast(ty, a));
-                self.stack.push(result);
+                match op {
+                    // i2b: sign-extend byte — (x << 24) >> 24
+                    0x91 => {
+                        let shifted = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Shl, a.clone(), Operand::int(24)),
+                        );
+                        let result = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Shr, shifted, Operand::int(24)),
+                        );
+                        self.stack.push(result);
+                    }
+                    // i2c: zero-extend char — x & 0xFFFF
+                    0x92 => {
+                        let result = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::And, a, Operand::int(0xFFFF)),
+                        );
+                        self.stack.push(result);
+                    }
+                    // i2s: sign-extend short — (x << 16) >> 16
+                    0x93 => {
+                        let shifted = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Shl, a.clone(), Operand::int(16)),
+                        );
+                        let result = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Shr, shifted, Operand::int(16)),
+                        );
+                        self.stack.push(result);
+                    }
+                    // Other conversions: i2l, l2i, i2f, i2d, l2f, l2d, f2i, f2l, f2d, d2i, d2l, d2f
+                    _ => {
+                        let ty = match op {
+                            0x85 | 0x8c | 0x8f => Ty::Long,
+                            0x86 | 0x89 | 0x90 => Ty::Float,
+                            0x87 | 0x8a | 0x8d => Ty::Double,
+                            _ => Ty::Int,
+                        };
+                        let result = self.assign(ty, Rvalue::Cast(ty, a));
+                        self.stack.push(result);
+                    }
+                }
             }
             // lcmp / fcmp / dcmp.
             0x94..=0x98 => {
@@ -1319,7 +1356,7 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // T.*Value(): read the $$value field from the receiver.
                 let this = receiver.unwrap_or_else(|| args.remove(0));
                 self.nullcheck(&this);
-                let result = self.assign(
+                let field_val = self.assign(
                     ty,
                     Rvalue::GetField {
                         obj: this,
@@ -1330,6 +1367,20 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                         },
                     },
                 );
+                // If the storage type differs from the method's return type,
+                // insert an explicit cast (narrowing or widening).
+                let ret_char = target.desc.as_bytes().get(target.desc.len() - 1).copied().unwrap_or(b'I');
+                let ret_ty = match ret_char {
+                    b'J' => Ty::Long,
+                    b'D' => Ty::Double,
+                    b'F' => Ty::Float,
+                    _ => Ty::Int,
+                };
+                let result = if ty.is_wide() != ret_ty.is_wide() {
+                    self.assign(ret_ty, Rvalue::Cast(ret_ty, field_val))
+                } else {
+                    field_val
+                };
                 self.stack.push(result);
             }
             CallModel::StaticBinOp(binop) => {
@@ -1532,6 +1583,13 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
     }
     prog.interfaces
         .insert(cf.this_class.clone(), cf.interfaces.clone());
+    for field in &cf.fields {
+        prog.declared_fields.insert((
+            cf.this_class.clone(),
+            field.name.clone(),
+            field.desc.clone(),
+        ));
+    }
 
     for m in &cf.methods {
         if m.code.is_none() {

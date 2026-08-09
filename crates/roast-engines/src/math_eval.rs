@@ -357,7 +357,17 @@ pub(crate) fn eval_math_call(
                 "isTitleCase" => Value::I32(0), // approximate: Java has specific titlecase chars
                 "isMirrored" => Value::I32(0), // approximate
                 "isJavaIdentifierStart" => Value::I32(c.map(|c| c.is_alphabetic() || c == '_' || c == '$').unwrap_or(false) as i32),
-                "isJavaIdentifierPart" => Value::I32(c.map(|c| c.is_alphanumeric() || c == '_' || c == '$').unwrap_or(false) as i32),
+                "isJavaIdentifierPart" => {
+                    let is_part = c.map(|c| {
+                        let cp = c as u32;
+                        c.is_alphanumeric() || c == '_' || c == '$'
+                            // isIdentifierIgnorable: 0x00-0x08, 0x0E-0x1B, 0x7F-0x9F
+                            || cp <= 0x08
+                            || (cp >= 0x0E && cp <= 0x1B)
+                            || (cp >= 0x7F && cp <= 0x9F)
+                    }).unwrap_or(false);
+                    Value::I32(is_part as i32)
+                },
                 "isUnicodeIdentifierStart" => Value::I32(c.map(|c| c.is_alphabetic()).unwrap_or(false) as i32),
                 "isUnicodeIdentifierPart" => Value::I32(c.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) as i32),
                 _ => Value::Unknown,

@@ -92,19 +92,11 @@ impl Engine for NraEngine {
                     }
                 }
                 NraResult::Unsat => {
-                    info!("nra: obligation {} proved safe (UNSAT)", oref);
-                    let _ = bb.publish(
-                        self.id(),
-                        Direction::Over,
-                        Artifact::Status(
-                            oref.clone(),
-                            Status::Discharged {
-                                by: self.id(),
-                                proof: ProofKind::Exhaustive,
-                            },
-                        ),
-                    );
-                    advanced = true;
+                    // NRA encodes over reals, not IEEE 754 floats.
+                    // UNSAT over reals does not imply UNSAT over floats
+                    // (NaN, Inf, -0 can violate assertions that hold over R).
+                    // So we log but do NOT discharge.
+                    debug!("nra: obligation {} UNSAT over reals (not discharging — float unsoundness)", oref);
                 }
                 NraResult::Unknown => {
                     debug!("nra: solver returned unknown for {}", oref);

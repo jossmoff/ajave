@@ -72,6 +72,8 @@ enum Outcome {
     },
     /// Ran out of budget or hit something we can't interpret.
     Inconclusive,
+    /// Method threw an exception of this class.
+    Threw(String),
 }
 
 /// Result of inlining a method call.
@@ -84,6 +86,7 @@ enum InlineResult {
         witness: Vec<i64>,
         entries: Vec<NondetEntry>,
     },
+    Threw(String),
 }
 
 /// Result of evaluating a Check obligation.
@@ -203,6 +206,18 @@ impl Run {
                     Mul => x.wrapping_mul(y),
                     Div => x.checked_div(y).unwrap_or(0),
                     Rem => x.checked_rem(y).unwrap_or(0),
+                    _ => unreachable!(),
+                })
+            }
+            And | Or | Xor | Shl | Shr | UShr if wide => {
+                let (x, y) = (a.as_i64(), b.as_i64());
+                Value::I64(match op {
+                    And => x & y,
+                    Or => x | y,
+                    Xor => x ^ y,
+                    Shl => x.wrapping_shl(y as u32),
+                    Shr => x.wrapping_shr(y as u32),
+                    UShr => ((x as u64) >> (y as u32 & 63)) as i64,
                     _ => unreachable!(),
                 })
             }
@@ -370,6 +385,7 @@ impl<'a> ConcreteState<'a> {
                 entries,
             }),
             Outcome::Inconclusive => None,
+            Outcome::Threw(cls) => Some(InlineResult::Threw(cls)),
         }
     }
 
@@ -446,6 +462,7 @@ impl<'a> ConcreteState<'a> {
                     Some(InlineResult::Violated { method, oid, witness, entries }) => {
                         Err(Outcome::Violated { method, oid, witness, entries })
                     }
+                    Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
                     None => {
                         let mut r = Run { store: std::mem::take(store) };
                         let val = r.eval_rvalue(rv);
@@ -648,7 +665,28 @@ impl<'a> ConcreteState<'a> {
                         return Outcome::Clean;
                     }
                     Terminator::Halt => return Outcome::Halted,
-                    Terminator::Throw(_) | Terminator::Diverge(_) => return Outcome::Inconclusive,
+                    Terminator::Throw(op) => {
+                        let thrown_class = match op {
+                            Operand::Var(v) => {
+                                if let Some(Value::Ref(aid)) = store.get(v) {
+                                    self.alloc_types.get(aid).cloned()
+                                } else { None }
+                            }
+                            _ => None,
+                        };
+                        match thrown_class {
+                            Some(cls) => {
+                                if let Some(target) = route(self.prog, b, &cls) {
+                                    block = target;
+                                    idx = 0;
+                                    continue;
+                                }
+                                return Outcome::Threw(cls);
+                            }
+                            None => return Outcome::Inconclusive,
+                        }
+                    }
+                    Terminator::Diverge(_) => return Outcome::Inconclusive,
                 }
                 continue;
             }
@@ -658,6 +696,14 @@ impl<'a> ConcreteState<'a> {
                 Stmt::Assign(v, rv) => {
                     match self.eval_assign(rv, &mut store) {
                         Ok(val) => { store.insert(*v, val); }
+                        Err(Outcome::Threw(cls)) => {
+                            if let Some(target) = route(self.prog, b, &cls) {
+                                block = target;
+                                idx = 0;
+                                continue;
+                            }
+                            return Outcome::Threw(cls);
+                        }
                         Err(outcome) => return outcome,
                     }
                 }

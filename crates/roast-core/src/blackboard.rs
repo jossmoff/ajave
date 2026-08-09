@@ -111,10 +111,18 @@ impl Blackboard {
 
         match &artifact {
             Artifact::Status(oref, st) => {
-                let keep =
-                    !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
-                if keep {
-                    self.statuses.insert(oref.clone(), st.clone());
+                // Only accept status updates for obligations that were
+                // originally seeded. Non-seeded obligations (e.g. ArrayBounds,
+                // NullDeref in callee bodies) are not property-relevant and
+                // must not influence the verdict.
+                if !self.statuses.contains_key(oref) {
+                    trace!("blackboard: ignoring status for non-seeded {oref}");
+                } else {
+                    let keep =
+                        !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
+                    if keep {
+                        self.statuses.insert(oref.clone(), st.clone());
+                    }
                 }
             }
             Artifact::Invariant(inv) => self.invariants.push(inv.clone()),

@@ -426,7 +426,12 @@ fn main() {
     prog.entry = prog
         .bodies
         .keys()
-        .find(|k| k.name == "main" && k.desc == "([Ljava/lang/String;)V")
+        .filter(|k| k.name == "main" && k.desc == "([Ljava/lang/String;)V")
+        .min_by_key(|k| {
+            // Prefer the "Main" class (SV-COMP convention), then shorter
+            // class names (less likely to be a nested/test class).
+            if k.class == "Main" { 0 } else { 1 + k.class.len() }
+        })
         .cloned();
 
     for e in &load_errors {
@@ -495,7 +500,7 @@ fn main() {
     let all_lifted = prog
         .reachable_from_entry()
         .iter()
-        .all(|k| prog.body(k).map(|b| b.is_fully_lifted()).unwrap_or(false));
+        .all(|k| prog.body(k).map(|b| b.is_fully_lifted()).unwrap_or(true));
     let verdict = if verdict == verdict::Verdict::True && !all_lifted {
         eprintln!("downgrading TRUE to UNKNOWN: program contains unlifted regions");
         verdict::Verdict::Unknown

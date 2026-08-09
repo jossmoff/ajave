@@ -13,6 +13,7 @@ impl<'a> ExploreCtx<'a> {
             vars: self.vars.clone(),
             str_vars: self.str_vars.clone(),
             nondet_terms: self.nondet_terms.clone(),
+            var_widths: self.var_widths.clone(),
             tainted: self.tainted.clone(),
             float_tainted: self.float_tainted.clone(),
             path_tainted: self.path_tainted,
@@ -20,6 +21,7 @@ impl<'a> ExploreCtx<'a> {
             static_str: self.static_str.clone(),
             static_tainted: self.static_tainted.clone(),
             field_arrays: self.field_arrays.clone(),
+            field_str: self.field_str.clone(),
             field_tainted: self.field_tainted.clone(),
             array_map: self.array_map.clone(),
             type_array: self.type_array,
@@ -32,6 +34,7 @@ impl<'a> ExploreCtx<'a> {
         self.vars = s.vars;
         self.str_vars = s.str_vars;
         self.nondet_terms = s.nondet_terms;
+        self.var_widths = s.var_widths;
         self.tainted = s.tainted;
         self.float_tainted = s.float_tainted;
         self.path_tainted = s.path_tainted;
@@ -39,6 +42,7 @@ impl<'a> ExploreCtx<'a> {
         self.static_str = s.static_str;
         self.static_tainted = s.static_tainted;
         self.field_arrays = s.field_arrays;
+        self.field_str = s.field_str;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
         self.type_array = s.type_array;
@@ -48,28 +52,34 @@ impl<'a> ExploreCtx<'a> {
 
     /// ITE-merge two branch states into the current state.
     /// `cond` is the Bool term that selects `a` (true) vs `b` (false).
+    /// `self` must hold the pre-branch state so that variables not modified
+    /// on one side fall back to their pre-branch value instead of becoming
+    /// unconstrained.
     pub(super) fn merge_states_ite(&mut self, cond: Term, a: &SavedState, b: &SavedState) {
         // Variables
         let all_vids: HashSet<VarId> = a.vars.keys().chain(b.vars.keys()).copied().collect();
         for vid in all_vids {
-            match (a.vars.get(&vid).copied(), b.vars.get(&vid).copied()) {
+            let av = a.vars.get(&vid).copied();
+            let bv = b.vars.get(&vid).copied();
+            // Fall back to pre-branch value when a branch didn't touch the var
+            let av = av.or_else(|| self.vars.get(&vid).copied());
+            let bv = bv.or_else(|| self.vars.get(&vid).copied());
+            match (av, bv) {
                 (Some(t), Some(e)) if t == e => { self.vars.insert(vid, t); }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.vars.insert(vid, m);
                 }
-                (Some(t), None) => {
-                    let fresh = self.solver.fresh_bv("merge", self.width_of_var(vid));
-                    let m = self.solver.ite(cond, t, fresh);
-                    self.vars.insert(vid, m);
-                }
-                (None, Some(e)) => {
-                    let fresh = self.solver.fresh_bv("merge", self.width_of_var(vid));
-                    let m = self.solver.ite(cond, fresh, e);
-                    self.vars.insert(vid, m);
-                }
+                (Some(t), None) => { self.vars.insert(vid, t); }
+                (None, Some(e)) => { self.vars.insert(vid, e); }
                 (None, None) => {}
             }
+        }
+
+        // Var widths — pick whichever was assigned
+        for vid in a.var_widths.keys().chain(b.var_widths.keys()).copied().collect::<HashSet<_>>() {
+            let w = a.var_widths.get(&vid).or_else(|| b.var_widths.get(&vid)).copied().unwrap_or(32);
+            self.var_widths.insert(vid, w);
         }
 
         // Static fields
@@ -158,27 +168,45 @@ impl<'a> ExploreCtx<'a> {
                 (None, None) => {}
             }
         }
+
+        // Instance field strings
+        let all_fs: HashSet<_> = a.field_str.keys().chain(b.field_str.keys()).cloned().collect();
+        self.field_str.clear();
+        for k in all_fs {
+            match (a.field_str.get(&k).copied(), b.field_str.get(&k).copied()) {
+                (Some(t), Some(e)) if t == e => { self.field_str.insert(k, t); }
+                (Some(t), Some(e)) => {
+                    let m = self.solver.ite(cond, t, e);
+                    self.field_str.insert(k, m);
+                }
+                (Some(t), None) => { self.field_str.insert(k, t); }
+                (None, Some(e)) => { self.field_str.insert(k, e); }
+                (None, None) => {}
+            }
+        }
     }
 
     /// ITE-merge a case state into an accumulator SavedState.
     /// `cond` selects `case` (true) vs `acc` (false).
     pub(super) fn merge_saved_into(&mut self, acc: &mut SavedState, cond: Term, case: &SavedState) {
-        // Vars
+        // Vars — fall back to pre-branch value (self.vars) for missing sides
         let all_vids: HashSet<VarId> = case.vars.keys().chain(acc.vars.keys()).copied().collect();
         for vid in all_vids {
-            match (case.vars.get(&vid).copied(), acc.vars.get(&vid).copied()) {
-                (Some(a), Some(b)) if a == b => {}
+            let cv = case.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
+            let av = acc.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
+            match (cv, av) {
+                (Some(a), Some(b)) if a == b => { acc.vars.insert(vid, a); }
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
                     acc.vars.insert(vid, m);
                 }
-                (Some(a), None) => {
-                    let fresh = self.solver.fresh_bv("sw_merge", self.width_of_var(vid));
-                    let m = self.solver.ite(cond, a, fresh);
-                    acc.vars.insert(vid, m);
-                }
+                (Some(a), None) => { acc.vars.insert(vid, a); }
                 (None, Some(_)) | (None, None) => {}
             }
+        }
+        // Var widths
+        for (&vid, &w) in &case.var_widths {
+            acc.var_widths.entry(vid).or_insert(w);
         }
         // Statics
         let all_sk: HashSet<_> = case.statics.keys().chain(acc.statics.keys()).cloned().collect();
@@ -247,12 +275,26 @@ impl<'a> ExploreCtx<'a> {
                 _ => {}
             }
         }
+        // Instance field strings
+        let all_fs: HashSet<_> = case.field_str.keys().chain(acc.field_str.keys()).cloned().collect();
+        for k in all_fs {
+            match (case.field_str.get(&k).copied(), acc.field_str.get(&k).copied()) {
+                (Some(a), Some(b)) if a == b => {}
+                (Some(a), Some(b)) => {
+                    let m = self.solver.ite(cond, a, b);
+                    acc.field_str.insert(k, m);
+                }
+                (Some(a), None) => { acc.field_str.insert(k, a); }
+                _ => {}
+            }
+        }
     }
 
     /// Apply a merged SavedState to self.
     pub(super) fn apply_merged_state(&mut self, s: SavedState) {
         self.vars = s.vars;
         self.str_vars = s.str_vars;
+        self.var_widths = s.var_widths;
         self.tainted = s.tainted;
         self.float_tainted = s.float_tainted;
         self.path_tainted = s.path_tainted;
@@ -260,6 +302,7 @@ impl<'a> ExploreCtx<'a> {
         self.static_str = s.static_str;
         self.static_tainted = s.static_tainted;
         self.field_arrays = s.field_arrays;
+        self.field_str = s.field_str;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
         self.type_array = s.type_array;
