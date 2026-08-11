@@ -10,6 +10,20 @@ use roast_models;
 use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 
 impl<'a> ExploreCtx<'a> {
+    /// Set str_vars for `var_id` and all other vars that share the same SMT term.
+    fn propagate_str_to_aliases(&mut self, var_id: VarId, str_term: Term) {
+        self.str_vars.insert(var_id, str_term);
+        if let Some(&recv_term) = self.vars.get(&var_id) {
+            let aliases: Vec<VarId> = self.vars.iter()
+                .filter(|(vid, &t)| **vid != var_id && t == recv_term)
+                .map(|(vid, _)| *vid)
+                .collect();
+            for alias in aliases {
+                self.str_vars.insert(alias, str_term);
+            }
+        }
+    }
+
     /// Run <clinit> for a class if it hasn't been run yet and has a body.
     pub(super) fn ensure_clinit(&mut self, class: &str) {
         if self.clinit_done.contains(class) {
@@ -333,9 +347,43 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Call { target, args, .. }
                 if roast_models::STR_OWNERS.contains(&target.class.as_str()) =>
             {
-                match self.encode_str_call(target, args) {
-                    Some((bv, st)) => (bv, st),
-                    None => (self.encode_rvalue(rv), None),
+                // Handle StringBuilder/StringBuffer <init> as a side effect:
+                // register str_vars on the receiver with the initial content.
+                if target.name == "<init>" {
+                    if let Some(recv) = args.first() {
+                        if let Operand::Var(recv_v) = recv {
+                            let init_str = if target.desc.starts_with("(Ljava/lang/String;)") {
+                                // <init>(String) — use the string argument
+                                args.get(1).and_then(|a| self.encode_str_operand(a))
+                                    .unwrap_or_else(|| self.solver.str_const(""))
+                            } else {
+                                // <init>() — empty string
+                                self.solver.str_const("")
+                            };
+                            self.propagate_str_to_aliases(*recv_v, init_str);
+                        }
+                    }
+                    (self.encode_rvalue(rv), None)
+                } else if matches!(target.name.as_str(),
+                    "append" | "setLength" | "deleteCharAt" | "delete" | "insert" | "reverse"
+                ) {
+                    // Mutating method — update str_vars for receiver and all aliases
+                    match self.encode_str_call(target, args) {
+                        Some((bv, st)) => {
+                            if let Some(st) = st {
+                                if let Some(Operand::Var(recv_v)) = args.first() {
+                                    self.propagate_str_to_aliases(*recv_v, st);
+                                }
+                            }
+                            (bv, st)
+                        }
+                        None => (self.encode_rvalue(rv), None),
+                    }
+                } else {
+                    match self.encode_str_call(target, args) {
+                        Some((bv, st)) => (bv, st),
+                        None => (self.encode_rvalue(rv), None),
+                    }
                 }
             }
             Rvalue::Call { target, args, is_virtual } => {
@@ -358,8 +406,8 @@ impl<'a> ExploreCtx<'a> {
                     (self.encode_rvalue(rv), None)
                 }
             }
-            Rvalue::Use(Operand::Var(src)) => {
-                let st = self.str_vars.get(src).copied();
+            Rvalue::Use(op) => {
+                let st = self.encode_str_operand(op);
                 (self.encode_rvalue(rv), st)
             }
             Rvalue::Nondet(Ty::Str, _) => {

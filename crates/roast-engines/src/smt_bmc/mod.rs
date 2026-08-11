@@ -10,6 +10,7 @@
 mod encode;
 mod explore;
 mod merge;
+mod str_encode;
 
 use std::collections::{HashMap, HashSet};
 

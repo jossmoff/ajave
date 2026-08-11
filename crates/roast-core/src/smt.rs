@@ -59,6 +59,7 @@ pub trait Solver {
     fn bvsle(&mut self, a: Term, b: Term) -> Term;
     fn bvsgt(&mut self, a: Term, b: Term) -> Term;
     fn bvsge(&mut self, a: Term, b: Term) -> Term;
+    fn bvult(&mut self, a: Term, b: Term) -> Term;
 
     // -- Conversion --
 
@@ -94,6 +95,14 @@ pub trait Solver {
     fn str_to_int(&mut self, s: Term) -> Term;
     fn str_from_int(&mut self, i: Term) -> Term;
     fn str_eq(&mut self, a: Term, b: Term) -> Term;
+    /// `(str.to_code s)` — code point of single-char string, -1 if len!=1.
+    fn str_to_code(&mut self, s: Term) -> Term;
+    /// `(str.from_code i)` — single-char string from code point.
+    fn str_from_code(&mut self, i: Term) -> Term;
+    /// `(str.replace_all s t1 t2)` — replace all occurrences of t1 with t2.
+    fn str_replace_all(&mut self, s: Term, from: Term, to: Term) -> Term;
+    /// `(str.< a b)` — lexicographic less-than.
+    fn str_lt(&mut self, a: Term, b: Term) -> Term;
 
     // -- Array theory --
 

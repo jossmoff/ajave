@@ -264,7 +264,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
             "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+            "toString" | "toHexString" | "toBinaryString" | "toOctalString"
+            | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Long" => match name {
@@ -276,7 +277,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Long)),
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Long)),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
-            // Long.toString disabled — bv32_to_int truncates 64-bit values
+            "toString" | "toHexString" | "toBinaryString" | "toOctalString"
+            | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
         },
         "java/lang/Short" => match name {
@@ -374,6 +376,7 @@ fn is_math_call(owner: &str, name: &str) -> bool {
                 | "compare" | "hashCode" | "reverseBytes"
                 | "isISOControl"
                 | "isJavaIdentifierStart" | "isJavaIdentifierPart"
+                | "isJavaLetter" | "isJavaLetterOrDigit"
         ),
         "java/lang/Short" => matches!(
             name,

@@ -2,6 +2,36 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Phase 1 Wrong-Answer Fixes: Vacuous TRUE Guard + BV Width Safety (2026-08-10)
+
+Two wrong-TRUE fixes eliminating all known wrong answers:
+
+**Vacuous TRUE guard (Refl4)**: When the reachability analysis fails to reach any assertions (e.g. due to unmodelled reflection via `Class.forName`), the verifier was returning TRUE vacuously — "no obligations seeded, so nothing can go wrong." Fixed by tracking `total_assertions` across the entire program during seeding. If the program has assertions but none were reachable, return UNKNOWN instead of TRUE. This is a soundness guard against incomplete reachability analysis without requiring full reflection support.
+
+**BV width mismatch safety (StringValueOf07)**: `signed_bv_to_str()` was hardcoded to BV32 — when called with a 64-bit long value (via `String.valueOf(long)`), it produced `(bvslt <BV64> <BV32>)` which Z3 rejects as a sort error. The error cascaded: Z3 returned error strings parsed as Unknown, poisoning all subsequent solver queries. The engine then saw both branches of an if/else as infeasible, skipping the assertion entirely, and unsoundly discharged it. Fixed by parameterizing `signed_bv_to_str` with the BV width, and parsing the descriptor to determine 32 vs 64-bit at each call site.
+
+**Impact**: +33 points (Refl4: wrong TRUE→UNKNOWN = +16; StringValueOf07: wrong TRUE→correct FALSE = +17). Eliminates all known wrong answers.
+
+## Phase 2 String Theory: Full Method Coverage + StringBuilder (2026-08-10)
+
+Major expansion of the SMT BMC's QF_S string encoding, adding 20+ new string methods:
+
+1. **String comparison & search**: `indexOf(int)`, `indexOf(int,int)`, `indexOf(String,int)`, `lastIndexOf` (all variants via iterative forward search, 8 iterations), `compareTo` (sign-only, removed from modelled set due to Over-discharge unsoundness with exact-value checks), `equalsIgnoreCase` (via `str.replace_all` ASCII case folding), `regionMatches` (4-arg and 5-arg with bounds checking).
+
+2. **String transform**: `replace(char,char)` via `str.replace_all`, `toLowerCase`/`toUpperCase` via 26 `str.replace_all` calls (ASCII approximation), `trim` (fresh string with length ≤ original + contains constraint).
+
+3. **StringBuilder/StringBuffer**: Full lifecycle support — `<init>()` / `<init>(String)` → empty/copy, `append(String/int/char/boolean/long)`, `insert(int,X)`, `delete(int,int)`, `deleteCharAt(int)`, `setLength(int)`, `reverse` (length-preserving approximation), `charAt`, `toString`. Key insight: **alias propagation** — `<init>` and mutating methods propagate `str_vars` to all SSA variables sharing the same SMT term, solving the `new X → copy → copy → <init> → use` pattern common in javac output.
+
+4. **valueOf enhancements**: `String.valueOf(boolean)` → `ite(nz, "true", "false")`, `String.valueOf(char)` → `str.from_code`, `charAt` fixed from `str.to_int` → `str.to_code`.
+
+5. **Solver extensions**: Added `str_to_code`, `str_from_code`, `str_replace_all`, `str_lt` to the Solver trait and SmtLib implementation.
+
+6. **Soundness fix**: `compareTo`/`compareToIgnoreCase` removed from string encoding — sign-only approximation {-1,0,1} caused unsound Over-discharge when benchmarks check exact return values. regionMatches bounds checking added (Java returns false for out-of-range offsets).
+
+7. **Code modularity**: Extracted 540-line `str_encode.rs` from `encode.rs` (1827→1250 lines), containing all string method encoding, helpers (lastIndexOf, toLowerCase, toUpperCase, signed_bv_to_str).
+
+Impact: Score 554 → ~559. New correct: StringBuilderConstructors01, StringBuilderAppend02, StringBuilderChars02/06, StringCompare02/04/05, StringIndexMethods01/02/04, StringValueOf06/10, plus 2 wrong TRUEs eliminated (compareTo/compareToIgnoreCase autostub).
+
 ## String Theory: Heap Flow and Wrapper toString Modeling (2026-08-09)
 
 Three improvements to the SMT BMC's string theory that unlock securibench and autostub toString benchmarks:

@@ -24,6 +24,9 @@ pub struct Blackboard {
     next_seq: u64,
     next_inv: u32,
     pub rejections: Vec<String>,
+    /// Total assertion obligations in the program (seeded + unreachable).
+    /// Used to detect vacuous TRUE when reachability is incomplete.
+    total_assertions: usize,
 }
 
 impl Blackboard {
@@ -44,6 +47,16 @@ impl Blackboard {
     pub fn seed(&mut self, prog: &Program, assertion_only: bool) {
         let reachable: std::collections::HashSet<_> =
             prog.reachable_from_entry().into_iter().collect();
+        // Count total assertions in the entire program (for vacuous-TRUE guard).
+        self.total_assertions = prog
+            .obligations()
+            .iter()
+            .filter(|(method, id)| {
+                prog.body(method)
+                    .map(|b| b.obligation(*id).kind.is_assertion())
+                    .unwrap_or(false)
+            })
+            .count();
         for (method, id) in prog.obligations() {
             if !reachable.contains(&method) {
                 continue;
@@ -59,8 +72,9 @@ impl Blackboard {
                 .insert(ObligationRef { method, id }, Status::Open);
         }
         debug!(
-            "blackboard: seeded {} reachable obligations{}",
+            "blackboard: seeded {} reachable obligations (total assertions in program: {}){}",
             self.statuses.len(),
+            self.total_assertions,
             if assertion_only { " (assertion-only)" } else { "" }
         );
     }
@@ -195,7 +209,11 @@ impl Blackboard {
     /// requires every obligation discharged.
     pub fn verdict(&self) -> Verdict {
         if self.statuses.is_empty() {
-            // No obligations at all means nothing can go wrong.
+            if self.total_assertions > 0 {
+                // Program has assertions but none were reachable — incomplete
+                // reachability analysis. Return Unknown rather than vacuous TRUE.
+                return Verdict::Unknown;
+            }
             return Verdict::True;
         }
         if self

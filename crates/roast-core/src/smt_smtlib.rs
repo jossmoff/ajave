@@ -242,6 +242,10 @@ impl Solver for SmtLib {
         self.binop_bool("bvsge", a, b)
     }
 
+    fn bvult(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("bvult", a, b)
+    }
+
     fn sign_extend(&mut self, t: Term, extra_bits: u32) -> Term {
         let tn = self.name(t).to_string();
         let sort = match self.sort(t) {
@@ -408,6 +412,33 @@ impl Solver for SmtLib {
         let an = self.name(a).to_string();
         let bn = self.name(b).to_string();
         let expr = format!("(= {an} {bn})");
+        self.define_term("t", &expr, Sort::Bool)
+    }
+
+    fn str_to_code(&mut self, s: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let expr = format!("(str.to_code {sn})");
+        self.define_term("t", &expr, Sort::Int)
+    }
+
+    fn str_from_code(&mut self, i: Term) -> Term {
+        let in_ = self.name(i).to_string();
+        let expr = format!("(str.from_code {in_})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_replace_all(&mut self, s: Term, from: Term, to: Term) -> Term {
+        let sn = self.name(s).to_string();
+        let fn_ = self.name(from).to_string();
+        let tn = self.name(to).to_string();
+        let expr = format!("(str.replace_all {sn} {fn_} {tn})");
+        self.define_term("t", &expr, Sort::Str)
+    }
+
+    fn str_lt(&mut self, a: Term, b: Term) -> Term {
+        let an = self.name(a).to_string();
+        let bn = self.name(b).to_string();
+        let expr = format!("(str.< {an} {bn})");
         self.define_term("t", &expr, Sort::Bool)
     }
 
