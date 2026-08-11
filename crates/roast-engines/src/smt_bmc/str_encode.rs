@@ -602,4 +602,181 @@ impl<'a> ExploreCtx<'a> {
         let is_zero = self.solver.bveq(val, zero_bv);
         self.solver.ite(is_zero, zero_str, result)
     }
+
+    // ── Wrapper toString encoding ───────────────────────────────────────
+
+    /// Encode wrapper-type calls that produce strings.
+    /// Returns (bv_ref, Some(str_term)) on success.
+    pub(super) fn encode_wrapper_str_call(
+        &mut self,
+        target: &MethodKey,
+        args: &[Operand],
+    ) -> Option<(Term, Option<Term>)> {
+        let one = self.solver.bv_const(1, 32);
+        match (target.class.as_str(), target.name.as_str()) {
+            // Boolean.toString(boolean) / Boolean.toString()
+            ("java/lang/Boolean", "toString") => {
+                let val = if target.desc.starts_with("(Z)") {
+                    self.encode_operand(args.first()?)
+                } else if target.desc == "()Ljava/lang/String;" {
+                    let recv = self.encode_operand(args.first()?);
+                    let fk = (
+                        "java/lang/Boolean".to_string(),
+                        "$$value".to_string(),
+                        "I".to_string(),
+                    );
+                    let arr = self.get_field_array(&fk, 32);
+                    self.solver.array_select(arr, recv)
+                } else {
+                    return None;
+                };
+                let zero = self.solver.bv_const(0, 32);
+                let eq = self.solver.bveq(val, zero);
+                let is_nz = self.solver.not(eq);
+                let s_true = self.solver.str_const("true");
+                let s_false = self.solver.str_const("false");
+                let result = self.solver.ite(is_nz, s_true, s_false);
+                Some((one, Some(result)))
+            }
+            // Integer.toString(int) / Integer.toString()
+            ("java/lang/Integer", "toString") => {
+                let val = if target.desc.starts_with("(I)") {
+                    self.encode_operand(args.first()?)
+                } else if target.desc == "()Ljava/lang/String;" {
+                    let recv = self.encode_operand(args.first()?);
+                    let fk = (
+                        "java/lang/Integer".to_string(),
+                        "$$value".to_string(),
+                        "I".to_string(),
+                    );
+                    let arr = self.get_field_array(&fk, 32);
+                    self.solver.array_select(arr, recv)
+                } else {
+                    return None;
+                };
+                let result = self.signed_bv_to_str(val, 32);
+                Some((one, Some(result)))
+            }
+            // Long.toString(long) / Long.toString()
+            ("java/lang/Long", "toString") => {
+                let val = if target.desc.starts_with("(J)") {
+                    self.encode_operand(args.first()?)
+                } else if target.desc == "()Ljava/lang/String;" {
+                    let recv = self.encode_operand(args.first()?);
+                    let fk = (
+                        "java/lang/Long".to_string(),
+                        "$$value".to_string(),
+                        "J".to_string(),
+                    );
+                    let arr = self.get_field_array(&fk, 64);
+                    self.solver.array_select(arr, recv)
+                } else {
+                    return None;
+                };
+                let result = self.signed_bv_to_str(val, 64);
+                Some((one, Some(result)))
+            }
+            // Integer/Long.toHexString
+            ("java/lang/Integer", "toHexString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_hex_str(val, 32);
+                Some((one, Some(result)))
+            }
+            ("java/lang/Long", "toHexString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_hex_str(val, 64);
+                Some((one, Some(result)))
+            }
+            // Integer/Long.toBinaryString
+            ("java/lang/Integer", "toBinaryString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_bin_str(val, 32);
+                Some((one, Some(result)))
+            }
+            ("java/lang/Long", "toBinaryString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_bin_str(val, 64);
+                Some((one, Some(result)))
+            }
+            // Integer/Long.toOctalString
+            ("java/lang/Integer", "toOctalString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_oct_str(val, 32);
+                Some((one, Some(result)))
+            }
+            ("java/lang/Long", "toOctalString") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_oct_str(val, 64);
+                Some((one, Some(result)))
+            }
+            // Integer/Long.toUnsignedString(int/long)
+            ("java/lang/Integer", "toUnsignedString") if target.desc.starts_with("(I)") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_str(val, 32);
+                Some((one, Some(result)))
+            }
+            ("java/lang/Long", "toUnsignedString") if target.desc.starts_with("(J)") => {
+                let val = self.encode_operand(args.first()?);
+                let result = self.unsigned_bv_to_str(val, 64);
+                Some((one, Some(result)))
+            }
+            // Short/Byte.toString
+            ("java/lang/Short" | "java/lang/Byte", "toString")
+                if target.desc.contains(")Ljava/lang/String;") =>
+            {
+                let val = if target.desc == "()Ljava/lang/String;" {
+                    let recv = self.encode_operand(args.first()?);
+                    let fk = (
+                        target.class.clone(),
+                        "$$value".to_string(),
+                        "I".to_string(),
+                    );
+                    let arr = self.get_field_array(&fk, 32);
+                    self.solver.array_select(arr, recv)
+                } else {
+                    self.encode_operand(args.first()?)
+                };
+                let result = self.signed_bv_to_str(val, 32);
+                Some((one, Some(result)))
+            }
+            // Character.toString(char)
+            ("java/lang/Character", "toString")
+                if target.desc.contains(")Ljava/lang/String;") =>
+            {
+                let s = self.solver.fresh_str("char_str");
+                let len = self.solver.str_len(s);
+                let one_int = self.solver.int_const(1);
+                let len_eq = self.solver.bveq(len, one_int);
+                self.solver.assert(len_eq);
+                Some((one, Some(s)))
+            }
+            // String.valueOf(int/long/boolean/char)
+            ("java/lang/String", "valueOf")
+                if !target.desc.starts_with("(L") && !target.desc.starts_with("([") =>
+            {
+                let val = self.encode_operand(args.first()?);
+                if target.desc.starts_with("(Z)") {
+                    let zero = self.solver.bv_const(0, 32);
+                    let eq = self.solver.bveq(val, zero);
+                    let is_nz = self.solver.not(eq);
+                    let s_true = self.solver.str_const("true");
+                    let s_false = self.solver.str_const("false");
+                    let result = self.solver.ite(is_nz, s_true, s_false);
+                    Some((one, Some(result)))
+                } else if target.desc.starts_with("(C)") {
+                    let s = self.solver.fresh_str("char_str");
+                    let len = self.solver.str_len(s);
+                    let one_int = self.solver.int_const(1);
+                    let len_eq = self.solver.bveq(len, one_int);
+                    self.solver.assert(len_eq);
+                    Some((one, Some(s)))
+                } else {
+                    let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
+                    let result = self.signed_bv_to_str(val, w);
+                    Some((one, Some(result)))
+                }
+            }
+            _ => None,
+        }
+    }
 }

@@ -2,6 +2,16 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## SMT Encoding Modularization + Reduction Tree Popcount (2026-08-11)
+
+**Binary reduction tree for bitCount**: Replaced the O(W)-depth ITE cascade popcount with a divide-and-conquer binary reduction tree. The old encoding extracted each bit via `bvand`+`bveq`+`ite` and accumulated with 32-bit `bvadd` — creating W sequential 32-bit additions. The new encoding extracts each bit to a 1-bit BV via `extract`, then pairwise `zero_extend(1)` + `bvadd` in a tree of depth O(log W). Additions start at 2-bit width and grow to only 6-7 bits at the root. This reduces SAT gate count by ~90% and AST depth from 32 to 5 (for 32-bit). Result: **Integer.bitCount solves in 0.5s vs 89s (110x speedup)**, moving from TIMEOUT to correct FALSE. Long.bitCount also solves in 0.5s.
+
+**Encoding benchmark harness** (`tools/bench_encodings.py`): 25 benchmarks across bit/arith/char/string categories with time budgets and regression detection. Saves baselines to JSON, flags >2x slowdowns. Ensures encoding changes don't regress solver performance.
+
+**Modularized encode.rs**: Split the 1328-line monolith into focused modules: `math_encode.rs` (bit/arithmetic methods), `char_encode.rs` (Character utilities), `str_encode.rs` (toString/radix). Each module is independently testable and the encoding benchmark harness covers all of them.
+
+**Radix toString encoding**: `toHexString`, `toBinaryString`, `toOctalString`, `toUnsignedString` for Integer and Long. Generic `unsigned_bv_to_radix_str` extracts bit groups, maps to chars via `str_from_code`, strips leading zeros via magnitude-based ITE chain. Also enabled Long.toString (bv2int works for any BV width, not just 32-bit as the function name suggested).
+
 ## Phase 1 Wrong-Answer Fixes: Vacuous TRUE Guard + BV Width Safety (2026-08-10)
 
 Two wrong-TRUE fixes eliminating all known wrong answers:

@@ -1,0 +1,102 @@
+{
+  "Character.isDigit": {
+    "time": 0.52,
+    "verdict": "FALSE"
+  },
+  "Character.isLetter": {
+    "time": 0.54,
+    "verdict": "FALSE"
+  },
+  "Character.isUpperCase": {
+    "time": 0.49,
+    "verdict": "FALSE"
+  },
+  "Integer.bitCount": {
+    "time": 0.55,
+    "verdict": "FALSE"
+  },
+  "Integer.compare": {
+    "time": 0.54,
+    "verdict": "FALSE"
+  },
+  "Integer.compareUnsigned": {
+    "time": 0.55,
+    "verdict": "FALSE"
+  },
+  "Integer.highestOneBit": {
+    "time": 0.49,
+    "verdict": "FALSE"
+  },
+  "Integer.lowestOneBit": {
+    "time": 0.47,
+    "verdict": "FALSE"
+  },
+  "Integer.max": {
+    "time": 0.53,
+    "verdict": "FALSE"
+  },
+  "Integer.min": {
+    "time": 0.55,
+    "verdict": "FALSE"
+  },
+  "Integer.numberOfLeadingZeros": {
+    "time": 0.52,
+    "verdict": "FALSE"
+  },
+  "Integer.numberOfTrailingZeros": {
+    "time": 0.48,
+    "verdict": "FALSE"
+  },
+  "Integer.reverse": {
+    "time": 0.51,
+    "verdict": "FALSE"
+  },
+  "Integer.reverseBytes": {
+    "time": 0.51,
+    "verdict": "FALSE"
+  },
+  "Integer.rotateLeft": {
+    "time": 0.51,
+    "verdict": "FALSE"
+  },
+  "Integer.rotateRight": {
+    "time": 0.5,
+    "verdict": "FALSE"
+  },
+  "Integer.signum": {
+    "time": 0.56,
+    "verdict": "FALSE"
+  },
+  "Integer.sum": {
+    "time": 0.55,
+    "verdict": "FALSE"
+  },
+  "Integer.toOctalString": {
+    "time": 2.42,
+    "verdict": "FALSE"
+  },
+  "Integer.toString": {
+    "time": 4.28,
+    "verdict": "FALSE"
+  },
+  "Integer.toUnsignedLong": {
+    "time": 0.52,
+    "verdict": "FALSE"
+  },
+  "Integer.toUnsignedString": {
+    "time": 0.53,
+    "verdict": "FALSE"
+  },
+  "Long.bitCount": {
+    "time": 0.53,
+    "verdict": "FALSE"
+  },
+  "Long.reverseBytes": {
+    "time": 0.5,
+    "verdict": "FALSE"
+  },
+  "Math.abs": {
+    "time": 0.55,
+    "verdict": "FALSE"
+  }
+}

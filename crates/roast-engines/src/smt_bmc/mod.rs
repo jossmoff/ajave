@@ -7,8 +7,10 @@
 //!
 //! Direction: Under. JvmReplay confirms all witnesses.
 
+mod char_encode;
 mod encode;
 mod explore;
+mod math_encode;
 mod merge;
 mod str_encode;
 
