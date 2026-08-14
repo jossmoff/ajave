@@ -232,7 +232,7 @@ impl<'a> Env<'a> {
                     _ => t,
                 }
             }
-            Rvalue::Cmp(a, b) => {
+            Rvalue::Cmp(_, a, b) => {
                 let at = self.encode_operand(a);
                 let bt = self.encode_operand(b);
                 // Handle width mismatch: sign-extend shorter operand.

@@ -8,6 +8,19 @@ use roast_ir::*;
 
 use super::ExploreCtx;
 
+/// Java String.compareTo semantics: compare char-by-char, return first
+/// difference; if one is a prefix of the other, return length difference.
+fn java_compare_to(a: &str, b: &str) -> i32 {
+    let ac: Vec<u16> = a.encode_utf16().collect();
+    let bc: Vec<u16> = b.encode_utf16().collect();
+    for (ca, cb) in ac.iter().zip(bc.iter()) {
+        if ca != cb {
+            return *ca as i32 - *cb as i32;
+        }
+    }
+    ac.len() as i32 - bc.len() as i32
+}
+
 impl<'a> ExploreCtx<'a> {
     /// Returns true if the given String/StringBuilder/StringBuffer method can be
     /// encoded precisely in SMT. Checks that required string operands are available.
@@ -26,7 +39,7 @@ impl<'a> ExploreCtx<'a> {
             "length" | "isEmpty" | "toString" | "trim"
             | "toLowerCase" | "toUpperCase" => has_recv_str,
             "contains" | "equals" | "startsWith" | "endsWith" | "concat"
-            | "equalsIgnoreCase" => {
+            | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase" => {
                 has_recv_str && has_arg1_str
             }
             "charAt" | "substring" | "hashCode" => has_recv_str,
@@ -232,6 +245,41 @@ impl<'a> ExploreCtx<'a> {
                 let b = self.solver.str_eq(s_low, t_low);
                 let r = self.solver.ite(b, one, zero);
                 Some((r, None))
+            }
+            "compareTo" => {
+                let s = recv_str?;
+                let t = args.get(1).and_then(|a| self.encode_str_operand(a))?;
+                // For constant strings, compute exact compareTo value
+                if let (Some(sv), Some(tv)) = (
+                    self.const_str_from_operand(args.first()?),
+                    self.const_str_from_operand(args.get(1)?),
+                ) {
+                    let v = java_compare_to(&sv, &tv);
+                    let r = self.solver.bv_const(v as i64, 32);
+                    Some((r, None))
+                } else {
+                    let r = self.encode_str_compare(s, t);
+                    Some((r, None))
+                }
+            }
+            "compareToIgnoreCase" => {
+                let s = recv_str?;
+                let t = args.get(1).and_then(|a| self.encode_str_operand(a))?;
+                if let (Some(sv), Some(tv)) = (
+                    self.const_str_from_operand(args.first()?),
+                    self.const_str_from_operand(args.get(1)?),
+                ) {
+                    let sv_low: String = sv.chars().map(|c| c.to_ascii_lowercase()).collect();
+                    let tv_low: String = tv.chars().map(|c| c.to_ascii_lowercase()).collect();
+                    let v = java_compare_to(&sv_low, &tv_low);
+                    let r = self.solver.bv_const(v as i64, 32);
+                    Some((r, None))
+                } else {
+                    let s_low = self.str_to_lower(s);
+                    let t_low = self.str_to_lower(t);
+                    let r = self.encode_str_compare(s_low, t_low);
+                    Some((r, None))
+                }
             }
             "regionMatches" => {
                 let s = recv_str?;
@@ -446,6 +494,42 @@ impl<'a> ExploreCtx<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Try to extract a constant string value from an operand.
+    fn const_str_from_operand(&self, op: &Operand) -> Option<String> {
+        match op {
+            Operand::Const(Const::Str(s)) => Some(s.clone()),
+            Operand::Var(v) => self.str_consts.get(v).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Encode String.compareTo: fresh var with sign constrained by str.<
+    fn encode_str_compare(&mut self, s: Term, t: Term) -> Term {
+        let zero = self.solver.bv_const(0, 32);
+        let r = self.solver.fresh_bv("cmp", 32);
+        let eq = self.solver.str_eq(s, t);
+        let lt = self.solver.str_lt(s, t);
+        // eq => r == 0
+        let r_eq0 = self.solver.bveq(r, zero);
+        let not_eq = self.solver.not(eq);
+        let c1 = self.solver.or(not_eq, r_eq0);
+        self.solver.assert(c1);
+        // lt => r < 0
+        let r_neg = self.solver.bvslt(r, zero);
+        let not_lt = self.solver.not(lt);
+        let c2 = self.solver.or(not_lt, r_neg);
+        self.solver.assert(c2);
+        // !eq && !lt => r > 0
+        let not_eq2 = self.solver.not(eq);
+        let not_lt2 = self.solver.not(lt);
+        let gt = self.solver.and(not_eq2, not_lt2);
+        let r_pos = self.solver.bvsgt(r, zero);
+        let not_gt = self.solver.not(gt);
+        let c3 = self.solver.or(not_gt, r_pos);
+        self.solver.assert(c3);
+        r
     }
 
     /// Encode lastIndexOf via iterative forward search (8 iterations).
@@ -739,15 +823,22 @@ impl<'a> ExploreCtx<'a> {
                 let result = self.signed_bv_to_str(val, 32);
                 Some((one, Some(result)))
             }
-            // Character.toString(char)
+            // Character.toString(char) — instance or static
             ("java/lang/Character", "toString")
                 if target.desc.contains(")Ljava/lang/String;") =>
             {
-                let s = self.solver.fresh_str("char_str");
-                let len = self.solver.str_len(s);
-                let one_int = self.solver.int_const(1);
-                let len_eq = self.solver.bveq(len, one_int);
-                self.solver.assert(len_eq);
+                let char_val = if target.desc.starts_with("()") {
+                    // Instance method: read $$value from receiver
+                    let this_ref = self.encode_operand(args.first()?);
+                    let k = ("java/lang/Character".to_string(), "$$value".to_string(), "I".to_string());
+                    let arr = self.get_field_array(&k, 32);
+                    self.solver.array_select(arr, this_ref)
+                } else {
+                    // Static method: arg is the char value directly
+                    self.encode_operand(args.first()?)
+                };
+                let char_int = self.solver.bv32_to_int(char_val);
+                let s = self.solver.str_from_code(char_int);
                 Some((one, Some(s)))
             }
             // String.valueOf(int/long/boolean/char)

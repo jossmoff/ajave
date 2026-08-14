@@ -56,6 +56,11 @@ struct Cli {
     /// Print the assumptions (nondet values) used in violation witnesses.
     #[arg(long = "show-witness")]
     show_witness: bool,
+
+    /// Constrain nondet char to ASCII (0-127). Prevents witnesses with
+    /// non-ASCII chars that our Character method encodings can't model.
+    #[arg(long = "ascii-only")]
+    ascii_only: bool,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -158,17 +163,16 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
 // Engine portfolio construction
 // ---------------------------------------------------------------------------
 
-fn build_engine_portfolio() -> Vec<Box<dyn Engine>> {
+fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     let mut engines: Vec<Box<dyn Engine>> = vec![
         Box::new(roast_engines::presolve::Presolve::new()),
         Box::new(roast_engines::concrete::Concrete::new()),
     ];
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
         let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
-        engines.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
-            Box::new(factory),
-            200,
-        )));
+        let mut bmc = roast_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
+        bmc.ascii_only = ascii_only;
+        engines.push(Box::new(bmc));
         if let Some(f2) = factory2 {
             engines.push(Box::new(roast_engines::kinduction::KInduction::new(
                 Box::new(f2),
@@ -456,7 +460,7 @@ fn main() {
     );
 
     // Run the engine portfolio.
-    let engines = build_engine_portfolio();
+    let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
     let verdict = orchestrator.run(&prog, 16);
 

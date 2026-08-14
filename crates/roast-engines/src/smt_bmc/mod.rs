@@ -53,6 +53,10 @@ pub struct SmtBmc {
     factory: Box<dyn SolverFactory>,
     max_depth: u32,
     done: bool,
+    /// Constrain nondet char to ASCII (0-127). Prevents witnesses with
+    /// non-ASCII chars that our Character method encodings can't model,
+    /// but limits falsification to the ASCII subset.
+    pub ascii_only: bool,
 }
 
 impl SmtBmc {
@@ -61,6 +65,7 @@ impl SmtBmc {
             factory,
             max_depth,
             done: false,
+            ascii_only: false,
         }
     }
 }
@@ -107,6 +112,7 @@ impl Engine for SmtBmc {
             body,
             vars: HashMap::new(),
             str_vars: HashMap::new(),
+            str_consts: HashMap::new(),
             nondet_terms: Vec::new(),
             var_widths: HashMap::new(),
             violations: Vec::new(),
@@ -145,6 +151,7 @@ impl Engine for SmtBmc {
             current_block: None,
             path_constraints: Vec::new(),
             inlined_methods: HashSet::new(),
+            ascii_only: self.ascii_only,
         };
 
         // Constrain entry method's Ref-typed parameters to be non-null.
@@ -264,6 +271,8 @@ struct ExploreCtx<'a> {
     body: &'a Body,
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
+    /// Tracks constant string values for variables (for precise compareTo).
+    str_consts: HashMap<VarId, String>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
     violations: Vec<(MethodKey, ObligationId, Witness)>,
     depth: u32,
@@ -322,6 +331,7 @@ struct ExploreCtx<'a> {
     current_block: Option<BlockId>,
     path_constraints: Vec<Term>,
     inlined_methods: HashSet<MethodKey>,
+    ascii_only: bool,
 }
 
 /// Snapshot of mutable state for save/restore across forks and diamond merges.
@@ -329,6 +339,7 @@ struct ExploreCtx<'a> {
 struct SavedState {
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
+    str_consts: HashMap<VarId, String>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
     var_widths: HashMap<VarId, u32>,
     tainted: HashSet<VarId>,
@@ -375,7 +386,7 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Use(op) | Rvalue::Neg(op) => self.width_of_operand(op),
             Rvalue::Bin(_, a, _) => self.width_of_operand(a),
             Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) | Rvalue::Cast(ty, _) => self.width_of_ty(ty),
-            Rvalue::Cmp(_, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
+            Rvalue::Cmp(_, _, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
             Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
             Rvalue::New(_) | Rvalue::NewArray { .. } => 32,
@@ -486,9 +497,19 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Cast(_, o) => {
                 self.operand_tainted(o) || self.operand_is_float(o)
             }
-            Rvalue::Bin(_, a, b) | Rvalue::Cmp(a, b) => {
+            Rvalue::Bin(_, a, b) => {
                 self.operand_tainted(a) || self.operand_tainted(b)
                     || self.operand_is_float(a) || self.operand_is_float(b)
+            }
+            // Float cmp (FloatL/FloatG) is precisely modeled via BV totalOrder,
+            // so the result is NOT tainted by float operands. Only propagate
+            // actual taint from havoc/unmodeled sources.
+            Rvalue::Cmp(kind, a, b) => {
+                let base_tainted = self.operand_tainted(a) || self.operand_tainted(b);
+                match kind {
+                    CmpKind::FloatL | CmpKind::FloatG => base_tainted,
+                    CmpKind::Long => base_tainted,
+                }
             }
             Rvalue::Nondet(..) => false,
             Rvalue::Havoc(_) => true,
@@ -503,9 +524,13 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Cast(_, o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)
             }
-            Rvalue::Bin(_, a, b) | Rvalue::Cmp(a, b) => {
+            Rvalue::Bin(_, a, b) => {
                 self.operand_float_tainted(a) || self.operand_float_tainted(b)
                     || self.operand_is_float(a) || self.operand_is_float(b)
+            }
+            // Cmp result is int, not float, so not float-tainted
+            Rvalue::Cmp(_, a, b) => {
+                self.operand_float_tainted(a) || self.operand_float_tainted(b)
             }
             _ => false,
         }

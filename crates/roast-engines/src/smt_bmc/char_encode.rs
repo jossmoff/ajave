@@ -13,11 +13,12 @@ impl<'a> ExploreCtx<'a> {
                 "isDigit" | "isLetter" | "isLetterOrDigit"
                     | "isUpperCase" | "isLowerCase" | "isWhitespace" | "isSpaceChar"
                     | "isAlphabetic" | "isBmpCodePoint"
-                    | "toUpperCase" | "toLowerCase"
+                    | "toUpperCase" | "toLowerCase" | "toTitleCase"
                     | "charCount" | "isValidCodePoint"
                     | "isSupplementaryCodePoint" | "isISOControl"
                     | "isJavaIdentifierStart" | "isJavaIdentifierPart"
                     | "isJavaLetter" | "isJavaLetterOrDigit"
+                    | "isSpace"
                     | "toCodePoint" | "digit" | "forDigit"
             ),
             _ => false,
@@ -27,6 +28,27 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn encode_char_wrapper_call(&mut self, class: &str, name: &str, args: &[Operand]) -> Term {
         let one = self.solver.bv_const(1, 32);
         let zero = self.solver.bv_const(0, 32);
+
+        // Constrain char arguments to ASCII range for classification methods
+        // where our model is only sound for ASCII. This ensures witnesses are
+        // replayable on the JVM. Non-classification methods (toCodePoint,
+        // charCount, etc.) work for the full range.
+        let is_classification = matches!(name,
+            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
+            | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isSpace"
+            | "isJavaIdentifierStart" | "isJavaIdentifierPart"
+            | "isJavaLetter" | "isJavaLetterOrDigit"
+        );
+        if is_classification {
+            for arg in args {
+                let a = self.encode_operand(arg);
+                let hi = self.solver.bv_const(127, 32);
+                let in_range = self.solver.bvsle(a, hi);
+                let ge_zero = self.solver.bvsge(a, zero);
+                let ok = self.solver.and(in_range, ge_zero);
+                self.solver.assert(ok);
+            }
+        }
 
         match (class, name) {
             ("java/lang/Character", "isDigit") => {
@@ -113,26 +135,10 @@ impl<'a> ExploreCtx<'a> {
                 self.solver.ite(result, one, zero)
             }
             ("java/lang/Character", "toUpperCase") => {
-                let c = self.encode_operand(&args[0]);
-                let lo = self.solver.bv_const(0x61, 32);
-                let hi = self.solver.bv_const(0x7A, 32);
-                let ge = self.solver.bvsge(c, lo);
-                let le = self.solver.bvsle(c, hi);
-                let is_lower = self.solver.and(ge, le);
-                let delta = self.solver.bv_const(0x20, 32);
-                let upper = self.solver.bvsub(c, delta);
-                self.solver.ite(is_lower, upper, c)
+                self.solver.fresh_bv("toUpper", 32)
             }
             ("java/lang/Character", "toLowerCase") => {
-                let c = self.encode_operand(&args[0]);
-                let lo = self.solver.bv_const(0x41, 32);
-                let hi = self.solver.bv_const(0x5A, 32);
-                let ge = self.solver.bvsge(c, lo);
-                let le = self.solver.bvsle(c, hi);
-                let is_upper = self.solver.and(ge, le);
-                let delta = self.solver.bv_const(0x20, 32);
-                let lower = self.solver.bvadd(c, delta);
-                self.solver.ite(is_upper, lower, c)
+                self.solver.fresh_bv("toLower", 32)
             }
             ("java/lang/Character", "charCount") => {
                 let cp = self.encode_operand(&args[0]);
@@ -210,6 +216,12 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Character", "digit") => {
                 let c = self.encode_operand(&args[0]);
                 let radix = self.encode_operand(&args[1]);
+                // Constrain radix to valid range [2, 36]
+                let two = self.solver.bv_const(2, 32);
+                let thirtysix = self.solver.bv_const(36, 32);
+                let radix_ge2 = self.solver.bvsge(radix, two);
+                let radix_le36 = self.solver.bvsle(radix, thirtysix);
+                let radix_ok = self.solver.and(radix_ge2, radix_le36);
                 let c0 = self.solver.bv_const(0x30, 32);
                 let c9 = self.solver.bv_const(0x39, 32);
                 let ca = self.solver.bv_const(0x61, 32);
@@ -238,15 +250,44 @@ impl<'a> ExploreCtx<'a> {
                 let in_range = self.solver.bvslt(v3, radix);
                 let valid = self.solver.bvsge(v3, zero);
                 let ok = self.solver.and(in_range, valid);
+                let ok = self.solver.and(ok, radix_ok);
                 let neg1b = self.solver.bv_const(-1, 32);
                 self.solver.ite(ok, v3, neg1b)
+            }
+            // isSpace (deprecated) — true for \t \n \f \r ' '
+            ("java/lang/Character", "isSpace") => {
+                let c = self.encode_operand(&args[0]);
+                let sp = self.solver.bv_const(0x20, 32);
+                let is_space = self.solver.bveq(c, sp);
+                let tab = self.solver.bv_const(0x09, 32);
+                let is_tab = self.solver.bveq(c, tab);
+                let nl = self.solver.bv_const(0x0A, 32);
+                let is_nl = self.solver.bveq(c, nl);
+                let cr = self.solver.bv_const(0x0D, 32);
+                let is_cr = self.solver.bveq(c, cr);
+                let ff = self.solver.bv_const(0x0C, 32);
+                let is_ff = self.solver.bveq(c, ff);
+                let r1 = self.solver.or(is_cr, is_ff);
+                let r2 = self.solver.or(is_nl, r1);
+                let r3 = self.solver.or(is_tab, r2);
+                let result = self.solver.or(is_space, r3);
+                self.solver.ite(result, one, zero)
+            }
+            ("java/lang/Character", "toTitleCase") => {
+                self.solver.fresh_bv("toTitle", 32)
             }
             ("java/lang/Character", "forDigit") => {
                 let d = self.encode_operand(&args[0]);
                 let radix = self.encode_operand(&args[1]);
+                let two = self.solver.bv_const(2, 32);
+                let thirtysix = self.solver.bv_const(36, 32);
+                let radix_ge2 = self.solver.bvsge(radix, two);
+                let radix_le36 = self.solver.bvsle(radix, thirtysix);
+                let radix_ok = self.solver.and(radix_ge2, radix_le36);
                 let in_range = self.solver.bvslt(d, radix);
                 let ge_zero = self.solver.bvsge(d, zero);
-                let valid = self.solver.and(in_range, ge_zero);
+                let digit_ok = self.solver.and(in_range, ge_zero);
+                let valid = self.solver.and(digit_ok, radix_ok);
                 let ten = self.solver.bv_const(10, 32);
                 let is_digit = self.solver.bvslt(d, ten);
                 let c0 = self.solver.bv_const(0x30, 32);
@@ -262,17 +303,41 @@ impl<'a> ExploreCtx<'a> {
     }
 
     pub(super) fn encode_is_alpha(&mut self, c: Term, one: Term, zero: Term) -> Term {
+        // ASCII A-Z
         let lo_u = self.solver.bv_const(0x41, 32);
         let hi_u = self.solver.bv_const(0x5A, 32);
         let ge_u = self.solver.bvsge(c, lo_u);
         let le_u = self.solver.bvsle(c, hi_u);
         let upper = self.solver.and(ge_u, le_u);
+        // ASCII a-z
         let lo_l = self.solver.bv_const(0x61, 32);
         let hi_l = self.solver.bv_const(0x7A, 32);
         let ge_l = self.solver.bvsge(c, lo_l);
         let le_l = self.solver.bvsle(c, hi_l);
         let lower = self.solver.and(ge_l, le_l);
-        let result = self.solver.or(upper, lower);
+        // Latin-1 Supplement: À-Ö (0xC0-0xD6)
+        let lo_l1a = self.solver.bv_const(0xC0, 32);
+        let hi_l1a = self.solver.bv_const(0xD6, 32);
+        let ge_l1a = self.solver.bvsge(c, lo_l1a);
+        let le_l1a = self.solver.bvsle(c, hi_l1a);
+        let latin1a = self.solver.and(ge_l1a, le_l1a);
+        // Latin-1 Supplement: Ø-ö (0xD8-0xF6)
+        let lo_l1b = self.solver.bv_const(0xD8, 32);
+        let hi_l1b = self.solver.bv_const(0xF6, 32);
+        let ge_l1b = self.solver.bvsge(c, lo_l1b);
+        let le_l1b = self.solver.bvsle(c, hi_l1b);
+        let latin1b = self.solver.and(ge_l1b, le_l1b);
+        // Latin-1 Supplement: ø-ÿ (0xF8-0xFF)
+        let lo_l1c = self.solver.bv_const(0xF8, 32);
+        let hi_l1c = self.solver.bv_const(0xFF, 32);
+        let ge_l1c = self.solver.bvsge(c, lo_l1c);
+        let le_l1c = self.solver.bvsle(c, hi_l1c);
+        let latin1c = self.solver.and(ge_l1c, le_l1c);
+        // Combine all ranges
+        let r1 = self.solver.or(upper, lower);
+        let r2 = self.solver.or(r1, latin1a);
+        let r3 = self.solver.or(r2, latin1b);
+        let result = self.solver.or(r3, latin1c);
         self.solver.ite(result, one, zero)
     }
 }

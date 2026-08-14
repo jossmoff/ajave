@@ -47,14 +47,16 @@ impl Blackboard {
     pub fn seed(&mut self, prog: &Program, assertion_only: bool) {
         let reachable: std::collections::HashSet<_> =
             prog.reachable_from_entry().into_iter().collect();
-        // Count total assertions in the entire program (for vacuous-TRUE guard).
+        // Count total assertions in reachable methods (for vacuous-TRUE guard).
         self.total_assertions = prog
             .obligations()
             .iter()
             .filter(|(method, id)| {
-                prog.body(method)
-                    .map(|b| b.obligation(*id).kind.is_assertion())
-                    .unwrap_or(false)
+                reachable.contains(method)
+                    && prog
+                        .body(method)
+                        .map(|b| b.obligation(*id).kind.is_assertion())
+                        .unwrap_or(false)
             })
             .count();
         for (method, id) in prog.obligations() {

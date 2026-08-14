@@ -58,11 +58,8 @@ impl<'a> ExploreCtx<'a> {
                     Some(b'Z') => Some((0, 1)),
                     Some(b'B') => Some((-128, 127)),
                     Some(b'S') => Some((-32768, 32767)),
-                    // Constrain char to ASCII range where our Character method
-                    // encodings are precise. Non-ASCII chars have Unicode-specific
-                    // behavior (isLetter, isDigit, etc.) that our BV encoding
-                    // doesn't model, leading to incorrect witnesses.
-                    Some(b'C') => Some((0, 127)),
+                    Some(b'C') if self.ascii_only => Some((0, 127)),
+                    Some(b'C') => Some((0, 0xFFFF)),
                     _ => None,
                 };
                 if let Some((lo, hi)) = range {
@@ -100,25 +97,57 @@ impl<'a> ExploreCtx<'a> {
                     _ => t,
                 }
             }
-            Rvalue::Cmp(a, b) => {
+            Rvalue::Cmp(kind, a, b) => {
                 let at = self.encode_operand(a);
                 let bt = self.encode_operand(b);
                 let aw = self.width_of_operand(a);
                 let bw = self.width_of_operand(b);
-                let (at, bt) = if aw < bw {
-                    (self.solver.sign_extend(at, bw - aw), bt)
-                } else if bw < aw {
-                    (at, self.solver.sign_extend(bt, aw - bw))
-                } else {
-                    (at, bt)
-                };
-                let lt = self.solver.bvslt(at, bt);
-                let eq = self.solver.bveq(at, bt);
-                let minus1 = self.solver.bv_const(-1, 32);
-                let zero = self.solver.bv_const(0, 32);
-                let one = self.solver.bv_const(1, 32);
-                let inner = self.solver.ite(eq, zero, one);
-                self.solver.ite(lt, minus1, inner)
+                match kind {
+                    CmpKind::Long => {
+                        let (at, bt) = if aw < bw {
+                            (self.solver.sign_extend(at, bw - aw), bt)
+                        } else if bw < aw {
+                            (at, self.solver.sign_extend(bt, aw - bw))
+                        } else {
+                            (at, bt)
+                        };
+                        let lt = self.solver.bvslt(at, bt);
+                        let eq = self.solver.bveq(at, bt);
+                        let minus1 = self.solver.bv_const(-1, 32);
+                        let zero = self.solver.bv_const(0, 32);
+                        let one = self.solver.bv_const(1, 32);
+                        let inner = self.solver.ite(eq, zero, one);
+                        self.solver.ite(lt, minus1, inner)
+                    }
+                    CmpKind::FloatL | CmpKind::FloatG => {
+                        // IEEE 754 float comparison via bit-pattern totalOrder
+                        if aw == 64 || bw == 64 {
+                            // double comparison
+                            let a_nan = self.fp_is_nan_64(at);
+                            let b_nan = self.fp_is_nan_64(bt);
+                            let either_nan = self.solver.or(a_nan, b_nan);
+                            let nan_val = if *kind == CmpKind::FloatL {
+                                self.solver.bv_const(-1, 32)
+                            } else {
+                                self.solver.bv_const(1, 32)
+                            };
+                            let cmp = self.fp_compare_bv64(at, bt);
+                            self.solver.ite(either_nan, nan_val, cmp)
+                        } else {
+                            // float comparison
+                            let a_nan = self.fp_is_nan_32(at);
+                            let b_nan = self.fp_is_nan_32(bt);
+                            let either_nan = self.solver.or(a_nan, b_nan);
+                            let nan_val = if *kind == CmpKind::FloatL {
+                                self.solver.bv_const(-1, 32)
+                            } else {
+                                self.solver.bv_const(1, 32)
+                            };
+                            let cmp = self.fp_compare_bv32(at, bt);
+                            self.solver.ite(either_nan, nan_val, cmp)
+                        }
+                    }
+                }
             }
             Rvalue::GetStatic(fk) => {
                 self.ensure_clinit(&fk.class);

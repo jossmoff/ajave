@@ -159,8 +159,15 @@ impl Solver for SmtLib {
             64 => value as u64,
             _ => (value as u64) & ((1u64 << width) - 1),
         };
-        let hex_digits = (width as usize) / 4;
-        let name = format!("#x{uval:0>hex_digits$x}");
+        let name = if width % 4 == 0 {
+            // Hex literal: exact number of hex digits
+            let hex_digits = (width as usize) / 4;
+            format!("#x{uval:0>hex_digits$x}")
+        } else {
+            // Binary literal for non-nibble-aligned widths
+            let bin_digits = width as usize;
+            format!("#b{uval:0>bin_digits$b}")
+        };
         let t = self.alloc(name, sort);
         self.bv_const_cache.insert((value, width), t);
         t
@@ -198,6 +205,12 @@ impl Solver for SmtLib {
     }
     fn bvsrem(&mut self, a: Term, b: Term) -> Term {
         self.binop("bvsrem", a, b)
+    }
+    fn bvudiv(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvudiv", a, b)
+    }
+    fn bvurem(&mut self, a: Term, b: Term) -> Term {
+        self.binop("bvurem", a, b)
     }
     fn bvneg(&mut self, a: Term) -> Term {
         let an = self.name(a).to_string();
@@ -271,6 +284,15 @@ impl Solver for SmtLib {
         let width = hi - lo + 1;
         let expr = format!("((_ extract {hi} {lo}) {tn})");
         self.define_term("t", &expr, Sort::Bv(width))
+    }
+
+    fn concat(&mut self, hi: Term, lo: Term) -> Term {
+        let hn = self.name(hi).to_string();
+        let ln = self.name(lo).to_string();
+        let hi_w = match self.sort(hi) { Sort::Bv(w) => w, _ => 32 };
+        let lo_w = match self.sort(lo) { Sort::Bv(w) => w, _ => 32 };
+        let expr = format!("(concat {hn} {ln})");
+        self.define_term("t", &expr, Sort::Bv(hi_w + lo_w))
     }
 
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term {

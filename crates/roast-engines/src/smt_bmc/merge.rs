@@ -12,6 +12,7 @@ impl<'a> ExploreCtx<'a> {
         SavedState {
             vars: self.vars.clone(),
             str_vars: self.str_vars.clone(),
+            str_consts: self.str_consts.clone(),
             nondet_terms: self.nondet_terms.clone(),
             var_widths: self.var_widths.clone(),
             tainted: self.tainted.clone(),
@@ -33,6 +34,7 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn restore_state(&mut self, s: SavedState) {
         self.vars = s.vars;
         self.str_vars = s.str_vars;
+        self.str_consts = s.str_consts;
         self.nondet_terms = s.nondet_terms;
         self.var_widths = s.var_widths;
         self.tainted = s.tainted;
@@ -150,6 +152,16 @@ impl<'a> ExploreCtx<'a> {
                     self.str_vars.insert(vid, m);
                 }
                 _ => {}
+            }
+        }
+
+        // String constants: keep only if same on both sides
+        self.str_consts.clear();
+        for vid in a.str_consts.keys() {
+            if let (Some(sa), Some(sb)) = (a.str_consts.get(vid), b.str_consts.get(vid)) {
+                if sa == sb {
+                    self.str_consts.insert(*vid, sa.clone());
+                }
             }
         }
 

@@ -141,14 +141,21 @@ impl Run {
                 (Ty::Long, Value::I32(v)) => Value::I64(v as i64),
                 (_, v) => v,
             },
-            Rvalue::Cmp(a, b) => {
+            Rvalue::Cmp(kind, a, b) => {
                 let av = self.eval(a);
                 let bv = self.eval(b);
                 if matches!(av, Value::Unknown) || matches!(bv, Value::Unknown) {
                     return Value::Unknown;
                 }
                 let (x, y) = (av.as_i64(), bv.as_i64());
-                Value::I32(x.cmp(&y) as i32)
+                match kind {
+                    CmpKind::Long => Value::I32(x.cmp(&y) as i32),
+                    CmpKind::FloatL | CmpKind::FloatG => {
+                        // For concrete, we can't easily do float compare
+                        // since values are stored as i64. Just use integer cmp.
+                        Value::I32(x.cmp(&y) as i32)
+                    }
+                }
             }
             Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
                 unreachable!("Nondet/Havoc is handled in run_with_choices")

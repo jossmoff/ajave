@@ -41,6 +41,8 @@ pub trait Solver {
     fn bvmul(&mut self, a: Term, b: Term) -> Term;
     fn bvsdiv(&mut self, a: Term, b: Term) -> Term;
     fn bvsrem(&mut self, a: Term, b: Term) -> Term;
+    fn bvudiv(&mut self, a: Term, b: Term) -> Term;
+    fn bvurem(&mut self, a: Term, b: Term) -> Term;
     fn bvneg(&mut self, a: Term) -> Term;
 
     // -- BV bitwise --
@@ -66,6 +68,7 @@ pub trait Solver {
     fn sign_extend(&mut self, t: Term, extra_bits: u32) -> Term;
     fn zero_extend(&mut self, t: Term, extra_bits: u32) -> Term;
     fn extract(&mut self, t: Term, hi: u32, lo: u32) -> Term;
+    fn concat(&mut self, hi: Term, lo: Term) -> Term;
 
     // -- Boolean / control --
 

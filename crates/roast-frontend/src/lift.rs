@@ -1015,11 +1015,17 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     }
                 }
             }
-            // lcmp / fcmp / dcmp.
+            // lcmp / fcmpl / fcmpg / dcmpl / dcmpg.
             0x94..=0x98 => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = self.assign(Ty::Int, Rvalue::Cmp(a, b));
+                let kind = match op {
+                    0x94 => CmpKind::Long,
+                    0x95 | 0x97 => CmpKind::FloatL,
+                    0x96 | 0x98 => CmpKind::FloatG,
+                    _ => unreachable!(),
+                };
+                let result = self.assign(Ty::Int, Rvalue::Cmp(kind, a, b));
                 self.stack.push(result);
             }
             _ => unreachable!(),

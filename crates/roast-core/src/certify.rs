@@ -37,10 +37,9 @@ pub trait Certifier {
 /// the classpath than the task's own copy, it shadows it, so `Main` runs
 /// completely unmodified against inputs we chose instead of random ones.
 ///
-/// Scoped to `Int`/`Long`/`Boolean` nondet, which is everything the concrete
-/// engine's witnesses currently contain (see `engines::concrete`). A witness
-/// touching `nondetFloat`/`nondetDouble`/`nondetString` returns `Inconclusive`
-/// rather than guessing at a replay -- the honest answer, not a wrong one.
+/// Supports `Int`/`Long`/`Boolean`/`Float`/`Double` nondet via bit-pattern
+/// reinterpretation (`intBitsToFloat`, `longBitsToDouble`). String nondet
+/// uses system properties (`roast.str.N`).
 pub struct JvmReplay {
     pub java: String,
     pub javac: String,
@@ -85,8 +84,8 @@ public final class Verifier {
     public static short nondetShort() { return (short) next(); }
     public static int nondetInt() { return (int) next(); }
     public static long nondetLong() { return next(); }
-    public static float nondetFloat() { return next(); }
-    public static double nondetDouble() { return next(); }
+    public static float nondetFloat() { return Float.intBitsToFloat((int) next()); }
+    public static double nondetDouble() { return Double.longBitsToDouble(next()); }
     public static String nondetString() {
         String val = System.getProperty("roast.str." + strIdx, "");
         strIdx++;

@@ -360,7 +360,18 @@ impl<'a> ExploreCtx<'a> {
                                 // <init>() — empty string
                                 self.solver.str_const("")
                             };
+                            debug!("str <init> propagating to v{} (class={})", recv_v.0, target.class);
                             self.propagate_str_to_aliases(*recv_v, init_str);
+                            // Propagate constant string value through <init>(String)
+                            if target.desc.starts_with("(Ljava/lang/String;)") {
+                                if let Some(Operand::Const(Const::Str(s))) = args.get(1) {
+                                    self.str_consts.insert(*recv_v, s.clone());
+                                } else if let Some(Operand::Var(src)) = args.get(1) {
+                                    if let Some(s) = self.str_consts.get(src).cloned() {
+                                        self.str_consts.insert(*recv_v, s);
+                                    }
+                                }
+                            }
                         }
                     }
                     (self.encode_rvalue(rv), None)
@@ -451,6 +462,20 @@ impl<'a> ExploreCtx<'a> {
             self.str_vars.insert(v, st);
         } else {
             self.str_vars.remove(&v);
+        }
+        // Propagate constant string values
+        match rv {
+            Rvalue::Use(Operand::Const(Const::Str(s))) => {
+                self.str_consts.insert(v, s.clone());
+            }
+            Rvalue::Use(Operand::Var(src)) => {
+                if let Some(s) = self.str_consts.get(src).cloned() {
+                    self.str_consts.insert(v, s);
+                } else {
+                    self.str_consts.remove(&v);
+                }
+            }
+            _ => { self.str_consts.remove(&v); }
         }
         if is_tainted {
             self.tainted.insert(v);

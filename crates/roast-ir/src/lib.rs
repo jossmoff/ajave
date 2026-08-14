@@ -103,6 +103,17 @@ impl Operand {
     }
 }
 
+/// Distinguishes integer three-way cmp from float three-way cmp.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CmpKind {
+    /// `lcmp` — signed integer comparison.
+    Long,
+    /// `fcmpl`/`dcmpl` — float comparison, NaN → -1.
+    FloatL,
+    /// `fcmpg`/`dcmpg` — float comparison, NaN → +1.
+    FloatG,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinOp {
     Add,
@@ -206,7 +217,7 @@ pub enum Rvalue {
     /// Primitive conversion (`i2l`, `l2i`, `i2b`, ...).
     Cast(Ty, Operand),
     /// Three-way comparison (`lcmp`, `fcmpl`, `dcmpg`): -1 / 0 / 1.
-    Cmp(Operand, Operand),
+    Cmp(CmpKind, Operand, Operand),
     New(String),
     Call {
         target: MethodKey,
@@ -616,7 +627,7 @@ impl fmt::Display for Rvalue {
             Rvalue::NewArray { elem, len } => write!(f, "new {elem}[{len}]"),
             Rvalue::InstanceOf { obj, class } => write!(f, "{obj} instanceof {class}"),
             Rvalue::Cast(t, o) => write!(f, "({t:?}) {o}"),
-            Rvalue::Cmp(a, b) => write!(f, "cmp({a}, {b})"),
+            Rvalue::Cmp(k, a, b) => write!(f, "cmp({k:?}, {a}, {b})"),
             Rvalue::New(c) => write!(f, "new {c}"),
             Rvalue::Call { target, args, .. } => {
                 let a: Vec<String> = args.iter().map(|x| x.to_string()).collect();

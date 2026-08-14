@@ -86,7 +86,7 @@ pub fn encode_rvalue<T: SmtTheory, V: VarLookup>(
             let operand = encode_operand(theory, o, vars);
             theory.encode_cast(ty, &operand)
         }
-        Rvalue::Cmp(a, b) => {
+        Rvalue::Cmp(_, a, b) => {
             let left = encode_operand(theory, a, vars);
             let right = encode_operand(theory, b, vars);
             theory.encode_cmp(&left, &right)

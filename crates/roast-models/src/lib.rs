@@ -317,6 +317,12 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Double)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Double)),
             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Double)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+            "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
             _ => None,
         },
         "java/lang/Float" => match name {
@@ -325,6 +331,12 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+            "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
             _ => None,
         },
         _ => None,
@@ -370,27 +382,41 @@ fn is_math_call(owner: &str, name: &str) -> bool {
             "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
                 | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
                 | "isSupplementaryCodePoint" | "isValidCodePoint"
-                | "toUpperCase" | "toLowerCase"
+                | "toUpperCase" | "toLowerCase" | "toTitleCase"
                 | "digit" | "forDigit"
                 | "charCount" | "toCodePoint"
-                | "compare" | "hashCode" | "reverseBytes"
-                | "isISOControl"
+                | "compare" | "compareTo" | "hashCode" | "reverseBytes"
+                | "isISOControl" | "isSpace"
                 | "isJavaIdentifierStart" | "isJavaIdentifierPart"
                 | "isJavaLetter" | "isJavaLetterOrDigit"
         ),
         "java/lang/Short" => matches!(
             name,
-            "parseShort" | "compare" | "hashCode" | "reverseBytes"
+            "parseShort" | "compare" | "compareTo" | "hashCode" | "reverseBytes"
                 | "toUnsignedInt" | "toUnsignedLong"
         ),
         "java/lang/Byte" => matches!(
             name,
-            "parseByte" | "compare" | "hashCode"
+            "parseByte" | "compare" | "compareTo" | "hashCode"
                 | "toUnsignedInt" | "toUnsignedLong"
         ),
         "java/lang/Boolean" => matches!(
             name,
             "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
+        ),
+        "java/lang/Float" => matches!(
+            name,
+            "floatToRawIntBits" | "floatToIntBits" | "intBitsToFloat"
+                | "isNaN" | "isInfinite" | "isFinite"
+                | "compare" | "max" | "min" | "sum"
+                | "hashCode"
+        ),
+        "java/lang/Double" => matches!(
+            name,
+            "doubleToRawLongBits" | "doubleToLongBits" | "longBitsToDouble"
+                | "isNaN" | "isInfinite" | "isFinite"
+                | "compare" | "max" | "min" | "sum"
+                | "hashCode"
         ),
         _ => false,
     }
