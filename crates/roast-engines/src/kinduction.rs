@@ -24,7 +24,7 @@ use roast_core::engine::{Budget, Engine, Progress};
 use roast_core::smt::{SatResult, SolverFactory};
 use roast_ir::*;
 
-use crate::body_analysis::{body_has_loops, body_uses_havoced_ops};
+use crate::body_analysis::body_has_loops;
 use crate::smt_encode;
 
 pub struct KInduction {
@@ -88,17 +88,6 @@ impl Engine for KInduction {
 
             // Check if the method has loops (back-edges in the CFG).
             let has_loops = body_has_loops(body);
-
-            // Only discharge if the encoding is precise — methods using heap,
-            // arrays, or calls are havoced in the SMT encoding, so a Bounded
-            // base case from the BMC doesn't actually cover all reachable states.
-            if body_uses_havoced_ops(body) {
-                debug!(
-                    "k-induction: {} uses havoced ops, skipping",
-                    oref
-                );
-                continue;
-            }
 
             if !has_loops {
                 // Loop-free: the base case is exhaustive. Discharge directly.

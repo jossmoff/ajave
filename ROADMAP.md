@@ -1,9 +1,17 @@
-# Roadmap: 591 → 900
+# Roadmap: 620 → 900
 
-Current: **591** (124 cT, 359 cF, 1 wT (Refl4), 0 wF)
-Target: **900** — gap: **309 points**
+Current: **620** (131 cT, 374 cF, 1 wT (Refl4), 0 wF)
+Target: **900** — gap: **280 points**
 
 ## Completed
+
+### Encoding barrier lift (+29, 591 → 620)
+- Removed `body_uses_havoced_ops` guard from k-induction, CHC, IMC
+- Fixed BV width bug in `smt_encode.rs` (heap ops always 32-bit → descriptor-parsed)
+- Fixed CHC apostrophe bug (Z3 HORN parser rejects `'` in identifiers)
+- Added `bv_fresh` declarations to CHC encoding
+- CEGAR guard kept (predicate abstraction unsound with havoced ops)
+- K-induction now proves 8 new benchmarks (BellmanFord, InsertionSort, RedBlackTree, array/list/enum)
 
 ### Phase 3a: Float/Double bit-level operations (+11, 580 → 591)
 - IEEE 754 Float/Double method encoding (18+ methods: floatToRawIntBits, isNaN, compare, etc.)
@@ -130,12 +138,13 @@ Revised down from +116 — core methods are done, remaining gains come from:
 | done | String theory core (2a) | +6 | 560 |
 | done | Wrong-answer fixes (1) | +20 | 580 |
 | done | Float/Double bit-level (3a) | +11 | 591 |
-| 2b | String theory remaining | +30 | 621 |
-| 3b | Float cast opcodes | +14 | 635 |
-| 4 | Securibench (collections, aliasing) | +60 | 695 |
-| 5 | NRA + float loops | +50 | 745 |
-| 6 | Deep programs | +50 | 795 |
-| 7 | Stretch (inlining, loops, mop-up) | +105 | 900 |
+| done | Encoding barrier lift | +29 | 620 |
+| 2b | String theory remaining | +30 | 650 |
+| 3b | Float cast opcodes | +14 | 664 |
+| 4 | Securibench (collections, aliasing) | +60 | 724 |
+| 5 | NRA + float loops | +50 | 774 |
+| 6 | Deep programs | +50 | 824 |
+| 7 | Stretch (inlining, loops, mop-up) | +76 | 900 |
 
 ## ROI ranking
 1. **Wrong answers** — highest per-benchmark ROI (34 pts for 2 fixes)

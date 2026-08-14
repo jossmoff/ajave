@@ -37,6 +37,23 @@ fn width_of(ty: &Ty) -> u32 {
     }
 }
 
+/// Width of a field from its JVM descriptor (e.g. "J" → 64, "I" → 32).
+fn field_width(desc: &str) -> u32 {
+    match desc.as_bytes().first() {
+        Some(b'J') | Some(b'D') => 64,
+        _ => 32,
+    }
+}
+
+/// Width of a method's return type from its JVM descriptor (e.g. "(I)J" → 64).
+fn return_width(desc: &str) -> u32 {
+    let after_paren = desc.split(')').nth(1).unwrap_or("V");
+    match after_paren.as_bytes().first() {
+        Some(b'J') | Some(b'D') => 64,
+        _ => 32,
+    }
+}
+
 /// Encode a single method body as an SMT formula.
 ///
 /// `frame` is a unique prefix for SSA variable names (allows multiple
@@ -263,10 +280,16 @@ impl<'a> Env<'a> {
                 self.solver.assert(neq);
                 t
             }
-            Rvalue::GetStatic(_) | Rvalue::GetField { .. }
-            | Rvalue::ArrayLoad { .. } | Rvalue::ArrayLength(_)
-            | Rvalue::NewArray { .. } | Rvalue::InstanceOf { .. }
-            | Rvalue::Call { .. } => self.fresh("havoc", 32),
+            Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => {
+                let w = field_width(&fk.desc);
+                self.fresh("havoc", w)
+            }
+            Rvalue::ArrayLoad { .. } | Rvalue::ArrayLength(_)
+            | Rvalue::NewArray { .. } | Rvalue::InstanceOf { .. } => self.fresh("havoc", 32),
+            Rvalue::Call { target, .. } => {
+                let w = return_width(&target.desc);
+                self.fresh("havoc", w)
+            }
         }
     }
 

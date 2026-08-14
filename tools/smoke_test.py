@@ -150,6 +150,11 @@ TESTS = [
     ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_toUpperCase_int.yml", "FALSE"),
     ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_toTitleCase_int.yml", "FALSE"),
 
+    # CEGAR wrong TRUE: predicate abstraction unsound with havoced heap ops.
+    # These were wrongly TRUE when CEGAR's body_uses_havoced_ops guard was removed.
+    ("canary", "sv-benchmarks/algorithms/BellmanFord-MemUnsat01.yml", "FALSE"),
+    ("canary", "sv-benchmarks/algorithms/InsertionSort-MemUnsat01.yml", "FALSE"),
+
     # ── Aliasing / strong updates ────────────────────────────────────────
     ("aliasing", "sv-benchmarks/securibench/Aliasing3.yml", "TRUE"),
 

@@ -23,7 +23,6 @@ use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
-use crate::body_analysis::body_uses_havoced_ops;
 use crate::interpolation::{
     encode_body_lia, find_interpolation_solver, InterpolationResult, InterpolationSolver,
 };
@@ -99,14 +98,6 @@ impl Engine for ImcEngine {
             let Some(body) = prog.body(&oref.method) else {
                 continue;
             };
-
-            // Skip methods with havoced operations — the LIA encoding
-            // overapproximates heap/array/call operations, which could lead
-            // to unsound proofs.
-            if body_uses_havoced_ops(body) {
-                debug!("imc: {} uses havoced ops, skipping", oref);
-                continue;
-            }
 
             if let Ok(proved) = try_imc(solver, body, oref.id) {
                 if proved {

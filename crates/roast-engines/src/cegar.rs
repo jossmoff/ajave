@@ -77,7 +77,13 @@ impl Engine for CegarEngine {
             return Progress::Stalled;
         }
 
-        // Skip methods with havoced operations.
+        // CEGAR uses predicate abstraction (CPA-based reachability), not SMT
+        // satisfiability. When heap operations produce unconstrained abstract
+        // values, the predicate domain can't track them, causing the abstract
+        // state to collapse to "top" — which makes the safety check trivially
+        // succeed, producing unsound TRUE verdicts. Unlike k-induction/CHC/IMC
+        // (which use SMT UNSAT checks where fresh values are conservative),
+        // CEGAR's abstract interpretation can lose safety-critical information.
         if body_uses_havoced_ops(body) {
             debug!("cegar: {} uses havoced ops, skipping", entry);
             return Progress::Stalled;

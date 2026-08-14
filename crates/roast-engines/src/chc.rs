@@ -18,13 +18,12 @@ use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::process::{Command, Stdio};
 
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
 use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
-use crate::body_analysis::body_uses_havoced_ops;
 use crate::smt_text::{self, BitvectorTheory, SmtTheory};
 
 pub struct ChcEngine {
@@ -84,13 +83,6 @@ impl Engine for ChcEngine {
             return Progress::Stalled;
         }
 
-        // Skip methods with heap/array/call operations — the CHC encoding
-        // havoces these, so an "unsat" result would be unsound.
-        if body_uses_havoced_ops(body) {
-            debug!("chc: {} uses havoced ops, skipping", entry);
-            return Progress::Stalled;
-        }
-
         // Collect obligations we want to check.
         let obs: Vec<ObligationId> = open
             .iter()
@@ -107,6 +99,7 @@ impl Engine for ChcEngine {
         // Generate CHC encoding.
         let smt2 = encode_chc(body, &obs);
         debug!("chc: generated {} bytes of CHC encoding", smt2.len());
+        trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(2000)]);
 
         // Run solver.
         let mut advanced = false;
@@ -161,12 +154,17 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
     out.push_str("(set-logic HORN)\n");
 
     // Collect all integer-typed variables as the relation's signature.
-    let var_indices: Vec<(usize, u32)> = body
+    let var_widths: Vec<(usize, u32)> = body
         .vars
         .iter()
         .enumerate()
         .map(|(i, vi)| (i, width_of(&vi.ty)))
         .collect();
+    // Map from var index → BV width, for looking up assigned-to variable width.
+    let width_map: HashMap<usize, u32> = var_widths.iter().cloned().collect();
+    // Fresh variable declarations: (name, width).
+    let mut fresh_decls: Vec<(String, u32)> = Vec::new();
+    let var_indices = &var_widths;
 
     let n_vars = var_indices.len();
 
@@ -188,7 +186,7 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
 
     // Helper: variable names for source and destination.
     let src_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}", i)).collect();
-    let dst_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}'", i)).collect();
+    let dst_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}p", i)).collect();
 
     // Quantifier prefix for source variables.
     let forall_src: String = var_indices
@@ -205,7 +203,7 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
         let dst = var_indices
             .iter()
             .enumerate()
-            .map(|(i, (_, w))| format!("(v{}' (_ BitVec {}))", i, w));
+            .map(|(i, (_, w))| format!("(v{}p (_ BitVec {}))", i, w));
         src.chain(dst).collect::<Vec<_>>().join(" ")
     };
 
@@ -243,6 +241,13 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
             match stmt {
                 Stmt::Assign(vid, rv) => {
                     let expr = smt_text::encode_rvalue(&BitvectorTheory, rv, &var_map);
+                    // Track any fresh variables with the assigned-to variable's width.
+                    if expr.starts_with("bv_fresh") {
+                        let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);
+                        if !fresh_decls.iter().any(|(n, _)| n == &expr) {
+                            fresh_decls.push((expr.clone(), w));
+                        }
+                    }
                     var_map.insert(vid.0 as usize, expr);
                 }
                 Stmt::Assume(op) => {
@@ -279,8 +284,8 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
         let mut assign_constraints: Vec<String> = Vec::new();
         for i in 0..n_vars {
             let val = var_map.get(&i).unwrap();
-            if *val != format!("v{}'", i) {
-                assign_constraints.push(format!("(= v{}' {})", i, val));
+            if *val != format!("v{}p", i) {
+                assign_constraints.push(format!("(= v{}p {})", i, val));
             }
         }
 
@@ -328,12 +333,25 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
         }
     }
 
+    // Declare any fresh variables introduced by havoced operations.
+    // These appear as free symbols in the CHC clauses and need explicit
+    // declarations so the solver can parse them.
+    if !fresh_decls.is_empty() {
+        let insert_pos = out.find("(assert ").unwrap_or(out.len());
+        let decl_block: String = fresh_decls
+            .iter()
+            .map(|(name, width)| format!("(declare-fun {} () (_ BitVec {}))\n", name, width))
+            .collect();
+        out.insert_str(insert_pos, &decl_block);
+    }
+
     // Query: is error reachable?
     out.push_str("(assert (not error))\n");
     out.push_str("(check-sat)\n");
 
     out
 }
+
 
 
 /// Run the CHC solver and parse results.

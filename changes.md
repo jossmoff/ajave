@@ -2,6 +2,97 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Lifting the Encoding Barrier: Activating Non-BMC Engines (2026-08-14)
+
+### Background: why four engines contributed zero verdicts
+
+The engine portfolio includes k-induction, CHC (Constrained Horn Clauses), IMC
+(interpolation-based model checking), and CEGAR (counterexample-guided
+abstraction refinement) — all Over-approximation engines that can prove safety
+(TRUE). However, a soundness guard `body_uses_havoced_ops()` blocked ALL four
+on any method containing field accesses, static field reads, method calls,
+instanceof checks, or havoc operations. This covers essentially every
+non-trivial Java method.
+
+Full-suite engine attribution (1013 benchmarks, 502 correct verdicts) showed:
+- SMT BMC: 433 verdicts (86%)
+- Concrete: 55 verdicts (11%)
+- Interval-AI: 16 verdicts (3%, redundant with BMC)
+- NRA: 9 verdicts (2%)
+- k-induction: 0, CHC: 0, IMC: 0, CEGAR: 0
+
+### Why the guard was wrong
+
+The guard's comment said "the encoding havoces these, so an UNSAT result would
+be unsound." This reasoning is backwards. The simple encoders (`smt_encode.rs`,
+`smt_text.rs`) already handle havoced operations by substituting **fresh
+unconstrained symbolic values**. For Over-approximation engines, this is sound:
+a fresh unconstrained value is a strict superset of the actual concrete values.
+If UNSAT holds for all possible values (including the unconstrained ones), it
+holds for the actual values too.
+
+The guard was confusing *imprecision* (more SAT/unknown results because the
+encoding is too loose) with *unsoundness* (wrong UNSAT results). Imprecision
+costs completeness but not soundness.
+
+### The actual bug: wrong BV widths
+
+The real issue was a width bug in `smt_encode.rs` line 269: all heap operations
+were encoded as `self.fresh("havoc", 32)` regardless of type. A `GetField` for
+a `long` field or a `Call` returning `long` would produce a 32-bit fresh value
+assigned to a 64-bit variable. This causes Z3 sort mismatches that could lead to
+solver errors or (worse) silently wrong results.
+
+Fixed by parsing field and method descriptors for correct widths:
+- `GetStatic`/`GetField`: parse `FieldKey.desc` — `J`/`D` → 64-bit, else 32
+- `Call`: parse return type after `)` in `MethodKey.desc`
+- `ArrayLoad`/`ArrayLength`/`NewArray`/`InstanceOf`: always 32-bit (correct)
+
+This mirrors the BMC engine's `field_elem_width()` and return-type parsing.
+
+### CEGAR exception: guard must stay
+
+CEGAR uses predicate abstraction (CPA-based reachability), not SMT UNSAT. When
+heap operations produce unconstrained abstract values, the predicate domain
+can't track them, and the abstract state collapses to "top." This makes the
+safety check trivially succeed, producing unsound TRUE verdicts. Validated by
+finding 5 new wrong TRUEs (BellmanFord, InsertionSort, MergeSortIterative)
+when the guard was removed from CEGAR. Re-added the guard for CEGAR only.
+
+The key distinction: k-induction, CHC, and IMC use **SMT UNSAT checks** where
+fresh unconstrained values are conservative (UNSAT means safe for all possible
+values). CEGAR uses **abstract interpretation** where unconstrained values lose
+precision in the *unsafe direction*.
+
+### Changes
+
+1. **`smt_encode.rs`**: Added `field_width()` and `return_width()` helpers;
+   `GetStatic`/`GetField` use descriptor-based width; `Call` uses return-type
+   width.
+2. **`kinduction.rs`**: Removed `body_uses_havoced_ops` guard.
+3. **`chc.rs`**: Removed `body_uses_havoced_ops` guard; fixed CHC identifier
+   syntax (apostrophe `'` in variable names → `p` suffix); added `bv_fresh`
+   variable declarations with correct BV widths.
+4. **`imc.rs`**: Removed `body_uses_havoced_ops` guard.
+5. **`cegar.rs`**: Guard **kept** — unsound without it (predicate abstraction
+   can't safely handle havoced heap ops).
+
+### Paper-worthy observations
+
+- The encoding barrier represents a common conservatism pattern in verification
+  toolkits: a coarse-grained soundness check blocks entire capabilities instead
+  of handling edge cases precisely. In this case, the correct fix was a 20-line
+  descriptor parser, but the blunt guard cost 4 engines their entire contribution.
+
+- Over-approximation engines that use fresh unconstrained values for unmodelled
+  operations are *sound by construction* for proving safety: they explore a
+  strict superset of the actual state space. The risk is incompleteness (too
+  many false alarms or unknown results), not unsoundness.
+
+- Engine portfolio attribution is crucial for understanding where development
+  effort should go. Without measuring, we couldn't see that 4 of 9 engines
+  were completely inert.
+
 ## Float/Double Bit-Level Modeling, BV Const Width Fix, CmpKind (2026-08-13)
 
 **BV constant width bug**: `bv_const(value, width)` emitted hex literals with `width/4` digits, which is wrong for non-nibble-aligned widths (e.g., 23-bit mantissa → 5 hex digits = 20 bits). Z3 silently accepted the sort mismatch and returned Unknown for feasibility checks, which poisoned discharge decisions. Fixed to use binary literals (`#b...`) for non-nibble-aligned widths. This is a critical infrastructure fix — it could have caused wrong TRUEs on ANY benchmark that extracted non-nibble-aligned bitvector slices.
@@ -238,7 +329,7 @@ Every FALSE verdict is confirmed by replaying the witness on a real JVM before r
 
 ## Soundness Guards
 
-Proving engines (k-induction, CHC, IMC, CEGAR) skip methods with havoced operations via `body_uses_havoced_ops()`. Since havoced values are unconstrained, an UNSAT result from a simplified encoding would be unsound — the guard prevents false TRUE verdicts.
+Proving engines (k-induction, CHC, IMC, CEGAR) previously skipped methods with havoced operations via `body_uses_havoced_ops()`. **Superseded 2026-08-14**: the guard was overly conservative; see "Lifting the Encoding Barrier" entry above.
 
 ## CPA Substrate
 
