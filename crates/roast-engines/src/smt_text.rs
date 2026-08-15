@@ -82,7 +82,7 @@ pub fn encode_rvalue<T: SmtTheory, V: VarLookup>(
             let operand = encode_operand(theory, o, vars);
             theory.encode_neg(&operand)
         }
-        Rvalue::Cast(ty, o) => {
+        Rvalue::Cast(ty, _src, o) => {
             let operand = encode_operand(theory, o, vars);
             theory.encode_cast(ty, &operand)
         }

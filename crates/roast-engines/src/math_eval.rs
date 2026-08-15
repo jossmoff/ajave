@@ -16,6 +16,7 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
             name,
             "abs" | "min" | "max" | "addExact" | "subtractExact"
                 | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
+                | "round"
         ),
         "java/lang/Integer" => matches!(
             name,
@@ -170,6 +171,27 @@ pub(crate) fn eval_math_call(
                         (Some(a), Some(b)) if b != 0 => Value::I64(a.rem_euclid(b)),
                         _ => Value::Unknown,
                     },
+                },
+                "round" => {
+                    // Java: Math.round(float) = (int) Math.floor(x + 0.5f)
+                    //       Math.round(double) = (long) Math.floor(x + 0.5d)
+                    if target.desc.starts_with("(D)") {
+                        match get_i64(0) {
+                            Some(bits) => {
+                                let d = f64::from_bits(bits as u64);
+                                Value::I64((d + 0.5_f64).floor() as i64)
+                            }
+                            None => Value::Unknown,
+                        }
+                    } else {
+                        match get_i32(0) {
+                            Some(bits) => {
+                                let f = f32::from_bits(bits as u32);
+                                Value::I32((f + 0.5_f32).floor() as i32)
+                            }
+                            None => Value::Unknown,
+                        }
+                    }
                 },
                 _ => Value::Unknown,
             }

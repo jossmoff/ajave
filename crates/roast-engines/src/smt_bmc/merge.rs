@@ -60,17 +60,43 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn merge_states_ite(&mut self, cond: Term, a: &SavedState, b: &SavedState) {
         // Variables
         let all_vids: HashSet<VarId> = a.vars.keys().chain(b.vars.keys()).copied().collect();
+        let mut width_mismatch_vars: Vec<VarId> = Vec::new();
         for vid in all_vids {
             let av = a.vars.get(&vid).copied();
             let bv = b.vars.get(&vid).copied();
             // Fall back to pre-branch value when a branch didn't touch the var
             let av = av.or_else(|| self.vars.get(&vid).copied());
             let bv = bv.or_else(|| self.vars.get(&vid).copied());
+            // Check if both branches have different widths for this var
+            // (JVM local slot reuse across branches). ITE requires same-width
+            // operands, so skip the merge when widths disagree.
+            let aw = a.var_widths.get(&vid).copied()
+                .or_else(|| self.var_widths.get(&vid).copied());
+            let bw = b.var_widths.get(&vid).copied()
+                .or_else(|| self.var_widths.get(&vid).copied());
+            let width_match = match (aw, bw) {
+                (Some(wa), Some(wb)) => wa == wb,
+                _ => true, // assume match if unknown
+            };
             match (av, bv) {
                 (Some(t), Some(e)) if t == e => { self.vars.insert(vid, t); }
-                (Some(t), Some(e)) => {
+                (Some(t), Some(e)) if width_match => {
                     let m = self.solver.ite(cond, t, e);
                     self.vars.insert(vid, m);
+                }
+                (Some(_t), Some(_e)) => {
+                    // Width mismatch (JVM slot reuse) — can't create ITE with
+                    // mismatched widths. Use a fresh unconstrained BV at the
+                    // max width. Taint to prevent unsound discharge.
+                    let w = match (aw, bw) {
+                        (Some(a), Some(b)) => a.max(b),
+                        (Some(a), None) | (None, Some(a)) => a,
+                        _ => 32,
+                    };
+                    let fresh = self.solver.fresh_bv("merge_mismatch", w);
+                    self.vars.insert(vid, fresh);
+                    self.var_widths.insert(vid, w);
+                    width_mismatch_vars.push(vid);
                 }
                 (Some(t), None) => { self.vars.insert(vid, t); }
                 (None, Some(e)) => { self.vars.insert(vid, e); }
@@ -136,6 +162,10 @@ impl<'a> ExploreCtx<'a> {
 
         // Taint: conservative union
         self.tainted = &a.tainted | &b.tainted;
+        // Width-mismatch vars must be tainted after union to persist
+        for vid in width_mismatch_vars {
+            self.tainted.insert(vid);
+        }
         self.float_tainted = &a.float_tainted | &b.float_tainted;
         self.static_tainted = &a.static_tainted | &b.static_tainted;
         self.field_tainted = &a.field_tainted | &b.field_tainted;
@@ -203,14 +233,30 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn merge_saved_into(&mut self, acc: &mut SavedState, cond: Term, case: &SavedState) {
         // Vars — fall back to pre-branch value (self.vars) for missing sides
         let all_vids: HashSet<VarId> = case.vars.keys().chain(acc.vars.keys()).copied().collect();
+        let mut width_mismatch_vars: Vec<VarId> = Vec::new();
         for vid in all_vids {
             let cv = case.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
             let av = acc.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
+            let cw = case.var_widths.get(&vid).copied()
+                .or_else(|| self.var_widths.get(&vid).copied());
+            let aw_val = acc.var_widths.get(&vid).copied()
+                .or_else(|| self.var_widths.get(&vid).copied());
+            let width_match = match (cw, aw_val) {
+                (Some(wa), Some(wb)) => wa == wb,
+                _ => true,
+            };
             match (cv, av) {
                 (Some(a), Some(b)) if a == b => { acc.vars.insert(vid, a); }
-                (Some(a), Some(b)) => {
+                (Some(a), Some(b)) if width_match => {
                     let m = self.solver.ite(cond, a, b);
                     acc.vars.insert(vid, m);
+                }
+                (Some(_a), Some(_b)) => {
+                    // Width mismatch — fresh unconstrained BV, tainted
+                    let w = aw_val.or(cw).unwrap_or(32);
+                    let fresh = self.solver.fresh_bv("merge_mismatch", w);
+                    acc.vars.insert(vid, fresh);
+                    width_mismatch_vars.push(vid);
                 }
                 (Some(a), None) => { acc.vars.insert(vid, a); }
                 (None, Some(_)) | (None, None) => {}
@@ -258,6 +304,9 @@ impl<'a> ExploreCtx<'a> {
         }
         // Taint
         acc.tainted = &acc.tainted | &case.tainted;
+        for vid in width_mismatch_vars {
+            acc.tainted.insert(vid);
+        }
         acc.float_tainted = &acc.float_tainted | &case.float_tainted;
         acc.static_tainted = &acc.static_tainted | &case.static_tainted;
         acc.field_tainted = &acc.field_tainted | &case.field_tainted;

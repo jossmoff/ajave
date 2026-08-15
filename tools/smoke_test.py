@@ -110,6 +110,8 @@ TESTS = [
     # These have been wrong in the past. They should be UNKNOWN or correct.
     # StringValueOf07: was wrong TRUE (signed_bv_to_str BV32/BV64 sort mismatch)
     ("canary", "sv-benchmarks/jbmc-regression/StringValueOf07.yml", "FALSE"),
+    # StringValueOf09: was wrong TRUE (valueOf(double) used signed_bv_to_str → integer string)
+    ("canary", "sv-benchmarks/jbmc-regression/StringValueOf09.yml", "FALSE"),
     # Inter13, Refl3: fixed to UNKNOWN by all_calls_resolved tightening.
     ("canary", "sv-benchmarks/securibench/Inter13.yml", "FALSE"),
     ("canary", "sv-benchmarks/securibench/Refl3.yml", "FALSE"),
@@ -154,6 +156,19 @@ TESTS = [
     # These were wrongly TRUE when CEGAR's body_uses_havoced_ops guard was removed.
     ("canary", "sv-benchmarks/algorithms/BellmanFord-MemUnsat01.yml", "FALSE"),
     ("canary", "sv-benchmarks/algorithms/InsertionSort-MemUnsat01.yml", "FALSE"),
+
+    # Float taint + JVM slot reuse: bvmul on IEEE 754 doubles is garbage.
+    # VarInfo type can be wrong when locals are reused (int→double).
+    ("canary", "sv-benchmarks/argv-tasks/AbstractSerializationStreamReader_false.yml", "FALSE"),
+
+    # ── Float constants and comparisons in concrete engine ───────────────
+    # fcmpx_dcmpx1: float/double constant comparisons — was wrong FALSE
+    ("canary", "sv-benchmarks/jbmc-regression/fcmpx_dcmpx1.yml", "TRUE"),
+    # store_load1: JVM slot reuse across int/long/double/float blocks
+    ("canary", "sv-benchmarks/jbmc-regression/store_load1.yml", "TRUE"),
+
+    # ── nondetObject replay ────────────────────────────────────────────
+    ("canary", "sv-benchmarks/objects/objects03.yml", "FALSE"),
 
     # ── Aliasing / strong updates ────────────────────────────────────────
     ("aliasing", "sv-benchmarks/securibench/Aliasing3.yml", "TRUE"),

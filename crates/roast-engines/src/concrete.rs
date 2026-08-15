@@ -109,6 +109,8 @@ impl Run {
             Operand::Var(v) => self.store.get(v).copied().unwrap_or(Value::Unknown),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
+            Operand::Const(Const::Float(f)) => Value::I32(f.to_bits() as i32),
+            Operand::Const(Const::Double(d)) => Value::I64(d.to_bits() as i64),
             Operand::Const(Const::Null) => Value::Ref(0),
             // String literals and class constants are non-null, but we don't
             // allocate a unique ID for them (they're interned constants).
@@ -136,10 +138,26 @@ impl Run {
             // before reaching here. Any remaining Call (unmodelled code that
             // survived the lifter without diverging) returns Unknown.
             Rvalue::Call { .. } => Value::Unknown,
-            Rvalue::Cast(ty, o) => match (ty, self.eval(o)) {
-                (Ty::Int, Value::I64(v)) => Value::I32(v as i32),
-                (Ty::Long, Value::I32(v)) => Value::I64(v as i64),
-                (_, v) => v,
+            Rvalue::Cast(dst, src, o) => {
+                let v = self.eval(o);
+                match (dst, src, v) {
+                    (Ty::Int, Ty::Long, Value::I64(x)) => Value::I32(x as i32),
+                    (Ty::Long, Ty::Int, Value::I32(x)) => Value::I64(x as i64),
+                    // float → int: reinterpret bits as float, cast to int
+                    (Ty::Int, Ty::Float, Value::I32(x)) => Value::I32(f32::from_bits(x as u32) as i32),
+                    (Ty::Long, Ty::Float, Value::I32(x)) => Value::I64(f32::from_bits(x as u32) as i64),
+                    (Ty::Long, Ty::Double, Value::I64(x)) => Value::I64(f64::from_bits(x as u64) as i64),
+                    (Ty::Int, Ty::Double, Value::I64(x)) => Value::I32(f64::from_bits(x as u64) as i32),
+                    // int → float: cast to float, store as bits
+                    (Ty::Float, Ty::Int, Value::I32(x)) => Value::I32((x as f32).to_bits() as i32),
+                    (Ty::Float, Ty::Long, Value::I64(x)) => Value::I32((x as f32).to_bits() as i32),
+                    (Ty::Double, Ty::Int, Value::I32(x)) => Value::I64((x as f64).to_bits() as i64),
+                    (Ty::Double, Ty::Long, Value::I64(x)) => Value::I64((x as f64).to_bits() as i64),
+                    // float ↔ double
+                    (Ty::Double, Ty::Float, Value::I32(x)) => Value::I64((f32::from_bits(x as u32) as f64).to_bits() as i64),
+                    (Ty::Float, Ty::Double, Value::I64(x)) => Value::I32((f64::from_bits(x as u64) as f32).to_bits() as i32),
+                    (_, _, v) => v,
+                }
             },
             Rvalue::Cmp(kind, a, b) => {
                 let av = self.eval(a);
@@ -151,9 +169,19 @@ impl Run {
                 match kind {
                     CmpKind::Long => Value::I32(x.cmp(&y) as i32),
                     CmpKind::FloatL | CmpKind::FloatG => {
-                        // For concrete, we can't easily do float compare
-                        // since values are stored as i64. Just use integer cmp.
-                        Value::I32(x.cmp(&y) as i32)
+                        // Determine if float (32-bit) or double (64-bit) by
+                        // checking whether operands are stored as I32 or I64.
+                        let is_double = matches!(av, Value::I64(_)) || matches!(bv, Value::I64(_));
+                        let nan_result = if *kind == CmpKind::FloatL { -1 } else { 1 };
+                        if is_double {
+                            let fa = f64::from_bits(x as u64);
+                            let fb = f64::from_bits(y as u64);
+                            Value::I32(fa.partial_cmp(&fb).map_or(nan_result, |o| o as i32))
+                        } else {
+                            let fa = f32::from_bits(x as u32);
+                            let fb = f32::from_bits(y as u32);
+                            Value::I32(fa.partial_cmp(&fb).map_or(nan_result, |o| o as i32))
+                        }
                     }
                 }
             }

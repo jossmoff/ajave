@@ -594,13 +594,29 @@ fn parse_bv_value(resp: &str) -> Option<i64> {
 /// Parse a string value from an SMT-LIB2 `(get-value ...)` response.
 /// Response format: `((name "value"))`.
 fn parse_string_value(resp: &str) -> Option<String> {
-    let start = resp.rfind('"')?;
-    // Find the matching opening quote by scanning backwards.
-    let inner = &resp[..start];
-    let open = inner.rfind('"')?;
-    let raw = &resp[open + 1..start];
-    // Unescape SMT-LIB2 string: `""` → `"`, `\\` → `\`.
-    Some(raw.replace("\"\"", "\"").replace("\\\\", "\\"))
+    // Parse SMT-LIB2 string literal from `(get-value ...)` response.
+    // Response format: `((name "content"))`.  In SMT-LIB2 `""` inside a
+    // string literal represents a single `"`, so naive rfind-based parsing
+    // breaks on strings containing quotes.
+    let bytes = resp.as_bytes();
+    // Find the first `"` — this opens the string literal value.
+    let open = bytes.iter().position(|&b| b == b'"')?;
+    let mut result = String::new();
+    let mut i = open + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                result.push('"');
+                i += 2;
+            } else {
+                break; // closing quote
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Some(result)
 }
 
 fn sign_extend_to_i64(val: u64, width: usize) -> i64 {

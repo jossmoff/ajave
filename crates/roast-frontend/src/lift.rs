@@ -1004,13 +1004,22 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     }
                     // Other conversions: i2l, l2i, i2f, i2d, l2f, l2d, f2i, f2l, f2d, d2i, d2l, d2f
                     _ => {
-                        let ty = match op {
-                            0x85 | 0x8c | 0x8f => Ty::Long,
-                            0x86 | 0x89 | 0x90 => Ty::Float,
-                            0x87 | 0x8a | 0x8d => Ty::Double,
-                            _ => Ty::Int,
+                        let (dst, src) = match op {
+                            0x85 => (Ty::Long, Ty::Int),    // i2l
+                            0x86 => (Ty::Float, Ty::Int),   // i2f
+                            0x87 => (Ty::Double, Ty::Int),  // i2d
+                            0x88 => (Ty::Int, Ty::Long),    // l2i
+                            0x89 => (Ty::Float, Ty::Long),  // l2f
+                            0x8a => (Ty::Double, Ty::Long),  // l2d
+                            0x8b => (Ty::Int, Ty::Float),   // f2i
+                            0x8c => (Ty::Long, Ty::Float),  // f2l
+                            0x8d => (Ty::Double, Ty::Float), // f2d
+                            0x8e => (Ty::Int, Ty::Double),  // d2i
+                            0x8f => (Ty::Long, Ty::Double), // d2l
+                            0x90 => (Ty::Float, Ty::Double), // d2f
+                            _ => (Ty::Int, Ty::Int),
                         };
-                        let result = self.assign(ty, Rvalue::Cast(ty, a));
+                        let result = self.assign(dst, Rvalue::Cast(dst, src, a));
                         self.stack.push(result);
                     }
                 }
@@ -1383,7 +1392,7 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     _ => Ty::Int,
                 };
                 let result = if ty.is_wide() != ret_ty.is_wide() {
-                    self.assign(ret_ty, Rvalue::Cast(ret_ty, field_val))
+                    self.assign(ret_ty, Rvalue::Cast(ret_ty, ty, field_val))
                 } else {
                     field_val
                 };

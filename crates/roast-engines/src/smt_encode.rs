@@ -241,7 +241,7 @@ impl<'a> Env<'a> {
                 let t = self.encode_operand(o);
                 self.solver.bvneg(t)
             }
-            Rvalue::Cast(ty, o) => {
+            Rvalue::Cast(ty, _src, o) => {
                 let t = self.encode_operand(o);
                 match ty {
                     Ty::Long => self.solver.sign_extend(t, 32),

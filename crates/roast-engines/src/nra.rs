@@ -383,7 +383,7 @@ fn encode_rvalue<'tm>(
             let inner = encode_operand(tm, operand, var_terms);
             tm.mk_term(Kind::Neg, &[inner])
         }
-        Rvalue::Cast(_, operand) => encode_operand(tm, operand, var_terms),
+        Rvalue::Cast(_, _, operand) => encode_operand(tm, operand, var_terms),
         Rvalue::Cmp(_, a, b) => {
             let left = encode_operand(tm, a, var_terms);
             let right = encode_operand(tm, b, var_terms);

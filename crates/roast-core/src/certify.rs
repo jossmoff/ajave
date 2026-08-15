@@ -91,7 +91,23 @@ public final class Verifier {
         strIdx++;
         return val;
     }
+    public static <T> T nondetObject(Class<T> type, ObjectFactory<T> factory) {
+        // Try the factory; if null, try again with different nondet values.
+        // The witness may not include factory-internal nondets, so we retry
+        // a few times and fall back to reflection if still null.
+        for (int attempt = 0; attempt < 8; attempt++) {
+            T obj = factory.createObject();
+            if (obj != null) return obj;
+        }
+        try { return type.getDeclaredConstructor().newInstance(); }
+        catch (Exception e) { return null; }
+    }
 }
+"#;
+
+    const SHADOW_FACTORY_SRC: &'static str = r#"
+package org.sosy_lab.sv_benchmarks;
+public interface ObjectFactory<T> { T createObject(); }
 "#;
 
     /// Compile the shadow class into a temp directory, returning its path for
@@ -104,11 +120,14 @@ public final class Verifier {
         std::fs::create_dir_all(&pkg_dir).map_err(|e| e.to_string())?;
         let src = pkg_dir.join("Verifier.java");
         std::fs::write(&src, Self::SHADOW_SRC).map_err(|e| e.to_string())?;
+        let factory_src = pkg_dir.join("ObjectFactory.java");
+        std::fs::write(&factory_src, Self::SHADOW_FACTORY_SRC).map_err(|e| e.to_string())?;
 
         let out = std::process::Command::new(&self.javac)
             .arg("-d")
             .arg(&dir)
             .arg(&src)
+            .arg(&factory_src)
             .output()
             .map_err(|e| format!("failed to run {}: {e}", self.javac))?;
         if !out.status.success() {

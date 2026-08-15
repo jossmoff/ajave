@@ -68,9 +68,15 @@ impl<'a> ExploreCtx<'a> {
                 has_recv_str && has_other_str
             }
             "valueOf" => {
-                // Only model valueOf for primitive argument types (int, long, char, boolean).
-                // valueOf(Object) calls toString() which we can't model.
-                !target.desc.starts_with("(L") && !target.desc.starts_with("([")
+                // Model valueOf for primitive types and valueOf(Object)
+                // when the object is a known wrapper type.
+                if target.desc.starts_with("(L") || target.desc.starts_with("([") {
+                    // valueOf(Object) — model if argument has $$value field set
+                    // (wrapper boxing pattern from lifter)
+                    target.desc == "(Ljava/lang/Object;)Ljava/lang/String;"
+                } else {
+                    true
+                }
             }
             // StringBuilder / StringBuffer methods
             "append" => has_recv_str,
@@ -373,6 +379,45 @@ impl<'a> ExploreCtx<'a> {
                 let h = self.solver.fresh_bv("hash", 32);
                 Some((h, None))
             }
+            "valueOf" if target.desc == "(Ljava/lang/Object;)Ljava/lang/String;" => {
+                // String.valueOf(Object) — dispatch to wrapper toString
+                // by reading $$value from known wrapper field arrays.
+                let obj = self.encode_operand(args.first()?);
+                // Try each wrapper class; whichever has $$value set will
+                // produce the correct string.  In practice the lifter's
+                // boxing pattern writes exactly one wrapper field.
+                let wrappers: &[(&str, &str, u32)] = &[
+                    ("java/lang/Boolean", "I", 32),
+                    ("java/lang/Integer", "I", 32),
+                    ("java/lang/Short", "I", 32),
+                    ("java/lang/Byte", "I", 32),
+                    ("java/lang/Character", "I", 32),
+                    ("java/lang/Long", "J", 64),
+                ];
+                for &(cls, desc, width) in wrappers {
+                    let fk = (cls.to_string(), "$$value".to_string(), desc.to_string());
+                    if self.field_arrays.contains_key(&fk) {
+                        let arr = self.get_field_array(&fk, width);
+                        let val = self.solver.array_select(arr, obj);
+                        let result = if cls == "java/lang/Boolean" {
+                            let eq = self.solver.bveq(val, zero);
+                            let is_nz = self.solver.not(eq);
+                            let s_true = self.solver.str_const("true");
+                            let s_false = self.solver.str_const("false");
+                            self.solver.ite(is_nz, s_true, s_false)
+                        } else if cls == "java/lang/Character" {
+                            let ch_int = self.solver.bv32_to_int(val);
+                            self.solver.str_from_code(ch_int)
+                        } else {
+                            self.signed_bv_to_str(val, width)
+                        };
+                        return Some((one, Some(result)));
+                    }
+                }
+                // No wrapper field found — return a fresh string
+                let fresh = self.solver.fresh_str("valueOf_obj");
+                Some((one, Some(fresh)))
+            }
             "valueOf" if !target.desc.starts_with("(L") && !target.desc.starts_with("([") => {
                 let arg_bv = self.encode_operand(args.first()?);
                 if target.desc.starts_with("(Z)") {
@@ -385,6 +430,12 @@ impl<'a> ExploreCtx<'a> {
                 } else if target.desc.starts_with("(C)") {
                     let ch_int = self.solver.bv32_to_int(arg_bv);
                     let result = self.solver.str_from_code(ch_int);
+                    Some((one, Some(result)))
+                } else if target.desc.starts_with("(F)") || target.desc.starts_with("(D)") {
+                    // Float/double → string is not precisely modeled (IEEE 754
+                    // decimal representation is too complex). Use a fresh string
+                    // to avoid unsound conclusions.
+                    let result = self.solver.fresh_str("valueOf_fp");
                     Some((one, Some(result)))
                 } else {
                     let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
@@ -408,6 +459,8 @@ impl<'a> ExploreCtx<'a> {
                     } else if target.desc.starts_with("(C)") {
                         let ch_int = self.solver.bv32_to_int(bv);
                         self.solver.str_from_code(ch_int)
+                    } else if target.desc.starts_with("(F)") || target.desc.starts_with("(D)") {
+                        self.solver.fresh_str("append_fp")
                     } else {
                         let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
                         self.signed_bv_to_str(bv, w)

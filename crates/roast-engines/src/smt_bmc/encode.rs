@@ -89,11 +89,25 @@ impl<'a> ExploreCtx<'a> {
                 let t = self.encode_operand(o);
                 self.solver.bvneg(t)
             }
-            Rvalue::Cast(ty, o) => {
+            Rvalue::Cast(ty, src, o) => {
                 let t = self.encode_operand(o);
-                match ty {
-                    Ty::Long => self.solver.sign_extend(t, 32),
-                    Ty::Int => self.solver.extract(t, 31, 0),
+                match (src, ty) {
+                    // Integer width changes
+                    (Ty::Int, Ty::Long) => self.solver.sign_extend(t, 32),     // i2l
+                    (Ty::Long, Ty::Int) => self.solver.extract(t, 31, 0),      // l2i
+                    // Int → Float/Double
+                    (Ty::Int, Ty::Float) => self.encode_i2f(t),                // i2f
+                    (Ty::Int, Ty::Double) => self.encode_i2d(t),               // i2d
+                    (Ty::Long, Ty::Float) => self.solver.fresh_bv("l2f", 32),  // l2f
+                    (Ty::Long, Ty::Double) => self.encode_l2d(t),              // l2d
+                    // Float/Double → Int
+                    (Ty::Float, Ty::Int) => self.encode_f2i(t),                // f2i
+                    (Ty::Float, Ty::Long) => self.encode_f2l(t),               // f2l
+                    (Ty::Double, Ty::Int) => self.encode_d2i(t),               // d2i
+                    (Ty::Double, Ty::Long) => self.encode_d2l(t),              // d2l
+                    // Float ↔ Double
+                    (Ty::Float, Ty::Double) => self.encode_f2d(t),             // f2d
+                    (Ty::Double, Ty::Float) => self.solver.fresh_bv("d2f", 32),// d2f
                     _ => t,
                 }
             }

@@ -259,8 +259,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "valueOf" if desc == "(I)Ljava/lang/Integer;" => Some(CallModel::BoxStore(Ty::Int)),
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
             "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
@@ -274,8 +274,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Long)),
             "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Long)),
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Long)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Long)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Long)),
+            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
             "toString" | "toHexString" | "toBinaryString" | "toOctalString"
             | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
@@ -286,8 +286,9 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
@@ -298,8 +299,8 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             _ => None,
@@ -314,9 +315,9 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
         "java/lang/Double" => match name {
             "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Double)),
             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Double)),
-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Double)),
-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Double)),
-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Double)),
+            "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
@@ -328,9 +329,9 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
         "java/lang/Float" => match name {
             "valueOf" if desc == "(F)Ljava/lang/Float;" => Some(CallModel::BoxStore(Ty::Int)),
             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Int)),
+            "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+            "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
             "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
@@ -355,6 +356,7 @@ fn is_math_call(owner: &str, name: &str) -> bool {
                 | "exp" | "log" | "log10" | "pow" | "sqrt" | "round"
                 | "ceil" | "floor" | "toRadians" | "toDegrees"
                 | "sinh" | "cosh" | "tanh"
+                | "getExponent"
         ),
         "java/lang/Integer" => matches!(
             name,
@@ -431,7 +433,7 @@ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
             "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
                 | "exp" | "log" | "log10" | "pow" | "sqrt"
                 | "sinh" | "cosh" | "tanh"
-                | "ceil" | "floor" | "toRadians" | "toDegrees" | "round"
+                | "ceil" | "floor" | "toRadians" | "toDegrees"
         )
 }
 

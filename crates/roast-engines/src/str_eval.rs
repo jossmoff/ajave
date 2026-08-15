@@ -100,16 +100,32 @@ pub(crate) fn eval_str_call(
         // ---- StringBuilder.append ----
         "append" => {
             if let Some(aid) = recv_aid {
+                let is_bool = target.desc.starts_with("(Z)");
+                let is_char = target.desc.starts_with("(C)");
                 let to_append: Option<String> = if let Some(arg) = args.get(1) {
                     match str_of!(arg) {
                         Some(s) => Some(s),
                         None => match arg {
                             Operand::Var(vid) => match store.get(vid).copied() {
+                                Some(Value::I32(n)) if is_bool => {
+                                    Some(if n != 0 { "true".into() } else { "false".into() })
+                                }
+                                Some(Value::I32(n)) if is_char => {
+                                    Some(String::from(char::from_u32(n as u32).unwrap_or('?')))
+                                }
                                 Some(Value::I32(n)) => Some(n.to_string()),
                                 Some(Value::I64(n)) => Some(n.to_string()),
                                 _ => None,
                             },
-                            Operand::Const(Const::Int(n)) => Some(n.to_string()),
+                            Operand::Const(Const::Int(n)) => {
+                                if is_bool {
+                                    Some(if *n != 0 { "true".into() } else { "false".into() })
+                                } else if is_char {
+                                    Some(String::from(char::from_u32(*n as u32).unwrap_or('?')))
+                                } else {
+                                    Some(n.to_string())
+                                }
+                            }
                             _ => None,
                         },
                     }
@@ -468,14 +484,30 @@ pub(crate) fn eval_str_call(
 
         // ---- String.valueOf (static) ----
         "valueOf" => {
+            let is_bool = target.desc.starts_with("(Z)");
+            let is_char = target.desc.starts_with("(C)");
             let result = match args.first() {
                 Some(Operand::Var(vid)) => match store.get(vid).copied() {
+                    Some(Value::I32(n)) if is_bool => {
+                        Some(if n != 0 { "true".to_string() } else { "false".to_string() })
+                    }
+                    Some(Value::I32(n)) if is_char => {
+                        Some(String::from(char::from_u32(n as u32).unwrap_or('?')))
+                    }
                     Some(Value::I32(n)) => Some(n.to_string()),
                     Some(Value::I64(n)) => Some(n.to_string()),
                     Some(Value::Ref(aid)) => str_store.get(&aid).cloned(),
                     _ => None,
                 },
-                Some(Operand::Const(Const::Int(n))) => Some(n.to_string()),
+                Some(Operand::Const(Const::Int(n))) => {
+                    if is_bool {
+                        Some(if *n != 0 { "true".to_string() } else { "false".to_string() })
+                    } else if is_char {
+                        Some(String::from(char::from_u32(*n as u32).unwrap_or('?')))
+                    } else {
+                        Some(n.to_string())
+                    }
+                }
                 Some(Operand::Const(Const::Str(s))) => Some(s.clone()),
                 _ => None,
             };

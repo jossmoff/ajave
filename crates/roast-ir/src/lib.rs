@@ -215,7 +215,8 @@ pub enum Rvalue {
         class: String,
     },
     /// Primitive conversion (`i2l`, `l2i`, `i2b`, ...).
-    Cast(Ty, Operand),
+    /// Fields: (destination_type, source_type, operand).
+    Cast(Ty, Ty, Operand),
     /// Three-way comparison (`lcmp`, `fcmpl`, `dcmpg`): -1 / 0 / 1.
     Cmp(CmpKind, Operand, Operand),
     New(String),
@@ -626,7 +627,7 @@ impl fmt::Display for Rvalue {
             Rvalue::ArrayLength(a) => write!(f, "{a}.length"),
             Rvalue::NewArray { elem, len } => write!(f, "new {elem}[{len}]"),
             Rvalue::InstanceOf { obj, class } => write!(f, "{obj} instanceof {class}"),
-            Rvalue::Cast(t, o) => write!(f, "({t:?}) {o}"),
+            Rvalue::Cast(t, _src, o) => write!(f, "({t:?}) {o}"),
             Rvalue::Cmp(k, a, b) => write!(f, "cmp({k:?}, {a}, {b})"),
             Rvalue::New(c) => write!(f, "new {c}"),
             Rvalue::Call { target, args, .. } => {

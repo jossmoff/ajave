@@ -385,7 +385,7 @@ impl<'a> ExploreCtx<'a> {
         match rv {
             Rvalue::Use(op) | Rvalue::Neg(op) => self.width_of_operand(op),
             Rvalue::Bin(_, a, _) => self.width_of_operand(a),
-            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) | Rvalue::Cast(ty, _) => self.width_of_ty(ty),
+            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) | Rvalue::Cast(ty, _, _) => self.width_of_ty(ty),
             Rvalue::Cmp(_, _, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
             Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
@@ -493,13 +493,19 @@ impl<'a> ExploreCtx<'a> {
                 }
                 true
             }
-            Rvalue::Use(o) | Rvalue::Neg(o) => self.operand_tainted(o) || self.operand_is_float(o),
-            Rvalue::Cast(_, o) => {
-                self.operand_tainted(o) || self.operand_is_float(o)
+            Rvalue::Use(o) => self.operand_tainted(o),
+            Rvalue::Neg(o) => {
+                self.operand_tainted(o)
+                    || self.operand_is_float(o) || self.operand_float_tainted(o)
+            }
+            Rvalue::Cast(_, _, o) => {
+                self.operand_tainted(o)
+                    || self.operand_is_float(o) || self.operand_float_tainted(o)
             }
             Rvalue::Bin(_, a, b) => {
                 self.operand_tainted(a) || self.operand_tainted(b)
                     || self.operand_is_float(a) || self.operand_is_float(b)
+                    || self.operand_float_tainted(a) || self.operand_float_tainted(b)
             }
             // Float cmp (FloatL/FloatG) is precisely modeled via BV totalOrder,
             // so the result is NOT tainted by float operands. Only propagate
@@ -521,16 +527,22 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Use(o) | Rvalue::Neg(o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)
             }
-            Rvalue::Cast(_, o) => {
+            Rvalue::Cast(_, _, o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)
             }
             Rvalue::Bin(_, a, b) => {
                 self.operand_float_tainted(a) || self.operand_float_tainted(b)
                     || self.operand_is_float(a) || self.operand_is_float(b)
             }
-            // Cmp result is int, not float, so not float-tainted
-            Rvalue::Cmp(_, a, b) => {
-                self.operand_float_tainted(a) || self.operand_float_tainted(b)
+            // Cmp result is int, not float — float taint stops here.
+            // If operands came from imprecise float arithmetic, they are already
+            // in the `tainted` set, so rvalue_tainted's Cmp case catches them.
+            Rvalue::Cmp(..) => false,
+            Rvalue::GetStatic(fk) => {
+                matches!(fk.desc.as_bytes().first(), Some(b'F') | Some(b'D'))
+            }
+            Rvalue::GetField { field, .. } => {
+                matches!(field.desc.as_bytes().first(), Some(b'F') | Some(b'D'))
             }
             _ => false,
         }
