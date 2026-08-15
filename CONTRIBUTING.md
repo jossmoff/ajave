@@ -28,6 +28,24 @@ cargo test --workspace
 All five run in CI (`.github/workflows/ci.yml`); running them locally first
 is faster than waiting for the round trip.
 
+## Issue labels
+
+Every issue should have at least a `type:` and an `area:` label. See the full
+taxonomy in [`CLAUDE.md`](CLAUDE.md) under "Issue Labels and Experiment
+Tracking".
+
+Key conventions:
+- **`type:experiment`** — exploratory work with a measured outcome. Use when
+  trying an approach that might not pan out.
+- **`status:explored`** — the experiment was attempted, measured, and found
+  net-negative. The issue stays open as documentation so nobody re-attempts it
+  without reading the results first.
+- **`status:blocked`** — the approach is viable but depends on another issue
+  being resolved first. Link to the prerequisite.
+- When closing a `status:explored` issue, leave it open — it's a knowledge
+  artifact, not a task. Only close it if the prerequisite is resolved and the
+  experiment is re-attempted successfully.
+
 ## Soundness
 
 If a change touches `roast-core` (the blackboard, the CPA substrate) or any

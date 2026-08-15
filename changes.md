@@ -2,6 +2,34 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## valueOf Soundness and Extended Math Models (2026-08-15)
+
+### valueOf(float/double) wrong TRUE fix
+BMC's `signed_bv_to_str` was used for `String.valueOf(double)`, producing integer
+strings (e.g., "33" for 33.3333). Since "33.3333" can never equal an integer string,
+BMC would incorrectly discharge the assertion → wrong TRUE. Fixed by using
+`fresh_str("valueOf_fp")` for float/double valueOf and append, which is sound
+(unconstrained string prevents unsound discharge).
+
+### valueOf(boolean) concrete engine fix
+Concrete engine's `eval_str_call` was producing "0"/"1" for `valueOf(boolean)`
+instead of Java's "true"/"false". Fixed by checking `target.desc.starts_with("(Z)")`
+before calling `n.to_string()`.
+
+### Havoc suppression: a failed experiment
+Attempted adding a `havoced: bool` flag to the concrete engine to suppress
+violations on havoced paths. This was net -20 points: 8 FALSE benchmarks (toString
+autostubs) timed out because they relied on the concrete engine's quick violations
+on havoced paths to short-circuit BMC. The orchestrator's violation short-circuit
+(lines 68-76 of orchestrator.rs) means once concrete finds a violation, BMC never
+runs — which is actually beneficial for these benchmarks. Reverted entirely.
+
+### Key insight: orchestrator short-circuit
+The orchestrator jumps to Report phase on any violation (line 110). This means BMC
+cannot override concrete's violations with discharges, even if BMC would prove them
+safe. This is a potential +26 pts from java-ranger TRUE benchmarks alone but needs
+careful redesign to avoid timing regressions.
+
 ## Lifting the Encoding Barrier: Activating Non-BMC Engines (2026-08-14)
 
 ### Background: why four engines contributed zero verdicts

@@ -31,3 +31,25 @@ Format: `("category", "sv-benchmarks/path/to.yml", "EXPECTED_VERDICT"),`
 - **No hardcoded nondet patterns in concrete engine.** Single all-zero probe only. Finding specific input values is the SMT engine's job.
 - **Update `changes.md`** whenever implementing a new technique, engine, or notable design decision.
 - **Run smoke tests** after any engine change before full scoring.
+
+## Issue Labels and Experiment Tracking
+
+### Label taxonomy
+Labels follow the pattern `category:value`. Every issue should have at least a `type:` and an `area:` label.
+
+| Category | Purpose | Examples |
+|---|---|---|
+| `type:` | What kind of change | `feature`, `fix`, `refactor`, `docs`, `test`, `chore`, `ci`, `experiment` |
+| `area:` | Which crate/subsystem | `ir`, `models`, `core`, `frontend`, `engines`, `cli`, `benchexec`, `witness` |
+| `tier:` | Which engine tier | `0-presolve`, `1-ai`, `2-falsify`, `3-kinduction`, `4-cegar`, `5-chc` |
+| `direction:` | Approximation direction | `over`, `under`, `exact` |
+| `priority:` | Scheduling urgency | `p0-soundness`, `p1-blocker`, `p2-normal`, `p3-later` |
+| `status:` | Experiment outcome | `explored` (tried, net-negative), `blocked` (viable but needs prerequisite) |
+
+### Logging failed experiments
+When an experiment is attempted and reverted, file a GitHub issue with:
+1. Labels: `type:experiment`, `status:explored` (or `status:blocked`), plus relevant `area:` and `tier:` labels.
+2. Body must include: **Hypothesis**, **What was tried**, **Result** (with measured point impact), **Why it failed**, and **Path forward** (prerequisites for revisiting).
+3. Cross-reference related issues (e.g., a `status:blocked` experiment should link to its prerequisite).
+
+This prevents re-attempting known-bad approaches and documents the conditions under which they might become viable.
