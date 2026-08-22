@@ -354,10 +354,7 @@ impl Body {
         &self.obligations[id.0 as usize]
     }
 
-    /// Where a given obligation's `Check` statement lives. Used by any engine
-    /// that needs to evaluate or route around a specific check -- the interval
-    /// domain to read its abstract state there, the concrete engine to know
-    /// which block's exceptional edges apply when it fails.
+    /// Type and origin of a variable, by its arena index.
     pub fn var(&self, id: VarId) -> &VarInfo {
         &self.vars[id.0 as usize]
     }

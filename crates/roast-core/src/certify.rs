@@ -152,8 +152,11 @@ impl Certifier for JvmReplay {
             if cfg!(windows) { ";" } else { ":" },
             self.classpath
         );
+        // Two cursors, matching the shadow Verifier's two: `next()` walks
+        // roast.seq for numeric nondets, `nondetString()` walks roast.str.N.
+        // `Witness` derives both from one ordered list, so they cannot drift.
         let seq: Vec<String> = witness
-            .nondet_sequence
+            .nondet_sequence()
             .iter()
             .map(|v| v.to_string())
             .collect();
@@ -162,14 +165,8 @@ impl Certifier for JvmReplay {
         cmd.args(["-ea", "-cp", &cp]);
         cmd.arg(format!("-Droast.seq={}", seq.join(",")));
 
-        // Pass string nondet values as individual system properties so the
-        // shadow Verifier uses the exact strings from the witness.
-        let mut str_idx = 0usize;
-        for entry in &witness.entries {
-            if let roast_ir::verdict::NondetValue::Str(s) = &entry.value {
-                cmd.arg(format!("-Droast.str.{str_idx}={s}"));
-                str_idx += 1;
-            }
+        for (i, s) in witness.string_values().iter().enumerate() {
+            cmd.arg(format!("-Droast.str.{i}={s}"));
         }
 
         cmd.arg("Main");

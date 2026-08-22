@@ -37,9 +37,21 @@ impl Engine for NraEngine {
     }
 
     fn direction(&self) -> Direction {
-        // Over: UNSAT soundly proves the property.
-        // SAT from CVC5 with native transcendentals is also trustworthy.
-        Direction::Over
+        // Under, and the reasoning is worth spelling out because the comment
+        // here used to say Over.
+        //
+        // SAT is trustworthy: it yields concrete inputs, which become a witness,
+        // which JvmReplay runs on a real JVM before any FALSE is reported. An
+        // approximate encoding cannot produce a wrong FALSE when the JVM has the
+        // final say.
+        //
+        // UNSAT is *not* acted on. This encoding is over the reals; Java floats
+        // are IEEE 754. NaN, +/-Inf and -0 are values a real does not have and
+        // can violate an assertion that genuinely holds over R -- see the
+        // `NraResult::Unsat` arm in `step`, which deliberately declines to
+        // discharge. An engine that never discharges is Under, whatever it
+        // hoped to be.
+        Direction::Under
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
@@ -81,7 +93,7 @@ impl Engine for NraEngine {
                     let witness = build_witness_from_model(body, &model);
                     let published = bb.publish(
                         self.id(),
-                        Direction::Under,
+                        self.direction(),
                         Artifact::Status(
                             oref.clone(),
                             Status::Violated {

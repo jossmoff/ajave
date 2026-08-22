@@ -1,45 +1,19 @@
 //! Shared body-analysis utilities used by multiple engines.
 
 use roast_ir::{BinOp, BlockId, Body, Operand, Rvalue, Stmt, Terminator, VarId};
-use roast_models;
 
 /// Returns `true` if the body uses operations that are havoced (unmodelled)
 /// in the simplified SMT/LIA encoding: field access, instance-of checks,
 /// method calls, or explicit havoc. Proving engines skip such bodies to
 /// remain sound.
+///
+/// Delegates to `body_shape::analyze` rather than walking the body itself.
+/// There used to be a second walk here computing this by hand, and the two
+/// disagreed about `Rvalue::Call` -- see the module doc on `body_shape` for
+/// what that would have cost the first time `suitable_for_proving` acquired a
+/// caller.
 pub fn body_uses_havoced_ops(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(_, rv) => match rv {
-                    Rvalue::GetStatic(_)
-                    | Rvalue::GetField { .. }
-                    | Rvalue::InstanceOf { .. }
-                    | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
-                    _ => {}
-                },
-                Stmt::PutField { .. } => return true,
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
-/// Returns `true` if the body calls transcendental Math methods (sin, cos, exp,
-/// log, pow, sqrt, etc.) that require a nonlinear real arithmetic solver.
-pub fn body_uses_transcendental_math(body: &Body) -> bool {
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let Stmt::Assign(_, Rvalue::Call { target, .. }) = stmt {
-                if roast_models::is_transcendental_math(&target.class, &target.name) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    crate::body_shape::analyze(body).uses_havoced_ops()
 }
 
 /// Returns `true` if the body has any back-edges (loops).

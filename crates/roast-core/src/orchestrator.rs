@@ -50,6 +50,9 @@ impl Orchestrator {
         self.bb.seed(prog, self.assertion_only);
         for e in self.engines.iter_mut() {
             debug!("orchestrator: initialising engine {}", e.id());
+            // Register before init so the direction discipline is armed for
+            // anything an engine publishes during initialisation.
+            self.bb.register_engine(e.id(), e.direction());
             e.init(prog, &mut self.bb);
         }
 

@@ -263,10 +263,9 @@ fn is_safety_implied_by_predicates(
             if let Some(comp) = CompOp::from_binop(op) {
                 // Check if any predicate in our state tells us this comparison is true.
                 for (i, pred) in prec.predicates.iter().enumerate() {
-                    if state.values.get(i) == Some(&Some(true))
-                        && pred.op == comp {
-                            return true;
-                        }
+                    if state.values.get(i) == Some(&Some(true)) && pred.op == comp {
+                        return true;
+                    }
                 }
             }
         }
@@ -374,9 +373,11 @@ fn collect_free_vars_combined(a: &str, b: &str, declarations: &str) -> Vec<Strin
             if (token.starts_with("nd") || token.starts_with("bw") || token.starts_with("hv"))
                 && token.len() > 2
                 && token[2..].chars().all(|c| c.is_ascii_digit())
-                && !declarations.contains(token) && !vars.contains(&token.to_string()) {
-                    vars.push(token.to_string());
-                }
+                && !declarations.contains(token)
+                && !vars.contains(&token.to_string())
+            {
+                vars.push(token.to_string());
+            }
         }
     }
     vars

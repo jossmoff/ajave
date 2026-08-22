@@ -321,9 +321,11 @@ fn collect_free_vars(formula: &str, declarations: &str) -> Vec<String> {
         if (token.starts_with("nd") || token.starts_with("bw") || token.starts_with("hv"))
             && token.len() > 2
             && token[2..].chars().all(|c| c.is_ascii_digit())
-            && !declarations.contains(token) && !vars.contains(&token.to_string()) {
-                vars.push(token.to_string());
-            }
+            && !declarations.contains(token)
+            && !vars.contains(&token.to_string())
+        {
+            vars.push(token.to_string());
+        }
     }
     vars
 }

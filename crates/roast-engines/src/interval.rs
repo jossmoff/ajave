@@ -73,7 +73,7 @@ impl Interval {
     }
     /// Clamp to `i32` range, widening to Top if the true result could have
     /// left it -- the overflow rule from the module doc.
-    fn clamp(lo: i128, hi: i128) -> Interval {
+    pub(crate) fn clamp(lo: i128, hi: i128) -> Interval {
         if lo < NEG_INF as i128 || hi > POS_INF as i128 {
             Interval::top()
         } else {
@@ -94,7 +94,9 @@ impl Interval {
     pub fn definitely_zero(&self) -> bool {
         *self == Interval::point(0)
     }
-    fn join(self, o: Interval) -> Interval {
+    /// Least upper bound. Public because the lattice laws are worth testing
+    /// directly -- see `tests/interval_lattice.rs`.
+    pub fn join(self, o: Interval) -> Interval {
         if self.is_bottom() {
             return o;
         }
@@ -106,14 +108,15 @@ impl Interval {
             hi: self.hi.max(o.hi),
         }
     }
-    fn leq(self, o: Interval) -> bool {
+    /// Subsumption: is every value in `self` also in `o`?
+    pub fn leq(self, o: Interval) -> bool {
         self.is_bottom() || (!o.is_bottom() && o.lo <= self.lo && self.hi <= o.hi)
     }
 
     /// Narrow both operands of `a OP b` given the comparison holds. Returns
     /// `None` for operator/type combinations we don't bother narrowing --
     /// safe to skip, it only costs precision.
-    fn narrow(op: BinOp, a: Interval, b: Interval) -> Option<(Interval, Interval)> {
+    pub fn narrow(op: BinOp, a: Interval, b: Interval) -> Option<(Interval, Interval)> {
         use BinOp::*;
         if a.is_bottom() || b.is_bottom() {
             return Some((Interval::bottom(), Interval::bottom()));
@@ -347,8 +350,9 @@ impl HasLocation for IState {
     }
 }
 
-/// Find the statement in `body`'s block that defines `v` as `Bin(op, a, b)`,
-/// searching backward from the end of the block. This is how branch edges
+/// The interval domain as a `Cpa`: `merge_sep` + `stop_sep`, narrowing at
+/// branch and exceptional edges. See the module doc for why path sensitivity
+/// rather than joining is what makes the `assume`/`assert` idiom provable.
 pub struct IntervalCpa;
 
 impl Cpa for IntervalCpa {

@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use log::{debug, trace};
 
-use crate::smt_text::{self, LiaTheory, SmtTheory};
+use crate::smt_text::{self, LiaTheory};
 
 /// Result of an interpolation query.
 #[derive(Debug)]
@@ -234,11 +234,44 @@ fn parse_interpolant_response(lines: &[String]) -> InterpolationResult {
     }
 }
 
+/// Turns the shared walk's edges into LIA transition disjuncts.
+struct LiaSink {
+    prefix: String,
+    /// One disjunct per outgoing edge; their disjunction is the transition
+    /// relation.
+    clauses: Vec<String>,
+    errors: Vec<(roast_ir::ObligationId, String)>,
+}
+
+impl smt_text::ClauseSink for LiaSink {
+    fn transition(&mut self, t: smt_text::Transition<'_>) {
+        let mut conds: Vec<String> = t.bindings.to_vec();
+        conds.extend_from_slice(t.conds);
+        for (i, e) in t.var_exprs.iter().enumerate() {
+            let post = format!("{}v{i}p", self.prefix);
+            if *e != post {
+                conds.push(format!("(= {post} {e})"));
+            }
+        }
+        if !conds.is_empty() {
+            self.clauses.push(smt_text::conjoin(&conds));
+        }
+    }
+
+    fn error(&mut self, e: smt_text::ErrorSite<'_>) {
+        let mut conds: Vec<String> = e.bindings.to_vec();
+        conds.extend_from_slice(e.conds);
+        self.errors.push((e.obligation, smt_text::conjoin(&conds)));
+    }
+}
+
 /// Encode a method body's transition relation in QF_LIA format.
 ///
-/// Returns (declarations, transition_formula, init_formula, error_formulas).
-/// Variables are encoded as integers (not bitvectors) since interpolation
-/// requires LIA.
+/// Returns declarations, the transition relation, and one error formula per
+/// obligation. Variables are integers rather than bitvectors because
+/// interpolation support is far better developed for LIA -- which also means
+/// Java's wraparound on overflow is not modelled here. See
+/// `docs/strategies/imc.md`.
 pub fn encode_body_lia(
     body: &roast_ir::Body,
     obligations: &[roast_ir::ObligationId],
@@ -249,148 +282,41 @@ pub fn encode_body_lia(
     let theory = LiaTheory::new(prefix);
     let n_vars = body.vars.len();
 
-    // Variable declarations: pre-state and post-state.
+    // Pre- and post-state declarations.
     let mut decls = String::new();
     for i in 0..n_vars {
         decls.push_str(&format!("(declare-fun {prefix}v{i} () Int)\n"));
         decls.push_str(&format!("(declare-fun {prefix}v{i}p () Int)\n"));
     }
 
-    // Build per-block transition clauses.
-    let mut block_clauses: Vec<String> = Vec::new();
-    let mut error_clauses: Vec<(ObligationId, String)> = Vec::new();
+    let obs: std::collections::HashSet<ObligationId> = obligations.iter().copied().collect();
+    let mut fresh = smt_text::FreshPool::new(prefix);
+    let mut sink = LiaSink {
+        prefix: prefix.to_string(),
+        clauses: Vec::new(),
+        errors: Vec::new(),
+    };
+    smt_text::walk_body(body, &theory, &obs, &mut fresh, &mut sink);
 
-    for block in &body.blocks {
-        let mut var_exprs: Vec<String> = (0..n_vars).map(|i| format!("{prefix}v{i}")).collect();
-        let mut path_conds: Vec<String> = Vec::new();
-
-        // Track whether this block is the entry block.
-        let _is_entry = block.id == body.entry;
-
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Assign(vid, rv) => {
-                    let expr = smt_text::encode_rvalue(&theory, rv, &var_exprs);
-                    var_exprs[vid.0 as usize] = expr;
-                }
-                Stmt::Assume(op) => {
-                    let expr = smt_text::encode_operand(&theory, op, &var_exprs);
-                    path_conds.push(theory.encode_nonzero(&expr));
-                }
-                Stmt::Check(oid) => {
-                    if obligations.contains(oid) {
-                        let ob = body.obligation(*oid);
-                        let cond_expr = smt_text::encode_operand(&theory, &ob.cond, &var_exprs);
-                        let mut econds = path_conds.clone();
-                        econds.push(theory.encode_is_zero(&cond_expr));
-                        let error_cond = if econds.is_empty() {
-                            "true".to_string()
-                        } else if econds.len() == 1 {
-                            econds[0].clone()
-                        } else {
-                            format!("(and {})", econds.join(" "))
-                        };
-                        error_clauses.push((*oid, error_cond));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Build successor transition clauses.
-        let mk_assign = |var_exprs: &[String]| -> Vec<String> {
-            var_exprs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| {
-                    let post = format!("{prefix}v{i}p");
-                    if *e != post {
-                        Some(format!("(= {} {})", post, e))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        match &block.term {
-            Terminator::Goto(_) | Terminator::Return(_) | Terminator::Halt => {
-                let mut conds = path_conds.clone();
-                conds.extend(mk_assign(&var_exprs));
-                if !conds.is_empty() {
-                    let clause = if conds.len() == 1 {
-                        conds[0].clone()
-                    } else {
-                        format!("(and {})", conds.join(" "))
-                    };
-                    block_clauses.push(clause);
-                }
-            }
-            Terminator::Branch { cond, .. } => {
-                let cond_expr = smt_text::encode_operand(&theory, cond, &var_exprs);
-                let assigns = mk_assign(&var_exprs);
-
-                // Then branch: condition is nonzero.
-                let mut then_conds = path_conds.clone();
-                then_conds.push(theory.encode_nonzero(&cond_expr));
-                then_conds.extend(assigns.iter().cloned());
-                if !then_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", then_conds.join(" ")));
-                }
-
-                // Else branch: condition is zero.
-                let mut else_conds = path_conds.clone();
-                else_conds.push(theory.encode_is_zero(&cond_expr));
-                else_conds.extend(assigns);
-                if !else_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", else_conds.join(" ")));
-                }
-            }
-            Terminator::Switch {
-                value,
-                cases,
-                default: _,
-            } => {
-                let val_expr = smt_text::encode_operand(&theory, value, &var_exprs);
-                let assigns = mk_assign(&var_exprs);
-                let mut neg_cases = Vec::new();
-
-                for (cv, _) in cases {
-                    let mut case_conds = path_conds.clone();
-                    case_conds.push(format!("(= {} {})", val_expr, cv));
-                    case_conds.extend(assigns.iter().cloned());
-                    block_clauses.push(format!("(and {})", case_conds.join(" ")));
-                    neg_cases.push(format!("(not (= {} {}))", val_expr, cv));
-                }
-
-                // Default case.
-                let mut def_conds = path_conds.clone();
-                def_conds.extend(neg_cases);
-                def_conds.extend(assigns);
-                if !def_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", def_conds.join(" ")));
-                }
-            }
-            _ => {}
-        }
+    // Everything the walk minted has to be declared, or the script references
+    // symbols the solver has never heard of and it answers by discarding the
+    // clauses that mention them.
+    for (name, _) in fresh.issued() {
+        decls.push_str(&format!("(declare-fun {name} () Int)\n"));
     }
 
-    // The transition relation is the disjunction of all block clauses.
-    let transition = if block_clauses.is_empty() {
+    let transition = if sink.clauses.is_empty() {
         "true".to_string()
-    } else if block_clauses.len() == 1 {
-        block_clauses[0].clone()
+    } else if sink.clauses.len() == 1 {
+        sink.clauses[0].clone()
     } else {
-        format!("(or {})", block_clauses.join(" "))
+        format!("(or {})", sink.clauses.join(" "))
     };
-
-    // Error formula: disjunction of all error clauses.
-    let error_formulas: Vec<(ObligationId, String)> = error_clauses;
 
     LiaEncoding {
         declarations: decls,
         transition,
-        error_formulas,
+        error_formulas: sink.errors,
         n_vars,
     }
 }

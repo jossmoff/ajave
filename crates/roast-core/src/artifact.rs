@@ -147,27 +147,3 @@ pub struct Tagged {
     pub direction: Direction,
     pub artifact: Artifact,
 }
-
-/// Where a given obligation's `Check` statement lives, as a `ProgramPoint`.
-///
-/// This lives here rather than as a method on `roast_ir::Body` because
-/// `ProgramPoint` is a `roast-core` type: `roast-ir` has zero dependencies by
-/// design (every other crate depends on it, never the reverse), so anything
-/// that needs to hand back a core-crate type has to live on the core side of
-/// that boundary, even though it's `Body`'s data it's walking.
-pub fn check_point(body: &roast_ir::Body, id: roast_ir::ObligationId) -> Option<ProgramPoint> {
-    for b in &body.blocks {
-        for (i, s) in b.stmts.iter().enumerate() {
-            if let roast_ir::Stmt::Check(cid) = s {
-                if *cid == id {
-                    return Some(ProgramPoint {
-                        method: body.key.clone(),
-                        block: b.id,
-                        index: i,
-                    });
-                }
-            }
-        }
-    }
-    None
-}

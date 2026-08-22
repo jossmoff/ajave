@@ -55,6 +55,19 @@ impl Value {
     }
 }
 
+/// A violation the interpreter found, wherever it found it.
+///
+/// `Outcome` and `InlineResult` both carry one. They used to each spell the
+/// same three fields out inline, which meant every conversion between them was
+/// a field-by-field restatement that a new field could silently fall out of.
+#[derive(Clone, Debug)]
+struct FoundViolation {
+    method: MethodKey,
+    oid: ObligationId,
+    /// Every nondeterministic choice this path made, in order.
+    entries: Vec<NondetEntry>,
+}
+
 /// Outcome of running one concrete path to completion.
 enum Outcome {
     /// Ran to a `Return` with nothing amiss.
@@ -64,12 +77,7 @@ enum Outcome {
     /// `Verifier.assume` failed: this path is uninteresting, not unsafe.
     Halted,
     /// A `Check` failed with nothing able to catch it.
-    Violated {
-        method: MethodKey,
-        oid: ObligationId,
-        witness: Vec<i64>,
-        entries: Vec<NondetEntry>,
-    },
+    Violated(FoundViolation),
     /// Ran out of budget or hit something we can't interpret.
     Inconclusive,
     /// Method threw an exception of this class.
@@ -80,12 +88,7 @@ enum Outcome {
 enum InlineResult {
     Returned(Value),
     Halted,
-    Violated {
-        method: MethodKey,
-        oid: ObligationId,
-        witness: Vec<i64>,
-        entries: Vec<NondetEntry>,
-    },
+    Violated(FoundViolation),
     Threw(String),
 }
 
@@ -259,7 +262,6 @@ struct ConcreteState<'a> {
     prog: &'a Program,
     choices: &'a [i64],
     choice_idx: usize,
-    trace: Vec<i64>,
     entries: Vec<NondetEntry>,
     steps: u64,
     alloc_id: u64,
@@ -286,7 +288,6 @@ impl<'a> ConcreteState<'a> {
             prog,
             choices,
             choice_idx: 0,
-            trace: Vec::new(),
             entries: Vec::new(),
             steps: step_budget,
             alloc_id: 2,
@@ -372,17 +373,7 @@ impl<'a> ConcreteState<'a> {
             Outcome::Clean => Some(InlineResult::Returned(Value::Unknown)),
             Outcome::ReturnedValue(v) => Some(InlineResult::Returned(v)),
             Outcome::Halted => Some(InlineResult::Halted),
-            Outcome::Violated {
-                method,
-                oid,
-                witness,
-                entries,
-            } => Some(InlineResult::Violated {
-                method,
-                oid,
-                witness,
-                entries,
-            }),
+            Outcome::Violated(v) => Some(InlineResult::Violated(v)),
             Outcome::Inconclusive => None,
             Outcome::Threw(cls) => Some(InlineResult::Threw(cls)),
         }
@@ -465,17 +456,7 @@ impl<'a> ConcreteState<'a> {
             Rvalue::Call { target, args, .. } => match self.try_inline_call(target, args, store) {
                 Some(InlineResult::Returned(rv)) => Ok(rv),
                 Some(InlineResult::Halted) => Err(Outcome::Halted),
-                Some(InlineResult::Violated {
-                    method,
-                    oid,
-                    witness,
-                    entries,
-                }) => Err(Outcome::Violated {
-                    method,
-                    oid,
-                    witness,
-                    entries,
-                }),
+                Some(InlineResult::Violated(v)) => Err(Outcome::Violated(v)),
                 Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
                 None => {
                     let mut r = Run {
@@ -529,14 +510,14 @@ impl<'a> ConcreteState<'a> {
         }
     }
 
-    /// Evaluate a Nondet rvalue: pick a choice and record in trace.
+    /// Evaluate a Nondet rvalue: pick a choice and record it in `entries`,
+    /// which is the single record of what this run chose.
     fn eval_nondet(&mut self, ty: &Ty) -> Value {
         let raw = self.choices.get(self.choice_idx).copied().unwrap_or(0);
         self.choice_idx += 1;
         let line: Option<u16> = None;
         match ty {
             Ty::Str => {
-                self.trace.push(raw);
                 let chosen = String::new();
                 self.entries.push(NondetEntry {
                     value: NondetValue::Str(chosen.clone()),
@@ -554,7 +535,6 @@ impl<'a> ConcreteState<'a> {
                 Value::Ref(aid)
             }
             Ty::Long => {
-                self.trace.push(raw);
                 self.entries.push(NondetEntry {
                     value: NondetValue::Long(raw),
                     nondet_method: "nondetLong",
@@ -563,7 +543,6 @@ impl<'a> ConcreteState<'a> {
                 Value::I64(raw)
             }
             _ => {
-                self.trace.push(raw);
                 self.entries.push(NondetEntry {
                     value: NondetValue::Int(raw as i32),
                     nondet_method: "nondetInt",
@@ -630,12 +609,11 @@ impl<'a> ConcreteState<'a> {
                     return Some(CheckResult::Route(target));
                 }
             }
-            return Some(CheckResult::Exit(Outcome::Violated {
+            return Some(CheckResult::Exit(Outcome::Violated(FoundViolation {
                 method: body.key.clone(),
                 oid,
-                witness: std::mem::take(&mut self.trace),
                 entries: std::mem::take(&mut self.entries),
-            }));
+            })));
         }
         None
     }
@@ -807,21 +785,8 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
 /// the SMT BMC engine should find it via constraint solving.
 fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)> {
     let step_budget = 200_000u64;
-    if let Outcome::Violated {
-        method,
-        oid,
-        witness,
-        entries,
-    } = run_with_choices(prog, body, &[], step_budget)
-    {
-        vec![(
-            method,
-            oid,
-            Witness {
-                nondet_sequence: witness,
-                entries,
-            },
-        )]
+    if let Outcome::Violated(v) = run_with_choices(prog, body, &[], step_budget) {
+        vec![(v.method, v.oid, Witness { entries: v.entries })]
     } else {
         vec![]
     }
@@ -877,7 +842,7 @@ impl Engine for Concrete {
             let oref = ObligationRef { method, id: oid };
             debug!(
                 "concrete: publishing violation at {oref:?}, witness={:?}",
-                witness.nondet_sequence
+                witness.nondet_sequence()
             );
             let published = bb.publish(
                 self.id(),

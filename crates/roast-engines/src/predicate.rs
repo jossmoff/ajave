@@ -411,16 +411,13 @@ fn eval_comp(op: CompOp, a: i64, b: i64) -> bool {
 /// Get the known constant value of a variable from the predicate state.
 fn get_known_value(prec: &PredPrec, state: &PredState, v: VarId) -> Option<i64> {
     for (i, pred) in prec.predicates.iter().enumerate() {
-        if state.values.get(i) == Some(&Some(true))
-            && pred.op == CompOp::Eq {
-                if let (PredicateOperand::Var(x), PredicateOperand::Const(c)) =
-                    (&pred.lhs, &pred.rhs)
-                {
-                    if *x == v {
-                        return Some(*c);
-                    }
+        if state.values.get(i) == Some(&Some(true)) && pred.op == CompOp::Eq {
+            if let (PredicateOperand::Var(x), PredicateOperand::Const(c)) = (&pred.lhs, &pred.rhs) {
+                if *x == v {
+                    return Some(*c);
                 }
             }
+        }
     }
     None
 }

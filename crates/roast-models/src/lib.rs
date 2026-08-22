@@ -339,38 +339,7 @@ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
 /// so the SMT engine can model it precisely instead of havocing.
 fn is_math_call(owner: &str, name: &str) -> bool {
     match owner {
-        "java/lang/Math" | "java/lang/StrictMath" => matches!(
-            name,
-            "abs"
-                | "min"
-                | "max"
-                | "addExact"
-                | "subtractExact"
-                | "multiplyExact"
-                | "negateExact"
-                | "floorDiv"
-                | "floorMod"
-                | "sin"
-                | "cos"
-                | "tan"
-                | "asin"
-                | "acos"
-                | "atan"
-                | "atan2"
-                | "exp"
-                | "log"
-                | "log10"
-                | "pow"
-                | "sqrt"
-                | "round"
-                | "ceil"
-                | "floor"
-                | "toRadians"
-                | "toDegrees"
-                | "sinh"
-                | "cosh"
-                | "tanh"
-        ),
+        "java/lang/Math" | "java/lang/StrictMath" => math_class(name) != MathClass::NotModelled,
         "java/lang/Integer" => matches!(
             name,
             "parseInt"
@@ -465,33 +434,44 @@ fn is_math_call(owner: &str, name: &str) -> bool {
     }
 }
 
+/// How a `java.lang.Math` / `StrictMath` method is handled.
+///
+/// One table, two consumers. `is_math_call` decides whether the call survives
+/// into the IR as an `Rvalue::Call` at all; `is_transcendental_math` decides
+/// whether the NRA engine claims the body. Those used to be two independent
+/// `matches!` lists with a dozen names in common (`sin`, `cos`, `exp`, `log`,
+/// `pow`, `sqrt`, `ceil`, `floor`, `round`, `toRadians`, `toDegrees`, the
+/// hyperbolics), kept in step by hand. Adding a transcendental to one and not
+/// the other routes it to the wrong engine, silently.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MathClass {
+    /// Expressible in bitvector or integer arithmetic.
+    Linear,
+    /// Needs nonlinear real arithmetic (dReal, CVC5's native transcendentals).
+    Transcendental,
+    /// Not modelled; the lifter havocs it.
+    NotModelled,
+}
+
+/// Classify a `Math`/`StrictMath` method by name.
+pub fn math_class(name: &str) -> MathClass {
+    match name {
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "exp" | "log" | "log10"
+        | "pow" | "sqrt" | "sinh" | "cosh" | "tanh" | "ceil" | "floor" | "toRadians"
+        | "toDegrees" | "round" => MathClass::Transcendental,
+
+        "abs" | "min" | "max" | "addExact" | "subtractExact" | "multiplyExact" | "negateExact"
+        | "floorDiv" | "floorMod" => MathClass::Linear,
+
+        _ => MathClass::NotModelled,
+    }
+}
+
 /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
 /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
 pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
     matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
-        && matches!(
-            name,
-            "sin"
-                | "cos"
-                | "tan"
-                | "asin"
-                | "acos"
-                | "atan"
-                | "atan2"
-                | "exp"
-                | "log"
-                | "log10"
-                | "pow"
-                | "sqrt"
-                | "sinh"
-                | "cosh"
-                | "tanh"
-                | "ceil"
-                | "floor"
-                | "toRadians"
-                | "toDegrees"
-                | "round"
-        )
+        && math_class(name) == MathClass::Transcendental
 }
 
 /// Does a `new` of this class need field tracking? Exception objects do not:
@@ -513,5 +493,76 @@ pub fn exception_class(kind: roast_ir::ObligationKind) -> Option<&'static str> {
         ArrayBounds => Some("java/lang/ArrayIndexOutOfBoundsException"),
         NegArraySize => Some("java/lang/NegativeArraySizeException"),
         ClassCast => Some("java/lang/ClassCastException"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_transcendental_is_also_a_modelled_math_call() {
+        // The invariant the two hand-maintained lists were supposed to keep:
+        // anything the NRA engine claims must have survived into the IR as a
+        // call in the first place, or it was havoced before NRA ever saw it.
+        for name in [
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "exp",
+            "log",
+            "log10",
+            "pow",
+            "sqrt",
+            "sinh",
+            "cosh",
+            "tanh",
+            "ceil",
+            "floor",
+            "toRadians",
+            "toDegrees",
+            "round",
+        ] {
+            assert!(
+                is_transcendental_math("java/lang/Math", name),
+                "{name} should classify as transcendental"
+            );
+            assert!(
+                matches!(
+                    model_for("java/lang/Math", name, "(D)D"),
+                    CallModel::MathCall(_)
+                ),
+                "{name} must reach the IR as a MathCall"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_math_is_modelled_but_not_transcendental() {
+        for name in ["abs", "min", "max", "floorDiv", "floorMod"] {
+            assert_eq!(math_class(name), MathClass::Linear);
+            assert!(!is_transcendental_math("java/lang/Math", name));
+            assert!(matches!(
+                model_for("java/lang/Math", name, "(II)I"),
+                CallModel::MathCall(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn unknown_math_methods_are_not_modelled() {
+        assert_eq!(math_class("cbrt"), MathClass::NotModelled);
+        assert!(!is_transcendental_math("java/lang/Math", "cbrt"));
+    }
+
+    #[test]
+    fn transcendental_only_applies_to_the_math_classes() {
+        // `pow` on some user class is not Math.pow.
+        assert!(!is_transcendental_math("com/example/Util", "pow"));
+        assert!(is_transcendental_math("java/lang/StrictMath", "pow"));
     }
 }

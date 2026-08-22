@@ -173,7 +173,7 @@ impl Engine for SmtBmc {
             let oref = ObligationRef { method, id: oid };
             debug!(
                 "smt-bmc: publishing violation at {oref:?}, witness={:?}",
-                witness.nondet_sequence
+                witness.nondet_sequence()
             );
             let published = bb.publish(
                 self.id(),
@@ -689,7 +689,7 @@ impl<'a> ExploreCtx<'a> {
             self.solver.assert(pc);
         }
         self.solver.assert(extra);
-        
+
         // Don't pop yet — caller may need to extract witness
         self.solver.check_sat()
     }
@@ -700,12 +700,10 @@ impl<'a> ExploreCtx<'a> {
             .iter()
             .map(|(_, t, w, ty, st)| (*t, *w, *ty, *st))
             .collect();
-        let mut seq = Vec::new();
         let mut entries = Vec::new();
         for (t, w, ty, str_term) in &info {
             let val = self.solver.get_value_i64(*t).unwrap_or(0);
             let raw = if *w <= 32 { val as i32 as i64 } else { val };
-            seq.push(raw);
             let (value, method) = match ty {
                 Ty::Long => (NondetValue::Long(raw), "nondetLong"),
                 Ty::Str => {
@@ -722,9 +720,6 @@ impl<'a> ExploreCtx<'a> {
                 line: None,
             });
         }
-        Witness {
-            nondet_sequence: seq,
-            entries,
-        }
+        Witness { entries }
     }
 }
