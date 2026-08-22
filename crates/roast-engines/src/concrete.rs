@@ -100,16 +100,58 @@ enum CheckResult {
     Exit(Outcome),
 }
 
-/// The evaluator for everything except `Nondet` and string method `Call`s,
-/// which `run_with_choices` intercepts before they ever reach here.
-struct Run {
-    store: HashMap<VarId, Value>,
+/// Variable values, indexed directly by `VarId`.
+///
+/// `VarId` is a dense arena index into `body.vars` -- `roast-ir` says so in its
+/// module doc ("arena indices, not pointers ... `u32` newtypes into flat
+/// vectors"). This used to be a `HashMap<VarId, Value>`, hashing a `u32` to
+/// reach an array it already had, on the interpreter's hottest path: every
+/// operand read and every assignment, under a 200,000-step budget.
+///
+/// A slot that was never written reads as `Unknown`, which is what an absent
+/// key meant before.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Store {
+    slots: Vec<Value>,
 }
 
-impl Run {
+impl Store {
+    /// Size the store for a body up front, so the hot loop never resizes.
+    fn ensure_slots(&mut self, n: usize) {
+        if self.slots.len() < n {
+            self.slots.resize(n, Value::Unknown);
+        }
+    }
+
+    pub(crate) fn get(&self, v: VarId) -> Value {
+        self.slots
+            .get(v.0 as usize)
+            .copied()
+            .unwrap_or(Value::Unknown)
+    }
+
+    fn set(&mut self, v: VarId, val: Value) {
+        let i = v.0 as usize;
+        if i >= self.slots.len() {
+            self.slots.resize(i + 1, Value::Unknown);
+        }
+        self.slots[i] = val;
+    }
+}
+
+/// The evaluator for everything except `Nondet` and string method `Call`s,
+/// which `run_with_choices` intercepts before they ever reach here.
+struct Run<'a> {
+    /// Borrowed. It used to own the store, so every call site had to
+    /// `std::mem::take` the caller's map, run, and hand it back -- a dance to
+    /// satisfy the borrow checker that a reference makes unnecessary.
+    store: &'a Store,
+}
+
+impl Run<'_> {
     fn eval(&self, op: &Operand) -> Value {
         match op {
-            Operand::Var(v) => self.store.get(v).copied().unwrap_or(Value::Unknown),
+            Operand::Var(v) => self.store.get(*v),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
             Operand::Const(Const::Null) => Value::Ref(0),
@@ -119,7 +161,7 @@ impl Run {
         }
     }
 
-    fn eval_rvalue(&mut self, rv: &Rvalue) -> Value {
+    fn eval_rvalue(&self, rv: &Rvalue) -> Value {
         match rv {
             Rvalue::Use(o) => self.eval(o),
             Rvalue::Neg(o) => match self.eval(o) {
@@ -302,9 +344,9 @@ impl<'a> ConcreteState<'a> {
         }
     }
 
-    fn eval_op(&self, op: &Operand, store: &HashMap<VarId, Value>) -> Value {
+    fn eval_op(&self, op: &Operand, store: &Store) -> Value {
         match op {
-            Operand::Var(v) => store.get(v).copied().unwrap_or(Value::Unknown),
+            Operand::Var(v) => store.get(*v),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
             Operand::Const(Const::Null) => Value::Ref(0),
@@ -331,7 +373,7 @@ impl<'a> ConcreteState<'a> {
         if let Some(body) = self.prog.body(&clinit_key) {
             let body = body.clone();
             self.call_depth += 1;
-            let _ = self.run_body(&body, HashMap::new());
+            let _ = self.run_body(&body, Store::default());
             self.call_depth -= 1;
         }
     }
@@ -341,7 +383,7 @@ impl<'a> ConcreteState<'a> {
         &mut self,
         target: &MethodKey,
         args: &[Operand],
-        caller_store: &HashMap<VarId, Value>,
+        caller_store: &Store,
     ) -> Option<InlineResult> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return None;
@@ -349,7 +391,7 @@ impl<'a> ConcreteState<'a> {
         let body = self.prog.body(target)?;
 
         // Build callee's local store by mapping args to local slots.
-        let mut callee_store: HashMap<VarId, Value> = HashMap::new();
+        let mut callee_store = Store::default();
         let mut slot = 0u16;
         for arg in args {
             let val = self.eval_op(arg, caller_store);
@@ -359,7 +401,7 @@ impl<'a> ConcreteState<'a> {
                 .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Local(s) if s == slot))
             {
-                callee_store.insert(VarId(vid_idx as u32), val);
+                callee_store.set(VarId(vid_idx as u32), val);
                 slot += if vinfo.ty.is_wide() { 2 } else { 1 };
             } else {
                 slot += 1;
@@ -383,11 +425,7 @@ impl<'a> ConcreteState<'a> {
     /// map; heap state is shared through `self`.
     /// Evaluate an rvalue in the context of a concrete store.
     /// Returns `Ok(value)` for the computed result, or `Err(outcome)` for early termination.
-    fn eval_assign(
-        &mut self,
-        rv: &Rvalue,
-        store: &mut HashMap<VarId, Value>,
-    ) -> Result<Value, Outcome> {
+    fn eval_assign(&mut self, rv: &Rvalue, store: &mut Store) -> Result<Value, Outcome> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
             Rvalue::Havoc(ty) => Ok(self.eval_havoc(ty)),
@@ -425,8 +463,8 @@ impl<'a> ConcreteState<'a> {
             }
             Rvalue::ArrayLength(arr) => {
                 let aid = match arr {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::Ref(aid)) => Some(*aid),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::Ref(aid) => Some(aid),
                         _ => None,
                     },
                     _ => None,
@@ -458,14 +496,7 @@ impl<'a> ConcreteState<'a> {
                 Some(InlineResult::Halted) => Err(Outcome::Halted),
                 Some(InlineResult::Violated(v)) => Err(Outcome::Violated(v)),
                 Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
-                None => {
-                    let mut r = Run {
-                        store: std::mem::take(store),
-                    };
-                    let val = r.eval_rvalue(rv);
-                    *store = r.store;
-                    Ok(val)
-                }
+                None => Ok(Run { store }.eval_rvalue(rv)),
             },
             Rvalue::GetField { obj, field } => {
                 let obj_val = self.eval_op(obj, store);
@@ -499,14 +530,7 @@ impl<'a> ConcreteState<'a> {
                         }
                     }))
             }
-            other => {
-                let mut r = Run {
-                    store: std::mem::take(store),
-                };
-                let val = r.eval_rvalue(other);
-                *store = r.store;
-                Ok(val)
-            }
+            other => Ok(Run { store }.eval_rvalue(other)),
         }
     }
 
@@ -576,14 +600,14 @@ impl<'a> ConcreteState<'a> {
         body: &Body,
         block: &Block,
         oid: ObligationId,
-        store: &mut HashMap<VarId, Value>,
+        store: &mut Store,
     ) -> Option<CheckResult> {
         let ob = body.obligation(oid);
         let ok = match &ob.cond {
             Operand::Const(Const::Int(v)) => *v != 0,
             other => {
                 let v = match other {
-                    Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
+                    Operand::Var(vid) => store.get(*vid),
                     _ => Value::Unknown,
                 };
                 if v == Value::Unknown {
@@ -604,7 +628,7 @@ impl<'a> ConcreteState<'a> {
                     {
                         let aid = self.alloc_id;
                         self.alloc_id += 1;
-                        store.insert(slot, Value::Ref(aid));
+                        store.set(slot, Value::Ref(aid));
                     }
                     return Some(CheckResult::Route(target));
                 }
@@ -618,7 +642,8 @@ impl<'a> ConcreteState<'a> {
         None
     }
 
-    fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
+    fn run_body(&mut self, body: &Body, mut store: Store) -> Outcome {
+        store.ensure_slots(body.vars.len());
         let mut block = body.entry;
         let mut idx = 0usize;
 
@@ -636,13 +661,10 @@ impl<'a> ConcreteState<'a> {
                         idx = 0;
                     }
                     Terminator::Branch { cond, then_, else_ } => {
-                        let cv = store
-                            .get(match cond {
-                                Operand::Var(v) => v,
-                                _ => unreachable!("branch cond is always a temp"),
-                            })
-                            .copied()
-                            .unwrap_or(Value::Unknown);
+                        let cv = store.get(match cond {
+                            Operand::Var(v) => *v,
+                            _ => unreachable!("branch cond is always a temp"),
+                        });
                         if cv == Value::Unknown {
                             return Outcome::Inconclusive;
                         }
@@ -655,7 +677,7 @@ impl<'a> ConcreteState<'a> {
                         default,
                     } => {
                         let v = match value {
-                            Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
+                            Operand::Var(vid) => store.get(*vid),
                             other => Value::I32(match other {
                                 Operand::Const(Const::Int(n)) => *n,
                                 _ => 0,
@@ -679,13 +701,10 @@ impl<'a> ConcreteState<'a> {
                     Terminator::Halt => return Outcome::Halted,
                     Terminator::Throw(op) => {
                         let thrown_class = match op {
-                            Operand::Var(v) => {
-                                if let Some(Value::Ref(aid)) = store.get(v) {
-                                    self.alloc_types.get(aid).cloned()
-                                } else {
-                                    None
-                                }
-                            }
+                            Operand::Var(v) => match store.get(*v) {
+                                Value::Ref(aid) => self.alloc_types.get(&aid).cloned(),
+                                _ => None,
+                            },
                             _ => None,
                         };
                         match thrown_class {
@@ -705,11 +724,16 @@ impl<'a> ConcreteState<'a> {
                 continue;
             }
 
-            let stmt = b.stmts[idx].clone();
-            match &stmt {
+            // Borrowed, not cloned. `body` is a separate parameter from
+            // `&mut self`, so nothing here conflicts -- and a `Stmt` is not
+            // `Copy`: a `Call` carries a `Vec<Operand>` and a `MethodKey` with
+            // three `String`s in it. This runs once per interpreted statement,
+            // under a 200,000-step budget.
+            let stmt = &b.stmts[idx];
+            match stmt {
                 Stmt::Assign(v, rv) => match self.eval_assign(rv, &mut store) {
                     Ok(val) => {
-                        store.insert(*v, val);
+                        store.set(*v, val);
                     }
                     Err(Outcome::Threw(cls)) => {
                         if let Some(target) = route(self.prog, b, &cls) {
@@ -722,13 +746,10 @@ impl<'a> ConcreteState<'a> {
                     Err(outcome) => return outcome,
                 },
                 Stmt::Assume(op) => {
-                    let v = store
-                        .get(match op {
-                            Operand::Var(v) => v,
-                            _ => unreachable!("assume operand is always a temp"),
-                        })
-                        .copied()
-                        .unwrap_or(Value::Unknown);
+                    let v = store.get(match op {
+                        Operand::Var(v) => *v,
+                        _ => unreachable!("assume operand is always a temp"),
+                    });
                     if !v.nonzero() {
                         return Outcome::Halted;
                     }
@@ -772,7 +793,7 @@ impl<'a> ConcreteState<'a> {
 /// choices. Choices beyond what's provided fall back to `0`.
 fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut state = ConcreteState::new(prog, choices, step_budget);
-    state.run_body(body, HashMap::new())
+    state.run_body(body, Store::default())
 }
 
 /// Run a single all-zero probe. The concrete engine is a cheap first pass

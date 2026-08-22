@@ -30,6 +30,9 @@ pub struct Blackboard {
     /// The direction each engine *declared* via `Engine::direction`, recorded
     /// by the orchestrator before scheduling starts. See `register_engine`.
     declared: BTreeMap<EngineId, Direction>,
+    /// Set once any obligation reaches `Violated`, so the orchestrator does not
+    /// have to rescan every status twice a round to find out.
+    any_violated: bool,
 }
 
 impl Blackboard {
@@ -169,6 +172,9 @@ impl Blackboard {
                     let keep =
                         !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
                     if keep {
+                        if matches!(st, Status::Violated { .. }) {
+                            self.any_violated = true;
+                        }
                         self.statuses.insert(oref.clone(), st.clone());
                     }
                 }
@@ -217,12 +223,31 @@ impl Blackboard {
         self.statuses.get(oref).unwrap_or(&Status::Open)
     }
 
+    /// Obligations not yet finally decided.
+    ///
+    /// Allocates, and clones a `MethodKey` (three `String`s) per entry. Callers
+    /// that only need the count should use `open_count`, and callers that only
+    /// iterate should use `open_iter`; this exists for the ones that have to
+    /// hold the list across a `&mut self` borrow of the blackboard.
     pub fn open(&self) -> Vec<ObligationRef> {
+        self.open_iter().cloned().collect()
+    }
+
+    pub fn open_iter(&self) -> impl Iterator<Item = &ObligationRef> {
         self.statuses
             .iter()
             .filter(|(_, s)| !s.is_final())
-            .map(|(k, _)| k.clone())
-            .collect()
+            .map(|(k, _)| k)
+    }
+
+    pub fn open_count(&self) -> usize {
+        self.open_iter().count()
+    }
+
+    /// Has any obligation been violated? Tracked on publish rather than
+    /// rescanned; the orchestrator asks twice per round.
+    pub fn any_violated(&self) -> bool {
+        self.any_violated
     }
 
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {

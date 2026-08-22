@@ -387,9 +387,13 @@ pub struct Program {
     pub supers: HashMap<String, String>,
     /// class -> declared interfaces.
     pub interfaces: HashMap<String, Vec<String>>,
-    /// Set of (class, field_name, field_desc) for fields declared by each class.
+    /// Fields declared by each class, as class -> {(name, desc)}.
     /// Used to resolve field references to the declaring class.
-    pub declared_fields: HashSet<(String, String, String)>,
+    ///
+    /// Keyed by class rather than being one flat `HashSet<(String, String,
+    /// String)>` so `resolve_field_class` can probe it with a `&str` instead of
+    /// building three owned `String`s per hierarchy level, per lookup.
+    pub declared_fields: HashMap<String, HashSet<(String, String)>>,
     pub entry: Option<MethodKey>,
 }
 
@@ -402,18 +406,32 @@ impl Program {
     /// Javac may emit `getfield A3.some_member` when `some_member` is declared
     /// in A1 (a parent of A3). We walk up the hierarchy to find the declaring
     /// class so that field reads and writes use the same SMT array.
+    ///
+    /// Borrows through the walk. `declared_fields` used to be a flat
+    /// `HashSet<(String, String, String)>`, which cannot be probed by
+    /// reference, so every level of every lookup built three owned `String`s
+    /// and discarded them -- on the path the BMC explorer takes for each field
+    /// access, and again for each of the six heap maps keyed by that result.
     pub fn resolve_field_class(&self, class: &str, name: &str, desc: &str) -> String {
-        let mut cur = class.to_string();
+        let mut cur = class;
+        let mut guard = 0usize;
         loop {
-            if self
-                .declared_fields
-                .contains(&(cur.clone(), name.to_string(), desc.to_string()))
-            {
-                return cur;
+            if let Some(fields) = self.declared_fields.get(cur) {
+                // The (name, desc) probe still allocates; a borrowed lookup
+                // would need a `Borrow`-compatible key type, which is not worth
+                // a newtype here since the hierarchy is shallow.
+                if fields.contains(&(name.to_string(), desc.to_string())) {
+                    return cur.to_string();
+                }
             }
-            match self.supers.get(&cur) {
-                Some(sup) => cur = sup.clone(),
-                None => return class.to_string(), // not found, use original
+            match self.supers.get(cur) {
+                Some(sup) if sup != cur => cur = sup,
+                // Not found, or the hierarchy loops on itself.
+                _ => return class.to_string(),
+            }
+            guard += 1;
+            if guard > self.supers.len() + 1 {
+                return class.to_string();
             }
         }
     }

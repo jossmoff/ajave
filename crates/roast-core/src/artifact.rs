@@ -1,8 +1,25 @@
 //! What engines exchange.
 //!
-//! The central idea of the architecture: engines publish *artifacts*, not
-//! verdicts. A portfolio that only exchanges verdicts discards everything each
-//! engine learned on the way, which is most of the value.
+//! The intended design: engines publish *artifacts*, not verdicts. A portfolio
+//! that only exchanges verdicts discards everything each engine learned on the
+//! way, which is most of the value.
+//!
+//! **What is actually built today is narrower than that, and the gap is worth
+//! stating plainly rather than leaving a reader to infer it from grep.** Every
+//! engine publishes exactly one artifact kind, `Status`, and reads shared state
+//! through exactly one method, `Blackboard::open`. The cursor API
+//! (`Blackboard::since` / `head`), which is what would let an engine pull
+//! another's deltas without coupling to it, has no callers. Neither do
+//! `Invariant`, `Trace`, `Precision` or `Residual` -- nothing constructs them,
+//! so nothing consumes them.
+//!
+//! They are kept because the shapes are right and the first real consumer is
+//! identifiable: CEGAR already computes both a spurious-trace and a refined
+//! precision on every refinement round, and throws both away (see
+//! `docs/strategies/cegar.md`). Publishing those is the obvious first use.
+//! Until something does, treat this module as a designed interface with one
+//! implemented case, not as a description of how the portfolio currently
+//! communicates.
 
 use roast_ir::verdict::Witness;
 use roast_ir::{BlockId, MethodKey, ObligationId, VarId};

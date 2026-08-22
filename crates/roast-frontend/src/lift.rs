@@ -454,13 +454,16 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
 
         let mut ii = index[&start];
         while ii < insns.len() && insns[ii].off < end {
-            let n = insns[ii].clone();
+            // Borrowed, not cloned: `insns` is a local vector, independent of
+            // the `&mut lifter` borrow below, so the per-instruction clone of
+            // an `Insn` (which carries two `Vec`s) bought nothing.
+            let n = &insns[ii];
             let mut context = InsnContext {
                 lifter: &mut lifter,
                 stack: &mut stack,
                 stmts: &mut stmts,
                 block_of: &block_of,
-                insn: &n,
+                insn: n,
                 code_len: code.bytes.len(),
             };
             match context.lift() {
@@ -502,7 +505,10 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         // Exceptional successors: every handler covering any instruction in
         // this block.
         let mut exceptional = Vec::new();
-        for h in &lifter.handlers.clone() {
+        // `code.handlers` rather than `lifter.handlers.clone()`: the latter
+        // cloned the whole exception table once per basic block to sidestep a
+        // borrow, though the same data is right here and unborrowed.
+        for h in &code.handlers {
             let covers = (h.start as usize) < end && start < (h.end as usize);
             if !covers {
                 continue;
@@ -1619,12 +1625,14 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
     }
     prog.interfaces
         .insert(cf.this_class.clone(), cf.interfaces.clone());
-    for field in &cf.fields {
-        prog.declared_fields.insert((
-            cf.this_class.clone(),
-            field.name.clone(),
-            field.desc.clone(),
-        ));
+    if !cf.fields.is_empty() {
+        let entry = prog
+            .declared_fields
+            .entry(cf.this_class.clone())
+            .or_default();
+        for field in &cf.fields {
+            entry.insert((field.name.clone(), field.desc.clone()));
+        }
     }
 
     for m in &cf.methods {

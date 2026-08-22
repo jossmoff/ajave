@@ -19,6 +19,7 @@ pub mod kinduction;
 mod math_eval;
 #[cfg(feature = "nra")]
 pub mod nra;
+pub mod postdom;
 pub mod predicate;
 pub mod presolve;
 pub mod smt_bmc;

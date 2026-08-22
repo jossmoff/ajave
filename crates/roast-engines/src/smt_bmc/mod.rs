@@ -103,6 +103,8 @@ impl Engine for SmtBmc {
             solver: solver.as_mut(),
             prog,
             body,
+            postdom: crate::postdom::PostDom::new(body),
+            program_classes: prog.bodies.keys().map(|k| k.class.clone()).collect(),
             vars: HashMap::new(),
             str_vars: HashMap::new(),
             nondet_terms: Vec::new(),
@@ -256,6 +258,11 @@ struct ExploreCtx<'a> {
     solver: &'a mut dyn Solver,
     prog: &'a Program,
     body: &'a Body,
+    /// Post-dominator tree for `body`, computed once. Decides where a branch's
+    /// arms provably reconverge, i.e. whether they can be diamond-merged.
+    postdom: crate::postdom::PostDom,
+    /// Every class the program declares a body for, for `is_program_class`.
+    program_classes: HashSet<String>,
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
@@ -318,9 +325,45 @@ struct ExploreCtx<'a> {
     inlined_methods: HashSet<MethodKey>,
 }
 
+/// Everything the two branch handlers need to know about a conditional edge.
+///
+/// Passed as one value rather than eight positional arguments: the two
+/// handlers took the same list in a different order, which is the kind of
+/// signature where transposing two `BlockId`s compiles and silently swaps the
+/// arms of every branch in the program.
+#[derive(Clone, Copy)]
+pub(super) struct Branch {
+    pub block_id: BlockId,
+    /// The condition depends on something the encoding cannot model exactly.
+    pub tainted: bool,
+    /// Term asserting the condition is true.
+    pub nonzero: Term,
+    /// Term asserting it is false.
+    pub is_zero: Term,
+    pub then_: BlockId,
+    pub else_: BlockId,
+    pub stop_at: Option<BlockId>,
+}
+
+/// One arm of a forked switch, held until every arm has been explored and they
+/// can be merged back together.
+///
+/// A named struct rather than a five-tuple of
+/// `(Term, SavedState, Option<Term>, Option<Term>, bool)`: two of those fields
+/// have the same type and adjacent positions, and telling them apart at the
+/// destructuring site meant counting underscores.
+pub(super) struct SwitchCase {
+    /// Term asserting this case's value was the one selected.
+    pub guard: Term,
+    pub state: SavedState,
+    pub inline_return: Option<Term>,
+    pub inline_return_str: Option<Term>,
+    pub inline_return_tainted: bool,
+}
+
 /// Snapshot of mutable state for save/restore across forks and diamond merges.
 #[derive(Clone)]
-struct SavedState {
+pub(super) struct SavedState {
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
@@ -512,8 +555,14 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
+    /// Is this a class from the program under analysis, as opposed to a
+    /// library class we never loaded?
+    ///
+    /// Reads a set built once at construction. It used to scan every method key
+    /// in the program on each call, from inside `get_field_array` and
+    /// `rvalue_tainted` -- both on the per-field-access path.
     fn is_program_class(&self, class: &str) -> bool {
-        self.prog.bodies.keys().any(|k| k.class == class)
+        self.program_classes.contains(class)
     }
 
     fn field_elem_width(desc: &str) -> u32 {

@@ -1,13 +1,11 @@
 //! Block exploration: statement handling, terminator dispatch, branching, inlining.
 
-use std::collections::HashSet;
-
 use log::debug;
 use roast_core::smt::{SatResult, Term};
 use roast_ir::*;
 use roast_models;
 
-use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
+use super::{Branch, ExploreCtx, SavedState, SwitchCase, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 
 impl<'a> ExploreCtx<'a> {
     /// Set str_vars for `var_id` and all other vars that share the same SMT term.
@@ -255,70 +253,22 @@ impl<'a> ExploreCtx<'a> {
         true
     }
 
-    fn forward_reachable(&self, start: BlockId, limit: usize) -> HashSet<u32> {
-        let mut reached = HashSet::new();
-        let mut worklist = vec![start];
-        while let Some(bid) = worklist.pop() {
-            if !reached.insert(bid.0) || reached.len() >= limit {
-                continue;
-            }
-            let succs = self.block_successors(bid);
-            for s in succs {
-                if s.0 > bid.0 {
-                    worklist.push(s);
-                }
-            }
-        }
-        reached
-    }
-
-    fn block_successors(&self, bid: BlockId) -> Vec<BlockId> {
-        match &self.body.block(bid).term {
-            Terminator::Goto(t) => vec![*t],
-            Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
-            Terminator::Switch { cases, default, .. } => {
-                let mut v: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
-                v.push(*default);
-                v
-            }
-            _ => vec![],
-        }
-    }
-
+    /// The join point for a set of branch targets, from the body's
+    /// post-dominator tree.
+    ///
+    /// This used to run a fresh forward-reachability sweep per target on every
+    /// visit, capped at 50 blocks and following only successors with a higher
+    /// block id. Both of those quietly returned "no join" -- on a body over 50
+    /// blocks, or on any loop -- and a missing join means the explorer forks
+    /// the path instead of merging it, which is the exponential case diamond
+    /// merging exists to avoid. `PostDom` is exact and computed once per body.
     pub(super) fn find_join(&self, then_: BlockId, else_: BlockId) -> Option<BlockId> {
         self.find_join_multi(&[then_, else_])
     }
 
     fn find_join_multi(&self, targets: &[BlockId]) -> Option<BlockId> {
-        if targets.is_empty() {
-            return None;
-        }
-        // Compute forward reachable sets for each target.
-        let reach_sets: Vec<HashSet<u32>> = targets
-            .iter()
-            .map(|t| self.forward_reachable(*t, 50))
-            .collect();
-        // If any target is reachable from another target, the branches are
-        // not independent and diamond merge would produce incorrect results.
-        // Fall back to path forking in that case.
-        for (i, t) in targets.iter().enumerate() {
-            for (j, r) in reach_sets.iter().enumerate() {
-                if i != j && r.contains(&t.0) {
-                    return None;
-                }
-            }
-        }
-        let mut common = reach_sets[0].clone();
-        for r in &reach_sets[1..] {
-            common = common.intersection(r).copied().collect();
-        }
-        let target_set: HashSet<u32> = targets.iter().map(|t| t.0).collect();
-        let mut candidates: Vec<u32> = common
-            .into_iter()
-            .filter(|b| !target_set.contains(b))
-            .collect();
-        candidates.sort();
-        candidates.first().map(|&b| BlockId(b))
+        let ids: Vec<u32> = targets.iter().map(|b| b.0).collect();
+        self.postdom.common(&ids).map(BlockId)
     }
 
     // ── Statement handlers ──────────────────────────────────────────────
@@ -736,45 +686,35 @@ impl<'a> ExploreCtx<'a> {
         else_: BlockId,
         stop_at: Option<BlockId>,
     ) {
-        let cond_tainted = self.operand_tainted(&cond);
         let ct = self.encode_operand(&cond);
         let zero = self.solver.bv_const(0, 32);
         let cond_bool = self.solver.bveq(ct, zero);
-        let cond_nz = self.solver.not(cond_bool);
+        let br = Branch {
+            block_id,
+            tainted: self.operand_tainted(&cond),
+            nonzero: self.solver.not(cond_bool),
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+        };
 
-        if let Some(join) = self.find_join(then_, else_) {
-            self.handle_branch_diamond(
-                cond_tainted,
-                cond_nz,
-                cond_bool,
-                then_,
-                else_,
-                join,
-                stop_at,
-            );
-        } else {
-            self.handle_branch_fork(
-                block_id,
-                cond_tainted,
-                cond_nz,
-                cond_bool,
-                then_,
-                else_,
-                stop_at,
-            );
+        match self.find_join(then_, else_) {
+            Some(join) => self.handle_branch_diamond(&br, join),
+            None => self.handle_branch_fork(&br),
         }
     }
 
-    fn handle_branch_diamond(
-        &mut self,
-        cond_tainted: bool,
-        cond_nz: Term,
-        cond_bool: Term,
-        then_: BlockId,
-        else_: BlockId,
-        join: BlockId,
-        stop_at: Option<BlockId>,
-    ) {
+    fn handle_branch_diamond(&mut self, br: &Branch, join: BlockId) {
+        let Branch {
+            tainted: cond_tainted,
+            nonzero: cond_nz,
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+            ..
+        } = *br;
         let saved = self.save_state();
         if cond_tainted {
             self.path_tainted = true;
@@ -802,16 +742,16 @@ impl<'a> ExploreCtx<'a> {
         self.explore_block_until(join, 0, stop_at);
     }
 
-    fn handle_branch_fork(
-        &mut self,
-        block_id: BlockId,
-        cond_tainted: bool,
-        cond_nz: Term,
-        cond_bool: Term,
-        then_: BlockId,
-        else_: BlockId,
-        stop_at: Option<BlockId>,
-    ) {
+    fn handle_branch_fork(&mut self, br: &Branch) {
+        let Branch {
+            block_id,
+            tainted: cond_tainted,
+            nonzero: cond_nz,
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+        } = *br;
         self.fork_count += 1;
         log::trace!(
             "smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
@@ -1024,7 +964,7 @@ impl<'a> ExploreCtx<'a> {
         let ir_before = self.inline_return;
         let irs_before = self.inline_return_str;
         let irt_before = self.inline_return_tainted;
-        let mut case_saved: Vec<(Term, SavedState, Option<Term>, Option<Term>, bool)> = Vec::new();
+        let mut case_saved: Vec<SwitchCase> = Vec::new();
 
         for &(case_val, target) in cases {
             if !self.budget_left() {
@@ -1045,7 +985,13 @@ impl<'a> ExploreCtx<'a> {
             let c_ir = self.inline_return;
             let c_irs = self.inline_return_str;
             let c_irt = self.inline_return_tainted;
-            case_saved.push((eq, cs, c_ir, c_irs, c_irt));
+            case_saved.push(SwitchCase {
+                guard: eq,
+                state: cs,
+                inline_return: c_ir,
+                inline_return_str: c_irs,
+                inline_return_tainted: c_irt,
+            });
             self.restore_state(saved.clone());
         }
 
@@ -1070,25 +1016,26 @@ impl<'a> ExploreCtx<'a> {
         let mut any_irt = self.inline_return_tainted;
         self.restore_state(saved);
 
-        let state_refs: Vec<&SavedState> = case_saved.iter().map(|(_, s, _, _, _)| s).collect();
+        let state_refs: Vec<&SavedState> = case_saved.iter().map(|c| &c.state).collect();
         self.collect_nondets_dedup(&state_refs);
         self.collect_nondets_dedup(&[&merged]);
 
-        for (eq, cs, c_ir, c_irs, c_irt) in case_saved.iter().rev() {
-            self.merge_saved_into(&mut merged, *eq, cs);
-            any_irt = any_irt || *c_irt;
-            match (*c_ir, merged_ir) {
+        for case in case_saved.iter().rev() {
+            let eq = case.guard;
+            self.merge_saved_into(&mut merged, eq, &case.state);
+            any_irt = any_irt || case.inline_return_tainted;
+            match (case.inline_return, merged_ir) {
                 (Some(c), Some(m)) if c != m => {
-                    merged_ir = Some(self.solver.ite(*eq, c, m));
+                    merged_ir = Some(self.solver.ite(eq, c, m));
                 }
                 (Some(c), None) => {
                     merged_ir = Some(c);
                 }
                 _ => {}
             }
-            match (*c_irs, merged_irs) {
+            match (case.inline_return_str, merged_irs) {
                 (Some(c), Some(m)) if c != m => {
-                    merged_irs = Some(self.solver.ite(*eq, c, m));
+                    merged_irs = Some(self.solver.ite(eq, c, m));
                 }
                 (Some(c), None) => {
                     merged_irs = Some(c);

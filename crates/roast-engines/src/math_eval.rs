@@ -3,8 +3,6 @@
 //!
 //! Extracted from `concrete.rs` for modularity.
 
-use std::collections::HashMap;
-
 use roast_ir::*;
 
 use crate::concrete::Value;
@@ -135,11 +133,11 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
 pub(crate) fn eval_math_call(
     target: &MethodKey,
     args: &[Operand],
-    store: &HashMap<VarId, Value>,
+    store: &crate::concrete::Store,
 ) -> Value {
     let get_val = |i: usize| -> Value {
         match args.get(i) {
-            Some(Operand::Var(vid)) => store.get(vid).copied().unwrap_or(Value::Unknown),
+            Some(Operand::Var(vid)) => store.get(*vid),
             Some(Operand::Const(Const::Int(n))) => Value::I32(*n),
             Some(Operand::Const(Const::Long(n))) => Value::I64(*n),
             _ => Value::Unknown,
