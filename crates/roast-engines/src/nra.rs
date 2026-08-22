@@ -37,9 +37,21 @@ impl Engine for NraEngine {
     }
 
     fn direction(&self) -> Direction {
-        // Over: UNSAT soundly proves the property.
-        // SAT from CVC5 with native transcendentals is also trustworthy.
-        Direction::Over
+        // Under, and the reasoning is worth spelling out because the comment
+        // here used to say Over.
+        //
+        // SAT is trustworthy: it yields concrete inputs, which become a witness,
+        // which JvmReplay runs on a real JVM before any FALSE is reported. An
+        // approximate encoding cannot produce a wrong FALSE when the JVM has the
+        // final say.
+        //
+        // UNSAT is *not* acted on. This encoding is over the reals; Java floats
+        // are IEEE 754. NaN, +/-Inf and -0 are values a real does not have and
+        // can violate an assertion that genuinely holds over R -- see the
+        // `NraResult::Unsat` arm in `step`, which deliberately declines to
+        // discharge. An engine that never discharges is Under, whatever it
+        // hoped to be.
+        Direction::Under
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
@@ -70,7 +82,10 @@ impl Engine for NraEngine {
                 continue;
             }
 
-            info!("nra: encoding obligation {:?} for {:?}", oref.id, oref.method);
+            info!(
+                "nra: encoding obligation {:?} for {:?}",
+                oref.id, oref.method
+            );
 
             match solve_nra(body, oref.id) {
                 NraResult::Sat(model) => {
@@ -78,7 +93,7 @@ impl Engine for NraEngine {
                     let witness = build_witness_from_model(body, &model);
                     let published = bb.publish(
                         self.id(),
-                        Direction::Under,
+                        self.direction(),
                         Artifact::Status(
                             oref.clone(),
                             Status::Violated {
@@ -96,7 +111,10 @@ impl Engine for NraEngine {
                     // UNSAT over reals does not imply UNSAT over floats
                     // (NaN, Inf, -0 can violate assertions that hold over R).
                     // So we log but do NOT discharge.
-                    debug!("nra: obligation {} UNSAT over reals (not discharging — float unsoundness)", oref);
+                    debug!(
+                        "nra: obligation {} UNSAT over reals (not discharging — float unsoundness)",
+                        oref
+                    );
                 }
                 NraResult::Unknown => {
                     debug!("nra: solver returned unknown for {}", oref);
@@ -153,8 +171,7 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
     };
 
     let mut error_paths: Vec<Vec<CvcTerm>> = Vec::new();
-    let mut worklist: Vec<(BlockId, NraPathState, usize)> =
-        vec![(body.entry, initial_state, 0)];
+    let mut worklist: Vec<(BlockId, NraPathState, usize)> = vec![(body.entry, initial_state, 0)];
 
     while let Some((block_id, mut state, depth)) = worklist.pop() {
         if depth > MAX_NRA_DEPTH {
@@ -327,7 +344,11 @@ fn extract_real_value(term: &CvcTerm) -> f64 {
         if let Some(idx) = s.find('/') {
             let num: f64 = s[..idx].parse().unwrap_or(0.0);
             let den: f64 = s[idx + 1..].parse().unwrap_or(1.0);
-            if den != 0.0 { num / den } else { 0.0 }
+            if den != 0.0 {
+                num / den
+            } else {
+                0.0
+            }
         } else {
             s.parse().unwrap_or(0.0)
         }
@@ -652,16 +673,8 @@ fn build_witness_from_model(body: &Body, model: &[(String, f64)]) -> Witness {
                 "nondetFloat",
                 (value as f32).to_bits() as i64,
             ),
-            Ty::Long => (
-                NondetValue::Long(value as i64),
-                "nondetLong",
-                value as i64,
-            ),
-            _ => (
-                NondetValue::Int(value as i32),
-                "nondetInt",
-                value as i64,
-            ),
+            Ty::Long => (NondetValue::Long(value as i64), "nondetLong", value as i64),
+            _ => (NondetValue::Int(value as i32), "nondetInt", value as i64),
         };
 
         nondet_sequence.push(raw_bits);

@@ -30,11 +30,16 @@ roast-ir  <---- roast-models
 **`roast-ir` has zero dependencies.** Every other crate depends on it, never
 the reverse. This isn't just tidiness: it's what makes "the representation is
 independent of both what produces it and what consumes it" a checkable fact
-rather than an aspiration. It slipped once during the workspace split —
-`Body::check_point` briefly returned a `roast-core` type, which would have
-forced `roast-ir` to depend on `roast-core` and broken the whole graph — and
-`check-boundaries.sh` exists specifically because that kind of thing should
-fail CI, not get caught in review.
+rather than an aspiration.
+
+It slipped once, during the original single-crate → workspace split: a
+`Body::check_point` helper returned a `ProgramPoint`, which is a `roast-core`
+type, and would have forced `roast-ir` to depend on `roast-core` and inverted
+the whole graph. It was moved to the core side of the boundary, and
+`check-boundaries.sh` was written so that the next one fails CI instead of
+being caught in review. (The helper itself no longer exists — it never
+acquired a caller and was removed. The rule it motivated is the part worth
+keeping.)
 
 **`roast-frontend` and `roast-core` don't depend on each other.** Both only need
 `roast-ir` and `roast-models`. This is the load-bearing isolation claim in the

@@ -41,11 +41,7 @@ fn width_of(ty: &Ty) -> u32 {
 ///
 /// `frame` is a unique prefix for SSA variable names (allows multiple
 /// instances in the same solver context for k-induction's step case).
-pub fn encode_body(
-    solver: &mut dyn Solver,
-    body: &Body,
-    frame: &str,
-) -> Encoding {
+pub fn encode_body(solver: &mut dyn Solver, body: &Body, frame: &str) -> Encoding {
     let mut env = Env {
         solver,
         frame: frame.to_string(),
@@ -125,7 +121,11 @@ pub fn encode_body(
                 env.merge_pc(*then_, then_pc);
                 env.merge_pc(*else_, else_pc);
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 let vt = env.encode_operand(value);
                 let mut default_pc = current_pc;
                 for (val, target) in cases {
@@ -138,8 +138,10 @@ pub fn encode_body(
                 }
                 env.merge_pc(*default, default_pc);
             }
-            Terminator::Return(_) | Terminator::Halt
-            | Terminator::Throw(_) | Terminator::Diverge(_) => {}
+            Terminator::Return(_)
+            | Terminator::Halt
+            | Terminator::Throw(_)
+            | Terminator::Diverge(_) => {}
         }
     }
 
@@ -176,7 +178,8 @@ struct Env<'a> {
 impl<'a> Env<'a> {
     fn fresh(&mut self, name: &str, width: u32) -> Term {
         self.next_ssa += 1;
-        self.solver.fresh_bv(&format!("{}_{}{}", self.frame, name, self.next_ssa), width)
+        self.solver
+            .fresh_bv(&format!("{}_{}{}", self.frame, name, self.next_ssa), width)
     }
 
     fn merge_pc(&mut self, target: BlockId, incoming: Term) {
@@ -263,9 +266,12 @@ impl<'a> Env<'a> {
                 self.solver.assert(neq);
                 t
             }
-            Rvalue::GetStatic(_) | Rvalue::GetField { .. }
-            | Rvalue::ArrayLoad { .. } | Rvalue::ArrayLength(_)
-            | Rvalue::NewArray { .. } | Rvalue::InstanceOf { .. }
+            Rvalue::GetStatic(_)
+            | Rvalue::GetField { .. }
+            | Rvalue::ArrayLoad { .. }
+            | Rvalue::ArrayLength(_)
+            | Rvalue::NewArray { .. }
+            | Rvalue::InstanceOf { .. }
             | Rvalue::Call { .. } => self.fresh("havoc", 32),
         }
     }

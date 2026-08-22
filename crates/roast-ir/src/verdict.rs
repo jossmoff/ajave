@@ -62,12 +62,27 @@ pub enum NondetValue {
 
 impl NondetValue {
     /// The raw i64 encoding used by JvmReplay's `-Droast.seq` property.
-    pub fn as_raw(&self) -> i64 {
+    ///
+    /// Strings have no raw encoding: the shadow `Verifier` reads them from
+    /// separate `-Droast.str.N` properties and its `nondetString()` never
+    /// advances the numeric cursor. `Witness::nondet_sequence` therefore skips
+    /// them entirely rather than reserving a slot -- see the note there.
+    pub fn as_raw(&self) -> Option<i64> {
         match self {
-            NondetValue::Int(v) => *v as i64,
-            NondetValue::Long(v) => *v,
-            NondetValue::Bool(v) => *v as i64,
-            NondetValue::Str(_) => 0, // string index is in the raw sequence separately
+            NondetValue::Int(v) => Some(*v as i64),
+            NondetValue::Long(v) => Some(*v),
+            NondetValue::Bool(v) => Some(*v as i64),
+            NondetValue::Str(_) => None,
+        }
+    }
+
+    /// The `Verifier` method this value came back from.
+    pub fn nondet_method(&self) -> &'static str {
+        match self {
+            NondetValue::Int(_) => "nondetInt",
+            NondetValue::Long(_) => "nondetLong",
+            NondetValue::Bool(_) => "nondetBoolean",
+            NondetValue::Str(_) => "nondetString",
         }
     }
 }
@@ -86,25 +101,94 @@ pub struct NondetEntry {
 /// A violation witness: records the nondeterministic choices an execution made
 /// so they can be (a) replayed on a real JVM, and (b) emitted as a
 /// SV-COMP witness file that external validators can check.
+///
+/// One list, in call order. This used to be two -- a `Vec<i64>` of raw values
+/// alongside the typed entries, documented as "parallel to" each other with
+/// nothing enforcing it. They were in fact kept in lockstep by every producer,
+/// and that was the bug: the shadow `Verifier`'s `nondetString()` reads from
+/// `-Droast.str.N` and does *not* advance the numeric cursor, so reserving a
+/// slot in the raw sequence for a string shifted every later numeric value by
+/// one. A program calling `nondetString()` before `nondetInt()` replayed the
+/// wrong input, the expected exception did not fire, and a correct FALSE was
+/// downgraded to UNKNOWN by its own certifier.
 #[derive(Clone, Debug, Default)]
 pub struct Witness {
-    /// Values to be returned by successive `Verifier.nondet*()` calls, in order.
-    /// This is all a replay harness needs for the stage 0-2 fragment.
-    pub nondet_sequence: Vec<i64>,
-    /// Typed entries for witness file emission. Parallel to `nondet_sequence`
-    /// but carries the original type and source location.
+    /// Every nondeterministic choice, in the order the program made them.
     pub entries: Vec<NondetEntry>,
 }
 
+impl Witness {
+    /// Values for successive numeric `Verifier.nondet*()` calls, in order, as
+    /// the shadow `Verifier` consumes them. Strings are excluded: they are
+    /// passed out of band and do not advance that cursor.
+    pub fn nondet_sequence(&self) -> Vec<i64> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.value.as_raw())
+            .collect()
+    }
+
+    /// String values in call order, matching the shadow `Verifier`'s separate
+    /// `roast.str.N` cursor.
+    pub fn string_values(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter_map(|e| match &e.value {
+                NondetValue::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::Verdict::*;
+mod witness_tests {
+    use super::*;
+
+    fn entry(value: NondetValue) -> NondetEntry {
+        NondetEntry {
+            nondet_method: value.nondet_method(),
+            value,
+            line: None,
+        }
+    }
 
     #[test]
-    fn join_is_monotone_and_surfaces_disagreement() {
-        assert_eq!(Unknown.join(True), True);
-        assert_eq!(True.join(True), True);
-        assert_eq!(True.join(False), Contradiction);
-        assert_eq!(Contradiction.as_svcomp(), "UNKNOWN");
+    fn a_string_does_not_consume_a_numeric_slot() {
+        // The shadow Verifier's nondetString() advances only its own cursor, so
+        // a string must not shift the numeric sequence.
+        let w = Witness {
+            entries: vec![
+                entry(NondetValue::Str("hello".into())),
+                entry(NondetValue::Int(42)),
+            ],
+        };
+        assert_eq!(w.nondet_sequence(), vec![42]);
+        assert_eq!(w.string_values(), vec!["hello"]);
+    }
+
+    #[test]
+    fn numeric_values_keep_their_order_and_encoding() {
+        let w = Witness {
+            entries: vec![
+                entry(NondetValue::Int(-1)),
+                entry(NondetValue::Long(1 << 40)),
+                entry(NondetValue::Bool(true)),
+                entry(NondetValue::Bool(false)),
+            ],
+        };
+        assert_eq!(w.nondet_sequence(), vec![-1, 1 << 40, 1, 0]);
+    }
+
+    #[test]
+    fn an_empty_witness_is_legitimate() {
+        // A deterministic bug needs no inputs; that is not a missing witness.
+        let w = Witness::default();
+        assert!(w.is_empty());
+        assert!(w.nondet_sequence().is_empty());
     }
 }

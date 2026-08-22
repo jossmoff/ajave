@@ -17,10 +17,10 @@ use roast_core::engine::{Budget, Engine, Progress};
 use roast_ir::*;
 
 use crate::body_analysis::{body_uses_havoced_ops, find_defining_bin};
-use crate::interpolation::{
-    encode_body_lia, find_interpolation_solver, InterpolationSolver,
+use crate::interpolation::{encode_body_lia, find_interpolation_solver, InterpolationSolver};
+use crate::predicate::{
+    predicates_from_interpolant, CompOp, PredPrec, Predicate, PredicateCpa, PredicateOperand,
 };
-use crate::predicate::{predicates_from_interpolant, CompOp, PredPrec, Predicate, PredicateOperand, PredicateCpa};
 
 /// Maximum number of CEGAR refinement iterations.
 const MAX_REFINEMENTS: u32 = 20;
@@ -31,6 +31,12 @@ const MAX_STATES: usize = 10_000;
 pub struct CegarEngine {
     solver: Option<InterpolationSolver>,
     done: bool,
+}
+
+impl Default for CegarEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CegarEngine {
@@ -94,7 +100,10 @@ impl Engine for CegarEngine {
             return Progress::Exhausted;
         }
 
-        info!("cegar: starting refinement loop for {} obligation(s)", open.len());
+        info!(
+            "cegar: starting refinement loop for {} obligation(s)",
+            open.len()
+        );
 
         let mut advanced = false;
 
@@ -159,7 +168,8 @@ fn try_cegar(
             index: 0,
         };
 
-        let (reached, complete) = reachability(&PredicateCpa, prog, &start, prec.clone(), MAX_STATES);
+        let (reached, complete) =
+            reachability(&PredicateCpa, prog, &start, prec.clone(), MAX_STATES);
 
         if !complete {
             debug!("cegar: reachability incomplete at {} states", MAX_STATES);
@@ -253,10 +263,8 @@ fn is_safety_implied_by_predicates(
             if let Some(comp) = CompOp::from_binop(op) {
                 // Check if any predicate in our state tells us this comparison is true.
                 for (i, pred) in prec.predicates.iter().enumerate() {
-                    if state.values.get(i) == Some(&Some(true)) {
-                        if pred.op == comp {
-                            return true;
-                        }
+                    if state.values.get(i) == Some(&Some(true)) && pred.op == comp {
+                        return true;
                     }
                 }
             }
@@ -328,15 +336,10 @@ fn seed_predicates_from_body(body: &Body, prec: &mut PredPrec) {
         {
             if let Some((op, a, b)) = find_defining_bin(body, block.id, *cv) {
                 if let Some(comp) = CompOp::from_binop(op) {
-                    if let (Some(lhs), Some(rhs)) = (
-                        operand_to_pred_operand(a),
-                        operand_to_pred_operand(b),
-                    ) {
-                        let pred = Predicate {
-                            lhs,
-                            op: comp,
-                            rhs,
-                        };
+                    if let (Some(lhs), Some(rhs)) =
+                        (operand_to_pred_operand(a), operand_to_pred_operand(b))
+                    {
+                        let pred = Predicate { lhs, op: comp, rhs };
                         if !prec.predicates.contains(&pred) {
                             prec.predicates.push(pred);
                         }
@@ -370,10 +373,10 @@ fn collect_free_vars_combined(a: &str, b: &str, declarations: &str) -> Vec<Strin
             if (token.starts_with("nd") || token.starts_with("bw") || token.starts_with("hv"))
                 && token.len() > 2
                 && token[2..].chars().all(|c| c.is_ascii_digit())
+                && !declarations.contains(token)
+                && !vars.contains(&token.to_string())
             {
-                if !declarations.contains(token) && !vars.contains(&token.to_string()) {
-                    vars.push(token.to_string());
-                }
+                vars.push(token.to_string());
             }
         }
     }

@@ -65,13 +65,13 @@ pub fn emit_violation_yaml(
         // No nondet calls — the violation is on a fixed path.
         // Emit a single target waypoint at the violation line.
         out.push_str("    - segment:\n");
-        emit_target_waypoint(&mut out, &violation);
+        emit_target_waypoint(&mut out, violation);
     } else {
         out.push_str("    - segment:\n");
         for entry in &witness.entries {
             emit_assumption_waypoint(&mut out, entry);
         }
-        emit_target_waypoint(&mut out, &violation);
+        emit_target_waypoint(&mut out, violation);
     }
 
     out
@@ -149,7 +149,7 @@ fn java_string_literal(s: &str) -> String {
 /// Not a real UUID v4, but unique enough for witness identification.
 fn make_uuid(witness: &Witness) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
-    for &v in &witness.nondet_sequence {
+    for v in witness.nondet_sequence() {
         h ^= v as u64;
         h = h.wrapping_mul(0x100000001b3);
     }

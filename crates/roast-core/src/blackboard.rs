@@ -27,11 +27,36 @@ pub struct Blackboard {
     /// Total assertion obligations in the program (seeded + unreachable).
     /// Used to detect vacuous TRUE when reachability is incomplete.
     total_assertions: usize,
+    /// The direction each engine *declared* via `Engine::direction`, recorded
+    /// by the orchestrator before scheduling starts. See `register_engine`.
+    declared: BTreeMap<EngineId, Direction>,
+    /// Set once any obligation reaches `Violated`, so the orchestrator does not
+    /// have to rescan every status twice a round to find out.
+    any_violated: bool,
 }
 
 impl Blackboard {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record what an engine declared it is entitled to conclude.
+    ///
+    /// The soundness gate below reads the `direction` passed to `publish`, not
+    /// the engine's `Engine::direction()`. Those are supposed to be the same
+    /// value, and for every engine but one they were -- `NraEngine` declared
+    /// `Over` while passing `Direction::Under` at its publish site, and nothing
+    /// noticed, because the gate had no way to compare them. That particular
+    /// case was benign (NRA never discharges, so `Under` was the honest label
+    /// and the declaration was the wrong half), but an engine free to pass a
+    /// different direction per call can route around the discipline entirely.
+    ///
+    /// So the orchestrator registers every engine here first, and `publish`
+    /// rejects any artifact whose direction disagrees with the registration.
+    /// Engines constructed outside an orchestrator -- unit tests, mostly --
+    /// simply are not registered, and are gated on the passed direction alone.
+    pub fn register_engine(&mut self, id: EngineId, direction: Direction) {
+        self.declared.insert(id, direction);
     }
 
     /// Register every obligation reachable from the entry point as `Open`.
@@ -75,7 +100,11 @@ impl Blackboard {
             "blackboard: seeded {} reachable obligations (total assertions in program: {}){}",
             self.statuses.len(),
             self.total_assertions,
-            if assertion_only { " (assertion-only)" } else { "" }
+            if assertion_only {
+                " (assertion-only)"
+            } else {
+                ""
+            }
         );
     }
 
@@ -92,6 +121,14 @@ impl Blackboard {
         direction: Direction,
         artifact: Artifact,
     ) -> Result<u64, Rejected> {
+        if let Some(&declared) = self.declared.get(&producer) {
+            if declared != direction {
+                return self.reject(format!(
+                    "{producer} declared {declared:?} but published as {direction:?}"
+                ));
+            }
+        }
+
         if let Artifact::Status(oref, st) = &artifact {
             match (direction, st) {
                 (Direction::Under, Status::Discharged { .. }) => {
@@ -135,6 +172,9 @@ impl Blackboard {
                     let keep =
                         !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
                     if keep {
+                        if matches!(st, Status::Violated { .. }) {
+                            self.any_violated = true;
+                        }
                         self.statuses.insert(oref.clone(), st.clone());
                     }
                 }
@@ -183,12 +223,31 @@ impl Blackboard {
         self.statuses.get(oref).unwrap_or(&Status::Open)
     }
 
+    /// Obligations not yet finally decided.
+    ///
+    /// Allocates, and clones a `MethodKey` (three `String`s) per entry. Callers
+    /// that only need the count should use `open_count`, and callers that only
+    /// iterate should use `open_iter`; this exists for the ones that have to
+    /// hold the list across a `&mut self` borrow of the blackboard.
     pub fn open(&self) -> Vec<ObligationRef> {
+        self.open_iter().cloned().collect()
+    }
+
+    pub fn open_iter(&self) -> impl Iterator<Item = &ObligationRef> {
         self.statuses
             .iter()
             .filter(|(_, s)| !s.is_final())
-            .map(|(k, _)| k.clone())
-            .collect()
+            .map(|(k, _)| k)
+    }
+
+    pub fn open_count(&self) -> usize {
+        self.open_iter().count()
+    }
+
+    /// Has any obligation been violated? Tracked on publish rather than
+    /// rescanned; the orchestrator asks twice per round.
+    pub fn any_violated(&self) -> bool {
+        self.any_violated
     }
 
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {
@@ -282,6 +341,67 @@ mod tests {
             ),
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn declared_direction_must_match_the_published_one() {
+        // The hole this closes: the gate reads the direction passed to
+        // `publish`, so an engine could declare Over and publish Under (or the
+        // reverse) and never be caught. NraEngine actually did.
+        let mut bb = Blackboard::new();
+        bb.register_engine(EngineId("nra"), Direction::Over);
+        let r = bb.publish(
+            EngineId("nra"),
+            Direction::Under,
+            Artifact::Status(
+                oref(),
+                Status::Violated {
+                    by: EngineId("nra"),
+                    witness: Default::default(),
+                },
+            ),
+        );
+        assert!(
+            r.is_err(),
+            "a direction that disagrees with the declaration is rejected"
+        );
+    }
+
+    #[test]
+    fn matching_declared_direction_is_accepted() {
+        let mut bb = Blackboard::new();
+        bb.register_engine(EngineId("concrete"), Direction::Under);
+        let r = bb.publish(
+            EngineId("concrete"),
+            Direction::Under,
+            Artifact::Status(
+                oref(),
+                Status::Violated {
+                    by: EngineId("concrete"),
+                    witness: Default::default(),
+                },
+            ),
+        );
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn unregistered_engines_are_gated_on_the_passed_direction_alone() {
+        // Engines built outside an orchestrator (unit tests) are not
+        // registered; the original direction gate must still apply.
+        let mut bb = Blackboard::new();
+        let r = bb.publish(
+            EngineId("ad-hoc"),
+            Direction::Over,
+            Artifact::Status(
+                oref(),
+                Status::Violated {
+                    by: EngineId("ad-hoc"),
+                    witness: Default::default(),
+                },
+            ),
+        );
+        assert!(r.is_err(), "over-approximating engines may not violate");
     }
 
     #[test]

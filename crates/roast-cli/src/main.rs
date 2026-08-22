@@ -194,6 +194,7 @@ fn build_engine_portfolio() -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(cegar));
         }
     }
+    #[cfg(feature = "nra")]
     engines.push(Box::new(roast_engines::nra::NraEngine::new()));
     engines
 }
@@ -249,10 +250,7 @@ fn confirm_violations(
             roast_core::certify::CertResult::Confirmed => {
                 any_confirmed = true;
                 if confirmed.is_none() {
-                    confirmed = Some((
-                        violation.obligation_ref.clone(),
-                        violation.witness.clone(),
-                    ));
+                    confirmed = Some((violation.obligation_ref.clone(), violation.witness.clone()));
                 }
                 if trace {
                     eprintln!("jvm-replay: confirmed {}", violation.obligation_ref);
@@ -430,7 +428,11 @@ fn main() {
         .min_by_key(|k| {
             // Prefer the "Main" class (SV-COMP convention), then shorter
             // class names (less likely to be a nested/test class).
-            if k.class == "Main" { 0 } else { 1 + k.class.len() }
+            if k.class == "Main" {
+                0
+            } else {
+                1 + k.class.len()
+            }
         })
         .cloned();
 
@@ -475,7 +477,9 @@ fn main() {
     // Confirm violations via JVM replay.
     let violations = collect_violations(&orchestrator);
     let confirmed_witness = if cli.no_replay {
-        violations.first().map(|v| (v.obligation_ref.clone(), v.witness.clone()))
+        violations
+            .first()
+            .map(|v| (v.obligation_ref.clone(), v.witness.clone()))
     } else if !violations.is_empty() && verdict == verdict::Verdict::False {
         confirm_violations(&violations, &classpath, &prog, cli.trace)
     } else {

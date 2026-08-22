@@ -10,4 +10,12 @@ roast-ir = { path = "../roast-ir" }
 roast-models = { path = "../roast-models" }
 roast-core = { path = "../roast-core" }
 log.workspace = true
-cvc5.workspace = true
+cvc5 = { workspace = true, optional = true }
+
+[features]
+default = ["nra"]
+# The NRA engine links CVC5's C++ library statically. That is a heavyweight
+# build (CMake, a C++ toolchain, a GMP download) and nothing else in this
+# crate needs it, so it is gated: `--no-default-features` builds and tests
+# every other engine in seconds, anywhere.
+nra = ["dep:cvc5"]

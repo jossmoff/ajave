@@ -112,6 +112,25 @@ under-approximating producer or a `Violated` from an over-approximating one.
 That is the same rule `verdict.rs` enforces in the type system; belt and braces,
 because this is the single place a soundness bug turns into a −32.
 
+The direction it checks is the one each engine *declared* via
+`Engine::direction`, registered with the blackboard by the orchestrator before
+scheduling begins. That registration exists because the gate used to read only
+the direction handed to `publish`, and an engine is free to pass a different
+one per call — `NraEngine` declared `Over` while publishing as `Under`, and
+nothing could see the disagreement.
+
+> **What is implemented, as of this writing.** The diagram above is the design.
+> The parts that exist are the blackboard itself, `Status` artifacts, the
+> direction discipline, and `JvmReplay` as the `Certifier` for violations.
+> The parts that do not: no engine publishes an invariant, trace, precision or
+> residual, so the dotted cross-engine arrows carry nothing today, and the
+> `deltas since seq` cursor API has no callers — engines poll
+> `Blackboard::open` instead. There is no certifier for a `Discharged` status,
+> so a TRUE rests on the discharging engine plus the direction rule rather than
+> on an independently re-checked certificate. `roast-core::artifact` and
+> `roast-core::certify` say the same in their module docs, and
+> `docs/strategies/README.md` says it per engine.
+
 ## 4. Orchestrator schedule (state machine)
 
 ```mermaid

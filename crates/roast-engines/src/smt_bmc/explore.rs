@@ -1,20 +1,20 @@
 //! Block exploration: statement handling, terminator dispatch, branching, inlining.
 
-use std::collections::HashSet;
-
 use log::debug;
 use roast_core::smt::{SatResult, Term};
 use roast_ir::*;
 use roast_models;
 
-use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
+use super::{Branch, ExploreCtx, SavedState, SwitchCase, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 
 impl<'a> ExploreCtx<'a> {
     /// Set str_vars for `var_id` and all other vars that share the same SMT term.
     fn propagate_str_to_aliases(&mut self, var_id: VarId, str_term: Term) {
         self.str_vars.insert(var_id, str_term);
         if let Some(&recv_term) = self.vars.get(&var_id) {
-            let aliases: Vec<VarId> = self.vars.iter()
+            let aliases: Vec<VarId> = self
+                .vars
+                .iter()
                 .filter(|(vid, &t)| **vid != var_id && t == recv_term)
                 .map(|(vid, _)| *vid)
                 .collect();
@@ -83,8 +83,13 @@ impl<'a> ExploreCtx<'a> {
         let targets = if is_virtual {
             // If the receiver (args[0]) has a known concrete class from `new`,
             // restrict dispatch to only that type's implementation.
-            let receiver_class = args.first()
-                .and_then(|a| if let Operand::Var(v) = a { self.concrete_classes.get(v).cloned() } else { None });
+            let receiver_class = args.first().and_then(|a| {
+                if let Operand::Var(v) = a {
+                    self.concrete_classes.get(v).cloned()
+                } else {
+                    None
+                }
+            });
 
             if let Some(recv_cls) = receiver_class {
                 // Precise devirtualization: only consider the concrete type's method.
@@ -115,14 +120,18 @@ impl<'a> ExploreCtx<'a> {
                         Some(k) => vec![k],
                         None => {
                             let t = self.prog.devirtualise(target);
-                            if t.is_empty() { return false; }
+                            if t.is_empty() {
+                                return false;
+                            }
                             t
                         }
                     }
                 }
             } else {
                 let t = self.prog.devirtualise(target);
-                if t.is_empty() { return false; }
+                if t.is_empty() {
+                    return false;
+                }
                 t
             }
         } else {
@@ -141,7 +150,9 @@ impl<'a> ExploreCtx<'a> {
 
         let mut ret_tainted = false;
         for resolved in &targets {
-            if !self.budget_left() { break; }
+            if !self.budget_left() {
+                break;
+            }
             let callee = self.prog.body(resolved).unwrap();
 
             let saved_body = self.body;
@@ -164,7 +175,9 @@ impl<'a> ExploreCtx<'a> {
             let mut slot = 0u16;
             for (i, arg_t) in arg_terms.iter().enumerate() {
                 if let Some((vid_idx, vinfo)) = callee
-                    .vars.iter().enumerate()
+                    .vars
+                    .iter()
+                    .enumerate()
                     .find(|(_, vi)| matches!(vi.kind, VarKind::Local(s) if s == slot))
                 {
                     let vid = VarId(vid_idx as u32);
@@ -240,67 +253,22 @@ impl<'a> ExploreCtx<'a> {
         true
     }
 
-    fn forward_reachable(&self, start: BlockId, limit: usize) -> HashSet<u32> {
-        let mut reached = HashSet::new();
-        let mut worklist = vec![start];
-        while let Some(bid) = worklist.pop() {
-            if !reached.insert(bid.0) || reached.len() >= limit {
-                continue;
-            }
-            let succs = self.block_successors(bid);
-            for s in succs {
-                if s.0 > bid.0 {
-                    worklist.push(s);
-                }
-            }
-        }
-        reached
-    }
-
-    fn block_successors(&self, bid: BlockId) -> Vec<BlockId> {
-        match &self.body.block(bid).term {
-            Terminator::Goto(t) => vec![*t],
-            Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
-            Terminator::Switch { cases, default, .. } => {
-                let mut v: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
-                v.push(*default);
-                v
-            }
-            _ => vec![],
-        }
-    }
-
+    /// The join point for a set of branch targets, from the body's
+    /// post-dominator tree.
+    ///
+    /// This used to run a fresh forward-reachability sweep per target on every
+    /// visit, capped at 50 blocks and following only successors with a higher
+    /// block id. Both of those quietly returned "no join" -- on a body over 50
+    /// blocks, or on any loop -- and a missing join means the explorer forks
+    /// the path instead of merging it, which is the exponential case diamond
+    /// merging exists to avoid. `PostDom` is exact and computed once per body.
     pub(super) fn find_join(&self, then_: BlockId, else_: BlockId) -> Option<BlockId> {
         self.find_join_multi(&[then_, else_])
     }
 
     fn find_join_multi(&self, targets: &[BlockId]) -> Option<BlockId> {
-        if targets.is_empty() { return None; }
-        // Compute forward reachable sets for each target.
-        let reach_sets: Vec<HashSet<u32>> = targets
-            .iter()
-            .map(|t| self.forward_reachable(*t, 50))
-            .collect();
-        // If any target is reachable from another target, the branches are
-        // not independent and diamond merge would produce incorrect results.
-        // Fall back to path forking in that case.
-        for (i, t) in targets.iter().enumerate() {
-            for (j, r) in reach_sets.iter().enumerate() {
-                if i != j && r.contains(&t.0) {
-                    return None;
-                }
-            }
-        }
-        let mut common = reach_sets[0].clone();
-        for r in &reach_sets[1..] {
-            common = common.intersection(r).copied().collect();
-        }
-        let target_set: HashSet<u32> = targets.iter().map(|t| t.0).collect();
-        let mut candidates: Vec<u32> = common.into_iter()
-            .filter(|b| !target_set.contains(b))
-            .collect();
-        candidates.sort();
-        candidates.first().map(|&b| BlockId(b))
+        let ids: Vec<u32> = targets.iter().map(|b| b.0).collect();
+        self.postdom.common(&ids).map(BlockId)
     }
 
     // ── Statement handlers ──────────────────────────────────────────────
@@ -324,7 +292,9 @@ impl<'a> ExploreCtx<'a> {
                     }
                 }
                 Stmt::Assume(op) => {
-                    if !self.handle_assume(op) { return false; }
+                    if !self.handle_assume(op) {
+                        return false;
+                    }
                 }
                 Stmt::Check(oid) => self.handle_check(*oid),
                 Stmt::PutStatic(fk, val) => self.handle_put_static(fk, val),
@@ -350,11 +320,12 @@ impl<'a> ExploreCtx<'a> {
                 // Handle StringBuilder/StringBuffer <init> as a side effect:
                 // register str_vars on the receiver with the initial content.
                 if target.name == "<init>" {
-                    if let Some(recv) = args.first() {
-                        if let Operand::Var(recv_v) = recv {
+                    if let Some(Operand::Var(recv_v)) = args.first() {
+                        {
                             let init_str = if target.desc.starts_with("(Ljava/lang/String;)") {
                                 // <init>(String) — use the string argument
-                                args.get(1).and_then(|a| self.encode_str_operand(a))
+                                args.get(1)
+                                    .and_then(|a| self.encode_str_operand(a))
                                     .unwrap_or_else(|| self.solver.str_const(""))
                             } else {
                                 // <init>() — empty string
@@ -364,7 +335,8 @@ impl<'a> ExploreCtx<'a> {
                         }
                     }
                     (self.encode_rvalue(rv), None)
-                } else if matches!(target.name.as_str(),
+                } else if matches!(
+                    target.name.as_str(),
                     "append" | "setLength" | "deleteCharAt" | "delete" | "insert" | "reverse"
                 ) {
                     // Mutating method — update str_vars for receiver and all aliases
@@ -386,7 +358,11 @@ impl<'a> ExploreCtx<'a> {
                     }
                 }
             }
-            Rvalue::Call { target, args, is_virtual } => {
+            Rvalue::Call {
+                target,
+                args,
+                is_virtual,
+            } => {
                 if let Some((bv, st)) = self.encode_wrapper_str_call(target, args) {
                     (bv, st)
                 } else if self.math_call_modelled(target) {
@@ -436,7 +412,9 @@ impl<'a> ExploreCtx<'a> {
         self.var_widths.insert(v, self.rvalue_result_width(rv));
         // Track concrete class from `new` for exception dispatch / instanceof.
         match rv {
-            Rvalue::New(class) => { self.concrete_classes.insert(v, class.clone()); }
+            Rvalue::New(class) => {
+                self.concrete_classes.insert(v, class.clone());
+            }
             Rvalue::Use(Operand::Var(src)) => {
                 // Copy propagation: if src has a concrete class, propagate it.
                 if let Some(c) = self.concrete_classes.get(src).cloned() {
@@ -445,7 +423,9 @@ impl<'a> ExploreCtx<'a> {
                     self.concrete_classes.remove(&v);
                 }
             }
-            _ => { self.concrete_classes.remove(&v); }
+            _ => {
+                self.concrete_classes.remove(&v);
+            }
         }
         if let Some(st) = str_term {
             self.str_vars.insert(v, st);
@@ -467,13 +447,17 @@ impl<'a> ExploreCtx<'a> {
 
     fn handle_assume(&mut self, op: &Operand) -> bool {
         let tainted = self.operand_tainted(op);
-        if tainted { self.path_tainted = true; }
+        if tainted {
+            self.path_tainted = true;
+        }
         if !tainted {
             let t = self.encode_operand(op);
             let c = self.nonzero_constraint(t);
             self.path_constraints.push(c);
             let res = self.check_sat_with_path();
-            if res == SatResult::Unsat { return false; }
+            if res == SatResult::Unsat {
+                return false;
+            }
         }
         true
     }
@@ -485,13 +469,22 @@ impl<'a> ExploreCtx<'a> {
         let cond = self.encode_operand(&ob_cond);
         let violation_cond = self.zero_constraint(cond);
         let res = self.check_sat_with_path_and(violation_cond);
-        log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
-            oid, self.body.key, ob_kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
+        log::debug!(
+            "smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
+            oid,
+            self.body.key,
+            ob_kind,
+            is_tainted,
+            self.path_tainted,
+            res,
+            self.path_constraints.len()
+        );
         if res == SatResult::Sat && !is_tainted {
             let witness = self.extract_witness();
             self.violations.push((self.body.key.clone(), oid, witness));
         }
-        if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown) {
+        if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown)
+        {
             self.skipped_obligations.insert(oid);
         }
         self.solver.pop();
@@ -568,7 +561,11 @@ impl<'a> ExploreCtx<'a> {
 
         if !exceptional.is_empty() {
             // Find Stack(0) variable — the handler entry expects the exception there.
-            let stack0_vid = self.body.vars.iter().enumerate()
+            let stack0_vid = self
+                .body
+                .vars
+                .iter()
+                .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Stack(0)))
                 .map(|(i, _)| VarId(i as u32));
 
@@ -585,9 +582,13 @@ impl<'a> ExploreCtx<'a> {
                         return;
                     }
                 };
-                if self.prog.is_subtype(&thrown_class, &handler_class) || thrown_class == handler_class {
-                    debug!("smt-bmc: exception dispatch: throw {} caught by handler for {} at bb{}",
-                           thrown_class, handler_class, edge.target.0);
+                if self.prog.is_subtype(&thrown_class, &handler_class)
+                    || thrown_class == handler_class
+                {
+                    debug!(
+                        "smt-bmc: exception dispatch: throw {} caught by handler for {} at bb{}",
+                        thrown_class, handler_class, edge.target.0
+                    );
                     if let Some(sv) = stack0_vid {
                         self.vars.insert(sv, thrown_term);
                     }
@@ -600,7 +601,10 @@ impl<'a> ExploreCtx<'a> {
         // No local handler matched. If we're inside an inlined callee,
         // propagate the exception to the caller via inline_throw.
         if self.call_depth > 0 {
-            debug!("smt-bmc: exception propagating from callee: throw {}", thrown_class);
+            debug!(
+                "smt-bmc: exception propagating from callee: throw {}",
+                thrown_class
+            );
             self.inline_throw = Some((thrown_term, thrown_class));
         } else {
             self.all_paths_complete = false;
@@ -618,7 +622,11 @@ impl<'a> ExploreCtx<'a> {
         let exceptional = self.body.block(block_id).exceptional.clone();
 
         if !exceptional.is_empty() {
-            let stack0_vid = self.body.vars.iter().enumerate()
+            let stack0_vid = self
+                .body
+                .vars
+                .iter()
+                .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Stack(0)))
                 .map(|(i, _)| VarId(i as u32));
 
@@ -633,7 +641,9 @@ impl<'a> ExploreCtx<'a> {
                         return;
                     }
                 };
-                if self.prog.is_subtype(thrown_class, &handler_class) || thrown_class == handler_class {
+                if self.prog.is_subtype(thrown_class, &handler_class)
+                    || thrown_class == handler_class
+                {
                     debug!("smt-bmc: cross-method exception dispatch: {} caught by handler for {} at bb{}",
                            thrown_class, handler_class, edge.target.0);
                     if let Some(sv) = stack0_vid {
@@ -676,39 +686,53 @@ impl<'a> ExploreCtx<'a> {
         else_: BlockId,
         stop_at: Option<BlockId>,
     ) {
-        let cond_tainted = self.operand_tainted(&cond);
         let ct = self.encode_operand(&cond);
         let zero = self.solver.bv_const(0, 32);
         let cond_bool = self.solver.bveq(ct, zero);
-        let cond_nz = self.solver.not(cond_bool);
+        let br = Branch {
+            block_id,
+            tainted: self.operand_tainted(&cond),
+            nonzero: self.solver.not(cond_bool),
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+        };
 
-        if let Some(join) = self.find_join(then_, else_) {
-            self.handle_branch_diamond(cond_tainted, cond_nz, cond_bool, then_, else_, join, stop_at);
-        } else {
-            self.handle_branch_fork(block_id, cond_tainted, cond_nz, cond_bool, then_, else_, stop_at);
+        match self.find_join(then_, else_) {
+            Some(join) => self.handle_branch_diamond(&br, join),
+            None => self.handle_branch_fork(&br),
         }
     }
 
-    fn handle_branch_diamond(
-        &mut self,
-        cond_tainted: bool,
-        cond_nz: Term,
-        cond_bool: Term,
-        then_: BlockId,
-        else_: BlockId,
-        join: BlockId,
-        stop_at: Option<BlockId>,
-    ) {
+    fn handle_branch_diamond(&mut self, br: &Branch, join: BlockId) {
+        let Branch {
+            tainted: cond_tainted,
+            nonzero: cond_nz,
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+            ..
+        } = *br;
         let saved = self.save_state();
-        if cond_tainted { self.path_tainted = true; }
-        if !cond_tainted { self.path_constraints.push(cond_nz); }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
+        if !cond_tainted {
+            self.path_constraints.push(cond_nz);
+        }
         self.explore_block_until(then_, 0, Some(join));
         let then_state = self.save_state();
         self.restore_state(saved);
 
         let saved = self.save_state();
-        if cond_tainted { self.path_tainted = true; }
-        if !cond_tainted { self.path_constraints.push(cond_bool); }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
+        if !cond_tainted {
+            self.path_constraints.push(cond_bool);
+        }
         self.explore_block_until(else_, 0, Some(join));
         let else_state = self.save_state();
         self.restore_state(saved);
@@ -718,19 +742,25 @@ impl<'a> ExploreCtx<'a> {
         self.explore_block_until(join, 0, stop_at);
     }
 
-    fn handle_branch_fork(
-        &mut self,
-        block_id: BlockId,
-        cond_tainted: bool,
-        cond_nz: Term,
-        cond_bool: Term,
-        then_: BlockId,
-        else_: BlockId,
-        stop_at: Option<BlockId>,
-    ) {
+    fn handle_branch_fork(&mut self, br: &Branch) {
+        let Branch {
+            block_id,
+            tainted: cond_tainted,
+            nonzero: cond_nz,
+            is_zero: cond_bool,
+            then_,
+            else_,
+            stop_at,
+        } = *br;
         self.fork_count += 1;
-        log::trace!("smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
-            block_id.0, self.body.key, then_.0, else_.0, stop_at.map(|b| b.0));
+        log::trace!(
+            "smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
+            block_id.0,
+            self.body.key,
+            then_.0,
+            else_.0,
+            stop_at.map(|b| b.0)
+        );
 
         let saved = self.save_state();
         let ir_before = self.inline_return;
@@ -738,12 +768,19 @@ impl<'a> ExploreCtx<'a> {
         let irt_before = self.inline_return_tainted;
 
         let mut then_explored = false;
-        if cond_tainted { self.path_tainted = true; }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
         if !cond_tainted {
             self.path_constraints.push(cond_nz);
             let feas = self.check_sat_with_path();
-            log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
-                then_.0, self.body.key, feas, cond_tainted);
+            log::trace!(
+                "smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
+                then_.0,
+                self.body.key,
+                feas,
+                cond_tainted
+            );
             if feas != SatResult::Unsat {
                 self.explore_block_until(then_, 0, stop_at);
                 then_explored = true;
@@ -763,7 +800,9 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
         if self.budget_left() {
-            if cond_tainted { self.path_tainted = true; }
+            if cond_tainted {
+                self.path_tainted = true;
+            }
             if !cond_tainted {
                 self.path_constraints.push(cond_bool);
                 let feas = self.check_sat_with_path();
@@ -786,12 +825,12 @@ impl<'a> ExploreCtx<'a> {
             let base_len = self.nondet_terms.len();
             if then_explored {
                 for nd in &then_state.nondet_terms[base_len..] {
-                    self.nondet_terms.push(nd.clone());
+                    self.nondet_terms.push(*nd);
                 }
             }
             if else_explored {
                 for nd in &else_state.nondet_terms[base_len..] {
-                    self.nondet_terms.push(nd.clone());
+                    self.nondet_terms.push(*nd);
                 }
             }
             self.merge_states_ite(cond_nz, &then_state, &else_state);
@@ -873,19 +912,27 @@ impl<'a> ExploreCtx<'a> {
 
         let mut case_saved: Vec<(Term, SavedState)> = Vec::new();
         for &(_, target, cond_eq) in &case_conds {
-            if !self.budget_left() { break; }
+            if !self.budget_left() {
+                break;
+            }
             let saved = self.save_state();
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             self.path_constraints.push(cond_eq);
             self.explore_block_until(target, 0, Some(join));
             case_saved.push((cond_eq, self.save_state()));
             self.restore_state(saved);
         }
 
-        if !self.budget_left() { return; }
+        if !self.budget_left() {
+            return;
+        }
 
         let saved = self.save_state();
-        if value_tainted { self.path_tainted = true; }
+        if value_tainted {
+            self.path_tainted = true;
+        }
         for &(_, _, cond_eq) in &case_conds {
             let neq = self.solver.not(cond_eq);
             self.path_constraints.push(neq);
@@ -917,15 +964,19 @@ impl<'a> ExploreCtx<'a> {
         let ir_before = self.inline_return;
         let irs_before = self.inline_return_str;
         let irt_before = self.inline_return_tainted;
-        let mut case_saved: Vec<(Term, SavedState, Option<Term>, Option<Term>, bool)> = Vec::new();
+        let mut case_saved: Vec<SwitchCase> = Vec::new();
 
         for &(case_val, target) in cases {
-            if !self.budget_left() { break; }
+            if !self.budget_left() {
+                break;
+            }
             self.fork_count += 1;
             self.inline_return = ir_before;
             self.inline_return_str = irs_before;
             self.inline_return_tainted = irt_before;
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             let cv = self.solver.bv_const(case_val as i64, 32);
             let eq = self.solver.bveq(vt, cv);
             self.path_constraints.push(eq);
@@ -934,7 +985,13 @@ impl<'a> ExploreCtx<'a> {
             let c_ir = self.inline_return;
             let c_irs = self.inline_return_str;
             let c_irt = self.inline_return_tainted;
-            case_saved.push((eq, cs, c_ir, c_irs, c_irt));
+            case_saved.push(SwitchCase {
+                guard: eq,
+                state: cs,
+                inline_return: c_ir,
+                inline_return_str: c_irs,
+                inline_return_tainted: c_irt,
+            });
             self.restore_state(saved.clone());
         }
 
@@ -942,7 +999,9 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
         if self.budget_left() {
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             for &(case_val, _) in cases {
                 let cv = self.solver.bv_const(case_val as i64, 32);
                 let eq = self.solver.bveq(vt, cv);
@@ -957,25 +1016,30 @@ impl<'a> ExploreCtx<'a> {
         let mut any_irt = self.inline_return_tainted;
         self.restore_state(saved);
 
-        let state_refs: Vec<&SavedState> = case_saved.iter().map(|(_, s, _, _, _)| s).collect();
+        let state_refs: Vec<&SavedState> = case_saved.iter().map(|c| &c.state).collect();
         self.collect_nondets_dedup(&state_refs);
         self.collect_nondets_dedup(&[&merged]);
 
-        for (eq, cs, c_ir, c_irs, c_irt) in case_saved.iter().rev() {
-            self.merge_saved_into(&mut merged, *eq, cs);
-            any_irt = any_irt || *c_irt;
-            match (*c_ir, merged_ir) {
+        for case in case_saved.iter().rev() {
+            let eq = case.guard;
+            self.merge_saved_into(&mut merged, eq, &case.state);
+            any_irt = any_irt || case.inline_return_tainted;
+            match (case.inline_return, merged_ir) {
                 (Some(c), Some(m)) if c != m => {
-                    merged_ir = Some(self.solver.ite(*eq, c, m));
+                    merged_ir = Some(self.solver.ite(eq, c, m));
                 }
-                (Some(c), None) => { merged_ir = Some(c); }
+                (Some(c), None) => {
+                    merged_ir = Some(c);
+                }
                 _ => {}
             }
-            match (*c_irs, merged_irs) {
+            match (case.inline_return_str, merged_irs) {
                 (Some(c), Some(m)) if c != m => {
-                    merged_irs = Some(self.solver.ite(*eq, c, m));
+                    merged_irs = Some(self.solver.ite(eq, c, m));
                 }
-                (Some(c), None) => { merged_irs = Some(c); }
+                (Some(c), None) => {
+                    merged_irs = Some(c);
+                }
                 _ => {}
             }
         }
@@ -992,7 +1056,12 @@ impl<'a> ExploreCtx<'a> {
         self.explore_block_until(block_id, stmt_idx, None);
     }
 
-    fn explore_block_until(&mut self, block_id: BlockId, stmt_idx: usize, stop_at: Option<BlockId>) {
+    fn explore_block_until(
+        &mut self,
+        block_id: BlockId,
+        stmt_idx: usize,
+        stop_at: Option<BlockId>,
+    ) {
         if stop_at == Some(block_id) {
             return;
         }
@@ -1025,16 +1094,21 @@ impl<'a> ExploreCtx<'a> {
             Terminator::Branch { cond, then_, else_ } => {
                 self.handle_branch(block_id, cond.clone(), *then_, *else_, stop_at);
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 self.handle_switch(value.clone(), cases.clone(), *default, stop_at);
             }
             Terminator::Return(Some(val)) => {
                 if self.call_depth > 0 {
                     self.inline_return = Some(self.encode_operand(val));
-                    self.inline_return_str = self.encode_str_operand(val)
-                        .or(self.inline_return_str);
+                    self.inline_return_str =
+                        self.encode_str_operand(val).or(self.inline_return_str);
                     self.inline_return_tainted = self.inline_return_tainted
-                        || self.operand_tainted(val) || self.path_tainted;
+                        || self.operand_tainted(val)
+                        || self.path_tainted;
                 }
             }
             Terminator::Return(None) | Terminator::Halt => {}

@@ -2,6 +2,127 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Codebase Health Pass: Four Correctness Fixes and the Tests That Found Them (2026-08-22)
+
+A health review of the whole tree, and the fixes it produced. Four of them are
+correctness bugs, and each is interesting for a different reason.
+
+**The fixpoint loop duplicated every state it merged.** `cpa::reachability` is
+the single most shared piece of code in the tree — every technique on the CPA
+substrate runs through it — and when `merge` returned `Joined` it overwrote the
+reached entry *and* pushed the join again, with the `stop` check short-circuited
+by the same flag. On a four-block diamond under `merge_join` the join point
+landed in `reached` four times.
+
+The interesting part is the cost model. This looks like a performance bug and is
+really a soundness-adjacent one: duplicates consume the `max_states` budget,
+which flips `reachability`'s `complete` flag, and an over-approximating engine
+that sees `complete == false` must decline to claim TRUE. The leak converted
+provable programs into UNKNOWN through pure bookkeeping. The fix — bucket
+`reached` by `ProgramPoint`, absorb-and-remove on merge — also makes the
+location filter structural rather than per-domain. That filter was added after a
+real false TRUE (`assert2`), and `PredicateCpa::merge` was carrying its own copy
+of the guard; a domain that forgot it would have joined states from unrelated
+program points.
+
+**CHC read its answers backwards.** Under the encoding roast emits (SMT-LIB2
+rules plus `(assert (not error))`), `sat` means an interpretation of the block
+relations exists keeping `error` false — the program is safe — and `unsat` means
+`error` is derivable. The engine discharged on `unsat`. The confusion is
+understandable and worth recording: Z3's fixedpoint `(query ...)` dialect uses
+the opposite convention, and the two are easy to mix when the script is
+assembled by hand. Verified empirically against z3 5.1.0 with the exact script
+shape the encoder produces, rather than reasoned about.
+
+A second-order lesson came with it: **z3 does not reject a malformed script.** It
+drops the offending clause and prints a verdict anyway. A dropped clause is a
+dropped constraint, which makes the system easier to satisfy and biases the
+answer toward `sat` — toward a spurious proof. Any `(error ...)` line now voids
+the answer.
+
+**Fresh symbols were never bound.** `SmtTheory::encode_fresh` minted names from
+a process-global `AtomicU64` and told nobody, so any body containing a `Nondet`,
+an array read, an allocation, or (in LIA) a bitwise operation produced a script
+referencing undeclared symbols — exactly the case above. `FreshPool` hands them
+out deterministically and records them, and each encoder binds them: CHC by
+extending the clause's `forall` prefix, LIA by declaring them. Determinism
+matters independently: the old counter made the emitted text depend on how many
+bodies had been encoded earlier in the process.
+
+**The witness carried two parallel arrays, and the parallelism was the bug.** A
+raw `Vec<i64>` alongside typed entries, documented as "parallel to" each other
+and kept in lockstep by every producer. But the shadow `Verifier`'s
+`nondetString()` reads from `-Droast.str.N` and never advances the numeric
+cursor, so reserving a slot for a string shifted every later numeric value by
+one. A program calling `nondetString()` before `nondetInt()` replayed the wrong
+input and had its correct FALSE downgraded to UNKNOWN by its own certifier.
+Entries are now the single source of truth and both sequences derive from them.
+
+### Post-dominators instead of a capped search
+
+Diamond merging is what keeps the BMC explorer from forking exponentially, and
+it fires only when a branch's join point is found. That join was computed by a
+fresh forward-reachability sweep per target, per visit, capped at 50 blocks and
+following only successors with a higher block id. Both limits silently returned
+"no join" — on a body over 50 blocks, or on any loop — and a missing join means
+forking. `postdom.rs` computes the post-dominator tree once per body with the
+iterative Cooper–Harvey–Kennedy algorithm on the reverse CFG: exact, uncapped,
+and independent of block ordering.
+
+### The direction discipline was declarative only
+
+The blackboard's soundness gate read the direction passed to `publish`, not the
+one the engine declared via `Engine::direction`. Those are meant to be the same
+value; `NraEngine` declared `Over` and published as `Under`, and nothing could
+see it. (NRA never discharges — it declines to act on UNSAT because its encoding
+is over the reals and Java floats are IEEE 754 — so `Under` was the honest label
+and the declaration was the wrong half.) The orchestrator now registers each
+engine's declared direction and `publish` rejects any artifact disagreeing with
+it, so a mismatch is a rejected artifact rather than an invisible one.
+
+### One walk, one table, one definition
+
+Three separate cases of the same pattern — a shared abstraction that was
+bypassed, leaving a second cruder path beside it:
+
+- `body_uses_havoced_ops` was a second walk computing a predicate overlapping
+  `BodyShape`, and the two disagreed about `Rvalue::Call`. `suitable_for_proving`
+  would have admitted a body full of unmodelled calls that
+  `body_uses_havoced_ops` exists to reject — a false TRUE waiting for its first
+  caller, which it never got because the method was dead.
+- CHC and the LIA encoder each carried a copy of the same ~120-line CFG walk,
+  already drifted (CHC dropped the `Return`/`Halt` edges LIA emitted).
+  `SmtTheory` had factored out the leaves but not the walk; `walk_body` is the
+  walk, and what differs is a `ClauseSink`.
+- `is_math_call` and `is_transcendental_math` were two hand-maintained name
+  lists sharing a dozen entries, together deciding which engine claimed a body.
+  One `MathClass` table now.
+
+That shared walk also names intermediate results instead of substituting
+rendered text into the variable map. Substitution meant a statement mentioning a
+variable twice doubled its rendered size, so a block of *n* such statements
+produced O(2^n) of output with nothing bounding it before the solver saw it.
+
+### Testing
+
+The suite was 121 tests, of which 114 were end-to-end binary invocations
+requiring a JDK, a C++ toolchain and solver binaries. Everything with
+interesting logic had no direct coverage — including the `Interval` domain,
+which has a documented past false TRUE and no test asserting its lattice laws.
+
+72 unit tests now sit underneath, running in about a second. The most useful are
+the interval soundness tests, which work by **exhaustive concretisation**: for
+small intervals, enumerate every concrete value the abstraction denotes, apply
+the concrete operation, and assert the abstract result contains it. "Narrowing
+never discards a satisfying pair" is checkable directly rather than argued in a
+comment — and it is precisely the property whose failure produces a false TRUE.
+
+Making that possible required one build change worth noting: `cvc5` was an
+unconditional dependency of `roast-engines` for the sake of one module, so
+building or testing *anything* in the crate needed CMake, a C++ toolchain and a
+network fetch. It is now a default-on feature, and
+`cargo test --no-default-features` runs the whole suite anywhere in seconds.
+
 ## Phase 1 Wrong-Answer Fixes: Vacuous TRUE Guard + BV Width Safety (2026-08-10)
 
 Two wrong-TRUE fixes eliminating all known wrong answers:

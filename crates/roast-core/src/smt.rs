@@ -15,7 +15,10 @@ pub enum Sort {
     Str,
     Int,
     /// `(Array (_ BitVec idx_width) (_ BitVec elem_width))`
-    Array { idx: u32, elem: u32 },
+    Array {
+        idx: u32,
+        elem: u32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

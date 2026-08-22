@@ -3,8 +3,6 @@
 //!
 //! Extracted from `concrete.rs` for modularity.
 
-use std::collections::HashMap;
-
 use roast_ir::*;
 
 use crate::concrete::Value;
@@ -14,41 +12,102 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
     match owner {
         "java/lang/Math" | "java/lang/StrictMath" => matches!(
             name,
-            "abs" | "min" | "max" | "addExact" | "subtractExact"
-                | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
+            "abs"
+                | "min"
+                | "max"
+                | "addExact"
+                | "subtractExact"
+                | "multiplyExact"
+                | "negateExact"
+                | "floorDiv"
+                | "floorMod"
         ),
         "java/lang/Integer" => matches!(
             name,
-            "parseInt" | "max" | "min" | "sum" | "reverse" | "reverseBytes"
-                | "numberOfLeadingZeros" | "numberOfTrailingZeros" | "bitCount"
-                | "highestOneBit" | "lowestOneBit" | "signum" | "toUnsignedLong"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
+            "parseInt"
+                | "max"
+                | "min"
+                | "sum"
+                | "reverse"
+                | "reverseBytes"
+                | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros"
+                | "bitCount"
+                | "highestOneBit"
+                | "lowestOneBit"
+                | "signum"
+                | "toUnsignedLong"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
         ),
         "java/lang/Long" => matches!(
             name,
-            "parseLong" | "max" | "min" | "sum" | "signum"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
+            "parseLong"
+                | "max"
+                | "min"
+                | "sum"
+                | "signum"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
         ),
         "java/lang/Character" => matches!(
             name,
-            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
-                | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
-                | "isSupplementaryCodePoint" | "isHighSurrogate" | "isLowSurrogate"
-                | "isSurrogate" | "isSurrogatePair" | "isValidCodePoint"
-                | "toUpperCase" | "toLowerCase" | "toTitleCase"
-                | "getNumericValue" | "getType" | "digit" | "forDigit"
-                | "charCount" | "codePointAt" | "codePointBefore" | "codePointCount"
-                | "compare" | "hashCode" | "reverseBytes"
-                | "highSurrogate" | "lowSurrogate" | "toCodePoint" | "toChars"
-                | "isISOControl" | "isMirrored" | "isDefined" | "isTitleCase"
-                | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                | "isUnicodeIdentifierStart" | "isUnicodeIdentifierPart"
+            "isDigit"
+                | "isLetter"
+                | "isLetterOrDigit"
+                | "isUpperCase"
+                | "isLowerCase"
+                | "isWhitespace"
+                | "isSpaceChar"
+                | "isAlphabetic"
+                | "isBmpCodePoint"
+                | "isSupplementaryCodePoint"
+                | "isHighSurrogate"
+                | "isLowSurrogate"
+                | "isSurrogate"
+                | "isSurrogatePair"
+                | "isValidCodePoint"
+                | "toUpperCase"
+                | "toLowerCase"
+                | "toTitleCase"
+                | "getNumericValue"
+                | "getType"
+                | "digit"
+                | "forDigit"
+                | "charCount"
+                | "codePointAt"
+                | "codePointBefore"
+                | "codePointCount"
+                | "compare"
+                | "hashCode"
+                | "reverseBytes"
+                | "highSurrogate"
+                | "lowSurrogate"
+                | "toCodePoint"
+                | "toChars"
+                | "isISOControl"
+                | "isMirrored"
+                | "isDefined"
+                | "isTitleCase"
+                | "isJavaIdentifierStart"
+                | "isJavaIdentifierPart"
+                | "isUnicodeIdentifierStart"
+                | "isUnicodeIdentifierPart"
         ),
         "java/lang/Short" => matches!(
             name,
-            "parseShort" | "compare" | "hashCode" | "reverseBytes" | "toUnsignedInt" | "toUnsignedLong"
+            "parseShort"
+                | "compare"
+                | "hashCode"
+                | "reverseBytes"
+                | "toUnsignedInt"
+                | "toUnsignedLong"
         ),
         "java/lang/Byte" => matches!(
             name,
@@ -58,8 +117,14 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
             name,
             "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
         ),
-        "java/lang/Double" => matches!(name, "compare" | "hashCode" | "isNaN" | "isInfinite" | "isFinite"),
-        "java/lang/Float" => matches!(name, "compare" | "hashCode" | "isNaN" | "isInfinite" | "isFinite"),
+        "java/lang/Double" => matches!(
+            name,
+            "compare" | "hashCode" | "isNaN" | "isInfinite" | "isFinite"
+        ),
+        "java/lang/Float" => matches!(
+            name,
+            "compare" | "hashCode" | "isNaN" | "isInfinite" | "isFinite"
+        ),
         _ => false,
     }
 }
@@ -68,11 +133,11 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
 pub(crate) fn eval_math_call(
     target: &MethodKey,
     args: &[Operand],
-    store: &HashMap<VarId, Value>,
+    store: &crate::concrete::Store,
 ) -> Value {
     let get_val = |i: usize| -> Value {
         match args.get(i) {
-            Some(Operand::Var(vid)) => store.get(vid).copied().unwrap_or(Value::Unknown),
+            Some(Operand::Var(vid)) => store.get(*vid),
             Some(Operand::Const(Const::Int(n))) => Value::I32(*n),
             Some(Operand::Const(Const::Long(n))) => Value::I64(*n),
             _ => Value::Unknown,
@@ -296,20 +361,54 @@ pub(crate) fn eval_math_call(
             match name {
                 "isDigit" => Value::I32(c.map(|c| c.is_ascii_digit()).unwrap_or(false) as i32),
                 "isLetter" => Value::I32(c.map(|c| c.is_alphabetic()).unwrap_or(false) as i32),
-                "isLetterOrDigit" => Value::I32(c.map(|c| c.is_alphanumeric()).unwrap_or(false) as i32),
+                "isLetterOrDigit" => {
+                    Value::I32(c.map(|c| c.is_alphanumeric()).unwrap_or(false) as i32)
+                }
                 "isUpperCase" => Value::I32(c.map(|c| c.is_uppercase()).unwrap_or(false) as i32),
                 "isLowerCase" => Value::I32(c.map(|c| c.is_lowercase()).unwrap_or(false) as i32),
                 "isWhitespace" => Value::I32(c.map(|c| c.is_whitespace()).unwrap_or(false) as i32),
-                "isSpaceChar" => Value::I32(c.map(|c| c == ' ' || c == '\u{a0}' || c == '\u{2007}' || c == '\u{202f}').unwrap_or(false) as i32),
+                "isSpaceChar" => Value::I32(
+                    c.map(|c| c == ' ' || c == '\u{a0}' || c == '\u{2007}' || c == '\u{202f}')
+                        .unwrap_or(false) as i32,
+                ),
                 "isAlphabetic" => Value::I32(c.map(|c| c.is_alphabetic()).unwrap_or(false) as i32),
-                "toUpperCase" => Value::I32(c.map(|c| c.to_uppercase().next().unwrap_or(c) as i32).unwrap_or(ch)),
-                "toLowerCase" => Value::I32(c.map(|c| c.to_lowercase().next().unwrap_or(c) as i32).unwrap_or(ch)),
-                "toTitleCase" => Value::I32(c.map(|c| c.to_uppercase().next().unwrap_or(c) as i32).unwrap_or(ch)),
+                "toUpperCase" => Value::I32(
+                    c.map(|c| c.to_uppercase().next().unwrap_or(c) as i32)
+                        .unwrap_or(ch),
+                ),
+                "toLowerCase" => Value::I32(
+                    c.map(|c| c.to_lowercase().next().unwrap_or(c) as i32)
+                        .unwrap_or(ch),
+                ),
+                "toTitleCase" => Value::I32(
+                    c.map(|c| c.to_uppercase().next().unwrap_or(c) as i32)
+                        .unwrap_or(ch),
+                ),
                 "isBmpCodePoint" => Value::I32(if (ch as u32) <= 0xFFFF { 1 } else { 0 }),
-                "isSupplementaryCodePoint" => Value::I32(if (ch as u32) >= 0x10000 && (ch as u32) <= 0x10FFFF { 1 } else { 0 }),
-                "isHighSurrogate" => Value::I32(if (ch as u32) >= 0xD800 && (ch as u32) <= 0xDBFF { 1 } else { 0 }),
-                "isLowSurrogate" => Value::I32(if (ch as u32) >= 0xDC00 && (ch as u32) <= 0xDFFF { 1 } else { 0 }),
-                "isSurrogate" => Value::I32(if (ch as u32) >= 0xD800 && (ch as u32) <= 0xDFFF { 1 } else { 0 }),
+                "isSupplementaryCodePoint" => {
+                    Value::I32(if (ch as u32) >= 0x10000 && (ch as u32) <= 0x10FFFF {
+                        1
+                    } else {
+                        0
+                    })
+                }
+                "isHighSurrogate" => {
+                    Value::I32(if (ch as u32) >= 0xD800 && (ch as u32) <= 0xDBFF {
+                        1
+                    } else {
+                        0
+                    })
+                }
+                "isLowSurrogate" => Value::I32(if (ch as u32) >= 0xDC00 && (ch as u32) <= 0xDFFF {
+                    1
+                } else {
+                    0
+                }),
+                "isSurrogate" => Value::I32(if (ch as u32) >= 0xD800 && (ch as u32) <= 0xDFFF {
+                    1
+                } else {
+                    0
+                }),
                 "isValidCodePoint" => Value::I32(if (ch as u32) <= 0x10FFFF { 1 } else { 0 }),
                 "charCount" => Value::I32(if (ch as u32) >= 0x10000 { 2 } else { 1 }),
                 "compare" => match get_i32(1) {
@@ -319,7 +418,7 @@ pub(crate) fn eval_math_call(
                 "hashCode" => Value::I32(ch),
                 "reverseBytes" => Value::I32(((ch as u16).swap_bytes()) as i32),
                 "digit" => match get_i32(1) {
-                    Some(radix) if radix >= 2 && radix <= 36 => {
+                    Some(radix) if (2..=36).contains(&radix) => {
                         let d = char::from_u32(ch as u32).and_then(|c| c.to_digit(radix as u32));
                         Value::I32(d.map(|d| d as i32).unwrap_or(-1))
                     }
@@ -328,7 +427,7 @@ pub(crate) fn eval_math_call(
                 "getNumericValue" => {
                     let d = char::from_u32(ch as u32).and_then(|c| c.to_digit(10));
                     Value::I32(d.map(|d| d as i32).unwrap_or(-1))
-                },
+                }
                 "isSurrogatePair" => match get_i32(1) {
                     Some(lo) => {
                         let hi_ok = (ch as u32) >= 0xD800 && (ch as u32) <= 0xDBFF;
@@ -347,29 +446,44 @@ pub(crate) fn eval_math_call(
                 "highSurrogate" => {
                     let cp = ch as u32;
                     Value::I32(((cp >> 10) + 0xD7C0) as i32)
-                },
+                }
                 "lowSurrogate" => {
                     let cp = ch as u32;
                     Value::I32(((cp & 0x3FF) + 0xDC00) as i32)
-                },
-                "isISOControl" => Value::I32(if (ch as u32) <= 0x1F || ((ch as u32) >= 0x7F && (ch as u32) <= 0x9F) { 1 } else { 0 }),
+                }
+                "isISOControl" => Value::I32(
+                    if (ch as u32) <= 0x1F || ((ch as u32) >= 0x7F && (ch as u32) <= 0x9F) {
+                        1
+                    } else {
+                        0
+                    },
+                ),
                 "isDefined" => Value::I32(c.is_some() as i32),
                 "isTitleCase" => Value::I32(0), // approximate: Java has specific titlecase chars
-                "isMirrored" => Value::I32(0), // approximate
-                "isJavaIdentifierStart" => Value::I32(c.map(|c| c.is_alphabetic() || c == '_' || c == '$').unwrap_or(false) as i32),
+                "isMirrored" => Value::I32(0),  // approximate
+                "isJavaIdentifierStart" => Value::I32(
+                    c.map(|c| c.is_alphabetic() || c == '_' || c == '$')
+                        .unwrap_or(false) as i32,
+                ),
                 "isJavaIdentifierPart" => {
-                    let is_part = c.map(|c| {
-                        let cp = c as u32;
-                        c.is_alphanumeric() || c == '_' || c == '$'
+                    let is_part = c
+                        .map(|c| {
+                            let cp = c as u32;
+                            c.is_alphanumeric() || c == '_' || c == '$'
                             // isIdentifierIgnorable: 0x00-0x08, 0x0E-0x1B, 0x7F-0x9F
                             || cp <= 0x08
-                            || (cp >= 0x0E && cp <= 0x1B)
-                            || (cp >= 0x7F && cp <= 0x9F)
-                    }).unwrap_or(false);
+                            || (0x0E..=0x1B).contains(&cp)
+                            || (0x7F..=0x9F).contains(&cp)
+                        })
+                        .unwrap_or(false);
                     Value::I32(is_part as i32)
-                },
-                "isUnicodeIdentifierStart" => Value::I32(c.map(|c| c.is_alphabetic()).unwrap_or(false) as i32),
-                "isUnicodeIdentifierPart" => Value::I32(c.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) as i32),
+                }
+                "isUnicodeIdentifierStart" => {
+                    Value::I32(c.map(|c| c.is_alphabetic()).unwrap_or(false) as i32)
+                }
+                "isUnicodeIdentifierPart" => {
+                    Value::I32(c.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) as i32)
+                }
                 _ => Value::Unknown,
             }
         }

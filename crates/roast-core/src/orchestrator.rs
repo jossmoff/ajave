@@ -4,7 +4,6 @@
 //! ends the task immediately. Proofs are expensive and only worth starting once
 //! the cheap exit is closed off.
 
-use crate::artifact::Status;
 use crate::blackboard::Blackboard;
 use crate::engine::{Budget, Engine, Progress};
 use log::{debug, info};
@@ -50,6 +49,9 @@ impl Orchestrator {
         self.bb.seed(prog, self.assertion_only);
         for e in self.engines.iter_mut() {
             debug!("orchestrator: initialising engine {}", e.id());
+            // Register before init so the direction discipline is armed for
+            // anything an engine publishes during initialisation.
+            self.bb.register_engine(e.id(), e.direction());
             e.init(prog, &mut self.bb);
         }
 
@@ -67,11 +69,7 @@ impl Orchestrator {
                 }
                 // Short-circuit: if a violation was already found by a
                 // previous engine in this round, skip remaining engines.
-                if self
-                    .bb
-                    .statuses()
-                    .any(|(_, s)| matches!(s, Status::Violated { .. }))
-                {
+                if self.bb.any_violated() {
                     break;
                 }
                 match e.step(prog, &mut self.bb, self.budget) {
@@ -84,11 +82,8 @@ impl Orchestrator {
                 }
             }
 
-            let open = self.bb.open().len();
-            let violated = self
-                .bb
-                .statuses()
-                .any(|(_, s)| matches!(s, Status::Violated { .. }));
+            let open = self.bb.open_count();
+            let violated = self.bb.any_violated();
 
             let msg = format!(
                 "round {round}: phase={:?} open={open} advanced={advanced}",

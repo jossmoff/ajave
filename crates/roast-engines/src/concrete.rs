@@ -55,6 +55,19 @@ impl Value {
     }
 }
 
+/// A violation the interpreter found, wherever it found it.
+///
+/// `Outcome` and `InlineResult` both carry one. They used to each spell the
+/// same three fields out inline, which meant every conversion between them was
+/// a field-by-field restatement that a new field could silently fall out of.
+#[derive(Clone, Debug)]
+struct FoundViolation {
+    method: MethodKey,
+    oid: ObligationId,
+    /// Every nondeterministic choice this path made, in order.
+    entries: Vec<NondetEntry>,
+}
+
 /// Outcome of running one concrete path to completion.
 enum Outcome {
     /// Ran to a `Return` with nothing amiss.
@@ -64,12 +77,7 @@ enum Outcome {
     /// `Verifier.assume` failed: this path is uninteresting, not unsafe.
     Halted,
     /// A `Check` failed with nothing able to catch it.
-    Violated {
-        method: MethodKey,
-        oid: ObligationId,
-        witness: Vec<i64>,
-        entries: Vec<NondetEntry>,
-    },
+    Violated(FoundViolation),
     /// Ran out of budget or hit something we can't interpret.
     Inconclusive,
     /// Method threw an exception of this class.
@@ -80,12 +88,7 @@ enum Outcome {
 enum InlineResult {
     Returned(Value),
     Halted,
-    Violated {
-        method: MethodKey,
-        oid: ObligationId,
-        witness: Vec<i64>,
-        entries: Vec<NondetEntry>,
-    },
+    Violated(FoundViolation),
     Threw(String),
 }
 
@@ -97,16 +100,58 @@ enum CheckResult {
     Exit(Outcome),
 }
 
-/// The evaluator for everything except `Nondet` and string method `Call`s,
-/// which `run_with_choices` intercepts before they ever reach here.
-struct Run {
-    store: HashMap<VarId, Value>,
+/// Variable values, indexed directly by `VarId`.
+///
+/// `VarId` is a dense arena index into `body.vars` -- `roast-ir` says so in its
+/// module doc ("arena indices, not pointers ... `u32` newtypes into flat
+/// vectors"). This used to be a `HashMap<VarId, Value>`, hashing a `u32` to
+/// reach an array it already had, on the interpreter's hottest path: every
+/// operand read and every assignment, under a 200,000-step budget.
+///
+/// A slot that was never written reads as `Unknown`, which is what an absent
+/// key meant before.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Store {
+    slots: Vec<Value>,
 }
 
-impl Run {
+impl Store {
+    /// Size the store for a body up front, so the hot loop never resizes.
+    fn ensure_slots(&mut self, n: usize) {
+        if self.slots.len() < n {
+            self.slots.resize(n, Value::Unknown);
+        }
+    }
+
+    pub(crate) fn get(&self, v: VarId) -> Value {
+        self.slots
+            .get(v.0 as usize)
+            .copied()
+            .unwrap_or(Value::Unknown)
+    }
+
+    fn set(&mut self, v: VarId, val: Value) {
+        let i = v.0 as usize;
+        if i >= self.slots.len() {
+            self.slots.resize(i + 1, Value::Unknown);
+        }
+        self.slots[i] = val;
+    }
+}
+
+/// The evaluator for everything except `Nondet` and string method `Call`s,
+/// which `run_with_choices` intercepts before they ever reach here.
+struct Run<'a> {
+    /// Borrowed. It used to own the store, so every call site had to
+    /// `std::mem::take` the caller's map, run, and hand it back -- a dance to
+    /// satisfy the borrow checker that a reference makes unnecessary.
+    store: &'a Store,
+}
+
+impl Run<'_> {
     fn eval(&self, op: &Operand) -> Value {
         match op {
-            Operand::Var(v) => self.store.get(v).copied().unwrap_or(Value::Unknown),
+            Operand::Var(v) => self.store.get(*v),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
             Operand::Const(Const::Null) => Value::Ref(0),
@@ -116,7 +161,7 @@ impl Run {
         }
     }
 
-    fn eval_rvalue(&mut self, rv: &Rvalue) -> Value {
+    fn eval_rvalue(&self, rv: &Rvalue) -> Value {
         match rv {
             Rvalue::Use(o) => self.eval(o),
             Rvalue::Neg(o) => match self.eval(o) {
@@ -251,7 +296,6 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
     None
 }
 
-
 // String eval (`eval_str_call`) moved to str_eval.rs
 // Math eval (`eval_math_call`, `is_concrete_math_call`) moved to math_eval.rs
 /// Shared mutable state for a concrete execution — threaded through call
@@ -260,7 +304,6 @@ struct ConcreteState<'a> {
     prog: &'a Program,
     choices: &'a [i64],
     choice_idx: usize,
-    trace: Vec<i64>,
     entries: Vec<NondetEntry>,
     steps: u64,
     alloc_id: u64,
@@ -287,7 +330,6 @@ impl<'a> ConcreteState<'a> {
             prog,
             choices,
             choice_idx: 0,
-            trace: Vec::new(),
             entries: Vec::new(),
             steps: step_budget,
             alloc_id: 2,
@@ -302,9 +344,9 @@ impl<'a> ConcreteState<'a> {
         }
     }
 
-    fn eval_op(&self, op: &Operand, store: &HashMap<VarId, Value>) -> Value {
+    fn eval_op(&self, op: &Operand, store: &Store) -> Value {
         match op {
-            Operand::Var(v) => store.get(v).copied().unwrap_or(Value::Unknown),
+            Operand::Var(v) => store.get(*v),
             Operand::Const(Const::Int(n)) => Value::I32(*n),
             Operand::Const(Const::Long(n)) => Value::I64(*n),
             Operand::Const(Const::Null) => Value::Ref(0),
@@ -331,7 +373,7 @@ impl<'a> ConcreteState<'a> {
         if let Some(body) = self.prog.body(&clinit_key) {
             let body = body.clone();
             self.call_depth += 1;
-            let _ = self.run_body(&body, HashMap::new());
+            let _ = self.run_body(&body, Store::default());
             self.call_depth -= 1;
         }
     }
@@ -341,7 +383,7 @@ impl<'a> ConcreteState<'a> {
         &mut self,
         target: &MethodKey,
         args: &[Operand],
-        caller_store: &HashMap<VarId, Value>,
+        caller_store: &Store,
     ) -> Option<InlineResult> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return None;
@@ -349,7 +391,7 @@ impl<'a> ConcreteState<'a> {
         let body = self.prog.body(target)?;
 
         // Build callee's local store by mapping args to local slots.
-        let mut callee_store: HashMap<VarId, Value> = HashMap::new();
+        let mut callee_store = Store::default();
         let mut slot = 0u16;
         for arg in args {
             let val = self.eval_op(arg, caller_store);
@@ -359,7 +401,7 @@ impl<'a> ConcreteState<'a> {
                 .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Local(s) if s == slot))
             {
-                callee_store.insert(VarId(vid_idx as u32), val);
+                callee_store.set(VarId(vid_idx as u32), val);
                 slot += if vinfo.ty.is_wide() { 2 } else { 1 };
             } else {
                 slot += 1;
@@ -373,17 +415,7 @@ impl<'a> ConcreteState<'a> {
             Outcome::Clean => Some(InlineResult::Returned(Value::Unknown)),
             Outcome::ReturnedValue(v) => Some(InlineResult::Returned(v)),
             Outcome::Halted => Some(InlineResult::Halted),
-            Outcome::Violated {
-                method,
-                oid,
-                witness,
-                entries,
-            } => Some(InlineResult::Violated {
-                method,
-                oid,
-                witness,
-                entries,
-            }),
+            Outcome::Violated(v) => Some(InlineResult::Violated(v)),
             Outcome::Inconclusive => None,
             Outcome::Threw(cls) => Some(InlineResult::Threw(cls)),
         }
@@ -393,7 +425,7 @@ impl<'a> ConcreteState<'a> {
     /// map; heap state is shared through `self`.
     /// Evaluate an rvalue in the context of a concrete store.
     /// Returns `Ok(value)` for the computed result, or `Err(outcome)` for early termination.
-    fn eval_assign(&mut self, rv: &Rvalue, store: &mut HashMap<VarId, Value>) -> Result<Value, Outcome> {
+    fn eval_assign(&mut self, rv: &Rvalue, store: &mut Store) -> Result<Value, Outcome> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
             Rvalue::Havoc(ty) => Ok(self.eval_havoc(ty)),
@@ -431,8 +463,8 @@ impl<'a> ConcreteState<'a> {
             }
             Rvalue::ArrayLength(arr) => {
                 let aid = match arr {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::Ref(aid)) => Some(*aid),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::Ref(aid) => Some(aid),
                         _ => None,
                     },
                     _ => None,
@@ -451,26 +483,21 @@ impl<'a> ConcreteState<'a> {
                 if models::STR_OWNERS.contains(&target.class.as_str()) =>
             {
                 Ok(eval_str_call(
-                    target, args, store,
-                    &mut self.str_store, &mut self.sb_store, &mut self.alloc_id,
+                    target,
+                    args,
+                    store,
+                    &mut self.str_store,
+                    &mut self.sb_store,
+                    &mut self.alloc_id,
                 ))
             }
-            Rvalue::Call { target, args, .. } => {
-                match self.try_inline_call(target, args, store) {
-                    Some(InlineResult::Returned(rv)) => Ok(rv),
-                    Some(InlineResult::Halted) => Err(Outcome::Halted),
-                    Some(InlineResult::Violated { method, oid, witness, entries }) => {
-                        Err(Outcome::Violated { method, oid, witness, entries })
-                    }
-                    Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
-                    None => {
-                        let mut r = Run { store: std::mem::take(store) };
-                        let val = r.eval_rvalue(rv);
-                        *store = r.store;
-                        Ok(val)
-                    }
-                }
-            }
+            Rvalue::Call { target, args, .. } => match self.try_inline_call(target, args, store) {
+                Some(InlineResult::Returned(rv)) => Ok(rv),
+                Some(InlineResult::Halted) => Err(Outcome::Halted),
+                Some(InlineResult::Violated(v)) => Err(Outcome::Violated(v)),
+                Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
+                None => Ok(Run { store }.eval_rvalue(rv)),
+            },
             Rvalue::GetField { obj, field } => {
                 let obj_val = self.eval_op(obj, store);
                 Ok(match obj_val {
@@ -487,7 +514,8 @@ impl<'a> ConcreteState<'a> {
                     return Ok(Value::I32(0));
                 }
                 self.ensure_clinit(&fk.class);
-                Ok(self.static_fields
+                Ok(self
+                    .static_fields
                     .get(&(fk.class.clone(), fk.name.clone()))
                     .copied()
                     .unwrap_or_else(|| {
@@ -502,23 +530,18 @@ impl<'a> ConcreteState<'a> {
                         }
                     }))
             }
-            other => {
-                let mut r = Run { store: std::mem::take(store) };
-                let val = r.eval_rvalue(other);
-                *store = r.store;
-                Ok(val)
-            }
+            other => Ok(Run { store }.eval_rvalue(other)),
         }
     }
 
-    /// Evaluate a Nondet rvalue: pick a choice and record in trace.
+    /// Evaluate a Nondet rvalue: pick a choice and record it in `entries`,
+    /// which is the single record of what this run chose.
     fn eval_nondet(&mut self, ty: &Ty) -> Value {
         let raw = self.choices.get(self.choice_idx).copied().unwrap_or(0);
         self.choice_idx += 1;
         let line: Option<u16> = None;
         match ty {
             Ty::Str => {
-                self.trace.push(raw);
                 let chosen = String::new();
                 self.entries.push(NondetEntry {
                     value: NondetValue::Str(chosen.clone()),
@@ -536,7 +559,6 @@ impl<'a> ConcreteState<'a> {
                 Value::Ref(aid)
             }
             Ty::Long => {
-                self.trace.push(raw);
                 self.entries.push(NondetEntry {
                     value: NondetValue::Long(raw),
                     nondet_method: "nondetLong",
@@ -545,7 +567,6 @@ impl<'a> ConcreteState<'a> {
                 Value::I64(raw)
             }
             _ => {
-                self.trace.push(raw);
                 self.entries.push(NondetEntry {
                     value: NondetValue::Int(raw as i32),
                     nondet_method: "nondetInt",
@@ -579,14 +600,14 @@ impl<'a> ConcreteState<'a> {
         body: &Body,
         block: &Block,
         oid: ObligationId,
-        store: &mut HashMap<VarId, Value>,
+        store: &mut Store,
     ) -> Option<CheckResult> {
         let ob = body.obligation(oid);
         let ok = match &ob.cond {
             Operand::Const(Const::Int(v)) => *v != 0,
             other => {
                 let v = match other {
-                    Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
+                    Operand::Var(vid) => store.get(*vid),
                     _ => Value::Unknown,
                 };
                 if v == Value::Unknown {
@@ -599,28 +620,30 @@ impl<'a> ConcreteState<'a> {
             if let Some(class) = models::exception_class(ob.kind) {
                 if let Some(target) = route(self.prog, block, class) {
                     if let Some(slot) = body
-                        .vars.iter().enumerate()
+                        .vars
+                        .iter()
+                        .enumerate()
                         .find(|(_, vi)| vi.kind == VarKind::Stack(0))
                         .map(|(i, _)| VarId(i as u32))
                     {
                         let aid = self.alloc_id;
                         self.alloc_id += 1;
-                        store.insert(slot, Value::Ref(aid));
+                        store.set(slot, Value::Ref(aid));
                     }
                     return Some(CheckResult::Route(target));
                 }
             }
-            return Some(CheckResult::Exit(Outcome::Violated {
+            return Some(CheckResult::Exit(Outcome::Violated(FoundViolation {
                 method: body.key.clone(),
                 oid,
-                witness: std::mem::take(&mut self.trace),
                 entries: std::mem::take(&mut self.entries),
-            }));
+            })));
         }
         None
     }
 
-    fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
+    fn run_body(&mut self, body: &Body, mut store: Store) -> Outcome {
+        store.ensure_slots(body.vars.len());
         let mut block = body.entry;
         let mut idx = 0usize;
 
@@ -633,28 +656,39 @@ impl<'a> ConcreteState<'a> {
             let b = body.block(block);
             if idx >= b.stmts.len() {
                 match &b.term {
-                    Terminator::Goto(t) => { block = *t; idx = 0; }
+                    Terminator::Goto(t) => {
+                        block = *t;
+                        idx = 0;
+                    }
                     Terminator::Branch { cond, then_, else_ } => {
-                        let cv = store
-                            .get(match cond {
-                                Operand::Var(v) => v,
-                                _ => unreachable!("branch cond is always a temp"),
-                            })
-                            .copied()
-                            .unwrap_or(Value::Unknown);
-                        if cv == Value::Unknown { return Outcome::Inconclusive; }
+                        let cv = store.get(match cond {
+                            Operand::Var(v) => *v,
+                            _ => unreachable!("branch cond is always a temp"),
+                        });
+                        if cv == Value::Unknown {
+                            return Outcome::Inconclusive;
+                        }
                         block = if cv.nonzero() { *then_ } else { *else_ };
                         idx = 0;
                     }
-                    Terminator::Switch { value, cases, default } => {
+                    Terminator::Switch {
+                        value,
+                        cases,
+                        default,
+                    } => {
                         let v = match value {
-                            Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
+                            Operand::Var(vid) => store.get(*vid),
                             other => Value::I32(match other {
                                 Operand::Const(Const::Int(n)) => *n,
                                 _ => 0,
                             }),
-                        }.as_i64() as i32;
-                        block = cases.iter().find(|(k, _)| *k == v).map(|(_, t)| *t).unwrap_or(*default);
+                        }
+                        .as_i64() as i32;
+                        block = cases
+                            .iter()
+                            .find(|(k, _)| *k == v)
+                            .map(|(_, t)| *t)
+                            .unwrap_or(*default);
                         idx = 0;
                     }
                     Terminator::Return(ret) => {
@@ -667,11 +701,10 @@ impl<'a> ConcreteState<'a> {
                     Terminator::Halt => return Outcome::Halted,
                     Terminator::Throw(op) => {
                         let thrown_class = match op {
-                            Operand::Var(v) => {
-                                if let Some(Value::Ref(aid)) = store.get(v) {
-                                    self.alloc_types.get(aid).cloned()
-                                } else { None }
-                            }
+                            Operand::Var(v) => match store.get(*v) {
+                                Value::Ref(aid) => self.alloc_types.get(&aid).cloned(),
+                                _ => None,
+                            },
                             _ => None,
                         };
                         match thrown_class {
@@ -691,31 +724,35 @@ impl<'a> ConcreteState<'a> {
                 continue;
             }
 
-            let stmt = b.stmts[idx].clone();
-            match &stmt {
-                Stmt::Assign(v, rv) => {
-                    match self.eval_assign(rv, &mut store) {
-                        Ok(val) => { store.insert(*v, val); }
-                        Err(Outcome::Threw(cls)) => {
-                            if let Some(target) = route(self.prog, b, &cls) {
-                                block = target;
-                                idx = 0;
-                                continue;
-                            }
-                            return Outcome::Threw(cls);
-                        }
-                        Err(outcome) => return outcome,
+            // Borrowed, not cloned. `body` is a separate parameter from
+            // `&mut self`, so nothing here conflicts -- and a `Stmt` is not
+            // `Copy`: a `Call` carries a `Vec<Operand>` and a `MethodKey` with
+            // three `String`s in it. This runs once per interpreted statement,
+            // under a 200,000-step budget.
+            let stmt = &b.stmts[idx];
+            match stmt {
+                Stmt::Assign(v, rv) => match self.eval_assign(rv, &mut store) {
+                    Ok(val) => {
+                        store.set(*v, val);
                     }
-                }
+                    Err(Outcome::Threw(cls)) => {
+                        if let Some(target) = route(self.prog, b, &cls) {
+                            block = target;
+                            idx = 0;
+                            continue;
+                        }
+                        return Outcome::Threw(cls);
+                    }
+                    Err(outcome) => return outcome,
+                },
                 Stmt::Assume(op) => {
-                    let v = store
-                        .get(match op {
-                            Operand::Var(v) => v,
-                            _ => unreachable!("assume operand is always a temp"),
-                        })
-                        .copied()
-                        .unwrap_or(Value::Unknown);
-                    if !v.nonzero() { return Outcome::Halted; }
+                    let v = store.get(match op {
+                        Operand::Var(v) => *v,
+                        _ => unreachable!("assume operand is always a temp"),
+                    });
+                    if !v.nonzero() {
+                        return Outcome::Halted;
+                    }
                 }
                 Stmt::PutField { obj, field, val } => {
                     let obj_val = self.eval_op(obj, &store);
@@ -729,7 +766,8 @@ impl<'a> ConcreteState<'a> {
                 Stmt::PutStatic(fk, val) => {
                     self.ensure_clinit(&fk.class);
                     let v = self.eval_op(val, &store);
-                    self.static_fields.insert((fk.class.clone(), fk.name.clone()), v);
+                    self.static_fields
+                        .insert((fk.class.clone(), fk.name.clone()), v);
                 }
                 Stmt::ArrayStore { .. } => {}
                 Stmt::Check(oid) => {
@@ -755,7 +793,7 @@ impl<'a> ConcreteState<'a> {
 /// choices. Choices beyond what's provided fall back to `0`.
 fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut state = ConcreteState::new(prog, choices, step_budget);
-    state.run_body(body, HashMap::new())
+    state.run_body(body, Store::default())
 }
 
 /// Run a single all-zero probe. The concrete engine is a cheap first pass
@@ -768,21 +806,8 @@ fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u
 /// the SMT BMC engine should find it via constraint solving.
 fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)> {
     let step_budget = 200_000u64;
-    if let Outcome::Violated {
-        method,
-        oid,
-        witness,
-        entries,
-    } = run_with_choices(prog, body, &[], step_budget)
-    {
-        vec![(
-            method,
-            oid,
-            Witness {
-                nondet_sequence: witness,
-                entries,
-            },
-        )]
+    if let Outcome::Violated(v) = run_with_choices(prog, body, &[], step_budget) {
+        vec![(v.method, v.oid, Witness { entries: v.entries })]
     } else {
         vec![]
     }
@@ -790,6 +815,12 @@ fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)
 
 pub struct Concrete {
     done: bool,
+}
+
+impl Default for Concrete {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Concrete {
@@ -829,13 +860,10 @@ impl Engine for Concrete {
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
-            let oref = ObligationRef {
-                method,
-                id: oid,
-            };
+            let oref = ObligationRef { method, id: oid };
             debug!(
                 "concrete: publishing violation at {oref:?}, witness={:?}",
-                witness.nondet_sequence
+                witness.nondet_sequence()
             );
             let published = bb.publish(
                 self.id(),

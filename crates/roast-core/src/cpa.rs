@@ -10,6 +10,8 @@
 //!
 //! A new domain is a new `Cpa` impl and nothing else in the tree changes.
 
+use std::collections::BTreeMap;
+
 use crate::artifact::ProgramPoint;
 use roast_ir::{Edge, Program, Stmt, Terminator};
 
@@ -49,6 +51,13 @@ pub trait Cpa {
     ) -> Vec<Self::State>;
 
     /// Default is `merge_sep`, the path-sensitive choice.
+    ///
+    /// `reached` is always a state at the *same location* as `new` -- the
+    /// driver buckets the reached set by `ProgramPoint`, so an implementation
+    /// never has to check that itself. Joining states from different program
+    /// points is meaningless (the result would carry one point's location and
+    /// the other's facts), and making it unrepresentable here is cheaper than
+    /// asking every domain to remember the guard.
     fn merge(
         &self,
         _new: &Self::State,
@@ -58,10 +67,13 @@ pub trait Cpa {
         MergeResult::Sep
     }
 
-    /// Default is `stop_sep`: covered iff some *already-reached state at the
-    /// same location* subsumes this one.
+    /// Default is `stop_sep`: covered iff some already-reached state subsumes
+    /// this one.
     ///
-    /// The location filter is not optional. Without it, a state's `leq` check
+    /// `reached` holds only states **at `state`'s own location** -- the driver
+    /// buckets the reached set by `ProgramPoint` and hands over the matching
+    /// bucket. That filter is not a convenience, and it used to live here as an
+    /// explicit `r.location() == state.location()` guard. Without it, `leq`
     /// runs against every reached state regardless of where it sits in the
     /// program -- and since a variable absent from a state's map reads as Top
     /// (unconstrained), the very first state explored (an empty map, i.e. Top
@@ -73,10 +85,13 @@ pub trait Cpa {
     /// on `assert2` in the interval domain (see `engines::interval`): the
     /// state actually reaching the failing assertion was live and correctly
     /// narrowed, but never made it into `reached` because of this.
+    ///
+    /// Moving the filter into the driver keeps that property structural rather
+    /// than per-implementation: an override of this method cannot reintroduce
+    /// the bug, because it is never shown a state from elsewhere in the
+    /// program. The same guarantee applies to `merge`.
     fn stop(&self, state: &Self::State, reached: &[Self::State], _prec: &Self::Prec) -> bool {
-        reached
-            .iter()
-            .any(|r| r.location() == state.location() && state.leq(r))
+        reached.iter().any(|r| state.leq(r))
     }
 
     /// Dynamic precision adjustment. The hook CEGAR lives in.
@@ -235,12 +250,31 @@ pub fn reachability<C: Cpa>(
     prec: C::Prec,
     max_states: usize,
 ) -> (Vec<C::State>, bool) {
-    let mut reached: Vec<C::State> = Vec::new();
+    // Bucketed by location, for two reasons that are really one.
+    //
+    // Correctness: `merge` and `stop` are only ever shown states at the same
+    // program point, so neither a domain author nor a future refactor can
+    // reintroduce the cross-location comparison described on `Cpa::stop`.
+    //
+    // Cost: both were linear scans over the entire reached set, once per
+    // successor, which is quadratic in the size of the search. Scanning one
+    // bucket is proportional to the states actually at that point.
+    //
+    // `BTreeMap` rather than `HashMap` so the flattened result is in a
+    // deterministic order -- CEGAR picks a counterexample trace out of it, and
+    // a verifier that reports different traces across runs of the same input
+    // is miserable to debug.
+    let mut reached: BTreeMap<ProgramPoint, Vec<C::State>> = BTreeMap::new();
+    let mut count = 0usize;
     let mut waitlist: Vec<C::State> = vec![cpa.initial(prog, start)];
 
+    let flatten = |m: BTreeMap<ProgramPoint, Vec<C::State>>| -> Vec<C::State> {
+        m.into_values().flatten().collect()
+    };
+
     while let Some(state) = waitlist.pop() {
-        if reached.len() >= max_states {
-            return (reached, false);
+        if count >= max_states {
+            return (flatten(reached), false);
         }
         let (state, prec) = cpa.prec(&state, &prec);
         if state.is_bottom() {
@@ -255,22 +289,38 @@ pub fn reachability<C: Cpa>(
                 if succ.is_bottom() {
                     continue;
                 }
+                let bucket = reached.entry(succ.location().clone()).or_default();
+
+                // Absorb every reached state the domain wants joined into
+                // `merged`, *removing* each one as it is absorbed. Leaving the
+                // old entry behind (and then pushing the join as well) meant a
+                // merge_join domain accumulated redundant copies of the same
+                // state at the same point, which inflated every later scan and
+                // burned the `max_states` budget on bookkeeping -- and a search
+                // that hits the cap reports `complete = false`, which correctly
+                // forbids an over-approximating engine from claiming TRUE. So
+                // the leak cost verdicts, not just cycles.
                 let mut merged = succ;
-                let mut replaced = false;
-                for r in reached.iter_mut() {
-                    if let MergeResult::Joined(j) = cpa.merge(&merged, r, &prec) {
-                        *r = j.clone();
-                        merged = j;
-                        replaced = true;
+                let mut i = 0;
+                while i < bucket.len() {
+                    match cpa.merge(&merged, &bucket[i], &prec) {
+                        MergeResult::Joined(j) => {
+                            merged = j;
+                            bucket.swap_remove(i);
+                            count -= 1;
+                        }
+                        MergeResult::Sep => i += 1,
                     }
                 }
-                if !replaced && cpa.stop(&merged, &reached, &prec) {
+
+                if cpa.stop(&merged, bucket, &prec) {
                     continue;
                 }
-                reached.push(merged.clone());
+                bucket.push(merged.clone());
+                count += 1;
                 waitlist.push(merged);
             }
         }
     }
-    (reached, true)
+    (flatten(reached), true)
 }

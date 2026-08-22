@@ -1,9 +1,22 @@
 //! Independent checking of things we do not trust.
 //!
-//! The rule: no artifact reaches the reporter on an engine's authority alone.
-//! FALSE is replayed on a real JVM; TRUE rests on invariants re-checked by a
-//! separate, small, boring pass. Full verification of the verifier is a
-//! multi-year project. Certificate checking gets most of the assurance now.
+//! The rule, as designed: no artifact reaches the reporter on an engine's
+//! authority alone. FALSE is replayed on a real JVM; TRUE rests on invariants
+//! re-checked by a separate, small, boring pass. Full verification of the
+//! verifier is a multi-year project. Certificate checking gets most of the
+//! assurance now.
+//!
+//! **Half of that is real.** `JvmReplay` below is the FALSE half, and it works:
+//! every violation is replayed against the exact bytecode that was lifted, and
+//! a verdict that does not reproduce is downgraded to UNKNOWN.
+//!
+//! There is no TRUE half. `JvmReplay` is the only `Certifier`, and it returns
+//! `Inconclusive` for anything that is not a `Violated` status. So a TRUE rests
+//! on the discharging engine's authority plus the blackboard's direction
+//! discipline -- which is a real constraint, but it is not certificate
+//! checking. The invariants that would make a checker possible are computed and
+//! discarded: IMC's accumulated `F`, CHC's Horn invariant, k-induction's step
+//! case. `docs/strategies/README.md` says the same thing per engine.
 
 use crate::artifact::*;
 use log::{debug, warn};
@@ -45,6 +58,11 @@ pub struct JvmReplay {
     pub java: String,
     pub javac: String,
     pub classpath: String,
+    /// Built at most once per process. `certify` is called per violation, and
+    /// the BMC engine collects up to `MAX_VIOLATIONS` of them, so this was up
+    /// to 50 `javac` invocations producing byte-identical output -- on the
+    /// critical path of every FALSE verdict, under a competition time limit.
+    shadow: std::sync::OnceLock<Result<std::path::PathBuf, String>>,
 }
 
 impl JvmReplay {
@@ -53,6 +71,7 @@ impl JvmReplay {
             java: "java".into(),
             javac: "javac".into(),
             classpath: classpath.into(),
+            shadow: std::sync::OnceLock::new(),
         }
     }
 
@@ -96,9 +115,14 @@ public final class Verifier {
 "#;
 
     /// Compile the shadow class into a temp directory, returning its path for
-    /// use as the front of the classpath. Cached per-process would be nicer;
-    /// kept simple since replay runs are few and this is a one-off tool.
+    /// use as the front of the classpath. Built once and reused.
     fn build_shadow(&self) -> Result<std::path::PathBuf, String> {
+        self.shadow
+            .get_or_init(|| self.build_shadow_uncached())
+            .clone()
+    }
+
+    fn build_shadow_uncached(&self) -> Result<std::path::PathBuf, String> {
         let dir = std::env::temp_dir().join(format!("roast-shadow-{}", std::process::id()));
         debug!("jvm-replay: building shadow Verifier in {}", dir.display());
         let pkg_dir = dir.join("org/sosy_lab/sv_benchmarks");
@@ -152,8 +176,11 @@ impl Certifier for JvmReplay {
             if cfg!(windows) { ";" } else { ":" },
             self.classpath
         );
+        // Two cursors, matching the shadow Verifier's two: `next()` walks
+        // roast.seq for numeric nondets, `nondetString()` walks roast.str.N.
+        // `Witness` derives both from one ordered list, so they cannot drift.
         let seq: Vec<String> = witness
-            .nondet_sequence
+            .nondet_sequence()
             .iter()
             .map(|v| v.to_string())
             .collect();
@@ -162,14 +189,8 @@ impl Certifier for JvmReplay {
         cmd.args(["-ea", "-cp", &cp]);
         cmd.arg(format!("-Droast.seq={}", seq.join(",")));
 
-        // Pass string nondet values as individual system properties so the
-        // shadow Verifier uses the exact strings from the witness.
-        let mut str_idx = 0usize;
-        for entry in &witness.entries {
-            if let roast_ir::verdict::NondetValue::Str(s) = &entry.value {
-                cmd.arg(format!("-Droast.str.{str_idx}={s}"));
-                str_idx += 1;
-            }
+        for (i, s) in witness.string_values().iter().enumerate() {
+            cmd.arg(format!("-Droast.str.{i}={s}"));
         }
 
         cmd.arg("Main");

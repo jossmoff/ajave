@@ -13,14 +13,14 @@ use crate::concrete::Value;
 /// (for String values) and the StringBuilder store.
 fn get_str_content(
     op: &Operand,
-    store: &HashMap<VarId, Value>,
+    store: &crate::concrete::Store,
     str_store: &HashMap<u64, String>,
     sb_store: &HashMap<u64, String>,
 ) -> Option<String> {
     match op {
         Operand::Const(Const::Str(s)) => Some(s.clone()),
-        Operand::Var(vid) => match store.get(vid)? {
-            Value::Ref(aid) => str_store.get(aid).or_else(|| sb_store.get(aid)).cloned(),
+        Operand::Var(vid) => match store.get(*vid) {
+            Value::Ref(aid) => str_store.get(&aid).or_else(|| sb_store.get(&aid)).cloned(),
             _ => None,
         },
         _ => None,
@@ -28,10 +28,10 @@ fn get_str_content(
 }
 
 /// Extract the allocation ID from a Var operand.
-fn get_ref_id(op: &Operand, store: &HashMap<VarId, Value>) -> Option<u64> {
+fn get_ref_id(op: &Operand, store: &crate::concrete::Store) -> Option<u64> {
     match op {
-        Operand::Var(vid) => match store.get(vid)? {
-            Value::Ref(aid) => Some(*aid),
+        Operand::Var(vid) => match store.get(*vid) {
+            Value::Ref(aid) => Some(aid),
             _ => None,
         },
         _ => None,
@@ -44,7 +44,7 @@ fn get_ref_id(op: &Operand, store: &HashMap<VarId, Value>) -> Option<u64> {
 pub(crate) fn eval_str_call(
     target: &MethodKey,
     args: &[Operand],
-    store: &HashMap<VarId, Value>,
+    store: &crate::concrete::Store,
     str_store: &mut HashMap<u64, String>,
     sb_store: &mut HashMap<u64, String>,
     alloc_id: &mut u64,
@@ -104,9 +104,9 @@ pub(crate) fn eval_str_call(
                     match str_of!(arg) {
                         Some(s) => Some(s),
                         None => match arg {
-                            Operand::Var(vid) => match store.get(vid).copied() {
-                                Some(Value::I32(n)) => Some(n.to_string()),
-                                Some(Value::I64(n)) => Some(n.to_string()),
+                            Operand::Var(vid) => match store.get(*vid) {
+                                Value::I32(n) => Some(n.to_string()),
+                                Value::I64(n) => Some(n.to_string()),
                                 _ => None,
                             },
                             Operand::Const(Const::Int(n)) => Some(n.to_string()),
@@ -126,7 +126,7 @@ pub(crate) fn eval_str_call(
             // append returns `this`
             args.first()
                 .and_then(|a| match a {
-                    Operand::Var(vid) => store.get(vid).copied(),
+                    Operand::Var(vid) => Some(store.get(*vid)),
                     _ => None,
                 })
                 .unwrap_or(Value::Unknown)
@@ -150,7 +150,7 @@ pub(crate) fn eval_str_call(
             }
             args.first()
                 .and_then(|a| match a {
-                    Operand::Var(vid) => store.get(vid).copied(),
+                    Operand::Var(vid) => Some(store.get(*vid)),
                     _ => None,
                 })
                 .unwrap_or(Value::Unknown)
@@ -160,16 +160,16 @@ pub(crate) fn eval_str_call(
         "setCharAt" => {
             if let Some(aid) = recv_aid {
                 let idx_v = args.get(1).and_then(|a| match a {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::I32(n)) => Some(*n),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::I32(n) => Some(n),
                         _ => None,
                     },
                     Operand::Const(Const::Int(n)) => Some(*n),
                     _ => None,
                 });
                 let ch_v = args.get(2).and_then(|a| match a {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::I32(n)) => Some(*n),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::I32(n) => Some(n),
                         _ => None,
                     },
                     Operand::Const(Const::Int(n)) => Some(*n),
@@ -194,16 +194,16 @@ pub(crate) fn eval_str_call(
         "delete" => {
             if let Some(aid) = recv_aid {
                 let start = args.get(1).and_then(|a| match a {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::I32(n)) => Some(*n as usize),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::I32(n) => Some(n as usize),
                         _ => None,
                     },
                     Operand::Const(Const::Int(n)) => Some(*n as usize),
                     _ => None,
                 });
                 let end = args.get(2).and_then(|a| match a {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::I32(n)) => Some(*n as usize),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::I32(n) => Some(n as usize),
                         _ => None,
                     },
                     Operand::Const(Const::Int(n)) => Some(*n as usize),
@@ -219,7 +219,7 @@ pub(crate) fn eval_str_call(
             }
             args.first()
                 .and_then(|a| match a {
-                    Operand::Var(vid) => store.get(vid).copied(),
+                    Operand::Var(vid) => Some(store.get(*vid)),
                     _ => None,
                 })
                 .unwrap_or(Value::Unknown)
@@ -229,8 +229,8 @@ pub(crate) fn eval_str_call(
         "insert" => {
             if let Some(aid) = recv_aid {
                 let offset = args.get(1).and_then(|a| match a {
-                    Operand::Var(vid) => match store.get(vid) {
-                        Some(Value::I32(n)) => Some(*n as usize),
+                    Operand::Var(vid) => match store.get(*vid) {
+                        Value::I32(n) => Some(n as usize),
                         _ => None,
                     },
                     Operand::Const(Const::Int(n)) => Some(*n as usize),
@@ -252,7 +252,7 @@ pub(crate) fn eval_str_call(
             }
             args.first()
                 .and_then(|a| match a {
-                    Operand::Var(vid) => store.get(vid).copied(),
+                    Operand::Var(vid) => Some(store.get(*vid)),
                     _ => None,
                 })
                 .unwrap_or(Value::Unknown)
@@ -284,7 +284,7 @@ pub(crate) fn eval_str_call(
                 .and_then(|aid| str_store.get(&aid).or_else(|| sb_store.get(&aid)))
                 .cloned();
             let idx_v = args.get(1).and_then(|a| match a {
-                Operand::Var(vid) => store.get(vid).copied(),
+                Operand::Var(vid) => Some(store.get(*vid)),
                 Operand::Const(Const::Int(n)) => Some(Value::I32(*n)),
                 _ => None,
             });
@@ -371,15 +371,15 @@ pub(crate) fn eval_str_call(
             match haystack {
                 Some(h) => {
                     let result = match args.get(1) {
-                        Some(Operand::Var(vid)) => match store.get(vid).copied() {
-                            Some(Value::I32(c)) => {
+                        Some(Operand::Var(vid)) => match store.get(*vid) {
+                            Value::I32(c) => {
                                 // indexOf(int ch)
                                 char::from_u32(c as u32)
                                     .and_then(|ch| h.find(ch))
                                     .map(|i| i as i32)
                                     .unwrap_or(-1)
                             }
-                            Some(Value::Ref(aid)) => {
+                            Value::Ref(aid) => {
                                 // indexOf(String)
                                 match str_store.get(&aid) {
                                     Some(needle) => {
@@ -411,16 +411,16 @@ pub(crate) fn eval_str_call(
             match s {
                 Some(s) => {
                     let start = match args.get(1) {
-                        Some(Operand::Var(vid)) => match store.get(vid) {
-                            Some(Value::I32(n)) => *n as usize,
+                        Some(Operand::Var(vid)) => match store.get(*vid) {
+                            Value::I32(n) => n as usize,
                             _ => return Value::Unknown,
                         },
                         Some(Operand::Const(Const::Int(n))) => *n as usize,
                         _ => return Value::Unknown,
                     };
                     let end = match args.get(2) {
-                        Some(Operand::Var(vid)) => match store.get(vid) {
-                            Some(Value::I32(n)) => *n as usize,
+                        Some(Operand::Var(vid)) => match store.get(*vid) {
+                            Value::I32(n) => n as usize,
                             _ => return Value::Unknown,
                         },
                         Some(Operand::Const(Const::Int(n))) => *n as usize,
@@ -469,10 +469,10 @@ pub(crate) fn eval_str_call(
         // ---- String.valueOf (static) ----
         "valueOf" => {
             let result = match args.first() {
-                Some(Operand::Var(vid)) => match store.get(vid).copied() {
-                    Some(Value::I32(n)) => Some(n.to_string()),
-                    Some(Value::I64(n)) => Some(n.to_string()),
-                    Some(Value::Ref(aid)) => str_store.get(&aid).cloned(),
+                Some(Operand::Var(vid)) => match store.get(*vid) {
+                    Value::I32(n) => Some(n.to_string()),
+                    Value::I64(n) => Some(n.to_string()),
+                    Value::Ref(aid) => str_store.get(&aid).cloned(),
                     _ => None,
                 },
                 Some(Operand::Const(Const::Int(n))) => Some(n.to_string()),
@@ -493,8 +493,8 @@ pub(crate) fn eval_str_call(
                 Some(this_str) => {
                     let get_int = |i: usize| -> Option<i32> {
                         match args.get(i)? {
-                            Operand::Var(vid) => match store.get(vid)? {
-                                Value::I32(n) => Some(*n),
+                            Operand::Var(vid) => match store.get(*vid) {
+                                Value::I32(n) => Some(n),
                                 _ => None,
                             },
                             Operand::Const(Const::Int(n)) => Some(*n),
@@ -504,7 +504,7 @@ pub(crate) fn eval_str_call(
                     let (ignore_case, toffset_i, other_i, ooffset_i, len_i) = if args.len() == 6 {
                         let ic = match args.get(1) {
                             Some(Operand::Var(vid)) => {
-                                matches!(store.get(vid), Some(Value::I32(n)) if *n != 0)
+                                matches!(store.get(*vid), Value::I32(n) if n != 0)
                             }
                             Some(Operand::Const(Const::Int(n))) => *n != 0,
                             _ => return Value::Unknown,
@@ -553,7 +553,7 @@ pub(crate) fn eval_str_call(
             // intern() returns `this` for our purposes (content unchanged)
             args.first()
                 .and_then(|a| match a {
-                    Operand::Var(vid) => store.get(vid).copied(),
+                    Operand::Var(vid) => Some(store.get(*vid)),
                     _ => None,
                 })
                 .unwrap_or(Value::Unknown)

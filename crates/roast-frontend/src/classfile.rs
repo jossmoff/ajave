@@ -343,7 +343,9 @@ impl ClassFile {
             Some(Cp::NameAndType(a, b)) => (*a, *b),
             _ => return Err(format!("cp[{nat_idx}] is not a NameAndType")),
         };
-        let bsm = self.bootstrap_methods.get(bsm_idx as usize)
+        let bsm = self
+            .bootstrap_methods
+            .get(bsm_idx as usize)
             .ok_or_else(|| format!("bootstrap method index {bsm_idx} out of bounds"))?;
         Ok((
             cp_utf8(&self.cp, name_idx)?,

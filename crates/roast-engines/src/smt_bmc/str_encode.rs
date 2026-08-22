@@ -12,21 +12,21 @@ impl<'a> ExploreCtx<'a> {
     /// Returns true if the given String/StringBuilder/StringBuffer method can be
     /// encoded precisely in SMT. Checks that required string operands are available.
     pub(super) fn str_call_modelled(&self, target: &MethodKey, args: &[Operand]) -> bool {
-        let has_recv_str = args.first().map_or(false, |a| match a {
+        let has_recv_str = args.first().is_some_and(|a| match a {
             Operand::Var(v) => self.str_vars.contains_key(v),
             Operand::Const(Const::Str(_)) => true,
             _ => false,
         });
-        let has_arg1_str = args.get(1).map_or(false, |a| match a {
+        let has_arg1_str = args.get(1).is_some_and(|a| match a {
             Operand::Var(v) => self.str_vars.contains_key(v),
             Operand::Const(Const::Str(_)) => true,
             _ => false,
         });
         match target.name.as_str() {
-            "length" | "isEmpty" | "toString" | "trim"
-            | "toLowerCase" | "toUpperCase" => has_recv_str,
-            "contains" | "equals" | "startsWith" | "endsWith" | "concat"
-            | "equalsIgnoreCase" => {
+            "length" | "isEmpty" | "toString" | "trim" | "toLowerCase" | "toUpperCase" => {
+                has_recv_str
+            }
+            "contains" | "equals" | "startsWith" | "endsWith" | "concat" | "equalsIgnoreCase" => {
                 has_recv_str && has_arg1_str
             }
             "charAt" | "substring" | "hashCode" => has_recv_str,
@@ -47,7 +47,7 @@ impl<'a> ExploreCtx<'a> {
             "replace" if target.desc.starts_with("(CC)") => has_recv_str,
             "regionMatches" => {
                 let other_idx = if target.desc.starts_with("(ZI") { 3 } else { 2 };
-                let has_other_str = args.get(other_idx).map_or(false, |a| match a {
+                let has_other_str = args.get(other_idx).is_some_and(|a| match a {
                     Operand::Var(v) => self.str_vars.contains_key(v),
                     Operand::Const(Const::Str(_)) => true,
                     _ => false,
@@ -243,7 +243,9 @@ impl<'a> ExploreCtx<'a> {
                     } else {
                         (false, 1, 2, 3, 4)
                     };
-                let other = args.get(other_idx).and_then(|a| self.encode_str_operand(a))?;
+                let other = args
+                    .get(other_idx)
+                    .and_then(|a| self.encode_str_operand(a))?;
                 let toff_bv = self.encode_operand(args.get(toff_idx)?);
                 let ooff_bv = self.encode_operand(args.get(ooff_idx)?);
                 let len_bv = self.encode_operand(args.get(len_idx)?);
@@ -339,7 +341,11 @@ impl<'a> ExploreCtx<'a> {
                     let result = self.solver.str_from_code(ch_int);
                     Some((one, Some(result)))
                 } else {
-                    let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
+                    let w = if target.desc.starts_with("(J)") {
+                        64
+                    } else {
+                        32
+                    };
                     let result = self.signed_bv_to_str(arg_bv, w);
                     Some((one, Some(result)))
                 }
@@ -361,7 +367,11 @@ impl<'a> ExploreCtx<'a> {
                         let ch_int = self.solver.bv32_to_int(bv);
                         self.solver.str_from_code(ch_int)
                     } else {
-                        let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
+                        let w = if target.desc.starts_with("(J)") {
+                            64
+                        } else {
+                            32
+                        };
                         self.signed_bv_to_str(bv, w)
                     }
                 });
@@ -449,7 +459,12 @@ impl<'a> ExploreCtx<'a> {
     }
 
     /// Encode lastIndexOf via iterative forward search (8 iterations).
-    pub(super) fn encode_last_indexof(&mut self, s: Term, needle: Term, max_from: Option<Term>) -> Term {
+    pub(super) fn encode_last_indexof(
+        &mut self,
+        s: Term,
+        needle: Term,
+        max_from: Option<Term>,
+    ) -> Term {
         let zero_int = self.solver.int_const(0);
         let nlen = self.solver.str_len(needle);
 
@@ -547,7 +562,7 @@ impl<'a> ExploreCtx<'a> {
         bits_per_digit: usize,
         hex: bool,
     ) -> Term {
-        let num_digits = (width as usize + bits_per_digit - 1) / bits_per_digit;
+        let num_digits = (width as usize).div_ceil(bits_per_digit);
         let digit_mask = ((1u64 << bits_per_digit) - 1) as i64;
         let mask = self.solver.bv_const(digit_mask, width);
 
@@ -593,7 +608,9 @@ impl<'a> ExploreCtx<'a> {
         for i in (0..num_digits - 1).rev() {
             let threshold_shift = (i + 1) * bits_per_digit;
             if threshold_shift < 64 {
-                let threshold = self.solver.bv_const((1u64 << threshold_shift) as i64, width);
+                let threshold = self
+                    .solver
+                    .bv_const((1u64 << threshold_shift) as i64, width);
                 let cond = self.solver.bvult(val, threshold);
                 result = self.solver.ite(cond, cumulative[i], result);
             }
