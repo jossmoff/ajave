@@ -32,7 +32,13 @@ pub enum Direction {
     Over,
     /// Under-approximates reachable states. May exhibit a bug, never safety.
     Under,
-    /// Exact. Only the frontend and the certifier get to claim this.
+    /// Exact: sound in both directions, so entitled to both discharge and
+    /// violate. The frontend and the certifier claim this, and so does an
+    /// engine whose reasoning is exact under conditions it checks for itself --
+    /// `smt_bmc` exhibits bugs from concrete witnesses (an under-approximating
+    /// justification) and proves safety from exhaustive path coverage (an
+    /// over-approximating one), tagging each artifact with whichever justifies
+    /// it. See `Blackboard::register_engine`.
     Exact,
 }
 

@@ -34,6 +34,14 @@ const MAX_ITERATIONS: u32 = 50;
 pub struct ImcEngine {
     solver: Option<InterpolationSolver>,
     done: bool,
+    profile: Option<roast_core::smt_profile::ProfileHandle>,
+}
+
+impl ImcEngine {
+    pub fn with_profile(mut self, profile: Option<roast_core::smt_profile::ProfileHandle>) -> Self {
+        self.profile = profile;
+        self
+    }
 }
 
 impl Default for ImcEngine {
@@ -47,6 +55,7 @@ impl ImcEngine {
         ImcEngine {
             solver: find_interpolation_solver(),
             done: false,
+            profile: None,
         }
     }
 
@@ -114,7 +123,7 @@ impl Engine for ImcEngine {
                 continue;
             }
 
-            if let Ok(proved) = try_imc(solver, body, oref.id) {
+            if let Ok(proved) = try_imc(solver, body, oref.id, self.profile.as_ref()) {
                 if proved {
                     debug!("imc: proved {} via interpolation fixpoint", oref);
                     let _ = bb.publish(
@@ -156,7 +165,12 @@ impl Engine for ImcEngine {
 ///    d. If UNSAT: get interpolant I between F∧T and Bad
 ///    e. If I ⊆ F: fixpoint → proved safe
 ///    f. Else F = F ∨ I, iterate
-fn try_imc(solver: &InterpolationSolver, body: &Body, oid: ObligationId) -> Result<bool, String> {
+fn try_imc(
+    solver: &InterpolationSolver,
+    body: &Body,
+    oid: ObligationId,
+    profile: Option<&roast_core::smt_profile::ProfileHandle>,
+) -> Result<bool, String> {
     let encoding = encode_body_lia(body, &[oid], "");
 
     // Find the error formula for this obligation.
@@ -207,7 +221,12 @@ fn try_imc(solver: &InterpolationSolver, body: &Body, oid: ObligationId) -> Resu
             format!("(and {} {})", reachable, encoding.transition)
         };
 
-        match solver.interpolate(&all_decls, &formula_a, &error_post) {
+        match solver.interpolate_profiled(
+            &all_decls,
+            &formula_a,
+            &error_post,
+            profile.map(|h| ("imc", h)),
+        ) {
             InterpolationResult::Interpolant(itp) => {
                 debug!("imc: got interpolant: {}", &itp[..itp.len().min(200)]);
 

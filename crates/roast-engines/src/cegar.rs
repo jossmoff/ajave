@@ -31,6 +31,14 @@ const MAX_STATES: usize = 10_000;
 pub struct CegarEngine {
     solver: Option<InterpolationSolver>,
     done: bool,
+    profile: Option<roast_core::smt_profile::ProfileHandle>,
+}
+
+impl CegarEngine {
+    pub fn with_profile(mut self, profile: Option<roast_core::smt_profile::ProfileHandle>) -> Self {
+        self.profile = profile;
+        self
+    }
 }
 
 impl Default for CegarEngine {
@@ -44,6 +52,7 @@ impl CegarEngine {
         CegarEngine {
             solver: find_interpolation_solver(),
             done: false,
+            profile: None,
         }
     }
 
@@ -108,7 +117,7 @@ impl Engine for CegarEngine {
         let mut advanced = false;
 
         for oref in &open {
-            match try_cegar(solver, prog, body, entry, oref.id) {
+            match try_cegar(solver, prog, body, entry, oref.id, self.profile.as_ref()) {
                 Ok(true) => {
                     debug!("cegar: proved {} via predicate abstraction", oref);
                     let _ = bb.publish(
@@ -148,6 +157,7 @@ fn try_cegar(
     body: &Body,
     entry: &MethodKey,
     oid: ObligationId,
+    profile: Option<&roast_core::smt_profile::ProfileHandle>,
 ) -> Result<bool, String> {
     let mut prec = PredPrec::default();
 
@@ -219,7 +229,7 @@ fn try_cegar(
         // Found a potential error trace. Check feasibility and refine.
         debug!("cegar: potential error trace found, attempting refinement");
 
-        let new_predicates = refine_from_trace(solver, body, oid, &error_path)?;
+        let new_predicates = refine_from_trace(solver, body, oid, &error_path, profile)?;
 
         if new_predicates.is_empty() {
             // Can't refine further — the trace may be real.
@@ -280,6 +290,7 @@ fn refine_from_trace(
     body: &Body,
     oid: ObligationId,
     _error_path: &[BlockId],
+    profile: Option<&roast_core::smt_profile::ProfileHandle>,
 ) -> Result<Vec<Predicate>, String> {
     // Encode the body's transition relation in LIA.
     let encoding = encode_body_lia(body, &[oid], "");
@@ -308,7 +319,12 @@ fn refine_from_trace(
     }
 
     // Try to get an interpolant.
-    match solver.interpolate(&all_decls, &partition_a, &partition_b) {
+    match solver.interpolate_profiled(
+        &all_decls,
+        &partition_a,
+        &partition_b,
+        profile.map(|h| ("cegar", h)),
+    ) {
         crate::interpolation::InterpolationResult::Interpolant(itp) => {
             debug!("cegar: got interpolant: {}", &itp[..itp.len().min(200)]);
             Ok(predicates_from_interpolant(&itp))

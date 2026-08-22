@@ -59,14 +59,51 @@ impl InterpolationSolver {
         formula_a: &str,
         formula_b: &str,
     ) -> InterpolationResult {
-        match self {
+        self.interpolate_profiled(declarations, formula_a, formula_b, None)
+    }
+
+    /// As `interpolate`, recording encoding size and solver time under
+    /// `profile_as` when `--profile` is on.
+    pub fn interpolate_profiled(
+        &self,
+        declarations: &str,
+        formula_a: &str,
+        formula_b: &str,
+        profile_as: Option<(&str, &roast_core::smt_profile::ProfileHandle)>,
+    ) -> InterpolationResult {
+        let started = std::time::Instant::now();
+        let result = match self {
             InterpolationSolver::Z3(binary) => {
                 interpolate_z3(binary, declarations, formula_a, formula_b)
             }
             InterpolationSolver::SmtInterpol(jar) => {
                 interpolate_smtinterpol(jar, declarations, formula_a, formula_b)
             }
+        };
+        if let Some((engine, handle)) = profile_as {
+            let binary = match self {
+                InterpolationSolver::Z3(b) => b.as_str(),
+                InterpolationSolver::SmtInterpol(j) => j.as_str(),
+            };
+            // The partitions are what actually goes to the solver, so their
+            // combined size is this query's encoding size.
+            let approx_script = declarations.len() + formula_a.len() + formula_b.len();
+            let script = " ".repeat(approx_script);
+            roast_core::smt_profile::record_batch(
+                &Some(handle.clone()),
+                engine,
+                binary,
+                &script,
+                std::time::Duration::ZERO,
+                started.elapsed(),
+                match result {
+                    InterpolationResult::Sat => "sat",
+                    InterpolationResult::Interpolant(_) => "unsat",
+                    InterpolationResult::Unsupported => "unknown",
+                },
+            );
         }
+        result
     }
 
     /// Compute a sequence of interpolants for a path formula.
@@ -174,6 +211,39 @@ pub fn run_solver_batch_pub(
     script: &str,
 ) -> Result<Vec<String>, String> {
     run_solver_batch(binary, args, script)
+}
+
+/// Run a whole SMT script through a fresh solver process.
+///
+/// The single choke point for every batch (non-incremental) solver call in the
+/// interpolation-based engines, and therefore where `--profile` measures them.
+/// `profile_as` names the engine the cost belongs to; `None` disables recording.
+pub fn run_solver_batch_profiled(
+    binary: &str,
+    args: &[&str],
+    script: &str,
+    profile_as: Option<(&str, &roast_core::smt_profile::ProfileHandle)>,
+) -> Result<Vec<String>, String> {
+    let started = std::time::Instant::now();
+    let result = run_solver_batch(binary, args, script);
+    if let Some((engine, handle)) = profile_as {
+        let response = match &result {
+            Ok(lines) => lines.first().map(String::as_str).unwrap_or("unknown"),
+            Err(_) => "unknown",
+        };
+        roast_core::smt_profile::record_batch(
+            &Some(handle.clone()),
+            engine,
+            binary,
+            script,
+            // The caller built the script before calling; attributing encode
+            // time here would double-count, so only solver time is recorded.
+            std::time::Duration::ZERO,
+            started.elapsed(),
+            response,
+        );
+    }
+    result
 }
 
 fn run_solver_batch(binary: &str, args: &[&str], script: &str) -> Result<Vec<String>, String> {

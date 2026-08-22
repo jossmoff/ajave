@@ -7,10 +7,12 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Instant;
 
 use log::{debug, trace};
 
 use crate::smt::{SatResult, Solver, SolverFactory, Sort, Term};
+use crate::smt_profile::{InstanceRecorder, ProfileHandle};
 
 pub struct SmtLib {
     child: Child,
@@ -24,6 +26,13 @@ pub struct SmtLib {
     /// Cache for bool constants.
     bool_true: Option<Term>,
     bool_false: Option<Term>,
+    /// Counters for `--profile`. Inert (a handful of `is_none` checks) when
+    /// profiling is off, and flushed into the shared profile on drop.
+    rec: InstanceRecorder,
+    /// Start of the current stretch of encoding, i.e. since the last solver
+    /// response. Everything between two responses is time the engine spent
+    /// building terms rather than waiting.
+    encode_since: Instant,
 }
 
 impl SmtLib {
@@ -31,16 +40,27 @@ impl SmtLib {
     /// and only flushed before operations that read a response.
     fn send(&mut self, cmd: &str) {
         trace!("smt>> {cmd}");
+        self.rec.note_command(cmd);
         let _ = writeln!(self.stdin, "{cmd}");
     }
 
     /// Flush buffered commands and read a response line from the solver.
+    ///
+    /// This is the boundary the profiler measures against. Everything up to the
+    /// flush is encoding; the flush and read is the solver, and it includes the
+    /// solver parsing everything buffered since the last response -- which is
+    /// exactly the cost a large encoding imposes, and the reason encoder output
+    /// size is worth measuring on its own.
     fn read_line(&mut self) -> String {
+        if self.rec.active() {
+            self.rec.note_encode_time(self.encode_since.elapsed());
+        }
         let _ = self.stdin.flush();
         let mut line = String::new();
         let _ = self.stdout.read_line(&mut line);
         let result = line.trim().to_string();
         trace!("smt<< {result}");
+        self.encode_since = Instant::now();
         result
     }
 
@@ -513,7 +533,9 @@ impl Solver for SmtLib {
 
     fn check_sat(&mut self) -> SatResult {
         self.send("(check-sat)");
+        let started = Instant::now();
         let resp = self.read_line();
+        self.rec.note_check_sat(started.elapsed(), &resp);
         match resp.as_str() {
             "sat" => SatResult::Sat,
             "unsat" => SatResult::Unsat,
@@ -524,14 +546,18 @@ impl Solver for SmtLib {
     fn get_value_i64(&mut self, t: Term) -> Option<i64> {
         let tn = self.name(t).to_string();
         self.send(&format!("(get-value ({tn}))"));
+        let started = Instant::now();
         let resp = self.read_line();
+        self.rec.note_model_query(started.elapsed());
         parse_bv_value(&resp)
     }
 
     fn get_value_string(&mut self, t: Term) -> Option<String> {
         let tn = self.name(t).to_string();
         self.send(&format!("(get-value ({tn}))"));
+        let started = Instant::now();
         let resp = self.read_line();
+        self.rec.note_model_query(started.elapsed());
         parse_string_value(&resp)
     }
 }
@@ -611,6 +637,25 @@ fn sign_extend_to_i64(val: u64, width: usize) -> i64 {
 pub struct SmtLibFactory {
     solver_binary: String,
     extra_args: Vec<String>,
+    /// Set by `with_profile`; every solver this factory creates reports into it.
+    profile: Option<ProfileHandle>,
+    /// Which engine's row the counters land in. The factory is what gets handed
+    /// to an engine, so it is the only place that knows.
+    engine: String,
+}
+
+impl SmtLibFactory {
+    /// Attach a profile, tagging everything this factory produces as belonging
+    /// to `engine`.
+    pub fn with_profile(mut self, engine: &str, profile: Option<ProfileHandle>) -> Self {
+        self.engine = engine.to_string();
+        self.profile = profile;
+        self
+    }
+
+    pub fn solver_binary(&self) -> &str {
+        &self.solver_binary
+    }
 }
 
 impl SmtLibFactory {
@@ -638,6 +683,8 @@ impl SmtLibFactory {
         Some(SmtLibFactory {
             solver_binary: binary,
             extra_args,
+            profile: None,
+            engine: "smt".to_string(),
         })
     }
 }
@@ -676,6 +723,8 @@ impl SolverFactory for SmtLibFactory {
             bv_const_cache: HashMap::new(),
             bool_true: None,
             bool_false: None,
+            rec: InstanceRecorder::new(&self.engine, &self.solver_binary, self.profile.clone()),
+            encode_since: Instant::now(),
         };
 
         // Preamble

@@ -56,6 +56,20 @@ struct Cli {
     /// Print the assumptions (nondet values) used in violation witnesses.
     #[arg(long = "show-witness")]
     show_witness: bool,
+
+    /// Print a per-engine breakdown of SMT encoding size and solver time.
+    ///
+    /// Separates the two costs an end-to-end timing confounds: how much text
+    /// each encoder produced, and how long the solver spent on it. An encoder
+    /// emitting a large formula pays for it in the solver's parsing before any
+    /// reasoning starts, so the two are worth reading side by side.
+    #[arg(long = "profile")]
+    profile: bool,
+
+    /// Write the SMT profile as JSON to this path. Implies --profile.
+    /// Consumed by `tools/smt_scaling.py`.
+    #[arg(long = "profile-json", value_name = "PATH")]
+    profile_json: Option<PathBuf>,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -158,38 +172,42 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
 // Engine portfolio construction
 // ---------------------------------------------------------------------------
 
-fn build_engine_portfolio() -> Vec<Box<dyn Engine>> {
+fn build_engine_portfolio(
+    profile: Option<roast_core::smt_profile::ProfileHandle>,
+) -> Vec<Box<dyn Engine>> {
     let mut engines: Vec<Box<dyn Engine>> = vec![
         Box::new(roast_engines::presolve::Presolve::new()),
         Box::new(roast_engines::concrete::Concrete::new()),
     ];
+    // Each SMT engine gets its own factory tagged with its own name, so the
+    // profile can attribute encoding bytes and solver time per engine rather
+    // than reporting one undifferentiated total.
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
-        let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
         engines.push(Box::new(roast_engines::smt_bmc::SmtBmc::new(
-            Box::new(factory),
+            Box::new(factory.with_profile("smt-bmc", profile.clone())),
             200,
         )));
-        if let Some(f2) = factory2 {
+        if let Some(f2) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
             engines.push(Box::new(roast_engines::kinduction::KInduction::new(
-                Box::new(f2),
+                Box::new(f2.with_profile("k-induction", profile.clone())),
             )));
         }
     }
     engines.push(Box::new(roast_engines::ai::AiEngine::new()));
     {
-        let chc = roast_engines::chc::ChcEngine::new();
+        let chc = roast_engines::chc::ChcEngine::new().with_profile(profile.clone());
         if chc.available() {
             engines.push(Box::new(chc));
         }
     }
     {
-        let imc = roast_engines::imc::ImcEngine::new();
+        let imc = roast_engines::imc::ImcEngine::new().with_profile(profile.clone());
         if imc.available() {
             engines.push(Box::new(imc));
         }
     }
     {
-        let cegar = roast_engines::cegar::CegarEngine::new();
+        let cegar = roast_engines::cegar::CegarEngine::new().with_profile(profile.clone());
         if cegar.available() {
             engines.push(Box::new(cegar));
         }
@@ -458,7 +476,12 @@ fn main() {
     );
 
     // Run the engine portfolio.
-    let engines = build_engine_portfolio();
+    let profile = if cli.profile || cli.profile_json.is_some() {
+        Some(roast_core::smt_profile::new_handle())
+    } else {
+        None
+    };
+    let engines = build_engine_portfolio(profile.clone());
     let mut orchestrator = Orchestrator::new(engines);
     let verdict = orchestrator.run(&prog, 16);
 
@@ -527,6 +550,20 @@ fn main() {
             print_witness(obligation_ref, witness, &prog);
         } else if !violations.is_empty() {
             print_unconfirmed_witness(&violations[0].witness);
+        }
+    }
+
+    if let Some(handle) = &profile {
+        if let Ok(p) = handle.lock() {
+            if cli.profile {
+                eprint!("{}", p.render_table());
+            }
+            if let Some(path) = &cli.profile_json {
+                match std::fs::write(path, p.to_json()) {
+                    Ok(()) => info!("smt profile written to {}", path.display()),
+                    Err(e) => warn!("failed to write profile: {e}"),
+                }
+            }
         }
     }
 

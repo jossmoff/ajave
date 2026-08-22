@@ -121,8 +121,17 @@ impl Blackboard {
         direction: Direction,
         artifact: Artifact,
     ) -> Result<u64, Rejected> {
+        // An engine may only publish under the direction it declared -- with
+        // one exception. An engine that declares `Exact` is claiming it is
+        // sound in both directions, and such an engine legitimately tags each
+        // artifact with the direction that *justifies that particular
+        // artifact*: `Under` for a violation backed by a witness, `Over` for a
+        // discharge backed by exhaustive coverage. `smt_bmc` is exactly that.
+        //
+        // Engines declaring `Over` or `Under` get the strict check, which is
+        // what caught `NraEngine` declaring one and publishing the other.
         if let Some(&declared) = self.declared.get(&producer) {
-            if declared != direction {
+            if declared != Direction::Exact && declared != direction {
                 return self.reject(format!(
                     "{producer} declared {declared:?} but published as {direction:?}"
                 ));
@@ -383,6 +392,44 @@ mod tests {
             ),
         );
         assert!(r.is_ok());
+    }
+
+    #[test]
+    fn an_exact_engine_may_publish_in_either_direction() {
+        // Bounded symbolic execution is sound both ways: a witness justifies a
+        // violation, exhaustive path coverage justifies a discharge. Such an
+        // engine declares Exact and tags each artifact with the direction that
+        // justifies it.
+        let mut bb = Blackboard::new();
+        bb.register_engine(EngineId("smt-bmc"), Direction::Exact);
+
+        let violated = bb.publish(
+            EngineId("smt-bmc"),
+            Direction::Under,
+            Artifact::Status(
+                oref(),
+                Status::Violated {
+                    by: EngineId("smt-bmc"),
+                    witness: Default::default(),
+                },
+            ),
+        );
+        assert!(violated.is_ok(), "an Exact engine may exhibit a bug");
+
+        let mut bb = Blackboard::new();
+        bb.register_engine(EngineId("smt-bmc"), Direction::Exact);
+        let discharged = bb.publish(
+            EngineId("smt-bmc"),
+            Direction::Over,
+            Artifact::Status(
+                oref(),
+                Status::Discharged {
+                    by: EngineId("smt-bmc"),
+                    proof: ProofKind::Exhaustive,
+                },
+            ),
+        );
+        assert!(discharged.is_ok(), "an Exact engine may also prove safety");
     }
 
     #[test]

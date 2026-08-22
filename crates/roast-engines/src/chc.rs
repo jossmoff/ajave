@@ -30,6 +30,17 @@ use crate::smt_text::{self, BitvectorTheory};
 pub struct ChcEngine {
     solver_binary: String,
     done: bool,
+    profile: Option<roast_core::smt_profile::ProfileHandle>,
+}
+
+impl ChcEngine {
+    /// Report encoding size and solver time into `profile` under this engine's
+    /// name. CHC assembles a whole script and shells out, so unlike the
+    /// incremental engines there is exactly one measurement per run.
+    pub fn with_profile(mut self, profile: Option<roast_core::smt_profile::ProfileHandle>) -> Self {
+        self.profile = profile;
+        self
+    }
 }
 
 impl Default for ChcEngine {
@@ -45,6 +56,7 @@ impl ChcEngine {
         ChcEngine {
             solver_binary: binary,
             done: false,
+            profile: None,
         }
     }
 
@@ -111,12 +123,30 @@ impl Engine for ChcEngine {
         info!("chc: encoding {} obligation(s) for {:?}", obs.len(), entry);
 
         // Generate CHC encoding.
+        let encode_start = std::time::Instant::now();
         let smt2 = encode_chc(body, &obs);
+        let encode_time = encode_start.elapsed();
         debug!("chc: generated {} bytes of CHC encoding", smt2.len());
 
         // Run solver.
         let mut advanced = false;
-        match run_chc_solver(&self.solver_binary, &smt2, &obs) {
+        let solve_start = std::time::Instant::now();
+        let outcome = run_chc_solver(&self.solver_binary, &smt2, &obs);
+        let solver_time = solve_start.elapsed();
+        roast_core::smt_profile::record_batch(
+            &self.profile,
+            "chc",
+            &self.solver_binary,
+            &smt2,
+            encode_time,
+            solver_time,
+            match &outcome {
+                Ok(results) if !results.is_empty() => "sat",
+                Ok(_) => "unknown",
+                Err(_) => "unknown",
+            },
+        );
+        match outcome {
             Ok(results) => {
                 for (oid, safe) in results {
                     if safe {

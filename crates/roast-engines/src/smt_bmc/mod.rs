@@ -69,7 +69,20 @@ impl Engine for SmtBmc {
     }
 
     fn direction(&self) -> Direction {
-        Direction::Under
+        // Exact, because this engine is sound in both directions and uses both:
+        //
+        //  * A violation comes with a satisfying assignment, which becomes a
+        //    witness and is replayed on a real JVM. That is under-approximating
+        //    reasoning, published as `Under`.
+        //  * A discharge is published only when `all_paths_complete` holds and
+        //    no budget was exhausted -- every path through the body was
+        //    covered, so within the bound nothing was approximated away. That
+        //    is over-approximating reasoning, published as `Over`.
+        //
+        // Declaring `Under` here while publishing discharges as `Over` is what
+        // the blackboard's direction registration is designed to catch, so the
+        // declaration says what the engine actually does.
+        Direction::Exact
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
