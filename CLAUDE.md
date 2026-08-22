@@ -39,6 +39,21 @@ Format: `("category", "tasks/path/to.yml", "EXPECTED_VERDICT"),`
   is permanently red is a gate everybody learns to ignore. Promote an entry to
   `TESTS` the moment it starts passing, so it can never silently regress.
 
+### Profiling and scaling the SMT layer
+`--profile` breaks a run down per engine: SMT bytes emitted, commands, encode
+time against solver time, check-sat count and verdict split. `--profile-json`
+writes the same machine-readably.
+
+`python3 tools/smt_scaling.py` generates families of programs parameterised by
+size, fits how encoding size and solver time grow, and fails when a family
+exceeds its declared growth budget. Fixed benchmarks cannot see a change in
+asymptotic behaviour -- an encoder going from linear to exponential output looks
+like "a bit slower" on any single task until it stops finishing at all. Run it
+after any change to an encoder or to the explorer's merge strategy.
+
+`--self-test` checks the growth classifier against series of known growth;
+worth running if you touch the fitting code.
+
 ### The other two harnesses
 - `cargo test -p roast` runs the full 114-task corpus as integration tests.
   Slower, and it needs a JDK. This is what CI runs.
