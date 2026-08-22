@@ -49,11 +49,7 @@ pub trait SmtTheory {
 }
 
 /// Encode an operand using the given theory and variable lookup.
-pub fn encode_operand<T: SmtTheory, V: VarLookup>(
-    theory: &T,
-    op: &Operand,
-    vars: &V,
-) -> String {
+pub fn encode_operand<T: SmtTheory, V: VarLookup>(theory: &T, op: &Operand, vars: &V) -> String {
     match op {
         Operand::Var(v) => vars.lookup(v.0 as usize),
         Operand::Const(Const::Int(n)) => theory.encode_int(*n),
@@ -65,11 +61,7 @@ pub fn encode_operand<T: SmtTheory, V: VarLookup>(
 }
 
 /// Encode an rvalue using the given theory and variable lookup.
-pub fn encode_rvalue<T: SmtTheory, V: VarLookup>(
-    theory: &T,
-    rvalue: &Rvalue,
-    vars: &V,
-) -> String {
+pub fn encode_rvalue<T: SmtTheory, V: VarLookup>(theory: &T, rvalue: &Rvalue, vars: &V) -> String {
     match rvalue {
         Rvalue::Use(o) => encode_operand(theory, o, vars),
         Rvalue::Nondet(..) | Rvalue::Havoc(_) => theory.encode_fresh(),

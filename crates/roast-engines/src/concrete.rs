@@ -251,7 +251,6 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
     None
 }
 
-
 // String eval (`eval_str_call`) moved to str_eval.rs
 // Math eval (`eval_math_call`, `is_concrete_math_call`) moved to math_eval.rs
 /// Shared mutable state for a concrete execution — threaded through call
@@ -393,7 +392,11 @@ impl<'a> ConcreteState<'a> {
     /// map; heap state is shared through `self`.
     /// Evaluate an rvalue in the context of a concrete store.
     /// Returns `Ok(value)` for the computed result, or `Err(outcome)` for early termination.
-    fn eval_assign(&mut self, rv: &Rvalue, store: &mut HashMap<VarId, Value>) -> Result<Value, Outcome> {
+    fn eval_assign(
+        &mut self,
+        rv: &Rvalue,
+        store: &mut HashMap<VarId, Value>,
+    ) -> Result<Value, Outcome> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
             Rvalue::Havoc(ty) => Ok(self.eval_havoc(ty)),
@@ -451,26 +454,38 @@ impl<'a> ConcreteState<'a> {
                 if models::STR_OWNERS.contains(&target.class.as_str()) =>
             {
                 Ok(eval_str_call(
-                    target, args, store,
-                    &mut self.str_store, &mut self.sb_store, &mut self.alloc_id,
+                    target,
+                    args,
+                    store,
+                    &mut self.str_store,
+                    &mut self.sb_store,
+                    &mut self.alloc_id,
                 ))
             }
-            Rvalue::Call { target, args, .. } => {
-                match self.try_inline_call(target, args, store) {
-                    Some(InlineResult::Returned(rv)) => Ok(rv),
-                    Some(InlineResult::Halted) => Err(Outcome::Halted),
-                    Some(InlineResult::Violated { method, oid, witness, entries }) => {
-                        Err(Outcome::Violated { method, oid, witness, entries })
-                    }
-                    Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
-                    None => {
-                        let mut r = Run { store: std::mem::take(store) };
-                        let val = r.eval_rvalue(rv);
-                        *store = r.store;
-                        Ok(val)
-                    }
+            Rvalue::Call { target, args, .. } => match self.try_inline_call(target, args, store) {
+                Some(InlineResult::Returned(rv)) => Ok(rv),
+                Some(InlineResult::Halted) => Err(Outcome::Halted),
+                Some(InlineResult::Violated {
+                    method,
+                    oid,
+                    witness,
+                    entries,
+                }) => Err(Outcome::Violated {
+                    method,
+                    oid,
+                    witness,
+                    entries,
+                }),
+                Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
+                None => {
+                    let mut r = Run {
+                        store: std::mem::take(store),
+                    };
+                    let val = r.eval_rvalue(rv);
+                    *store = r.store;
+                    Ok(val)
                 }
-            }
+            },
             Rvalue::GetField { obj, field } => {
                 let obj_val = self.eval_op(obj, store);
                 Ok(match obj_val {
@@ -487,7 +502,8 @@ impl<'a> ConcreteState<'a> {
                     return Ok(Value::I32(0));
                 }
                 self.ensure_clinit(&fk.class);
-                Ok(self.static_fields
+                Ok(self
+                    .static_fields
                     .get(&(fk.class.clone(), fk.name.clone()))
                     .copied()
                     .unwrap_or_else(|| {
@@ -503,7 +519,9 @@ impl<'a> ConcreteState<'a> {
                     }))
             }
             other => {
-                let mut r = Run { store: std::mem::take(store) };
+                let mut r = Run {
+                    store: std::mem::take(store),
+                };
                 let val = r.eval_rvalue(other);
                 *store = r.store;
                 Ok(val)
@@ -599,7 +617,9 @@ impl<'a> ConcreteState<'a> {
             if let Some(class) = models::exception_class(ob.kind) {
                 if let Some(target) = route(self.prog, block, class) {
                     if let Some(slot) = body
-                        .vars.iter().enumerate()
+                        .vars
+                        .iter()
+                        .enumerate()
                         .find(|(_, vi)| vi.kind == VarKind::Stack(0))
                         .map(|(i, _)| VarId(i as u32))
                     {
@@ -633,7 +653,10 @@ impl<'a> ConcreteState<'a> {
             let b = body.block(block);
             if idx >= b.stmts.len() {
                 match &b.term {
-                    Terminator::Goto(t) => { block = *t; idx = 0; }
+                    Terminator::Goto(t) => {
+                        block = *t;
+                        idx = 0;
+                    }
                     Terminator::Branch { cond, then_, else_ } => {
                         let cv = store
                             .get(match cond {
@@ -642,19 +665,30 @@ impl<'a> ConcreteState<'a> {
                             })
                             .copied()
                             .unwrap_or(Value::Unknown);
-                        if cv == Value::Unknown { return Outcome::Inconclusive; }
+                        if cv == Value::Unknown {
+                            return Outcome::Inconclusive;
+                        }
                         block = if cv.nonzero() { *then_ } else { *else_ };
                         idx = 0;
                     }
-                    Terminator::Switch { value, cases, default } => {
+                    Terminator::Switch {
+                        value,
+                        cases,
+                        default,
+                    } => {
                         let v = match value {
                             Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
                             other => Value::I32(match other {
                                 Operand::Const(Const::Int(n)) => *n,
                                 _ => 0,
                             }),
-                        }.as_i64() as i32;
-                        block = cases.iter().find(|(k, _)| *k == v).map(|(_, t)| *t).unwrap_or(*default);
+                        }
+                        .as_i64() as i32;
+                        block = cases
+                            .iter()
+                            .find(|(k, _)| *k == v)
+                            .map(|(_, t)| *t)
+                            .unwrap_or(*default);
                         idx = 0;
                     }
                     Terminator::Return(ret) => {
@@ -670,7 +704,9 @@ impl<'a> ConcreteState<'a> {
                             Operand::Var(v) => {
                                 if let Some(Value::Ref(aid)) = store.get(v) {
                                     self.alloc_types.get(aid).cloned()
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         };
@@ -693,20 +729,20 @@ impl<'a> ConcreteState<'a> {
 
             let stmt = b.stmts[idx].clone();
             match &stmt {
-                Stmt::Assign(v, rv) => {
-                    match self.eval_assign(rv, &mut store) {
-                        Ok(val) => { store.insert(*v, val); }
-                        Err(Outcome::Threw(cls)) => {
-                            if let Some(target) = route(self.prog, b, &cls) {
-                                block = target;
-                                idx = 0;
-                                continue;
-                            }
-                            return Outcome::Threw(cls);
-                        }
-                        Err(outcome) => return outcome,
+                Stmt::Assign(v, rv) => match self.eval_assign(rv, &mut store) {
+                    Ok(val) => {
+                        store.insert(*v, val);
                     }
-                }
+                    Err(Outcome::Threw(cls)) => {
+                        if let Some(target) = route(self.prog, b, &cls) {
+                            block = target;
+                            idx = 0;
+                            continue;
+                        }
+                        return Outcome::Threw(cls);
+                    }
+                    Err(outcome) => return outcome,
+                },
                 Stmt::Assume(op) => {
                     let v = store
                         .get(match op {
@@ -715,7 +751,9 @@ impl<'a> ConcreteState<'a> {
                         })
                         .copied()
                         .unwrap_or(Value::Unknown);
-                    if !v.nonzero() { return Outcome::Halted; }
+                    if !v.nonzero() {
+                        return Outcome::Halted;
+                    }
                 }
                 Stmt::PutField { obj, field, val } => {
                     let obj_val = self.eval_op(obj, &store);
@@ -729,7 +767,8 @@ impl<'a> ConcreteState<'a> {
                 Stmt::PutStatic(fk, val) => {
                     self.ensure_clinit(&fk.class);
                     let v = self.eval_op(val, &store);
-                    self.static_fields.insert((fk.class.clone(), fk.name.clone()), v);
+                    self.static_fields
+                        .insert((fk.class.clone(), fk.name.clone()), v);
                 }
                 Stmt::ArrayStore { .. } => {}
                 Stmt::Check(oid) => {
@@ -792,6 +831,12 @@ pub struct Concrete {
     done: bool,
 }
 
+impl Default for Concrete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Concrete {
     pub fn new() -> Self {
         Concrete { done: false }
@@ -829,10 +874,7 @@ impl Engine for Concrete {
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
-            let oref = ObligationRef {
-                method,
-                id: oid,
-            };
+            let oref = ObligationRef { method, id: oid };
             debug!(
                 "concrete: publishing violation at {oref:?}, witness={:?}",
                 witness.nondet_sequence

@@ -178,7 +178,11 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
             "assume" => CallModel::Assume,
             "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
             n if n.starts_with("nondet") => {
-                let jvm_byte = desc.as_bytes().get(desc.rfind(')').unwrap_or(0) + 1).copied().unwrap_or(b'I');
+                let jvm_byte = desc
+                    .as_bytes()
+                    .get(desc.rfind(')').unwrap_or(0) + 1)
+                    .copied()
+                    .unwrap_or(b'I');
                 CallModel::Nondet(ret_ty(desc), jvm_byte)
             }
             _ => CallModel::Unmodelled,
@@ -337,56 +341,121 @@ fn is_math_call(owner: &str, name: &str) -> bool {
     match owner {
         "java/lang/Math" | "java/lang/StrictMath" => matches!(
             name,
-            "abs" | "min" | "max" | "addExact" | "subtractExact"
-                | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
-                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "exp" | "log" | "log10" | "pow" | "sqrt" | "round"
-                | "ceil" | "floor" | "toRadians" | "toDegrees"
-                | "sinh" | "cosh" | "tanh"
+            "abs"
+                | "min"
+                | "max"
+                | "addExact"
+                | "subtractExact"
+                | "multiplyExact"
+                | "negateExact"
+                | "floorDiv"
+                | "floorMod"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "exp"
+                | "log"
+                | "log10"
+                | "pow"
+                | "sqrt"
+                | "round"
+                | "ceil"
+                | "floor"
+                | "toRadians"
+                | "toDegrees"
+                | "sinh"
+                | "cosh"
+                | "tanh"
         ),
         "java/lang/Integer" => matches!(
             name,
-            "parseInt" | "max" | "min" | "sum"
-                | "reverseBytes" | "highestOneBit"
-                | "lowestOneBit" | "signum" | "toUnsignedLong"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
-                | "rotateLeft" | "rotateRight"
-                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+            "parseInt"
+                | "max"
+                | "min"
+                | "sum"
+                | "reverseBytes"
+                | "highestOneBit"
+                | "lowestOneBit"
+                | "signum"
+                | "toUnsignedLong"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
+                | "rotateLeft"
+                | "rotateRight"
+                | "bitCount"
+                | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros"
                 | "reverse"
         ),
         "java/lang/Long" => matches!(
             name,
-            "parseLong" | "max" | "min" | "sum" | "signum"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
-                | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                | "rotateLeft" | "rotateRight"
-                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+            "parseLong"
+                | "max"
+                | "min"
+                | "sum"
+                | "signum"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
+                | "reverseBytes"
+                | "highestOneBit"
+                | "lowestOneBit"
+                | "rotateLeft"
+                | "rotateRight"
+                | "bitCount"
+                | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros"
                 | "reverse"
         ),
         "java/lang/Character" => matches!(
             name,
-            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
-                | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
-                | "isSupplementaryCodePoint" | "isValidCodePoint"
-                | "toUpperCase" | "toLowerCase"
-                | "digit" | "forDigit"
-                | "charCount" | "toCodePoint"
-                | "compare" | "hashCode" | "reverseBytes"
+            "isDigit"
+                | "isLetter"
+                | "isLetterOrDigit"
+                | "isUpperCase"
+                | "isLowerCase"
+                | "isWhitespace"
+                | "isSpaceChar"
+                | "isAlphabetic"
+                | "isBmpCodePoint"
+                | "isSupplementaryCodePoint"
+                | "isValidCodePoint"
+                | "toUpperCase"
+                | "toLowerCase"
+                | "digit"
+                | "forDigit"
+                | "charCount"
+                | "toCodePoint"
+                | "compare"
+                | "hashCode"
+                | "reverseBytes"
                 | "isISOControl"
-                | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                | "isJavaLetter" | "isJavaLetterOrDigit"
+                | "isJavaIdentifierStart"
+                | "isJavaIdentifierPart"
+                | "isJavaLetter"
+                | "isJavaLetterOrDigit"
         ),
         "java/lang/Short" => matches!(
             name,
-            "parseShort" | "compare" | "hashCode" | "reverseBytes"
-                | "toUnsignedInt" | "toUnsignedLong"
+            "parseShort"
+                | "compare"
+                | "hashCode"
+                | "reverseBytes"
+                | "toUnsignedInt"
+                | "toUnsignedLong"
         ),
         "java/lang/Byte" => matches!(
             name,
-            "parseByte" | "compare" | "hashCode"
-                | "toUnsignedInt" | "toUnsignedLong"
+            "parseByte" | "compare" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
         ),
         "java/lang/Boolean" => matches!(
             name,
@@ -402,10 +471,26 @@ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
     matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
         && matches!(
             name,
-            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "exp" | "log" | "log10" | "pow" | "sqrt"
-                | "sinh" | "cosh" | "tanh"
-                | "ceil" | "floor" | "toRadians" | "toDegrees" | "round"
+            "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "exp"
+                | "log"
+                | "log10"
+                | "pow"
+                | "sqrt"
+                | "sinh"
+                | "cosh"
+                | "tanh"
+                | "ceil"
+                | "floor"
+                | "toRadians"
+                | "toDegrees"
+                | "round"
         )
 }
 

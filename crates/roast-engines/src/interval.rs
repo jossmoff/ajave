@@ -441,7 +441,9 @@ impl Cpa for IntervalCpa {
                                 if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
                                     let mut narrowed = next.clone();
                                     let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
-                                    if let Some((na, nb)) = Interval::narrow(negate_binop(op), ia, ib) {
+                                    if let Some((na, nb)) =
+                                        Interval::narrow(negate_binop(op), ia, ib)
+                                    {
                                         if let Operand::Var(av) = a {
                                             narrowed.set(*av, na);
                                         }

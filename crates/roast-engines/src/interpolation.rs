@@ -168,7 +168,11 @@ fn interpolate_smtinterpol(
 }
 
 /// Public wrapper for running a solver script in batch mode.
-pub fn run_solver_batch_pub(binary: &str, args: &[&str], script: &str) -> Result<Vec<String>, String> {
+pub fn run_solver_batch_pub(
+    binary: &str,
+    args: &[&str],
+    script: &str,
+) -> Result<Vec<String>, String> {
     run_solver_batch(binary, args, script)
 }
 
@@ -397,7 +401,6 @@ pub struct LiaEncoding {
     pub error_formulas: Vec<(roast_ir::ObligationId, String)>,
     pub n_vars: usize,
 }
-
 
 /// Extract predicate atoms from an interpolant formula string.
 ///

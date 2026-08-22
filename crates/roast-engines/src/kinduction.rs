@@ -93,19 +93,13 @@ impl Engine for KInduction {
             // arrays, or calls are havoced in the SMT encoding, so a Bounded
             // base case from the BMC doesn't actually cover all reachable states.
             if body_uses_havoced_ops(body) {
-                debug!(
-                    "k-induction: {} uses havoced ops, skipping",
-                    oref
-                );
+                debug!("k-induction: {} uses havoced ops, skipping", oref);
                 continue;
             }
 
             if !has_loops {
                 // Loop-free: the base case is exhaustive. Discharge directly.
-                debug!(
-                    "k-induction: {} is loop-free, discharging at k={}",
-                    oref, k
-                );
+                debug!("k-induction: {} is loop-free, discharging at k={}", oref, k);
                 let _ = bb.publish(
                     self.id(),
                     self.direction(),

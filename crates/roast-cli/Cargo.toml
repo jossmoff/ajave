@@ -13,7 +13,14 @@ path = "src/main.rs"
 roast-ir = { path = "../roast-ir" }
 roast-frontend = { path = "../roast-frontend" }
 roast-core = { path = "../roast-core" }
-roast-engines = { path = "../roast-engines" }
+roast-engines = { path = "../roast-engines", default-features = false }
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true
+
+[features]
+default = ["nra"]
+# Forwards to roast-engines/nra. Building with `--no-default-features` drops
+# the CVC5 static link, so the binary and its corpus tests build without a
+# C++ toolchain (the NRA engine is simply absent from the portfolio).
+nra = ["roast-engines/nra"]

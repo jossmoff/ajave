@@ -170,10 +170,7 @@ impl Engine for SmtBmc {
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
-            let oref = ObligationRef {
-                method,
-                id: oid,
-            };
+            let oref = ObligationRef { method, id: oid };
             debug!(
                 "smt-bmc: publishing violation at {oref:?}, witness={:?}",
                 witness.nondet_sequence
@@ -201,7 +198,8 @@ impl Engine for SmtBmc {
                 let open_list = bb.open();
                 log::trace!("smt-bmc: exhaustive discharge check: entry={entry:?}, inlined={:?}, open={:?}, skipped={:?}", ctx.inlined_methods, open_list, ctx.skipped_obligations);
                 for oref in open_list {
-                    let method_explored = &oref.method == entry || ctx.inlined_methods.contains(&oref.method);
+                    let method_explored =
+                        &oref.method == entry || ctx.inlined_methods.contains(&oref.method);
                     // For the entry method: only block discharge when a
                     // havoced call is in a try block (exception edges).
                     // For inlined callees: require all_calls_resolved since
@@ -216,9 +214,7 @@ impl Engine for SmtBmc {
                     } else {
                         ctx.all_paths_complete && ctx.all_calls_resolved
                     };
-                    if can_discharge
-                        && !ctx.skipped_obligations.contains(&oref.id)
-                    {
+                    if can_discharge && !ctx.skipped_obligations.contains(&oref.id) {
                         debug!("smt-bmc: discharging {oref:?} (exhaustive exploration)");
                         let _ = bb.publish(
                             self.id(),
@@ -374,7 +370,9 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Bin(_, a, _) => self.width_of_operand(a),
             Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) | Rvalue::Cast(ty, _) => self.width_of_ty(ty),
             Rvalue::Cmp(_, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
-            Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
+            Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => {
+                Self::field_elem_width(&fk.desc)
+            }
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
             Rvalue::New(_) | Rvalue::NewArray { .. } => 32,
             Rvalue::Call { target, .. } => {
@@ -423,11 +421,12 @@ impl<'a> ExploreCtx<'a> {
     fn operand_is_float(&self, op: &Operand) -> bool {
         match op {
             Operand::Const(c) => matches!(c.ty(), Ty::Float | Ty::Double),
-            Operand::Var(v) => {
-                self.body.vars.get(v.0 as usize)
-                    .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
-                    .unwrap_or(false)
-            }
+            Operand::Var(v) => self
+                .body
+                .vars
+                .get(v.0 as usize)
+                .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+                .unwrap_or(false),
         }
     }
 
@@ -468,7 +467,11 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::NewArray { len, .. } => self.operand_tainted(len),
             Rvalue::InstanceOf { obj, .. } => self.operand_tainted(obj),
             Rvalue::New(_) => false,
-            Rvalue::Call { target, args, is_virtual } => {
+            Rvalue::Call {
+                target,
+                args,
+                is_virtual,
+            } => {
                 if roast_models::STR_OWNERS.contains(&target.class.as_str()) {
                     return !self.str_call_modelled(target, args);
                 }
@@ -481,12 +484,12 @@ impl<'a> ExploreCtx<'a> {
                 true
             }
             Rvalue::Use(o) | Rvalue::Neg(o) => self.operand_tainted(o) || self.operand_is_float(o),
-            Rvalue::Cast(_, o) => {
-                self.operand_tainted(o) || self.operand_is_float(o)
-            }
+            Rvalue::Cast(_, o) => self.operand_tainted(o) || self.operand_is_float(o),
             Rvalue::Bin(_, a, b) | Rvalue::Cmp(a, b) => {
-                self.operand_tainted(a) || self.operand_tainted(b)
-                    || self.operand_is_float(a) || self.operand_is_float(b)
+                self.operand_tainted(a)
+                    || self.operand_tainted(b)
+                    || self.operand_is_float(a)
+                    || self.operand_is_float(b)
             }
             Rvalue::Nondet(..) => false,
             Rvalue::Havoc(_) => true,
@@ -498,12 +501,12 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Use(o) | Rvalue::Neg(o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)
             }
-            Rvalue::Cast(_, o) => {
-                self.operand_float_tainted(o) || self.operand_is_float(o)
-            }
+            Rvalue::Cast(_, o) => self.operand_float_tainted(o) || self.operand_is_float(o),
             Rvalue::Bin(_, a, b) | Rvalue::Cmp(a, b) => {
-                self.operand_float_tainted(a) || self.operand_float_tainted(b)
-                    || self.operand_is_float(a) || self.operand_is_float(b)
+                self.operand_float_tainted(a)
+                    || self.operand_float_tainted(b)
+                    || self.operand_is_float(a)
+                    || self.operand_is_float(b)
             }
             _ => false,
         }
@@ -528,7 +531,8 @@ impl<'a> ExploreCtx<'a> {
             let zero = self.solver.bv_const(0, elem_width);
             self.solver.const_array(zero, elem_width)
         } else {
-            self.solver.fresh_array(&format!("f_{}_{}", k.0.replace('/', "_"), k.1), elem_width)
+            self.solver
+                .fresh_array(&format!("f_{}_{}", k.0.replace('/', "_"), k.1), elem_width)
         };
         self.field_arrays.insert(k.clone(), arr);
         arr
@@ -566,12 +570,16 @@ impl<'a> ExploreCtx<'a> {
         for (vid_idx, info) in self.body.vars.iter().enumerate() {
             if let roast_ir::VarKind::Local(slot) = info.kind {
                 if info.ty == roast_ir::Ty::Ref {
-                    if let Some(class) = params.iter().find(|(s, _)| *s == slot as usize).map(|(_, c)| c.clone()) {
+                    if let Some(class) = params
+                        .iter()
+                        .find(|(s, _)| *s == slot as usize)
+                        .map(|(_, c)| c.clone())
+                    {
                         let vid = roast_ir::VarId(vid_idx as u32);
                         let t = self.get_var(vid);
                         self.assert_nonzero(t);
                         // Store the declared type so instanceof checks work
-                        let type_id = self.get_type_id(&class) as i64;
+                        let type_id = self.get_type_id(&class);
                         let tid_term = self.solver.bv_const(type_id, 32);
                         let ta = self.solver.array_store(self.type_array, t, tid_term);
                         self.type_array = ta;
@@ -591,12 +599,19 @@ impl<'a> ExploreCtx<'a> {
         while pos < bytes.len() && bytes[pos] != b')' {
             let start = pos;
             match bytes[pos] {
-                b'J' | b'D' => { pos += 1; slot += 2; }
+                b'J' | b'D' => {
+                    pos += 1;
+                    slot += 2;
+                }
                 b'L' => {
                     pos += 1;
                     let class_start = pos;
-                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
-                    let class = std::str::from_utf8(&bytes[class_start..pos]).unwrap_or("").to_string();
+                    while pos < bytes.len() && bytes[pos] != b';' {
+                        pos += 1;
+                    }
+                    let class = std::str::from_utf8(&bytes[class_start..pos])
+                        .unwrap_or("")
+                        .to_string();
                     pos += 1;
                     result.push((slot, class));
                     slot += 1;
@@ -604,18 +619,27 @@ impl<'a> ExploreCtx<'a> {
                 b'[' => {
                     // Array type: [L...; or [I etc — the full descriptor is the class
                     let arr_start = start;
-                    while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] == b'[' {
+                        pos += 1;
+                    }
                     if pos < bytes.len() && bytes[pos] == b'L' {
-                        while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                        while pos < bytes.len() && bytes[pos] != b';' {
+                            pos += 1;
+                        }
                         pos += 1;
                     } else if pos < bytes.len() {
                         pos += 1;
                     }
-                    let class = std::str::from_utf8(&bytes[arr_start..pos]).unwrap_or("").to_string();
+                    let class = std::str::from_utf8(&bytes[arr_start..pos])
+                        .unwrap_or("")
+                        .to_string();
                     result.push((slot, class));
                     slot += 1;
                 }
-                _ => { pos += 1; slot += 1; }
+                _ => {
+                    pos += 1;
+                    slot += 1;
+                }
             }
         }
         result
@@ -665,9 +689,9 @@ impl<'a> ExploreCtx<'a> {
             self.solver.assert(pc);
         }
         self.solver.assert(extra);
-        let res = self.solver.check_sat();
+        
         // Don't pop yet — caller may need to extract witness
-        res
+        self.solver.check_sat()
     }
 
     fn extract_witness(&mut self) -> Witness {

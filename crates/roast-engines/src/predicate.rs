@@ -224,7 +224,7 @@ impl Lattice for PredState {
         for (sv, ov) in self.values.iter().zip(other.values.iter()) {
             match (sv, ov) {
                 (Some(a), Some(b)) if a != b => return false, // contradicts
-                (Some(_), None) => {} // self knows more, that's fine for ≤
+                (Some(_), None) => {}                         // self knows more, that's fine for ≤
                 (None, Some(_)) => return false, // other knows more, self doesn't cover
                 _ => {}
             }
@@ -304,19 +304,15 @@ impl Cpa for PredicateCpa {
                         for (i, pred) in prec.predicates.iter().enumerate() {
                             if pred.mentions(*v) {
                                 // Try to re-evaluate if the rvalue is simple.
-                                next.values[i] = evaluate_predicate_after_assign(
-                                    pred, *v, rv, state, prec,
-                                );
+                                next.values[i] =
+                                    evaluate_predicate_after_assign(pred, *v, rv, state, prec);
                             }
                         }
                     }
-                    Stmt::Assume(op) => {
-                        // If the operand is definitely zero, path is infeasible.
-                        // Check if any predicate gives us information about this.
-                        if let Operand::Const(Const::Int(0)) = op {
-                            return vec![]; // assume(false) prunes
-                        }
-                    }
+                    // assume(false) prunes the path outright. Anything else
+                    // needs a predicate to say something about it, which the
+                    // precision may or may not carry.
+                    Stmt::Assume(Operand::Const(Const::Int(0))) => return vec![],
                     _ => {}
                 }
                 vec![next]
@@ -339,12 +335,7 @@ impl Cpa for PredicateCpa {
                             for (i, pred) in prec.predicates.iter().enumerate() {
                                 if predicate_matches_comparison(pred, comp, a, b) {
                                     next.values[i] = Some(true);
-                                } else if predicate_matches_comparison(
-                                    pred,
-                                    comp.negate(),
-                                    a,
-                                    b,
-                                ) {
+                                } else if predicate_matches_comparison(pred, comp.negate(), a, b) {
                                     next.values[i] = Some(false);
                                 }
                             }
@@ -420,8 +411,8 @@ fn eval_comp(op: CompOp, a: i64, b: i64) -> bool {
 /// Get the known constant value of a variable from the predicate state.
 fn get_known_value(prec: &PredPrec, state: &PredState, v: VarId) -> Option<i64> {
     for (i, pred) in prec.predicates.iter().enumerate() {
-        if state.values.get(i) == Some(&Some(true)) {
-            if pred.op == CompOp::Eq {
+        if state.values.get(i) == Some(&Some(true))
+            && pred.op == CompOp::Eq {
                 if let (PredicateOperand::Var(x), PredicateOperand::Const(c)) =
                     (&pred.lhs, &pred.rhs)
                 {
@@ -430,17 +421,11 @@ fn get_known_value(prec: &PredPrec, state: &PredState, v: VarId) -> Option<i64> 
                     }
                 }
             }
-        }
     }
     None
 }
 
-fn predicate_matches_comparison(
-    pred: &Predicate,
-    comp: CompOp,
-    a: &Operand,
-    b: &Operand,
-) -> bool {
+fn predicate_matches_comparison(pred: &Predicate, comp: CompOp, a: &Operand, b: &Operand) -> bool {
     let lhs_matches = match (&pred.lhs, a) {
         (PredicateOperand::Var(pv), Operand::Var(ov)) => *pv == *ov,
         (PredicateOperand::Const(pc), Operand::Const(Const::Int(oc))) => *pc == *oc as i64,
@@ -496,8 +481,8 @@ fn parse_predicate_atom(atom: &str) -> Option<Predicate> {
 }
 
 fn parse_predicate_operand(s: &str) -> Option<PredicateOperand> {
-    if s.starts_with('v') {
-        let num: u32 = s[1..].parse().ok()?;
+    if let Some(rest) = s.strip_prefix('v') {
+        let num: u32 = rest.parse().ok()?;
         Some(PredicateOperand::Var(VarId(num)))
     } else if let Ok(n) = s.parse::<i64>() {
         Some(PredicateOperand::Const(n))

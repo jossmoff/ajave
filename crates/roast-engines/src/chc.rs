@@ -32,6 +32,12 @@ pub struct ChcEngine {
     done: bool,
 }
 
+impl Default for ChcEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChcEngine {
     pub fn new() -> Self {
         // Try to find z3 on PATH.
@@ -254,7 +260,8 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
                         // Emit error rule: if this block is reachable and
                         // the safety condition is zero, error is reachable.
                         let ob = body.obligation(*oid);
-                        let cond_expr = smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
+                        let cond_expr =
+                            smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
                         let mut error_conds = constraints.clone();
                         error_conds.push(BitvectorTheory.encode_is_zero(&cond_expr));
                         error_conds.push(block_app(block.id.0));
@@ -298,7 +305,9 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
 
             format!(
                 "(assert (forall ({}) (=> {} {})))\n",
-                forall_both, body_expr, block_app_dst(target_bid)
+                forall_both,
+                body_expr,
+                block_app_dst(target_bid)
             )
         };
 
@@ -313,13 +322,17 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
                 out.push_str(&mk_trans(then_.0, &[nz]));
                 out.push_str(&mk_trans(else_.0, &[z]));
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 let val_expr = smt_text::encode_operand(&BitvectorTheory, value, &var_map);
                 let mut neg_cases = Vec::new();
                 for (cv, target) in cases {
                     let cv_encoded = BitvectorTheory.encode_int(*cv);
                     let eq = format!("(= {} {})", val_expr, cv_encoded);
-                    out.push_str(&mk_trans(target.0, &[eq.clone()]));
+                    out.push_str(&mk_trans(target.0, std::slice::from_ref(&eq)));
                     neg_cases.push(format!("(not {})", eq));
                 }
                 out.push_str(&mk_trans(default.0, &neg_cases));
@@ -334,7 +347,6 @@ fn encode_chc(body: &Body, obligations: &[ObligationId]) -> String {
 
     out
 }
-
 
 /// Run the CHC solver and parse results.
 fn run_chc_solver(

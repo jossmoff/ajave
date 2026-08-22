@@ -26,59 +26,112 @@ impl<'a> ExploreCtx<'a> {
         match target.class.as_str() {
             "java/lang/Math" | "java/lang/StrictMath" => matches!(
                 target.name.as_str(),
-                "abs" | "min" | "max" | "addExact" | "subtractExact"
-                    | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
+                "abs"
+                    | "min"
+                    | "max"
+                    | "addExact"
+                    | "subtractExact"
+                    | "multiplyExact"
+                    | "negateExact"
+                    | "floorDiv"
+                    | "floorMod"
             ),
             "java/lang/Integer" => matches!(
                 target.name.as_str(),
-                "parseInt" | "max" | "min" | "sum"
-                    | "signum" | "toUnsignedLong"
-                    | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                    | "compare" | "compareTo" | "hashCode"
-                    | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                    | "rotateLeft" | "rotateRight"
-                    | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                "parseInt"
+                    | "max"
+                    | "min"
+                    | "sum"
+                    | "signum"
+                    | "toUnsignedLong"
+                    | "divideUnsigned"
+                    | "remainderUnsigned"
+                    | "compareUnsigned"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "highestOneBit"
+                    | "lowestOneBit"
+                    | "rotateLeft"
+                    | "rotateRight"
+                    | "bitCount"
+                    | "numberOfLeadingZeros"
+                    | "numberOfTrailingZeros"
                     | "reverse"
             ),
             "java/lang/Long" => matches!(
                 target.name.as_str(),
-                "parseLong" | "max" | "min" | "sum" | "signum"
-                    | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                    | "compare" | "compareTo" | "hashCode"
-                    | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                    | "rotateLeft" | "rotateRight"
-                    | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                "parseLong"
+                    | "max"
+                    | "min"
+                    | "sum"
+                    | "signum"
+                    | "divideUnsigned"
+                    | "remainderUnsigned"
+                    | "compareUnsigned"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "highestOneBit"
+                    | "lowestOneBit"
+                    | "rotateLeft"
+                    | "rotateRight"
+                    | "bitCount"
+                    | "numberOfLeadingZeros"
+                    | "numberOfTrailingZeros"
                     | "reverse"
             ),
             "java/lang/Short" => matches!(
                 target.name.as_str(),
-                "compare" | "compareTo" | "hashCode" | "reverseBytes"
-                    | "toUnsignedInt" | "toUnsignedLong"
+                "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "toUnsignedInt"
+                    | "toUnsignedLong"
                     | "parseShort"
             ),
             "java/lang/Byte" => matches!(
                 target.name.as_str(),
-                "compare" | "compareTo" | "hashCode"
-                    | "toUnsignedInt" | "toUnsignedLong"
+                "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "toUnsignedInt"
+                    | "toUnsignedLong"
                     | "parseByte"
             ),
             "java/lang/Character" => matches!(
                 target.name.as_str(),
-                "compare" | "compareTo" | "hashCode" | "reverseBytes"
-                    | "isDigit" | "isLetter" | "isLetterOrDigit"
-                    | "isUpperCase" | "isLowerCase" | "isWhitespace" | "isSpaceChar"
-                    | "isAlphabetic" | "isBmpCodePoint"
-                    | "toUpperCase" | "toLowerCase"
-                    | "charCount" | "isValidCodePoint"
-                    | "isSupplementaryCodePoint" | "isISOControl"
-                    | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                    | "isJavaLetter" | "isJavaLetterOrDigit"
-                    | "toCodePoint" | "digit" | "forDigit"
+                "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "isDigit"
+                    | "isLetter"
+                    | "isLetterOrDigit"
+                    | "isUpperCase"
+                    | "isLowerCase"
+                    | "isWhitespace"
+                    | "isSpaceChar"
+                    | "isAlphabetic"
+                    | "isBmpCodePoint"
+                    | "toUpperCase"
+                    | "toLowerCase"
+                    | "charCount"
+                    | "isValidCodePoint"
+                    | "isSupplementaryCodePoint"
+                    | "isISOControl"
+                    | "isJavaIdentifierStart"
+                    | "isJavaIdentifierPart"
+                    | "isJavaLetter"
+                    | "isJavaLetterOrDigit"
+                    | "toCodePoint"
+                    | "digit"
+                    | "forDigit"
             ),
-            "java/lang/Boolean" => matches!(
-                target.name.as_str(),
-                "compareTo"
-            ),
+            "java/lang/Boolean" => matches!(target.name.as_str(), "compareTo"),
             _ => false,
         }
     }
@@ -94,19 +147,27 @@ impl<'a> ExploreCtx<'a> {
                 b'J' | b'D' => 64,
                 b'L' => {
                     // Skip to ';'
-                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] != b';' {
+                        pos += 1;
+                    }
                     32
                 }
                 b'[' => {
-                    while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] == b'[' {
+                        pos += 1;
+                    }
                     if pos < bytes.len() && bytes[pos] == b'L' {
-                        while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                        while pos < bytes.len() && bytes[pos] != b';' {
+                            pos += 1;
+                        }
                     }
                     32
                 }
                 _ => 32,
             };
-            if i == idx { return w; }
+            if i == idx {
+                return w;
+            }
             pos += 1;
             i += 1;
         }
@@ -215,8 +276,10 @@ impl<'a> ExploreCtx<'a> {
                 let inner = self.solver.ite(eq, zero, one);
                 self.solver.ite(lt, mone, inner)
             }
-            ("java/lang/Integer", "parseInt") | ("java/lang/Long", "parseLong")
-            | ("java/lang/Short", "parseShort") | ("java/lang/Byte", "parseByte") => {
+            ("java/lang/Integer", "parseInt")
+            | ("java/lang/Long", "parseLong")
+            | ("java/lang/Short", "parseShort")
+            | ("java/lang/Byte", "parseByte") => {
                 let w = if class == "java/lang/Long" { 64 } else { 32 };
                 self.solver.fresh_bv("parse", w)
             }
@@ -239,9 +302,10 @@ impl<'a> ExploreCtx<'a> {
                 self.solver.bvsub(a, b)
             }
             // hashCode for Integer/Short/Byte/Character: identity function
-            ("java/lang/Integer" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Character", "hashCode") => {
-                self.encode_operand(&args[0])
-            }
+            (
+                "java/lang/Integer" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Character",
+                "hashCode",
+            ) => self.encode_operand(&args[0]),
             // Long.hashCode(long): (int)(value ^ (value >>> 32))
             ("java/lang/Long", "hashCode") => {
                 let a = self.encode_operand(&args[0]);
@@ -353,7 +417,11 @@ impl<'a> ExploreCtx<'a> {
                 let wc = self.solver.bv_const(w as i64, w);
                 // Mask distance to [0, w) — but d is 32-bit for both int and long
                 // For Long.rotateLeft(long, int): d is 32-bit, need to extend
-                let d_w = if w == 64 { self.solver.zero_extend(d, 32) } else { d };
+                let d_w = if w == 64 {
+                    self.solver.zero_extend(d, 32)
+                } else {
+                    d
+                };
                 let mask = self.solver.bv_const(w as i64 - 1, w);
                 let dist = self.solver.bvand(d_w, mask);
                 let complement = self.solver.bvsub(wc, dist);
@@ -367,7 +435,11 @@ impl<'a> ExploreCtx<'a> {
                 let d = self.encode_operand(&args[1]);
                 let w = arg0_w;
                 let wc = self.solver.bv_const(w as i64, w);
-                let d_w = if w == 64 { self.solver.zero_extend(d, 32) } else { d };
+                let d_w = if w == 64 {
+                    self.solver.zero_extend(d, 32)
+                } else {
+                    d
+                };
                 let mask = self.solver.bv_const(w as i64 - 1, w);
                 let dist = self.solver.bvand(d_w, mask);
                 let complement = self.solver.bvsub(wc, dist);
@@ -466,7 +538,11 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Long", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = ("java/lang/Long".to_string(), "$$value".to_string(), "J".to_string());
+                let k = (
+                    "java/lang/Long".to_string(),
+                    "$$value".to_string(),
+                    "J".to_string(),
+                );
                 let w = 64u32;
                 let arr = self.get_field_array(&k, w);
                 let a = self.solver.array_select(arr, this_ref);
@@ -543,9 +619,7 @@ impl<'a> ExploreCtx<'a> {
             (_, _) if self.is_char_or_wrapper_util(class, name) => {
                 self.encode_char_wrapper_call(class, name, args)
             }
-            _ => {
-                self.solver.fresh_bv("math_hv", 32)
-            }
+            _ => self.solver.fresh_bv("math_hv", 32),
         }
     }
 
@@ -553,15 +627,28 @@ impl<'a> ExploreCtx<'a> {
         match class {
             "java/lang/Character" => matches!(
                 name,
-                "isDigit" | "isLetter" | "isLetterOrDigit"
-                    | "isUpperCase" | "isLowerCase" | "isWhitespace" | "isSpaceChar"
-                    | "isAlphabetic" | "isBmpCodePoint"
-                    | "toUpperCase" | "toLowerCase"
-                    | "charCount" | "isValidCodePoint"
-                    | "isSupplementaryCodePoint" | "isISOControl"
-                    | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                    | "isJavaLetter" | "isJavaLetterOrDigit"
-                    | "toCodePoint" | "digit" | "forDigit"
+                "isDigit"
+                    | "isLetter"
+                    | "isLetterOrDigit"
+                    | "isUpperCase"
+                    | "isLowerCase"
+                    | "isWhitespace"
+                    | "isSpaceChar"
+                    | "isAlphabetic"
+                    | "isBmpCodePoint"
+                    | "toUpperCase"
+                    | "toLowerCase"
+                    | "charCount"
+                    | "isValidCodePoint"
+                    | "isSupplementaryCodePoint"
+                    | "isISOControl"
+                    | "isJavaIdentifierStart"
+                    | "isJavaIdentifierPart"
+                    | "isJavaLetter"
+                    | "isJavaLetterOrDigit"
+                    | "toCodePoint"
+                    | "digit"
+                    | "forDigit"
             ),
             _ => false,
         }
@@ -764,7 +851,7 @@ impl<'a> ExploreCtx<'a> {
                 let c9 = self.solver.bv_const(0x39, 32); // '9'
                 let ca = self.solver.bv_const(0x61, 32); // 'a'
                 let cb = self.solver.bv_const(0x41, 32); // 'A'
-                // digit value from '0'-'9': c - '0'
+                                                         // digit value from '0'-'9': c - '0'
                 let dval = self.solver.bvsub(c, c0);
                 let ge0 = self.solver.bvsge(c, c0);
                 let le9 = self.solver.bvsle(c, c9);
@@ -979,11 +1066,7 @@ impl<'a> ExploreCtx<'a> {
                 let val = if target.desc == "()Ljava/lang/String;" {
                     // Instance: unbox $$value from receiver
                     let recv = self.encode_operand(args.first()?);
-                    let fk = (
-                        target.class.clone(),
-                        "$$value".to_string(),
-                        "I".to_string(),
-                    );
+                    let fk = (target.class.clone(), "$$value".to_string(), "I".to_string());
                     let arr = self.get_field_array(&fk, 32);
                     self.solver.array_select(arr, recv)
                 } else {
@@ -993,9 +1076,7 @@ impl<'a> ExploreCtx<'a> {
                 Some((one, Some(result)))
             }
             // Character.toString(char) — approximate with fresh string of length 1
-            ("java/lang/Character", "toString")
-                if target.desc.contains(")Ljava/lang/String;") =>
-            {
+            ("java/lang/Character", "toString") if target.desc.contains(")Ljava/lang/String;") => {
                 let s = self.solver.fresh_str("char_str");
                 let len = self.solver.str_len(s);
                 let one_int = self.solver.int_const(1);
@@ -1013,7 +1094,7 @@ impl<'a> ExploreCtx<'a> {
                 if target.desc.starts_with("(Z)") {
                     let zero = self.solver.bv_const(0, 32);
                     let eq = self.solver.bveq(val, zero);
-                let is_nz = self.solver.not(eq);
+                    let is_nz = self.solver.not(eq);
                     let s_true = self.solver.str_const("true");
                     let s_false = self.solver.str_const("false");
                     let result = self.solver.ite(is_nz, s_true, s_false);
@@ -1026,7 +1107,11 @@ impl<'a> ExploreCtx<'a> {
                     self.solver.assert(len_eq);
                     Some((one, Some(s)))
                 } else {
-                    let w = if target.desc.starts_with("(J)") { 64 } else { 32 };
+                    let w = if target.desc.starts_with("(J)") {
+                        64
+                    } else {
+                        32
+                    };
                     let result = self.signed_bv_to_str(val, w);
                     Some((one, Some(result)))
                 }
@@ -1147,7 +1232,9 @@ impl<'a> ExploreCtx<'a> {
                 let ref_term = self.solver.bv_const(id, 32);
                 let type_id = self.get_type_id(class);
                 let type_id_term = self.solver.bv_const(type_id, 32);
-                let new_ta = self.solver.array_store(self.type_array, ref_term, type_id_term);
+                let new_ta = self
+                    .solver
+                    .array_store(self.type_array, ref_term, type_id_term);
                 self.type_array = new_ta;
                 ref_term
             }

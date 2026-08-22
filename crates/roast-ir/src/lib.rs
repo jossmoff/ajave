@@ -408,7 +408,10 @@ impl Program {
     pub fn resolve_field_class(&self, class: &str, name: &str, desc: &str) -> String {
         let mut cur = class.to_string();
         loop {
-            if self.declared_fields.contains(&(cur.clone(), name.to_string(), desc.to_string())) {
+            if self
+                .declared_fields
+                .contains(&(cur.clone(), name.to_string(), desc.to_string()))
+            {
                 return cur;
             }
             match self.supers.get(&cur) {
@@ -448,9 +451,7 @@ impl Program {
             return false;
         }
         // Any array type is also a subtype of Cloneable and Serializable
-        if sub.starts_with('[')
-            && (sup == "java/lang/Cloneable" || sup == "java/io/Serializable")
-        {
+        if sub.starts_with('[') && (sup == "java/lang/Cloneable" || sup == "java/io/Serializable") {
             return true;
         }
         let mut cur = sub.to_string();
@@ -509,7 +510,12 @@ impl Program {
             for b in &body.blocks {
                 for s in &b.stmts {
                     match s {
-                        Stmt::Assign(_, Rvalue::Call { target, is_virtual, .. }) => {
+                        Stmt::Assign(
+                            _,
+                            Rvalue::Call {
+                                target, is_virtual, ..
+                            },
+                        ) => {
                             work.push(target.clone());
                             if *is_virtual {
                                 for r in self.devirtualise(target) {

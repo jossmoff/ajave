@@ -65,20 +65,37 @@ impl<'a> ExploreCtx<'a> {
             let av = av.or_else(|| self.vars.get(&vid).copied());
             let bv = bv.or_else(|| self.vars.get(&vid).copied());
             match (av, bv) {
-                (Some(t), Some(e)) if t == e => { self.vars.insert(vid, t); }
+                (Some(t), Some(e)) if t == e => {
+                    self.vars.insert(vid, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.vars.insert(vid, m);
                 }
-                (Some(t), None) => { self.vars.insert(vid, t); }
-                (None, Some(e)) => { self.vars.insert(vid, e); }
+                (Some(t), None) => {
+                    self.vars.insert(vid, t);
+                }
+                (None, Some(e)) => {
+                    self.vars.insert(vid, e);
+                }
                 (None, None) => {}
             }
         }
 
         // Var widths — pick whichever was assigned
-        for vid in a.var_widths.keys().chain(b.var_widths.keys()).copied().collect::<HashSet<_>>() {
-            let w = a.var_widths.get(&vid).or_else(|| b.var_widths.get(&vid)).copied().unwrap_or(32);
+        for vid in a
+            .var_widths
+            .keys()
+            .chain(b.var_widths.keys())
+            .copied()
+            .collect::<HashSet<_>>()
+        {
+            let w = a
+                .var_widths
+                .get(&vid)
+                .or_else(|| b.var_widths.get(&vid))
+                .copied()
+                .unwrap_or(32);
             self.var_widths.insert(vid, w);
         }
 
@@ -86,28 +103,48 @@ impl<'a> ExploreCtx<'a> {
         let all_sk: HashSet<_> = a.statics.keys().chain(b.statics.keys()).cloned().collect();
         for k in all_sk {
             match (a.statics.get(&k).copied(), b.statics.get(&k).copied()) {
-                (Some(t), Some(e)) if t == e => { self.statics.insert(k, t); }
+                (Some(t), Some(e)) if t == e => {
+                    self.statics.insert(k, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.statics.insert(k, m);
                 }
-                (Some(t), None) => { self.statics.insert(k, t); }
-                (None, Some(e)) => { self.statics.insert(k, e); }
+                (Some(t), None) => {
+                    self.statics.insert(k, t);
+                }
+                (None, Some(e)) => {
+                    self.statics.insert(k, e);
+                }
                 (None, None) => {}
             }
         }
 
         // Instance field arrays
-        let all_fk: HashSet<_> = a.field_arrays.keys().chain(b.field_arrays.keys()).cloned().collect();
+        let all_fk: HashSet<_> = a
+            .field_arrays
+            .keys()
+            .chain(b.field_arrays.keys())
+            .cloned()
+            .collect();
         for k in all_fk {
-            match (a.field_arrays.get(&k).copied(), b.field_arrays.get(&k).copied()) {
-                (Some(t), Some(e)) if t == e => { self.field_arrays.insert(k, t); }
+            match (
+                a.field_arrays.get(&k).copied(),
+                b.field_arrays.get(&k).copied(),
+            ) {
+                (Some(t), Some(e)) if t == e => {
+                    self.field_arrays.insert(k, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.field_arrays.insert(k, m);
                 }
-                (Some(t), None) => { self.field_arrays.insert(k, t); }
-                (None, Some(e)) => { self.field_arrays.insert(k, e); }
+                (Some(t), None) => {
+                    self.field_arrays.insert(k, t);
+                }
+                (None, Some(e)) => {
+                    self.field_arrays.insert(k, e);
+                }
                 (None, None) => {}
             }
         }
@@ -116,12 +153,12 @@ impl<'a> ExploreCtx<'a> {
         let base_arr = self.array_map.clone();
         for entry in &a.array_map {
             if !base_arr.iter().any(|(r, _, _)| *r == entry.0) {
-                self.array_map.push(entry.clone());
+                self.array_map.push(*entry);
             }
         }
         for entry in &b.array_map {
             if !self.array_map.iter().any(|(r, _, _)| *r == entry.0) {
-                self.array_map.push(entry.clone());
+                self.array_map.push(*entry);
             }
         }
 
@@ -140,11 +177,18 @@ impl<'a> ExploreCtx<'a> {
         self.path_tainted = a.path_tainted || b.path_tainted;
 
         // String vars
-        let all_sv: HashSet<VarId> = a.str_vars.keys().chain(b.str_vars.keys()).copied().collect();
+        let all_sv: HashSet<VarId> = a
+            .str_vars
+            .keys()
+            .chain(b.str_vars.keys())
+            .copied()
+            .collect();
         self.str_vars.clear();
         for vid in all_sv {
             match (a.str_vars.get(&vid).copied(), b.str_vars.get(&vid).copied()) {
-                (Some(t), Some(e)) if t == e => { self.str_vars.insert(vid, t); }
+                (Some(t), Some(e)) if t == e => {
+                    self.str_vars.insert(vid, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.str_vars.insert(vid, m);
@@ -154,33 +198,55 @@ impl<'a> ExploreCtx<'a> {
         }
 
         // Static strings
-        let all_ss: HashSet<_> = a.static_str.keys().chain(b.static_str.keys()).cloned().collect();
+        let all_ss: HashSet<_> = a
+            .static_str
+            .keys()
+            .chain(b.static_str.keys())
+            .cloned()
+            .collect();
         self.static_str.clear();
         for k in all_ss {
             match (a.static_str.get(&k).copied(), b.static_str.get(&k).copied()) {
-                (Some(t), Some(e)) if t == e => { self.static_str.insert(k, t); }
+                (Some(t), Some(e)) if t == e => {
+                    self.static_str.insert(k, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.static_str.insert(k, m);
                 }
-                (Some(t), None) => { self.static_str.insert(k, t); }
-                (None, Some(e)) => { self.static_str.insert(k, e); }
+                (Some(t), None) => {
+                    self.static_str.insert(k, t);
+                }
+                (None, Some(e)) => {
+                    self.static_str.insert(k, e);
+                }
                 (None, None) => {}
             }
         }
 
         // Instance field strings
-        let all_fs: HashSet<_> = a.field_str.keys().chain(b.field_str.keys()).cloned().collect();
+        let all_fs: HashSet<_> = a
+            .field_str
+            .keys()
+            .chain(b.field_str.keys())
+            .cloned()
+            .collect();
         self.field_str.clear();
         for k in all_fs {
             match (a.field_str.get(&k).copied(), b.field_str.get(&k).copied()) {
-                (Some(t), Some(e)) if t == e => { self.field_str.insert(k, t); }
+                (Some(t), Some(e)) if t == e => {
+                    self.field_str.insert(k, t);
+                }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.field_str.insert(k, m);
                 }
-                (Some(t), None) => { self.field_str.insert(k, t); }
-                (None, Some(e)) => { self.field_str.insert(k, e); }
+                (Some(t), None) => {
+                    self.field_str.insert(k, t);
+                }
+                (None, Some(e)) => {
+                    self.field_str.insert(k, e);
+                }
                 (None, None) => {}
             }
         }
@@ -192,15 +258,27 @@ impl<'a> ExploreCtx<'a> {
         // Vars — fall back to pre-branch value (self.vars) for missing sides
         let all_vids: HashSet<VarId> = case.vars.keys().chain(acc.vars.keys()).copied().collect();
         for vid in all_vids {
-            let cv = case.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
-            let av = acc.vars.get(&vid).copied().or_else(|| self.vars.get(&vid).copied());
+            let cv = case
+                .vars
+                .get(&vid)
+                .copied()
+                .or_else(|| self.vars.get(&vid).copied());
+            let av = acc
+                .vars
+                .get(&vid)
+                .copied()
+                .or_else(|| self.vars.get(&vid).copied());
             match (cv, av) {
-                (Some(a), Some(b)) if a == b => { acc.vars.insert(vid, a); }
+                (Some(a), Some(b)) if a == b => {
+                    acc.vars.insert(vid, a);
+                }
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
                     acc.vars.insert(vid, m);
                 }
-                (Some(a), None) => { acc.vars.insert(vid, a); }
+                (Some(a), None) => {
+                    acc.vars.insert(vid, a);
+                }
                 (None, Some(_)) | (None, None) => {}
             }
         }
@@ -209,7 +287,12 @@ impl<'a> ExploreCtx<'a> {
             acc.var_widths.entry(vid).or_insert(w);
         }
         // Statics
-        let all_sk: HashSet<_> = case.statics.keys().chain(acc.statics.keys()).cloned().collect();
+        let all_sk: HashSet<_> = case
+            .statics
+            .keys()
+            .chain(acc.statics.keys())
+            .cloned()
+            .collect();
         for k in all_sk {
             match (case.statics.get(&k).copied(), acc.statics.get(&k).copied()) {
                 (Some(a), Some(b)) if a == b => {}
@@ -217,27 +300,39 @@ impl<'a> ExploreCtx<'a> {
                     let m = self.solver.ite(cond, a, b);
                     acc.statics.insert(k, m);
                 }
-                (Some(a), None) => { acc.statics.insert(k, a); }
+                (Some(a), None) => {
+                    acc.statics.insert(k, a);
+                }
                 _ => {}
             }
         }
         // Field arrays
-        let all_fk: HashSet<_> = case.field_arrays.keys().chain(acc.field_arrays.keys()).cloned().collect();
+        let all_fk: HashSet<_> = case
+            .field_arrays
+            .keys()
+            .chain(acc.field_arrays.keys())
+            .cloned()
+            .collect();
         for k in all_fk {
-            match (case.field_arrays.get(&k).copied(), acc.field_arrays.get(&k).copied()) {
+            match (
+                case.field_arrays.get(&k).copied(),
+                acc.field_arrays.get(&k).copied(),
+            ) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
                     acc.field_arrays.insert(k, m);
                 }
-                (Some(a), None) => { acc.field_arrays.insert(k, a); }
+                (Some(a), None) => {
+                    acc.field_arrays.insert(k, a);
+                }
                 _ => {}
             }
         }
         // Array map: union
         for entry in &case.array_map {
             if !acc.array_map.iter().any(|(r, _, _)| *r == entry.0) {
-                acc.array_map.push(entry.clone());
+                acc.array_map.push(*entry);
             }
         }
         // Type array
@@ -251,9 +346,17 @@ impl<'a> ExploreCtx<'a> {
         acc.field_tainted = &acc.field_tainted | &case.field_tainted;
         acc.path_tainted = acc.path_tainted || case.path_tainted;
         // String vars
-        let all_sv: HashSet<VarId> = case.str_vars.keys().chain(acc.str_vars.keys()).copied().collect();
+        let all_sv: HashSet<VarId> = case
+            .str_vars
+            .keys()
+            .chain(acc.str_vars.keys())
+            .copied()
+            .collect();
         for vid in all_sv {
-            match (case.str_vars.get(&vid).copied(), acc.str_vars.get(&vid).copied()) {
+            match (
+                case.str_vars.get(&vid).copied(),
+                acc.str_vars.get(&vid).copied(),
+            ) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
@@ -263,28 +366,48 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         // Static strings
-        let all_ss: HashSet<_> = case.static_str.keys().chain(acc.static_str.keys()).cloned().collect();
+        let all_ss: HashSet<_> = case
+            .static_str
+            .keys()
+            .chain(acc.static_str.keys())
+            .cloned()
+            .collect();
         for k in all_ss {
-            match (case.static_str.get(&k).copied(), acc.static_str.get(&k).copied()) {
+            match (
+                case.static_str.get(&k).copied(),
+                acc.static_str.get(&k).copied(),
+            ) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
                     acc.static_str.insert(k, m);
                 }
-                (Some(a), None) => { acc.static_str.insert(k, a); }
+                (Some(a), None) => {
+                    acc.static_str.insert(k, a);
+                }
                 _ => {}
             }
         }
         // Instance field strings
-        let all_fs: HashSet<_> = case.field_str.keys().chain(acc.field_str.keys()).cloned().collect();
+        let all_fs: HashSet<_> = case
+            .field_str
+            .keys()
+            .chain(acc.field_str.keys())
+            .cloned()
+            .collect();
         for k in all_fs {
-            match (case.field_str.get(&k).copied(), acc.field_str.get(&k).copied()) {
+            match (
+                case.field_str.get(&k).copied(),
+                acc.field_str.get(&k).copied(),
+            ) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
                     acc.field_str.insert(k, m);
                 }
-                (Some(a), None) => { acc.field_str.insert(k, a); }
+                (Some(a), None) => {
+                    acc.field_str.insert(k, a);
+                }
                 _ => {}
             }
         }
@@ -313,8 +436,12 @@ impl<'a> ExploreCtx<'a> {
         let base_len = self.nondet_terms.len();
         for state in states {
             for nd in &state.nondet_terms[base_len..] {
-                if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
-                    self.nondet_terms.push(nd.clone());
+                if !self
+                    .nondet_terms
+                    .iter()
+                    .any(|(idx, _, _, _, _)| *idx == nd.0)
+                {
+                    self.nondet_terms.push(*nd);
                 }
             }
         }
@@ -324,10 +451,10 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn collect_nondets_binary(&mut self, a: &SavedState, b: &SavedState) {
         let base_len = self.nondet_terms.len();
         for nd in &a.nondet_terms[base_len..] {
-            self.nondet_terms.push(nd.clone());
+            self.nondet_terms.push(*nd);
         }
         for nd in &b.nondet_terms[base_len..] {
-            self.nondet_terms.push(nd.clone());
+            self.nondet_terms.push(*nd);
         }
     }
 }

@@ -66,7 +66,11 @@ pub fn body_has_loops(body: &Body) -> bool {
 
 /// Walk backward through a block's statements to find the most recent
 /// assignment of `v` to a binary operation `Rvalue::Bin(op, a, b)`.
-pub fn find_defining_bin(body: &Body, block: BlockId, v: VarId) -> Option<(BinOp, &Operand, &Operand)> {
+pub fn find_defining_bin(
+    body: &Body,
+    block: BlockId,
+    v: VarId,
+) -> Option<(BinOp, &Operand, &Operand)> {
     for s in body.block(block).stmts.iter().rev() {
         if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
             if *dv == v {

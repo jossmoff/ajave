@@ -75,7 +75,11 @@ impl Blackboard {
             "blackboard: seeded {} reachable obligations (total assertions in program: {}){}",
             self.statuses.len(),
             self.total_assertions,
-            if assertion_only { " (assertion-only)" } else { "" }
+            if assertion_only {
+                " (assertion-only)"
+            } else {
+                ""
+            }
         );
     }
 

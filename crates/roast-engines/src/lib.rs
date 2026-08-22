@@ -6,21 +6,22 @@
 //! `roast-cli` -- nothing in this crate or `roast-core` should need to
 //! change. See `docs/strategies/` for the write-up of each one.
 
+pub mod ai;
 pub mod body_analysis;
 pub mod body_shape;
-pub mod ai;
 pub mod cegar;
 pub mod chc;
 pub mod concrete;
-mod math_eval;
-mod str_eval;
 pub mod imc;
 pub mod interpolation;
 pub mod interval;
 pub mod kinduction;
+mod math_eval;
+#[cfg(feature = "nra")]
 pub mod nra;
 pub mod predicate;
 pub mod presolve;
 pub mod smt_bmc;
 pub mod smt_encode;
 pub mod smt_text;
+mod str_eval;

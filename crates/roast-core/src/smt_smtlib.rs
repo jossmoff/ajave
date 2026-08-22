@@ -282,10 +282,14 @@ impl Solver for SmtLib {
         let en = self.name(else_);
         let cached = Self::sort_str(sort);
         if !cached.is_empty() {
-            self.send(&format!("(define-const {name} {cached} (ite {cn} {tn} {en}))"));
+            self.send(&format!(
+                "(define-const {name} {cached} (ite {cn} {tn} {en}))"
+            ));
         } else {
             let sort_s = Self::sort_str_dynamic(sort);
-            self.send(&format!("(define-const {name} {sort_s} (ite {cn} {tn} {en}))"));
+            self.send(&format!(
+                "(define-const {name} {sort_s} (ite {cn} {tn} {en}))"
+            ));
         }
         self.alloc(name, sort)
     }
@@ -443,7 +447,10 @@ impl Solver for SmtLib {
     }
 
     fn fresh_array(&mut self, name: &str, elem_width: u32) -> Term {
-        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sort = Sort::Array {
+            idx: 32,
+            elem: elem_width,
+        };
         let sname = format!("{name}_{}", self.next_id);
         let cached = Self::sort_str(sort);
         if !cached.is_empty() {
@@ -457,7 +464,10 @@ impl Solver for SmtLib {
 
     fn const_array(&mut self, val: Term, elem_width: u32) -> Term {
         let vn = self.name(val).to_string();
-        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sort = Sort::Array {
+            idx: 32,
+            elem: elem_width,
+        };
         let cached = Self::sort_str(sort);
         let expr = if !cached.is_empty() {
             format!("((as const {cached}) {vn})")
