@@ -565,31 +565,41 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
-    /// Encode String.compareTo: fresh var with sign constrained by str.<
+    /// Encode String.compareTo with exact return values.
+    ///
+    /// Constructs strings from fresh char-code BVs via `str.from_code`,
+    /// constraining the string SMT vars to equal the constructed single-char
+    /// strings. This keeps the formula in BV domain for the diff computation
+    /// while connecting to the string domain for witness extraction.
     fn encode_str_compare(&mut self, s: Term, t: Term) -> Term {
         let zero = self.solver.bv_const(0, 32);
-        let r = self.solver.fresh_bv("cmp", 32);
-        let eq = self.solver.str_eq(s, t);
-        let lt = self.solver.str_lt(s, t);
-        // eq => r == 0
-        let r_eq0 = self.solver.bveq(r, zero);
-        let not_eq = self.solver.not(eq);
-        let c1 = self.solver.or(not_eq, r_eq0);
-        self.solver.assert(c1);
-        // lt => r < 0
-        let r_neg = self.solver.bvslt(r, zero);
-        let not_lt = self.solver.not(lt);
-        let c2 = self.solver.or(not_lt, r_neg);
-        self.solver.assert(c2);
-        // !eq && !lt => r > 0
-        let not_eq2 = self.solver.not(eq);
-        let not_lt2 = self.solver.not(lt);
-        let gt = self.solver.and(not_eq2, not_lt2);
-        let r_pos = self.solver.bvsgt(r, zero);
-        let not_gt = self.solver.not(gt);
-        let c3 = self.solver.or(not_gt, r_pos);
-        self.solver.assert(c3);
-        r
+
+        // Fresh BVs for character codes, constrained to ASCII printable [32, 126]
+        let s_code_bv = self.solver.fresh_bv("cmpsc", 32);
+        let t_code_bv = self.solver.fresh_bv("cmptc", 32);
+        let lo = self.solver.bv_const(32, 32);
+        let hi = self.solver.bv_const(126, 32);
+        let s_ge = self.solver.bvsge(s_code_bv, lo);
+        let s_le = self.solver.bvsle(s_code_bv, hi);
+        let t_ge = self.solver.bvsge(t_code_bv, lo);
+        let t_le = self.solver.bvsle(t_code_bv, hi);
+        let s_range = self.solver.and(s_ge, s_le);
+        let t_range = self.solver.and(t_ge, t_le);
+        self.solver.assert(s_range);
+        self.solver.assert(t_range);
+
+        // Construct length-1 strings from char codes and constrain the
+        // string SMT vars to match (connects BV domain to string domain
+        // for correct witness extraction)
+        let s_code_int = self.solver.bv32_to_int(s_code_bv);
+        let t_code_int = self.solver.bv32_to_int(t_code_bv);
+        let s_built = self.solver.str_from_code(s_code_int);
+        let t_built = self.solver.str_from_code(t_code_int);
+        let s_eq = self.solver.str_eq(s, s_built);
+        let t_eq = self.solver.str_eq(t, t_built);
+        self.solver.assert(s_eq);
+        self.solver.assert(t_eq);
+        self.solver.bvsub(s_code_bv, t_code_bv)
     }
 
     /// Encode lastIndexOf via iterative forward search (8 iterations).

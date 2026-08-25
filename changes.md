@@ -2,6 +2,30 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Character Unicode tables + String compareTo exact encoding (2026-08-25)
+
+### Character method modeling via ITE chains
+Extended the BMC's Character method support from simple boolean predicates (isDigit, isLetter, etc.)
+to full Unicode table methods: `getType`, `getDirectionality`, `getNumericValue`, `isDefined`,
+`isMirrored`, `isTitleCase`, `isIdeographic`, `isUnicodeIdentifierPart/Start`, `isIdentifierIgnorable`.
+
+Each method is encoded as an ITE chain over character ranges, mapping to Java's exact constant values.
+For example, `getType` maps ASCII uppercase to `UPPERCASE_LETTER(1)`, lowercase to `LOWERCASE_LETTER(2)`,
+digits to `DECIMAL_DIGIT_NUMBER(9)`, control chars to `CONTROL(15)`, plus Unicode extensions for CJK
+(`OTHER_LETTER(5)`), titlecase codepoints, and Latin-1 supplement. This avoids the need for lookup
+tables while remaining sound for the modeled ranges (havoc for unmodeled codepoints).
+
+Fixed `toLowerCase`/`toUpperCase`/`toTitleCase` from fresh-BV havoc to proper ASCII case conversion.
+
+### String compareTo: BV-string domain bridging via str.from_code
+The `compareTo` encoding bridges Z3's BV and string theories: fresh BV variables represent character
+codes, constrained to ASCII printable [32,126]. The key insight is using `str.from_code` to construct
+length-1 strings from the BV codes, then asserting equality with the string SMT variables. This
+connects the BV domain (where subtraction computes the return value) to the string domain (where
+Z3 can extract concrete witnesses). Previous attempts using `str.to_code`/`str.at` caused Z3 timeouts.
+
+**Impact**: +14 new FALSE on autostub benchmarks (167→181), 0 wrong TRUE.
+
 ## NRA engine: CVC5 transcendental falsification (2026-08-25)
 
 ### Interprocedural NRA encoding

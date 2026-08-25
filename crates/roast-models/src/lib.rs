@@ -416,6 +416,10 @@ fn is_math_call(owner: &str, name: &str) -> bool {
                 | "isISOControl" | "isSpace"
                 | "isJavaIdentifierStart" | "isJavaIdentifierPart"
                 | "isJavaLetter" | "isJavaLetterOrDigit"
+                | "getType" | "isDefined" | "isMirrored" | "isTitleCase"
+                | "isUnicodeIdentifierPart" | "isUnicodeIdentifierStart"
+                | "isIdentifierIgnorable" | "getDirectionality"
+                | "getNumericValue" | "isIdeographic"
         ),
         "java/lang/Short" => matches!(
             name,

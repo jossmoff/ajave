@@ -163,6 +163,11 @@ TESTS = [
     # Character toUpperCase/toTitleCase: were wrong TRUE (ASCII-only model + ASCII constraint)
     ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_toUpperCase_int.yml", "FALSE"),
     ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_toTitleCase_int.yml", "FALSE"),
+    # Character Unicode table methods: getType, isMirrored, getNumericValue, getDirectionality
+    ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_getType_char.yml", "FALSE"),
+    ("canary", "sv-benchmarks/autostub/Character_public_static_boolean_java_lang_Character_isMirrored_char.yml", "FALSE"),
+    ("canary", "sv-benchmarks/autostub/Character_public_static_int_java_lang_Character_getNumericValue_char.yml", "FALSE"),
+    ("canary", "sv-benchmarks/autostub/Character_public_static_byte_java_lang_Character_getDirectionality_char.yml", "FALSE"),
 
     # CEGAR wrong TRUE: predicate abstraction unsound with havoced heap ops.
     # These were wrongly TRUE when CEGAR's body_uses_havoced_ops guard was removed.
