@@ -72,6 +72,8 @@ fn could_throw_runtime_exception(target: &MethodKey) -> bool {
         return false;
     }
     // Known-safe: String methods that never throw RuntimeException.
+    // NOTE: matches/replaceAll/replaceFirst/split throw PatternSyntaxException
+    // (a RuntimeException) on invalid regex — NOT safe for NRE.
     if class == "java/lang/String"
         && (name == "length" || name == "isEmpty" || name == "equals" || name == "equalsIgnoreCase"
             || name == "hashCode" || name == "toString" || name == "valueOf"
@@ -80,8 +82,7 @@ fn could_throw_runtime_exception(target: &MethodKey) -> bool {
             || name == "toLowerCase" || name == "concat" || name == "replace"
             || name == "compareTo" || name == "compareToIgnoreCase"
             || name == "<init>" || name == "format" || name == "join"
-            || name == "matches" || name == "replaceAll" || name == "replaceFirst"
-            || name == "split" || name == "toCharArray" || name == "getBytes")
+            || name == "toCharArray" || name == "getBytes")
     {
         return false;
     }
