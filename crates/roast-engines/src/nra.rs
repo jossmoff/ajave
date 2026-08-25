@@ -7,6 +7,10 @@
 //! `Kind::Exponential`, `Kind::Sqrt`, etc. SAT models are exact, enabling
 //! both falsification (Under) and verification (Over).
 
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 use cvc5::{Kind, Solver, Term as CvcTerm, TermManager};
 use log::{debug, info};
 use roast_core::artifact::*;
@@ -37,9 +41,12 @@ impl Engine for NraEngine {
     }
 
     fn direction(&self) -> Direction {
-        // Over: UNSAT soundly proves the property.
-        // SAT from CVC5 with native transcendentals is also trustworthy.
-        Direction::Over
+        // Under: SAT from CVC5 with native transcendentals produces
+        // concrete witness values suitable for JVM replay. UNSAT over
+        // reals does NOT imply UNSAT over IEEE 754 floats (NaN, Inf, -0
+        // can violate assertions that hold over R), so we cannot soundly
+        // discharge. Falsification only.
+        Direction::Under
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
@@ -72,10 +79,10 @@ impl Engine for NraEngine {
 
             info!("nra: encoding obligation {:?} for {:?}", oref.id, oref.method);
 
-            match solve_nra(body, oref.id) {
-                NraResult::Sat(model) => {
+            match solve_nra_with_timeout(prog, &oref.method, oref.id, Duration::from_secs(8)) {
+                NraResult::Sat(witness) => {
                     info!("nra: found violation for {}", oref);
-                    let witness = build_witness_from_model(body, &model);
+                    debug!("nra: witness seq={:?} entries={:?}", witness.nondet_sequence, witness.entries);
                     let published = bb.publish(
                         self.id(),
                         Direction::Under,
@@ -119,7 +126,7 @@ impl Engine for NraEngine {
 const MAX_NRA_DEPTH: usize = 50;
 
 enum NraResult {
-    Sat(Vec<(String, f64)>),
+    Sat(Witness),
     Unsat,
     Unknown,
 }
@@ -128,47 +135,139 @@ enum NraResult {
 struct NraPathState<'tm> {
     var_terms: Vec<CvcTerm<'tm>>,
     constraints: Vec<CvcTerm<'tm>>,
+    /// Which body we're currently encoding (for interprocedural DFS).
+    body_key: MethodKey,
 }
 
-fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
+/// Run `solve_nra` in a detached thread with a wall-clock timeout.
+/// If cvc5 hangs (known issue with transcendental theories), the thread
+/// is abandoned and we return Unknown.
+fn solve_nra_with_timeout(
+    prog: &Program,
+    oref_method: &MethodKey,
+    obligation_id: ObligationId,
+    timeout: Duration,
+) -> NraResult {
+    let prog_clone = prog.clone();
+    let method_clone = oref_method.clone();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(solve_nra(&prog_clone, &method_clone, obligation_id));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => {
+            debug!("nra: timeout for {:?}, abandoning cvc5 thread", obligation_id);
+            NraResult::Unknown
+        }
+    }
+}
+
+fn solve_nra(prog: &Program, oref_method: &MethodKey, obligation_id: ObligationId) -> NraResult {
+    if prog.body(oref_method).is_none() {
+        return NraResult::Unknown;
+    }
+
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
 
     solver.set_logic("QF_NRAT");
     solver.set_option("produce-models", "true");
-    solver.set_option("tlimit", "8000");
+    solver.set_option("rlimit", "500000");
 
     let real_sort = tm.real_sort();
-    let n_vars = body.vars.len();
 
-    // Declare all variables as Real constants.
-    let var_consts: Vec<CvcTerm> = (0..n_vars)
-        .map(|i| tm.mk_const(real_sort.clone(), &format!("v{}", i)))
+    // Determine start body: entry if available, else the obligation's own body.
+    let entry_key = prog.entry.as_ref().unwrap_or(oref_method);
+    let start_body = match prog.body(entry_key) {
+        Some(b) => b,
+        None => return NraResult::Unknown,
+    };
+
+    // Create initial var terms for the start body.
+    let start_var_consts: Vec<CvcTerm> = (0..start_body.vars.len())
+        .map(|i| tm.mk_const(real_sort.clone(), &format!("e{}", i)))
         .collect();
 
-    // DFS from entry block, collecting error path constraints.
+    // Track which (body_key, var_index) are Nondet for witness construction.
+    let mut nondet_vars: Vec<(MethodKey, usize, CvcTerm)> = Vec::new();
+
     let initial_state = NraPathState {
-        var_terms: var_consts.clone(),
+        var_terms: start_var_consts.clone(),
         constraints: Vec::new(),
+        body_key: entry_key.clone(),
     };
 
     let mut error_paths: Vec<Vec<CvcTerm>> = Vec::new();
     let mut worklist: Vec<(BlockId, NraPathState, usize)> =
-        vec![(body.entry, initial_state, 0)];
+        vec![(start_body.entry, initial_state, 0)];
 
     while let Some((block_id, mut state, depth)) = worklist.pop() {
         if depth > MAX_NRA_DEPTH {
             continue;
         }
 
+        let body = match prog.body(&state.body_key) {
+            Some(b) => b,
+            None => continue,
+        };
         let block = body.block(block_id);
 
         let mut found_error = false;
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rvalue) => {
-                    let term = encode_rvalue(&tm, rvalue, &state.var_terms);
-                    state.var_terms[vid.0 as usize] = term;
+                    match rvalue {
+                        Rvalue::Call { target, args, .. } => {
+                            // Check if we should inline this call.
+                            if let Some(callee) = prog.body(target) {
+                                // Build callee var terms: params mapped from args.
+                                let mut callee_terms: Vec<CvcTerm> = (0..callee.vars.len())
+                                    .map(|i| {
+                                        tm.mk_const(
+                                            real_sort.clone(),
+                                            &format!("{}_{}", target.name, i),
+                                        )
+                                    })
+                                    .collect();
+                                // Map callee params to caller's argument terms.
+                                for (pi, arg) in args.iter().enumerate() {
+                                    if pi < callee_terms.len() {
+                                        callee_terms[pi] =
+                                            encode_operand(&tm, arg, &state.var_terms);
+                                    }
+                                }
+
+                                let callee_state = NraPathState {
+                                    var_terms: callee_terms,
+                                    constraints: state.constraints.clone(),
+                                    body_key: target.clone(),
+                                };
+                                worklist.push((callee.entry, callee_state, depth + 1));
+                                // Return value is unconstrained in caller.
+                                state.var_terms[vid.0 as usize] =
+                                    tm.mk_const(real_sort.clone(), "_ret");
+                            } else {
+                                // External call: encode normally (may be transcendental).
+                                let term = encode_rvalue(&tm, rvalue, &state.var_terms);
+                                state.var_terms[vid.0 as usize] = term;
+                            }
+                        }
+                        Rvalue::Nondet(_, _) => {
+                            // Track nondet var for witness construction.
+                            let const_term = state.var_terms[vid.0 as usize].clone();
+                            nondet_vars.push((
+                                state.body_key.clone(),
+                                vid.0 as usize,
+                                const_term,
+                            ));
+                            // Keep the fresh const (already initialized).
+                        }
+                        _ => {
+                            let term = encode_rvalue(&tm, rvalue, &state.var_terms);
+                            state.var_terms[vid.0 as usize] = term;
+                        }
+                    }
                 }
                 Stmt::Assume(operand) => {
                     let expr = encode_operand(&tm, operand, &state.var_terms);
@@ -177,7 +276,7 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
                     state.constraints.push(neq);
                 }
                 Stmt::Check(oid) => {
-                    if *oid == obligation_id {
+                    if *oid == obligation_id && state.body_key == *oref_method {
                         let obligation = body.obligation(*oid);
                         let cond = encode_operand(&tm, &obligation.cond, &state.var_terms);
                         let zero = tm.mk_real(0);
@@ -196,6 +295,8 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
             continue;
         }
 
+        // After inlining a call, we still continue processing the caller's
+        // successor blocks (e.g. for obligations after the call in the caller).
         match &block.term {
             Terminator::Goto(target) => {
                 worklist.push((*target, state, depth + 1));
@@ -214,6 +315,7 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
                         ));
                         c
                     },
+                    body_key: state.body_key.clone(),
                 };
                 worklist.push((*then_, then_state, depth + 1));
 
@@ -224,6 +326,7 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
                         c.push(tm.mk_term(Kind::Equal, &[cond_term, zero]));
                         c
                     },
+                    body_key: state.body_key,
                 };
                 worklist.push((*else_, else_state, depth + 1));
             }
@@ -245,6 +348,7 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
                             c.push(eq);
                             c
                         },
+                        body_key: state.body_key.clone(),
                     };
                     worklist.push((*target, case_state, depth + 1));
                     neg_cases.push(tm.mk_term(
@@ -256,11 +360,16 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
                 state.constraints.extend(neg_cases);
                 worklist.push((*default, state, depth + 1));
             }
+            Terminator::Halt => {
+                // Verifier.assume(false) → this path is infeasible, drop it.
+            }
             _ => {}
         }
     }
 
     // Build the assertion: disjunction of error paths.
+    let error_paths_count = error_paths.len();
+    debug!("nra: found {} error paths for {:?}", error_paths_count, obligation_id);
     let assertion = if error_paths.is_empty() {
         tm.mk_false()
     } else {
@@ -286,19 +395,29 @@ fn solve_nra(body: &Body, obligation_id: ObligationId) -> NraResult {
 
     solver.assert_formula(assertion);
 
+    debug!("nra: calling check_sat for {:?} ({} error paths)", obligation_id, error_paths_count);
     let result = solver.check_sat();
+    debug!("nra: check_sat returned for {:?}", obligation_id);
     if result.is_sat() {
-        // Extract model values for parameter variables.
-        let mut model = Vec::new();
-        for (i, vi) in body.vars.iter().enumerate() {
-            if !matches!(vi.kind, VarKind::Local(_)) {
-                break;
-            }
-            let val_term = solver.get_value(var_consts[i].clone());
-            let value = extract_real_value(&val_term);
-            model.push((format!("v{}", i), value));
+        // Build witness from nondet variables (entry body's Verifier.nondet*() calls).
+        if nondet_vars.is_empty() {
+            // Fallback: use callee body params as before.
+            let obl_body = prog.body(oref_method).unwrap();
+            let callee_consts: Vec<CvcTerm> = (0..obl_body.vars.len())
+                .map(|i| tm.mk_const(real_sort.clone(), &format!("e{}", i)))
+                .collect();
+            build_witness_direct(&solver, obl_body, &callee_consts)
+        } else {
+            // Deduplicate nondet_vars by (body_key, var_index) preserving order.
+            let mut seen = std::collections::HashSet::new();
+            let unique_nondets: Vec<_> = nondet_vars
+                .into_iter()
+                .filter(|(bk, idx, _)| seen.insert((bk.clone(), *idx)))
+                .collect();
+
+            let start_body_ref = prog.body(entry_key).unwrap();
+            build_witness_from_nondets(&solver, start_body_ref, &unique_nondets)
         }
-        NraResult::Sat(model)
     } else if result.is_unsat() {
         NraResult::Unsat
     } else {
@@ -623,63 +742,90 @@ fn encode_transcendental_call<'tm>(
     }
 }
 
-fn build_witness_from_model(body: &Body, model: &[(String, f64)]) -> Witness {
+/// Build witness from tracked nondet variables.
+fn build_witness_from_nondets(
+    solver: &Solver,
+    body: &Body,
+    nondets: &[(MethodKey, usize, CvcTerm)],
+) -> NraResult {
     let mut nondet_sequence = Vec::new();
     let mut entries = Vec::new();
 
-    let mut i = 0;
-    while i < body.vars.len() {
-        let var_info = &body.vars[i];
-        if !matches!(var_info.kind, VarKind::Local(_)) {
-            break;
-        }
+    for (bk, idx, const_term) in nondets {
+        let var_info = &body.vars[*idx];
+        let val_term = solver.get_value(const_term.clone());
+        let value = extract_real_value(&val_term);
+        debug!("nra: nondet {}:v{} (ty={:?}) = {}", bk.name, idx, var_info.ty, value);
 
-        let var_name = format!("v{}", i);
-        let value = model
-            .iter()
-            .find(|(name, _)| name == &var_name)
-            .map(|(_, v)| *v)
-            .unwrap_or(0.0);
-
-        let (nondet_value, nondet_method, raw_bits) = match var_info.ty {
-            Ty::Double => (
-                NondetValue::Long(value.to_bits() as i64),
-                "nondetDouble",
-                value.to_bits() as i64,
-            ),
-            Ty::Float => (
-                NondetValue::Int((value as f32).to_bits() as i32),
-                "nondetFloat",
-                (value as f32).to_bits() as i64,
-            ),
-            Ty::Long => (
-                NondetValue::Long(value as i64),
-                "nondetLong",
-                value as i64,
-            ),
-            _ => (
-                NondetValue::Int(value as i32),
-                "nondetInt",
-                value as i64,
-            ),
-        };
-
+        let (nondet_value, nondet_method, raw_bits) = real_to_witness(var_info.ty, value);
         nondet_sequence.push(raw_bits);
         entries.push(NondetEntry {
             value: nondet_value,
             nondet_method,
             line: None,
         });
-
-        if var_info.ty.is_wide() {
-            i += 2;
-        } else {
-            i += 1;
-        }
     }
 
-    Witness {
+    NraResult::Sat(Witness {
         nondet_sequence,
         entries,
+    })
+}
+
+/// Build witness from callee body's parameter variables (direct case, no entry body).
+fn build_witness_direct(
+    solver: &Solver,
+    body: &Body,
+    var_consts: &[CvcTerm],
+) -> NraResult {
+    let mut nondet_sequence = Vec::new();
+    let mut entries = Vec::new();
+
+    for (i, vi) in body.vars.iter().enumerate() {
+        if !matches!(vi.kind, VarKind::Local(_)) {
+            break;
+        }
+        let val_term = solver.get_value(var_consts[i].clone());
+        let value = extract_real_value(&val_term);
+        debug!("nra: callee var v{} (ty={:?}) = {}", i, vi.ty, value);
+
+        let (nondet_value, nondet_method, raw_bits) = real_to_witness(vi.ty, value);
+        nondet_sequence.push(raw_bits);
+        entries.push(NondetEntry {
+            value: nondet_value,
+            nondet_method,
+            line: None,
+        });
+    }
+
+    NraResult::Sat(Witness {
+        nondet_sequence,
+        entries,
+    })
+}
+
+/// Convert a real model value to witness format based on JVM type.
+fn real_to_witness(ty: Ty, value: f64) -> (NondetValue, &'static str, i64) {
+    match ty {
+        Ty::Double => (
+            NondetValue::Long(value.to_bits() as i64),
+            "nondetDouble",
+            value.to_bits() as i64,
+        ),
+        Ty::Float => (
+            NondetValue::Int((value as f32).to_bits() as i32),
+            "nondetFloat",
+            (value as f32).to_bits() as i64,
+        ),
+        Ty::Long => (
+            NondetValue::Long(value as i64),
+            "nondetLong",
+            value as i64,
+        ),
+        _ => (
+            NondetValue::Int(value as i32),
+            "nondetInt",
+            value as i64,
+        ),
     }
 }

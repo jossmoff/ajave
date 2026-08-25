@@ -571,6 +571,24 @@ impl<'a> ConcreteState<'a> {
                 self.alloc_id += 1;
                 Value::Ref(aid)
             }
+            Ty::Double => {
+                self.trace.push(raw);
+                self.entries.push(NondetEntry {
+                    value: NondetValue::Long(raw),
+                    nondet_method: "nondetDouble",
+                    line,
+                });
+                Value::I64(raw)
+            }
+            Ty::Float => {
+                self.trace.push(raw);
+                self.entries.push(NondetEntry {
+                    value: NondetValue::Int(raw as i32),
+                    nondet_method: "nondetFloat",
+                    line,
+                });
+                Value::I32(raw as i32)
+            }
             Ty::Long => {
                 self.trace.push(raw);
                 self.entries.push(NondetEntry {
@@ -595,7 +613,7 @@ impl<'a> ConcreteState<'a> {
     /// Evaluate a Havoc rvalue: default value without witness recording.
     fn eval_havoc(&mut self, ty: &Ty) -> Value {
         match ty {
-            Ty::Long => Value::I64(0),
+            Ty::Long | Ty::Double => Value::I64(0),
             Ty::Str | Ty::Ref => {
                 let aid = self.alloc_id;
                 self.alloc_id += 1;

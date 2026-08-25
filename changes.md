@@ -2,6 +2,40 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## NRA engine: CVC5 transcendental falsification (2026-08-25)
+
+### Interprocedural NRA encoding
+The NRA engine encodes methods with transcendental Math calls (sin, cos, exp, sqrt, etc.) as
+QF_NRAT constraints via CVC5's native transcendental support. CVC5 has built-in `Kind::Sine`,
+`Kind::Cosine`, `Kind::Exponential`, `Kind::Sqrt`, etc. — no approximation needed.
+
+**Key design**: Interprocedural DFS starting from the program entry body (Main.main), inlining
+calls to callee methods where obligations live. This is critical for benchmarks where Main.main
+has `Verifier.assume()` constraints that bound nondet parameters before passing them to the
+benchmark method. Without interprocedural encoding, the NRA solver finds witnesses that violate
+assume constraints and fail JVM replay.
+
+**Call inlining**: When the DFS encounters `Rvalue::Call { target, args }` to a method with a
+program body, it pushes the callee's entry block onto the worklist with parameter variables
+mapped to the caller's argument CVC5 terms. Assumes and branches in the entry body (e.g.,
+short-circuit `&&` evaluation) are properly tracked as path constraints.
+
+**Witness construction**: Nondet variables (`Rvalue::Nondet`) are tracked during the DFS.
+Model values from CVC5 are converted from reals to IEEE 754 bits (`f64::to_bits()`) for
+`Double.longBitsToDouble(next())` JVM replay.
+
+**Direction**: Under-approximating only (falsification). SAT over reals → concrete witness.
+UNSAT over reals does NOT imply UNSAT over IEEE 754 floats (NaN, Inf, -0 can violate
+assertions that hold over R), so we never discharge.
+
+**Timeout**: CVC5's `tlimit`/`rlimit` don't work in statically-linked builds. Solved with
+detached `thread::spawn` + `mpsc::channel` + `recv_timeout(8s)`. Abandoned threads are leaked.
+
+### Results
++21 new FALSE (18 coral + 3 Optimization) from float-nonlinear-calculation benchmarks.
+Remaining ~49 coral benchmarks use sin+cos constraints where CVC5 hangs (known limitation
+of transcendental theory decision procedures).
+
 ## Z3 string constraint solving for securibench (2026-08-24)
 
 ### Fresh string propagation for unresolved calls

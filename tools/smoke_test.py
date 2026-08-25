@@ -223,6 +223,12 @@ TESTS = [
     ("collections", "sv-benchmarks/securibench/Collections6.yml", "FALSE"),
     ("collections", "sv-benchmarks/securibench/Collections7.yml", "FALSE"),
     ("collections", "sv-benchmarks/securibench/Collections10.yml", "FALSE"),
+
+    # NRA engine: transcendental math via CVC5
+    ("nra", "sv-benchmarks/float-nonlinear-calculation/coral4.yml", "FALSE"),
+    ("nra", "sv-benchmarks/float-nonlinear-calculation/coral29.yml", "FALSE"),
+    ("nra", "sv-benchmarks/float-nonlinear-calculation/coral48.yml", "FALSE"),
+    ("nra", "sv-benchmarks/float-nonlinear-calculation/Optimization1.yml", "FALSE"),
 ]
 
 import yaml

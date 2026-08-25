@@ -174,6 +174,10 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         Box::new(roast_engines::presolve::Presolve::new()),
         Box::new(roast_engines::concrete::Concrete::new()),
     ];
+    // NRA before BMC: NRA handles transcendental math (sin, cos, exp, etc.)
+    // via cvc5's native support. BMC havoces these calls and produces garbage
+    // witnesses, so NRA must claim them first.
+    engines.push(Box::new(roast_engines::nra::NraEngine::new()));
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
         let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
         let mut bmc = roast_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
@@ -206,7 +210,6 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(cegar));
         }
     }
-    engines.push(Box::new(roast_engines::nra::NraEngine::new()));
     engines
 }
 
