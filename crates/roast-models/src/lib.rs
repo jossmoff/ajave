@@ -21,6 +21,9 @@ pub const ASSERTION_ERROR: &str = "java/lang/AssertionError";
 pub const ENUM_ORDINAL_FIELD: &str = "$$ordinal";
 /// Synthetic field name used to store the boxed primitive value.
 pub const BOX_VALUE_FIELD: &str = "$$value";
+/// Synthetic field name for the last element stored in a collection.
+/// Used by `CollectionStore` / `CollectionLoad` to model add/get as field ops.
+pub const COLL_LAST_FIELD: &str = "$$coll_last";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallModel {
@@ -58,6 +61,17 @@ pub enum CallModel {
     MathCall(Option<Ty>),
     /// `Class.desiredAssertionStatus()` — always returns true (1) under SV-COMP.
     AssertionsEnabled,
+    /// Collection store: `add`, `addLast`, `put`, etc. — store the element to
+    /// a synthetic `$$coll_last` field on the receiver.  The argument index of
+    /// the element is encoded: 0 for add(elem), 1 for put(key, elem) or
+    /// add(idx, elem).
+    CollectionStore(u8),
+    /// Collection load: `get`, `getLast`, `next`, etc. — read from the
+    /// synthetic `$$coll_last` field on the receiver.
+    CollectionLoad(Option<Ty>),
+    /// `iterator()` / `listIterator()` — return the receiver itself so that
+    /// subsequent `next()` reads the same `$$coll_last`.
+    CollectionIterator,
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -177,6 +191,9 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return match name {
             "assume" => CallModel::Assume,
             "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
+            // nondetObject returns a factory-created object; must inline the
+            // factory body rather than treating it as a raw nondet ref.
+            "nondetObject" => CallModel::Unmodelled,
             n if n.starts_with("nondet") => {
                 let jvm_byte = desc.as_bytes().get(desc.rfind(')').unwrap_or(0) + 1).copied().unwrap_or(b'I');
                 CallModel::Nondet(ret_ty(desc), jvm_byte)
@@ -192,8 +209,10 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return CallModel::NoOp;
     }
     // Constructors of pure/collection classes: no tracked state to set up.
+    // The lifter preserves Pure(None) as a Call, so taint analysis can see
+    // argument flow (e.g. `new StringTokenizer(taintedStr)`).
     if name == "<init>" && PURE_OWNERS.contains(&owner) {
-        return CallModel::NoOp;
+        return CallModel::Pure(None);
     }
 
     // Enum support: model the ordinal field that javac's enum <clinit> sets.
@@ -232,6 +251,12 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     // Math/Integer/Long methods the SMT engine can model precisely.
     if is_math_call(owner, name) {
         return CallModel::MathCall(ret_ty(desc));
+    }
+
+    // Collection methods: add/get/put modelled as synthetic field ops.
+    // Must come before the PURE_OWNERS catch-all so we intercept these.
+    if let Some(model) = collection_model(owner, name, desc) {
+        return model;
     }
 
     if PURE_OWNERS.contains(&owner) {
@@ -421,6 +446,118 @@ fn is_math_call(owner: &str, name: &str) -> bool {
                 | "hashCode"
         ),
         _ => false,
+    }
+}
+
+/// Owners that are collection types (List, Set, Map, Queue, Deque + impls).
+fn is_collection_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/LinkedList"
+            | "java/util/Vector"
+            | "java/util/Stack"
+            | "java/util/Set"
+            | "java/util/HashSet"
+            | "java/util/TreeSet"
+            | "java/util/LinkedHashSet"
+            | "java/util/Collection"
+            | "java/util/AbstractList"
+            | "java/util/AbstractCollection"
+            | "java/util/AbstractSet"
+            | "java/util/Queue"
+            | "java/util/Deque"
+            | "java/util/ArrayDeque"
+    )
+}
+
+fn is_map_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/Map"
+            | "java/util/HashMap"
+            | "java/util/TreeMap"
+            | "java/util/LinkedHashMap"
+            | "java/util/AbstractMap"
+            | "java/util/Hashtable"
+    )
+}
+
+fn is_iterator_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/Iterator" | "java/util/ListIterator"
+    )
+}
+
+fn is_map_entry_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/Map$Entry" | "java/util/AbstractMap$SimpleEntry"
+            | "java/util/AbstractMap$SimpleImmutableEntry"
+    )
+}
+
+/// Model collection add/get/put/iterator as synthetic field operations.
+/// Returns `None` for methods we don't specifically model (they fall through
+/// to `Pure` via `PURE_OWNERS`).
+fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+    // Iterator methods
+    if is_iterator_owner(owner) {
+        return match name {
+            "next" | "previous" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+            // hasNext → unconstrained boolean (Pure/Havoc)
+            _ => None,
+        };
+    }
+
+    // Map.Entry methods — getValue/getKey read from the same $coll_last
+    if is_map_entry_owner(owner) {
+        return match name {
+            "getValue" | "getKey" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+            "setValue" => Some(CallModel::CollectionStore(0)),
+            _ => None,
+        };
+    }
+
+    // Map methods
+    if is_map_owner(owner) {
+        return match name {
+            "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]
+            "get" | "remove" | "getOrDefault" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+            "values" | "keySet" | "entrySet" => Some(CallModel::CollectionIterator),
+            _ => None,
+        };
+    }
+
+    if !is_collection_owner(owner) {
+        return None;
+    }
+
+    // Collection/List/Set/Queue/Deque store methods
+    match name {
+        "add" | "offer" => {
+            // add(Object) → arg 0; add(int, Object) → arg 1
+            let elem_idx = if desc.starts_with("(I") { 1 } else { 0 };
+            Some(CallModel::CollectionStore(elem_idx))
+        }
+        "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" => {
+            Some(CallModel::CollectionStore(0))
+        }
+        "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
+
+        // Collection/List/Queue/Deque load methods
+        "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast"
+        | "poll" | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast"
+        | "element" | "elementAt" | "firstElement" | "lastElement" => {
+            Some(CallModel::CollectionLoad(ret_ty(desc)))
+        }
+
+        // Iterator creation — return the collection itself
+        "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+
+        _ => None,
     }
 }
 

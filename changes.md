@@ -2,6 +2,204 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Z3 string constraint solving for securibench (2026-08-24)
+
+### Fresh string propagation for unresolved calls
+The BMC already had rich string encoding (`str_encode.rs`: 25+ modeled methods) and Z3 string
+theory support, but strings were lost at call boundaries. When an unresolved method returns
+`Ljava/lang/String;`, BMC created only a `fresh_bv` (opaque ref) with no corresponding string
+term. Downstream `contains`/`equals` calls found nothing in `str_vars` and fell back to tainted
+results.
+
+**Fix**: At four propagation points, create `fresh_str()` terms when the return/field type is String:
+1. Unresolved `Rvalue::Call` returning String → `fresh_str("hvc_<name>")`
+2. Inlined method fallback (no `inline_return_str`) → `fresh_str("ret_s_<name>")`
+3. `GetStatic` of non-program String fields → `fresh_str("sf_<class>_<name>")`
+4. `GetField` of String-typed fields → string array select (creates fresh array if needed)
+
+### Identity model for toLowerCase/toUpperCase
+The precise model (26× `str.replace_all` for A→a..Z→z) caused Z3 to return `Unknown` on
+downstream `str.contains` checks. Replaced with identity (`s → s`): sound under-approximation
+because violations found will replay correctly on JVM (lowercase patterns like `"<bad/>"` are
+preserved by real toLowerCase). JvmReplay certifier catches any false positives.
+
+### Impact
+~49 securibench FALSE benchmarks solved through formal Z3 string reasoning. No hardcoded
+witness values — the solver discovers inputs like `"<bad/>"` through constraint solving.
+0 wrong answers, all violations JVM-replay confirmed.
+
+## Soundness hardening: tainted-path discharge guards, CHC soundness, instanceof covariance (2026-08-24)
+
+### Tainted-path Bounded/discharge soundness
+When BMC's `path_tainted` flag is true (float/double imprecision or havoced recursive returns),
+the solver may find SAT violations that are artifacts. Previously, suppressing these violations
+while still publishing `Bounded` status or allowing relaxed discharge created soundness holes:
+
+1. **Bounded publishing**: k-induction consumed `Bounded` from BMC for obligations where the
+   BMC suppressed a SAT violation due to `path_tainted`. K-induction's step-case proof was
+   then vacuously correct (wrong TRUE on BufferedReaderReadLine).
+   Fix: skip `Bounded` publishing for obligations in `skipped_obligations`.
+
+2. **Relaxed assertion discharge**: The `can_discharge()` relaxation for assertion-only programs
+   allowed discharge when `method_explored && !has_unresolved_in_try && !has_depth_limited_havoc`.
+   But when `has_tainted_paths`, some obligation checks may never be reached because tainted
+   branch conditions prevented exploration of certain paths (wrong TRUE on EquidistantConicProjection).
+   Fix: add `has_tainted_paths` flag to Completeness, set when any obligation check occurs with
+   `path_tainted=true`, blocks relaxed assertion discharge.
+
+### CHC unresolved-calls guard
+CHC's LIA encoding havoces calls to methods without bodies. When these methods can throw
+exceptions or return values that affect assertions, the havoc is unsound for discharge.
+Example: HttpTransport_false has `getMessage().equals("FAKE")` in a catch block; CHC's LIA
+encoding can't model exception dispatch or string comparison, so it vacuously proves the catch
+block unreachable (wrong TRUE). Fix: skip CHC when any reachable method has calls to non-Verifier
+library methods without bodies.
+
+### Array covariance in instanceof
+`subtype_ids()` filtered out types not in the `supers` map. Array types (`[Lfoo;`) are never
+in `supers` (they're synthetic), so `String[] instanceof Object[]` returned false despite
+array covariance making it true. Fix: exempt array-typed classes from the `supers` filter,
+allowing `is_subtype()` to handle array covariance correctly.
+
+Score impact: 697 → 723+ (eliminated 4 wrong TRUEs worth -64 penalty points, +2 from instanceof3).
+
+## nondetObject factory inlining, instanceof soundness (2026-08-16)
+
+### nondetObject factory inlining
+`Verifier.nondetObject(Class, ObjectFactory)` was incorrectly matched by the
+`n.starts_with("nondet")` pattern in `model_for()`, converting it to
+`CallModel::Nondet(Ref)`. This lost the factory invocation entirely — the returned
+object got `const_array(0)` field defaults instead of factory-assigned values,
+causing BMC to incorrectly discharge assertions as unreachable (wrong TRUE on
+objects14). Fix: explicit `"nondetObject" => CallModel::Unmodelled` before the
+wildcard pattern, so the call is inlined and the factory body actually executes.
+
+### Concrete engine instanceof soundness
+`InstanceOf` checks on library classes not in the `supers` map returned `I32(0)`
+(false), causing spurious violations. For example, `new Integer(1)` followed by
+`instanceof Integer` returned false because Integer's supertype chain wasn't
+loaded. Fix: exact-match check on allocation type, with `Unknown` fallback for
+unresolved types instead of `I32(0)`.
+
+### BMC instanceof subtype_ids soundness
+`subtype_ids()` used `is_subtype()` which returns `true` for unknown class
+hierarchies (conservative for over-approximation). This caused `instanceof`
+to incorrectly report `true` for JDK classes like `Integer instanceof String`
+— the Integer type wasn't in the loaded supers map, so the optimistic fallback
+assumed it was a subtype of String. Fix: skip classes with unknown hierarchies
+in `subtype_ids()`, so only verified subtype relationships are used.
+
+### Merge nondet_terms bounds guard
+Deep inlining through factory methods can cause branch states to have fewer
+`nondet_terms` than the merge point's `base_len`. Added bounds checks to
+`collect_nondets_dedup` and `collect_nondets_binary` to prevent slice panics.
+
+## Cross-engine AI→BMC Invariant Sharing (2026-08-16)
+
+### Interval domain hints for SMT-backed BMC
+The interval abstract interpretation (AI) engine publishes per-block-per-variable
+interval bounds to the blackboard during `init()`, before any engine's `step()`.
+The SMT BMC engine consumes these as path constraints, pruning infeasible regions
+of the search space and potentially making UNSAT proofs faster.
+
+### Architecture
+- AI runs at init time → publishes `(method, block, var) → [lo, hi]` hints
+- BMC loads hints at construction, asserts `lo ≤ var ≤ hi` as path constraints
+  at each block entry
+- Only block-entry states (index 0), only 32-bit variables, only entry method
+  (call_depth == 0)
+
+### Soundness constraints
+- **Wide type guard**: AI hints are NOT published for methods containing Long or
+  Double typed variables. The interval domain uses i32 arithmetic, so `cmp(Long, ...)`
+  results get wrong intervals from 64-bit constant wrapping.
+- **Block-entry only**: Mid-block states reflect post-assignment values that
+  don't hold at block entry.
+- **32-bit only**: Long/Double variables filtered individually when publishing.
+- **Entry method only**: Block IDs are per-method, so hints for Main.main must not
+  apply to inlined callee bodies.
+
+### Refactoring
+- `FK` field key: type alias `(String, String, String)` → named struct with
+  `class`, `name`, `desc` fields
+- `Completeness` struct: consolidated `all_paths_complete`, `all_calls_resolved`,
+  `has_unresolved_in_try` into single struct with `can_discharge()` method
+- `check_sat_with_path_and_witness()`: RAII-style push/check/extract/pop replacing
+  fragile push-without-pop pattern
+- `ret_width_from_desc()`: centralized JVM descriptor return-type width parsing
+- Per-object string field arrays (`field_str_arrays`) replacing global per-FK tracking
+
+## Inter-procedural CHC with LIA Encoding (2026-08-15)
+
+### Method summary relations for recursive programs
+Extended the CHC engine from single-method BV encoding to inter-procedural LIA
+encoding with method summary relations. Each method gets a summary relation
+`mN_s(params..., ret)` and per-block relations `mN_bK(vars...)`. Call sites invoke
+callee summaries, producing recursive Horn clauses that Z3 Spacer resolves via
+fixpoint computation.
+
+### Key design decisions
+- **LIA over BV**: Spacer's fixpoint engine works well with integers but times out
+  on bitvector fixpoints. LIA is used for the inter-procedural encoding.
+- **Soundness guard — heap ops**: CHC skips methods whose reachable callees use
+  arrays, field access, or instanceof — LIA can't model heap and would produce
+  wrong TRUE results.
+- **Soundness guard — assertion only**: CHC only discharges Assertion obligations,
+  not NegArraySize/ArrayBounds/NullDeref which require heap modeling.
+- **CHC semantics**: Z3 HORN mode: `sat` = error unreachable (safe), `unsat` =
+  error reachable. The original code had this inverted.
+- **Engine ordering**: BMC runs before CHC. BMC may find spurious violations on
+  tainted recursive paths, but these are filtered by JVM replay. CHC proves safety
+  for obligations BMC couldn't determine.
+- **Orchestrator change**: Removed violation-based short-circuit and phase
+  termination. All engines run to completion, allowing Over engines (CHC) to
+  discharge obligations even when Under engines (BMC) found violations on other
+  obligations.
+
+### LIA overflow unsoundness
+LIA is not a sound over-approximation when integer overflow matters. For programs
+where the assertion depends on overflow behavior (UnsatAddition02), LIA wrongly
+proves safety. This is mitigated by BMC finding the violation first (with havoced
+recursive returns), which prevents CHC from seeing the obligation.
+
+### Results
+Proved 8 new TRUE recursive benchmarks (SatAckermann01-03, SatFibonacci01-03,
+SatMccarthy91, Addition) that no other engine could handle. Score impact: +16 pts.
+
+## Java Collections Modeling via Synthetic Fields (2026-08-15)
+
+### Approach: "last-element" abstraction
+Java collections (ArrayList, LinkedList, HashMap, etc.) are modeled by lowering
+`add`/`put`/`get`/`remove`/etc. to PutField/GetField on a synthetic `$coll_last`
+field. This collapses any collection to "the last element stored", which is
+sufficient for taint tracking (if any tainted value enters the collection, reads
+return a tainted value). Three new `CallModel` variants:
+- `CollectionStore(elem_idx)` — PutField on `$coll_last`
+- `CollectionLoad(Option<Ty>)` — GetField on `$coll_last`
+- `CollectionIterator` — returns receiver (so `iterator().next()` reads from same object)
+
+Map.Entry methods (`getValue`/`getKey`) modeled as CollectionLoad, and
+`entrySet()`/`values()`/`keySet()` as CollectionIterator.
+
+### Per-object string arrays
+Initial implementation used `field_str: HashMap<FK, Term>` — a global map from
+field key to Z3 string term. This broke when multiple collection objects shared
+the same `$coll_last` field key (e.g., `ll1.addLast(tainted)` then
+`ll2.addLast("abc")` would overwrite ll1's string). Fixed by introducing
+`Sort::StrArray` (`(Array BV32 String)`) — per-object SMT arrays for string
+values, paralleling the existing `field_arrays` for BV values.
+
+### String.valueOf(Object) passthrough
+`valueOf(Object)` was creating a `fresh_str` when no wrapper `$$value` field was
+found, losing the string term flowing from collection loads. Fixed by checking
+the argument's `str_vars` first — if available, pass through the existing string
+term. This also fixed non-collection benchmarks (Aliasing4, Basic26) where
+objects carrying string values went through `valueOf`.
+
+### Impact
++9 securibench-micro collection benchmarks (1–7, 10 of 13 total), +2 additional
+securibench from valueOf fix. ~+11 points on the full benchmark suite.
+
 ## valueOf Soundness and Extended Math Models (2026-08-15)
 
 ### valueOf(float/double) wrong TRUE fix

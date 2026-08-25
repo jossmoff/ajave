@@ -92,10 +92,10 @@ fn analyze_rvalue(rvalue: &Rvalue, shape: &mut BodyShape) {
 
 impl BodyShape {
     /// Returns `true` if the body is suitable for the NRA (nonlinear real
-    /// arithmetic) engine — i.e. it uses transcendental math and doesn't
-    /// use heap operations that the NRA encoding can't model.
+    /// arithmetic) engine — i.e. it uses transcendental math or float types
+    /// and doesn't use heap operations that the NRA encoding can't model.
     pub fn suitable_for_nra(&self) -> bool {
-        self.has_transcendental_math && !self.has_heap_ops
+        (self.has_transcendental_math || self.has_float_types) && !self.has_heap_ops
     }
 
     /// Returns `true` if the body is suitable for proving engines that use

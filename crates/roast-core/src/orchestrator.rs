@@ -65,15 +65,12 @@ impl Orchestrator {
                 if retired[i] {
                     continue;
                 }
-                // Short-circuit: if a violation was already found by a
-                // previous engine in this round, skip remaining engines.
-                if self
-                    .bb
-                    .statuses()
-                    .any(|(_, s)| matches!(s, Status::Violated { .. }))
-                {
-                    break;
-                }
+                // Note: no short-circuit on violations. Over-approximating
+                // engines (CHC, k-induction) should still run to discharge
+                // obligations that BMC couldn't determine. BMC may publish
+                // spurious violations on tainted paths; the CHC engine can
+                // prove those obligations safe by looking at open obligations
+                // (which exclude already-Violated finals).
                 match e.step(prog, &mut self.bb, self.budget) {
                     Progress::Advanced => advanced = true,
                     Progress::Stalled => {}
@@ -106,8 +103,8 @@ impl Orchestrator {
     }
 
     /// The schedule state machine from ARCHITECTURE.md section 4.
-    fn next_phase(&self, open: usize, violated: bool, advanced: bool, all_retired: bool) -> Phase {
-        if violated || open == 0 || all_retired {
+    fn next_phase(&self, open: usize, _violated: bool, advanced: bool, all_retired: bool) -> Phase {
+        if open == 0 || all_retired {
             return Phase::Report;
         }
         match self.phase {

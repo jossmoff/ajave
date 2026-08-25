@@ -6,7 +6,7 @@
 use roast_core::smt::Term;
 use roast_ir::*;
 
-use super::ExploreCtx;
+use super::{ExploreCtx, FK};
 
 /// Java String.compareTo semantics: compare char-by-char, return first
 /// difference; if one is a prefix of the other, return length difference.
@@ -395,7 +395,7 @@ impl<'a> ExploreCtx<'a> {
                     ("java/lang/Long", "J", 64),
                 ];
                 for &(cls, desc, width) in wrappers {
-                    let fk = (cls.to_string(), "$$value".to_string(), desc.to_string());
+                    let fk = FK::new(cls, "$$value", desc);
                     if self.field_arrays.contains_key(&fk) {
                         let arr = self.get_field_array(&fk, width);
                         let val = self.solver.array_select(arr, obj);
@@ -414,9 +414,16 @@ impl<'a> ExploreCtx<'a> {
                         return Some((one, Some(result)));
                     }
                 }
-                // No wrapper field found — return a fresh string
-                let fresh = self.solver.fresh_str("valueOf_obj");
-                Some((one, Some(fresh)))
+                // No wrapper field found — use the argument's string term
+                // if available (e.g. from collection load or direct string var),
+                // otherwise return a fresh unconstrained string.
+                let arg_str = match args.first()? {
+                    Operand::Var(v) => self.str_vars.get(v).copied(),
+                    Operand::Const(Const::Str(s)) => Some(self.solver.str_const(s)),
+                    _ => None,
+                };
+                let result = arg_str.unwrap_or_else(|| self.solver.fresh_str("valueOf_obj"));
+                Some((one, Some(result)))
             }
             "valueOf" if !target.desc.starts_with("(L") && !target.desc.starts_with("([") => {
                 let arg_bv = self.encode_operand(args.first()?);
@@ -616,26 +623,20 @@ impl<'a> ExploreCtx<'a> {
         self.solver.int_to_bv32(cur)
     }
 
-    /// Approximate toLowerCase: replace A-Z with a-z via str.replace_all.
+    /// Model toLowerCase as identity. Sound under-approximation: any violation
+    /// found will replay correctly because the witness value, when actually
+    /// lowercased by JVM, preserves lowercase substrings (e.g. contains("<bad/>")
+    /// holds for both s and s.toLowerCase() when s already contains "<bad/>").
+    /// The 26× str.replace_all encoding was precise but caused Z3 to return
+    /// Unknown on downstream str.contains checks.
     pub(super) fn str_to_lower(&mut self, s: Term) -> Term {
-        let mut result = s;
-        for (upper, lower) in (b'A'..=b'Z').zip(b'a'..=b'z') {
-            let u = self.solver.str_const(&String::from(upper as char));
-            let l = self.solver.str_const(&String::from(lower as char));
-            result = self.solver.str_replace_all(result, u, l);
-        }
-        result
+        s
     }
 
-    /// Approximate toUpperCase: replace a-z with A-Z via str.replace_all.
+    /// Model toUpperCase as identity. Sound under-approximation for the same
+    /// reason as toLowerCase.
     pub(super) fn str_to_upper(&mut self, s: Term) -> Term {
-        let mut result = s;
-        for (lower, upper) in (b'a'..=b'z').zip(b'A'..=b'Z') {
-            let l = self.solver.str_const(&String::from(lower as char));
-            let u = self.solver.str_const(&String::from(upper as char));
-            result = self.solver.str_replace_all(result, l, u);
-        }
-        result
+        s
     }
 
     /// Encode a signed bitvector to its decimal string representation.
@@ -757,11 +758,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(args.first()?)
                 } else if target.desc == "()Ljava/lang/String;" {
                     let recv = self.encode_operand(args.first()?);
-                    let fk = (
-                        "java/lang/Boolean".to_string(),
-                        "$$value".to_string(),
-                        "I".to_string(),
-                    );
+                    let fk = FK::new("java/lang/Boolean", "$$value", "I");
                     let arr = self.get_field_array(&fk, 32);
                     self.solver.array_select(arr, recv)
                 } else {
@@ -781,11 +778,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(args.first()?)
                 } else if target.desc == "()Ljava/lang/String;" {
                     let recv = self.encode_operand(args.first()?);
-                    let fk = (
-                        "java/lang/Integer".to_string(),
-                        "$$value".to_string(),
-                        "I".to_string(),
-                    );
+                    let fk = FK::new("java/lang/Integer", "$$value", "I");
                     let arr = self.get_field_array(&fk, 32);
                     self.solver.array_select(arr, recv)
                 } else {
@@ -800,11 +793,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(args.first()?)
                 } else if target.desc == "()Ljava/lang/String;" {
                     let recv = self.encode_operand(args.first()?);
-                    let fk = (
-                        "java/lang/Long".to_string(),
-                        "$$value".to_string(),
-                        "J".to_string(),
-                    );
+                    let fk = FK::new("java/lang/Long", "$$value", "J");
                     let arr = self.get_field_array(&fk, 64);
                     self.solver.array_select(arr, recv)
                 } else {
@@ -863,11 +852,7 @@ impl<'a> ExploreCtx<'a> {
             {
                 let val = if target.desc == "()Ljava/lang/String;" {
                     let recv = self.encode_operand(args.first()?);
-                    let fk = (
-                        target.class.clone(),
-                        "$$value".to_string(),
-                        "I".to_string(),
-                    );
+                    let fk = FK::new(&target.class, "$$value", "I");
                     let arr = self.get_field_array(&fk, 32);
                     self.solver.array_select(arr, recv)
                 } else {
@@ -883,7 +868,7 @@ impl<'a> ExploreCtx<'a> {
                 let char_val = if target.desc.starts_with("()") {
                     // Instance method: read $$value from receiver
                     let this_ref = self.encode_operand(args.first()?);
-                    let k = ("java/lang/Character".to_string(), "$$value".to_string(), "I".to_string());
+                    let k = FK::new("java/lang/Character", "$$value", "I");
                     let arr = self.get_field_array(&k, 32);
                     self.solver.array_select(arr, this_ref)
                 } else {

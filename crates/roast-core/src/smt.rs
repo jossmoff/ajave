@@ -16,6 +16,8 @@ pub enum Sort {
     Int,
     /// `(Array (_ BitVec idx_width) (_ BitVec elem_width))`
     Array { idx: u32, elem: u32 },
+    /// `(Array (_ BitVec 32) String)`
+    StrArray,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,6 +119,13 @@ pub trait Solver {
     fn array_select(&mut self, arr: Term, idx: Term) -> Term;
     /// `(store arr idx val)` — write element at index, returning new array.
     fn array_store(&mut self, arr: Term, idx: Term, val: Term) -> Term;
+
+    // -- String-array theory --
+
+    /// Create a fresh unconstrained array: `(Array (_ BitVec 32) String)`.
+    fn fresh_str_array(&mut self, name: &str) -> Term;
+    /// Create a constant string array where every element is `val`.
+    fn const_str_array(&mut self, val: Term) -> Term;
 
     // -- Solver state --
 

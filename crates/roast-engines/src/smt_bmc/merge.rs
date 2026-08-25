@@ -22,7 +22,7 @@ impl<'a> ExploreCtx<'a> {
             static_str: self.static_str.clone(),
             static_tainted: self.static_tainted.clone(),
             field_arrays: self.field_arrays.clone(),
-            field_str: self.field_str.clone(),
+            field_str_arrays: self.field_str_arrays.clone(),
             field_tainted: self.field_tainted.clone(),
             array_map: self.array_map.clone(),
             type_array: self.type_array,
@@ -44,7 +44,7 @@ impl<'a> ExploreCtx<'a> {
         self.static_str = s.static_str;
         self.static_tainted = s.static_tainted;
         self.field_arrays = s.field_arrays;
-        self.field_str = s.field_str;
+        self.field_str_arrays = s.field_str_arrays;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
         self.type_array = s.type_array;
@@ -212,17 +212,17 @@ impl<'a> ExploreCtx<'a> {
         }
 
         // Instance field strings
-        let all_fs: HashSet<_> = a.field_str.keys().chain(b.field_str.keys()).cloned().collect();
-        self.field_str.clear();
+        let all_fs: HashSet<_> = a.field_str_arrays.keys().chain(b.field_str_arrays.keys()).cloned().collect();
+        self.field_str_arrays.clear();
         for k in all_fs {
-            match (a.field_str.get(&k).copied(), b.field_str.get(&k).copied()) {
-                (Some(t), Some(e)) if t == e => { self.field_str.insert(k, t); }
+            match (a.field_str_arrays.get(&k).copied(), b.field_str_arrays.get(&k).copied()) {
+                (Some(t), Some(e)) if t == e => { self.field_str_arrays.insert(k, t); }
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
-                    self.field_str.insert(k, m);
+                    self.field_str_arrays.insert(k, m);
                 }
-                (Some(t), None) => { self.field_str.insert(k, t); }
-                (None, Some(e)) => { self.field_str.insert(k, e); }
+                (Some(t), None) => { self.field_str_arrays.insert(k, t); }
+                (None, Some(e)) => { self.field_str_arrays.insert(k, e); }
                 (None, None) => {}
             }
         }
@@ -337,15 +337,15 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         // Instance field strings
-        let all_fs: HashSet<_> = case.field_str.keys().chain(acc.field_str.keys()).cloned().collect();
+        let all_fs: HashSet<_> = case.field_str_arrays.keys().chain(acc.field_str_arrays.keys()).cloned().collect();
         for k in all_fs {
-            match (case.field_str.get(&k).copied(), acc.field_str.get(&k).copied()) {
+            match (case.field_str_arrays.get(&k).copied(), acc.field_str_arrays.get(&k).copied()) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), Some(b)) => {
                     let m = self.solver.ite(cond, a, b);
-                    acc.field_str.insert(k, m);
+                    acc.field_str_arrays.insert(k, m);
                 }
-                (Some(a), None) => { acc.field_str.insert(k, a); }
+                (Some(a), None) => { acc.field_str_arrays.insert(k, a); }
                 _ => {}
             }
         }
@@ -363,7 +363,7 @@ impl<'a> ExploreCtx<'a> {
         self.static_str = s.static_str;
         self.static_tainted = s.static_tainted;
         self.field_arrays = s.field_arrays;
-        self.field_str = s.field_str;
+        self.field_str_arrays = s.field_str_arrays;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
         self.type_array = s.type_array;
@@ -373,6 +373,9 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn collect_nondets_dedup(&mut self, states: &[&SavedState]) {
         let base_len = self.nondet_terms.len();
         for state in states {
+            if base_len > state.nondet_terms.len() {
+                continue;
+            }
             for nd in &state.nondet_terms[base_len..] {
                 if !self.nondet_terms.iter().any(|(idx, _, _, _, _)| *idx == nd.0) {
                     self.nondet_terms.push(nd.clone());
@@ -384,11 +387,15 @@ impl<'a> ExploreCtx<'a> {
     /// Collect nondets from two branch states (no dedup needed for binary branches).
     pub(super) fn collect_nondets_binary(&mut self, a: &SavedState, b: &SavedState) {
         let base_len = self.nondet_terms.len();
-        for nd in &a.nondet_terms[base_len..] {
-            self.nondet_terms.push(nd.clone());
+        if base_len <= a.nondet_terms.len() {
+            for nd in &a.nondet_terms[base_len..] {
+                self.nondet_terms.push(nd.clone());
+            }
         }
-        for nd in &b.nondet_terms[base_len..] {
-            self.nondet_terms.push(nd.clone());
+        if base_len <= b.nondet_terms.len() {
+            for nd in &b.nondet_terms[base_len..] {
+                self.nondet_terms.push(nd.clone());
+            }
         }
     }
 }

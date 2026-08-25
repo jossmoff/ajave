@@ -1409,6 +1409,56 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // SV-COMP: assertions always enabled → return 1.
                 self.stack.push(Operand::int(1));
             }
+            CallModel::CollectionStore(elem_idx) => {
+                // add(elem) / put(key, elem) / set(idx, elem):
+                // Store the element to synthetic $$coll_last field on receiver.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                let elem = args
+                    .get(elem_idx as usize)
+                    .cloned()
+                    .unwrap_or(Operand::int(0));
+                self.stmts.push(Stmt::PutField {
+                    obj: this,
+                    field: FieldKey {
+                        class: "$$coll".into(),
+                        name: models::COLL_LAST_FIELD.into(),
+                        desc: "Ljava/lang/Object;".into(),
+                    },
+                    val: elem,
+                });
+                // add() returns boolean true; put()/set()/remove() return old value (null).
+                if let Some(ty) = ret {
+                    let result = match ty {
+                        Ty::Int => Operand::int(1), // add() → true
+                        _ => Operand::int(0),        // put()/set() → null
+                    };
+                    self.stack.push(result);
+                }
+            }
+            CallModel::CollectionLoad(t) => {
+                // get(idx) / getLast() / next() / Map.get(key):
+                // Read from synthetic $$coll_last field on receiver.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                self.nullcheck(&this);
+                let result = self.assign(
+                    t.unwrap_or(Ty::Ref),
+                    Rvalue::GetField {
+                        obj: this,
+                        field: FieldKey {
+                            class: "$$coll".into(),
+                            name: models::COLL_LAST_FIELD.into(),
+                            desc: "Ljava/lang/Object;".into(),
+                        },
+                    },
+                );
+                self.stack.push(result);
+            }
+            CallModel::CollectionIterator => {
+                // iterator() / values() / keySet() / entrySet():
+                // Return the collection itself so next() reads $$coll_last.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                self.stack.push(this);
+            }
             CallModel::Unmodelled => {
                 if let Some(obj) = receiver.clone() {
                     self.nullcheck(&obj);

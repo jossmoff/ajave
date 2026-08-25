@@ -61,6 +61,12 @@ struct Cli {
     /// non-ASCII chars that our Character method encodings can't model.
     #[arg(long = "ascii-only")]
     ascii_only: bool,
+
+    /// SV-COMP property to check. Defaults to `assert`.
+    ///   assert              — valid-assert (assertion violations)
+    ///   no-runtime-exception — uncaught RuntimeException
+    #[arg(long = "property", default_value = "assert")]
+    property: String,
 }
 
 fn collect_by_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
@@ -179,13 +185,15 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             )));
         }
     }
-    engines.push(Box::new(roast_engines::ai::AiEngine::new()));
+    // CHC after BMC: BMC handles falsification; CHC proves safety for
+    // recursive programs that BMC can't resolve (unbounded recursion).
     {
         let chc = roast_engines::chc::ChcEngine::new();
         if chc.available() {
             engines.push(Box::new(chc));
         }
     }
+    engines.push(Box::new(roast_engines::ai::AiEngine::new()));
     {
         let imc = roast_engines::imc::ImcEngine::new();
         if imc.available() {
@@ -299,7 +307,7 @@ fn emit_witness_file(
             "CHECK( init(Main.main()), LTL(G assert) )"
         }
         _ => {
-            "CHECK( init(Main.main()), LTL(G ! call(org.sosy_lab.sv_benchmarks.Verifier.assume(false))) )"
+            "CHECK(init(Main.main()), LTL(G ! uncaught(java.lang.RuntimeException)))"
         }
     };
     let yaml = roast_core::witness::emit_violation_yaml(
@@ -460,8 +468,10 @@ fn main() {
     );
 
     // Run the engine portfolio.
+    let assertion_only = cli.property != "no-runtime-exception";
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
+    orchestrator.assertion_only = assertion_only;
     let verdict = orchestrator.run(&prog, 16);
 
     if cli.trace {

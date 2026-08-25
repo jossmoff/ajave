@@ -27,6 +27,14 @@ pub fn body_uses_havoced_ops(body: &Body) -> bool {
     false
 }
 
+/// Returns `true` if the body uses Long or Double typed variables.
+/// The interval AI domain uses i32 arithmetic, so its intervals are unsound
+/// for bodies that manipulate 64-bit values (comparisons, casts, etc.).
+pub fn body_uses_wide_types(body: &Body) -> bool {
+    use roast_ir::Ty;
+    body.vars.iter().any(|vi| matches!(vi.ty, Ty::Long | Ty::Double))
+}
+
 /// Returns `true` if the body calls transcendental Math methods (sin, cos, exp,
 /// log, pow, sqrt, etc.) that require a nonlinear real arithmetic solver.
 pub fn body_uses_transcendental_math(body: &Body) -> bool {

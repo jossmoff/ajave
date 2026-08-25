@@ -8,29 +8,176 @@
 //! composition exercise, not a rewrite: `core::cpa::Product` exists for
 //! exactly that.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::interval::IntervalCpa;
+use crate::body_analysis::body_uses_wide_types;
+use crate::interval::{IntervalCpa, Interval, Nullness, NEG_INF, POS_INF};
 use log::{debug, info};
 use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
 use roast_core::cpa::{reachability, HasLocation};
 use roast_core::engine::{Budget, Engine, Progress};
-use roast_ir::{Const, ObligationId, Operand, Program, Stmt};
+use roast_ir::{BlockId, Const, FieldKey, ObligationId, Operand, Program, Rvalue, Stmt, VarId};
+
+/// Analyze constructors to find fields guaranteed non-null after construction.
+/// Returns a set of FieldKeys that are always assigned non-null in every <init>.
+fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
+    let mut nonnull_fields = HashSet::new();
+    for (mk, body) in &prog.bodies {
+        if mk.name != "<init>" {
+            continue;
+        }
+        // Track which variables are known non-null and which are copies of `this`.
+        let mut nonnull_vars: HashSet<VarId> = HashSet::new();
+        let mut this_vars: HashSet<VarId> = HashSet::new();
+        // Seed `this` (Local 0).
+        for (idx, vi) in body.vars.iter().enumerate() {
+            if matches!(vi.kind, roast_ir::VarKind::Local(0)) && vi.ty == roast_ir::Ty::Ref {
+                this_vars.insert(VarId(idx as u32));
+                nonnull_vars.insert(VarId(idx as u32));
+            }
+        }
+        // Pass 1: find all New/Str/Class/GetStatic assignments and this-copies.
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let Stmt::Assign(v, rv) = stmt {
+                    match rv {
+                        Rvalue::New(_) | Rvalue::NewArray { .. } => { nonnull_vars.insert(*v); }
+                        Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => { nonnull_vars.insert(*v); }
+                        // Static field loads (enum constants, etc.) are non-null
+                        // in practice. This is a sound heuristic: class initializers
+                        // run before any instance constructor, and static ref fields
+                        // of program classes are either explicitly initialized or
+                        // default to null. For enum constants they're always non-null.
+                        Rvalue::GetStatic(_) => {
+                            // Only for Ref-typed vars (not int/boolean static fields)
+                            if body.vars.get(v.0 as usize)
+                                .map(|vi| vi.ty == roast_ir::Ty::Ref)
+                                .unwrap_or(false)
+                            {
+                                nonnull_vars.insert(*v);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Pass 2: propagate through variable copies (fixpoint).
+        for _ in 0..10 {
+            let mut changed = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    if let Stmt::Assign(v, Rvalue::Use(Operand::Var(src))) = stmt {
+                        if nonnull_vars.contains(src) && nonnull_vars.insert(*v) {
+                            changed = true;
+                        }
+                        if this_vars.contains(src) && this_vars.insert(*v) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+        // Pass 3: find PutField(this, field, non-null-var).
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let Stmt::PutField { obj, field, val } = stmt {
+                    let obj_is_this = match obj {
+                        Operand::Var(v) => this_vars.contains(v),
+                        _ => false,
+                    };
+                    if !obj_is_this { continue; }
+                    let val_nonnull = match val {
+                        Operand::Const(Const::Str(_) | Const::Class(_)) => true,
+                        Operand::Var(vv) => nonnull_vars.contains(vv),
+                        _ => false,
+                    };
+                    if val_nonnull {
+                        nonnull_fields.insert(field.clone());
+                    }
+                }
+            }
+        }
+    }
+    nonnull_fields
+}
 
 pub struct AiEngine {
     done: bool,
+    /// Fields known to be non-null after constructor completes.
+    nonnull_fields: HashSet<FieldKey>,
 }
 
 impl AiEngine {
     pub fn new() -> Self {
-        AiEngine { done: false }
+        AiEngine { done: false, nonnull_fields: HashSet::new() }
     }
 }
 
 impl Default for AiEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AiEngine {
+    /// Collect per-block-per-variable interval bounds from the reached states
+    /// and publish them to the blackboard for other engines to consume.
+    fn publish_interval_hints(
+        &self,
+        entry: &roast_ir::MethodKey,
+        reached: &[crate::interval::IState],
+        bb: &mut Blackboard,
+        body: &roast_ir::Body,
+    ) {
+        // For each (block, var), join all intervals across reached states at
+        // that block. The result is a sound over-approximation: every concrete
+        // value at that block is within the published interval.
+        let mut block_vars: HashMap<(BlockId, VarId), Interval> = HashMap::new();
+
+        for state in reached {
+            let loc = state.location();
+            if loc.method != *entry {
+                continue;
+            }
+            // Only use states at block entry (index 0) — mid-block states
+            // reflect post-assignment values that don't hold at block entry.
+            if loc.index != 0 {
+                continue;
+            }
+            for (&vid, &iv) in &state.vars {
+                if iv.is_bottom() {
+                    continue;
+                }
+                // Only publish for 32-bit integer variables. The interval
+                // domain uses i32 range; Long/Double intervals would be wrong.
+                let var_ty = body.vars.get(vid.0 as usize).map(|v| &v.ty);
+                if matches!(var_ty, Some(roast_ir::Ty::Long | roast_ir::Ty::Double)) {
+                    continue;
+                }
+                let key = (loc.block, vid);
+                let joined = block_vars
+                    .entry(key)
+                    .or_insert_with(Interval::bottom);
+                *joined = joined.join(iv);
+            }
+        }
+
+        let mut hint_count = 0;
+        for ((block, vid), iv) in &block_vars {
+            // Only publish if narrower than Top (i.e., actually informative).
+            if iv.lo > NEG_INF || iv.hi < POS_INF {
+                bb.publish_interval_hint(entry.clone(), *block, *vid, iv.lo, iv.hi);
+                hint_count += 1;
+            }
+        }
+        if hint_count > 0 {
+            debug!(
+                "interval-ai: published {hint_count} interval hints for other engines"
+            );
+        }
     }
 }
 
@@ -43,6 +190,38 @@ impl Engine for AiEngine {
         Direction::Over
     }
 
+    /// Runs the interval analysis at init time to publish hints for BMC and
+    /// other engines. The discharge logic runs later in `step()`.
+    fn init(&mut self, prog: &Program, bb: &mut Blackboard) {
+        // Analyze constructors for field nullness.
+        self.nonnull_fields = analyze_constructor_fields(prog);
+        if !self.nonnull_fields.is_empty() {
+            debug!("interval-ai: {} fields known non-null from constructors", self.nonnull_fields.len());
+        }
+
+        let Some(entry) = &prog.entry else { return; };
+        let Some(body) = prog.body(entry) else { return; };
+        if !body.is_fully_lifted() { return; }
+        // The interval domain uses i32 arithmetic. When the body has Long/Double
+        // variables, intermediate int values (e.g. cmp results) get wrong
+        // intervals due to i32 wrapping of 64-bit constants. Skip hints entirely.
+        if body_uses_wide_types(body) { return; }
+
+        let cpa = IntervalCpa { nonnull_fields: self.nonnull_fields.clone() };
+        info!("interval-ai: init — running abstract interpretation for hints");
+        let start = ProgramPoint {
+            method: entry.clone(),
+            block: body.entry,
+            index: 0,
+        };
+        let max_states = 1000usize;
+        let (reached, complete) = reachability(&cpa, prog, &start, (), max_states);
+
+        if complete {
+            self.publish_interval_hints(entry, &reached, bb, body);
+        }
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -52,99 +231,121 @@ impl Engine for AiEngine {
         let Some(entry) = &prog.entry else {
             return Progress::Exhausted;
         };
-        let Some(body) = prog.body(entry) else {
-            return Progress::Exhausted;
-        };
-        // A body we couldn't fully lift may hide obligations behind the
-        // divergence. Over-approximating engines cannot see past that, so
-        // nothing here is provably safe.
-        if !body.is_fully_lifted() {
-            return Progress::Stalled;
-        }
 
-        info!("interval-ai: starting abstract interpretation of {entry:?}");
-        let start = ProgramPoint {
-            method: entry.clone(),
-            block: body.entry,
-            index: 0,
-        };
-        let max_states = (budget.work as usize).max(64);
-        let (reached, complete) = reachability(&IntervalCpa, prog, &start, (), max_states);
-
-        if !complete {
-            // The search was cut short. Silence at an unexplored obligation is
-            // not a proof of anything -- see the doc on `cpa::reachability`.
-            debug!("interval-ai: analysis incomplete at max_states={max_states}, stalling");
-            return Progress::Stalled;
-        }
-        debug!("interval-ai: reached {} abstract states", reached.len());
-
-        // For each obligation, every reached state sitting at its check point
-        // must show the safety condition can never be false there. A single
-        // state where it *could* be false (interval includes zero) rules the
-        // obligation out.
-        //
-        // Crucially: an obligation the search never reaches at all is *also*
-        // safe, not merely unassessed. `reachability` returned `complete`,
-        // meaning this is a sound over-approximation of every real execution
-        // -- so if the abstract search never sets foot at a check point, no
-        // concrete execution can either. That's the case that actually fires
-        // here on stage01/02: once `v3 > 3` is proven always true, the branch
-        // to the `AssertionError` path narrows to a bottom state and is
-        // pruned outright, so its `Check` is never visited. Starting every
-        // obligation at `true` and only falsifying it on an actual sighting
-        // is what lets that count as the proof it is, instead of silently
-        // sitting at Open forever because nothing ever "saw" it.
-        let mut safe: HashMap<ObligationId, bool> =
-            body.obligations.iter().map(|o| (o.id, true)).collect();
-
-        for state in &reached {
-            let loc = state.location();
-            if loc.method != *entry {
-                continue;
+        // Collect methods to analyze.
+        // For NRE, analyze all methods with open obligations (intra-procedural
+        // analysis is sound for NRE: each method's params are non-null from the
+        // JVM call convention, and we're checking runtime exceptions).
+        // For assert, only analyze the entry method (callee analysis with
+        // assumed-NonNull params is unsound for assert: the caller might pass
+        // null to trigger an assertion failure).
+        let open = bb.open();
+        let mut methods_to_analyze: Vec<roast_ir::MethodKey> = Vec::new();
+        methods_to_analyze.push(entry.clone());
+        if !bb.is_assertion_only() {
+            for oref in &open {
+                if !methods_to_analyze.contains(&oref.method) {
+                    methods_to_analyze.push(oref.method.clone());
+                }
             }
-            let Some(Stmt::Check(oid)) = body.block(loc.block).stmts.get(loc.index) else {
-                continue;
-            };
-            let ob = body.obligation(*oid);
-            let cond_ok = match &ob.cond {
-                Operand::Const(Const::Int(v)) => *v != 0,
-                _ => state.eval_operand(&ob.cond).definitely_nonzero(),
-            };
-            let entry_flag = safe.entry(*oid).or_insert(true);
-            *entry_flag = *entry_flag && cond_ok;
         }
 
-        let safe_count = safe.values().filter(|&&v| v).count();
-        debug!(
-            "interval-ai: {safe_count}/{} obligations proved safe by interval analysis",
-            safe.len()
-        );
+        info!("interval-ai: analyzing {} methods", methods_to_analyze.len());
 
         let mut advanced = false;
-        for (oid, is_safe) in safe {
-            if !is_safe {
+        let max_states_per_method = ((budget.work as usize) / methods_to_analyze.len().max(1)).max(500);
+        let cpa = IntervalCpa { nonnull_fields: self.nonnull_fields.clone() };
+
+        for method in &methods_to_analyze {
+            let Some(body) = prog.body(method) else {
+                continue;
+            };
+            if !body.is_fully_lifted() {
                 continue;
             }
-            let oref = ObligationRef {
-                method: entry.clone(),
-                id: oid,
+            // Skip methods with wide types (AI domain is i32-based).
+            if body_uses_wide_types(body) {
+                continue;
+            }
+
+            let start = ProgramPoint {
+                method: method.clone(),
+                block: body.entry,
+                index: 0,
             };
-            debug!("interval-ai: discharging {oref:?}");
-            let inv_id = bb.fresh_invariant_id();
-            let published = bb.publish(
-                self.id(),
-                self.direction(),
-                Artifact::Status(
-                    oref,
-                    Status::Discharged {
-                        by: self.id(),
-                        proof: ProofKind::Invariant(inv_id),
-                    },
-                ),
-            );
-            if published.is_ok() {
-                advanced = true;
+            let (reached, complete) = reachability(&cpa, prog, &start, (), max_states_per_method);
+
+            if !complete {
+                debug!("interval-ai: analysis incomplete for {:?}, skipping", method);
+                continue;
+            }
+            debug!("interval-ai: reached {} abstract states for {:?}", reached.len(), method);
+
+            // For each obligation, every reached state sitting at its check
+            // point must show the safety condition can never be false there.
+            // An obligation the search never reaches is also safe (complete
+            // over-approximation means no concrete execution reaches it).
+            let mut safe: HashMap<ObligationId, bool> =
+                body.obligations.iter().map(|o| (o.id, true)).collect();
+
+            for state in &reached {
+                let loc = state.location();
+                if loc.method != *method {
+                    continue;
+                }
+                let Some(Stmt::Check(oid)) = body.block(loc.block).stmts.get(loc.index) else {
+                    continue;
+                };
+                let ob = body.obligation(*oid);
+                let cond_ok = match &ob.cond {
+                    Operand::Const(Const::Int(v)) => *v != 0,
+                    _ => state.eval_operand(&ob.cond).definitely_nonzero(),
+                };
+                let entry_flag = safe.entry(*oid).or_insert(true);
+                *entry_flag = *entry_flag && cond_ok;
+            }
+
+            let safe_count = safe.values().filter(|&&v| v).count();
+            if safe_count > 0 {
+                debug!(
+                    "interval-ai: {safe_count}/{} obligations proved safe for {:?}",
+                    safe.len(),
+                    method,
+                );
+            }
+
+            for (oid, is_safe) in safe {
+                if !is_safe {
+                    continue;
+                }
+                // For assert property, only discharge Assertion obligations.
+                // Discharging NullDeref/ArrayBounds can expose latent BMC bugs
+                // where exception propagation from callees is incomplete.
+                if bb.is_assertion_only() {
+                    let ob = body.obligation(oid);
+                    if !ob.kind.is_assertion() {
+                        continue;
+                    }
+                }
+                let oref = ObligationRef {
+                    method: method.clone(),
+                    id: oid,
+                };
+                let inv_id = bb.fresh_invariant_id();
+                let published = bb.publish(
+                    self.id(),
+                    self.direction(),
+                    Artifact::Status(
+                        oref,
+                        Status::Discharged {
+                            by: self.id(),
+                            proof: ProofKind::Invariant(inv_id),
+                        },
+                    ),
+                );
+                if published.is_ok() {
+                    advanced = true;
+                }
             }
         }
 

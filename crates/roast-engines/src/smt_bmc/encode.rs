@@ -247,7 +247,10 @@ impl<'a> ExploreCtx<'a> {
                 let result_bool = self.solver.and(not_null, is_instance);
                 self.solver.ite(result_bool, one, zero)
             }
-            Rvalue::Call { .. } => self.solver.fresh_bv("havoc", 32),
+            Rvalue::Call { target, .. } => {
+                let w = Self::ret_width_from_desc(&target.desc);
+                self.solver.fresh_bv("havoc", w)
+            }
         }
     }
 

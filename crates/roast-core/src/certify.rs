@@ -170,10 +170,17 @@ impl Certifier for JvmReplay {
             if cfg!(windows) { ";" } else { ":" },
             self.classpath
         );
+        // Build the integer sequence for JVM replay, excluding string entries.
+        // The shadow Verifier uses separate counters: `idx` for int/long/etc
+        // (via next()) and `strIdx` for strings (via system properties).
+        // String entries occupy a slot in nondet_sequence but the shadow
+        // Verifier does NOT call next() for nondetString(), so we must skip them.
         let seq: Vec<String> = witness
-            .nondet_sequence
+            .entries
             .iter()
-            .map(|v| v.to_string())
+            .zip(witness.nondet_sequence.iter())
+            .filter(|(e, _)| !matches!(e.value, roast_ir::verdict::NondetValue::Str(_)))
+            .map(|(_, v)| v.to_string())
             .collect();
 
         let mut cmd = std::process::Command::new(&self.java);

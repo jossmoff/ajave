@@ -117,6 +117,10 @@ TESTS = [
     ("canary", "sv-benchmarks/securibench/Refl3.yml", "FALSE"),
     ("canary", "sv-benchmarks/juliet-java/CWE369_Divide_by_Zero__float_connect_tcp_divide_01_bad.yml", "FALSE"),
 
+    # Refl4: was wrong TRUE (vacuous TRUE with unreachable assertions)
+    ("canary", "sv-benchmarks/securibench/Refl4.yml", "FALSE"),
+    # StrongUpdates1: relaxed discharge for assertions when no depth-limited/try havoc
+    ("canary", "sv-benchmarks/securibench/StrongUpdates1.yml", "TRUE"),
     # VelocityTracker: was wrong TRUE (Unknown solver result not skipped)
     ("canary", "sv-benchmarks/argv-tasks/VelocityTracker_false.yml", "FALSE"),
     # Base64, StrictLineReader: were wrong FALSE (non-seeded obligations leaked)
@@ -126,6 +130,14 @@ TESTS = [
     ("canary", "sv-benchmarks/securibench/StrongUpdates5.yml", "TRUE"),
     # MathHelper_true: was wrong TRUE (NRA discharged over reals, not IEEE 754)
     ("canary", "sv-benchmarks/argv-tasks/MathHelper_true.yml", "FALSE"),
+    # BufferedReaderReadLine: was wrong TRUE (tainted-path violation suppressed, k-induction consumed Bounded)
+    ("canary", "sv-benchmarks/jbmc-regression/BufferedReaderReadLine.yml", "FALSE"),
+    # EquidistantConicProjection_false: was wrong TRUE (tainted paths blocked obligation check, relaxed discharge unsound)
+    ("canary", "sv-benchmarks/argv-tasks/EquidistantConicProjection_false.yml", "FALSE"),
+    # HttpTransport_false: was wrong TRUE (CHC discharged catch-block assertion via unsound LIA encoding)
+    ("canary", "sv-benchmarks/argv-tasks/HttpTransport_false.yml", "FALSE"),
+    # UnsatAddition02: was wrong TRUE (BMC tainted-path relaxed discharge on havoced recursive calls)
+    ("canary", "sv-benchmarks/jayhorn-recursive/UnsatAddition02.yml", "FALSE"),
 
     # Byte/Short/Character compareTo: were UNKNOWN (missing from math_call_modelled)
     ("canary", "sv-benchmarks/autostub/Byte_public_int_java_lang_Byte_compareTo_java_lang_Byte.yml", "FALSE"),
@@ -167,8 +179,31 @@ TESTS = [
     # store_load1: JVM slot reuse across int/long/double/float blocks
     ("canary", "sv-benchmarks/jbmc-regression/store_load1.yml", "TRUE"),
 
+    # ── CHC inter-procedural recursive proofs ──────────────────────────
+    # These are proved by the CHC engine using LIA inter-proc encoding.
+    ("chc-recursive", "sv-benchmarks/jayhorn-recursive/SatAckermann01.yml", "TRUE"),
+    ("chc-recursive", "sv-benchmarks/jayhorn-recursive/SatFibonacci01.yml", "TRUE"),
+    ("chc-recursive", "sv-benchmarks/jayhorn-recursive/SatMccarthy91.yml", "TRUE"),
+    # UnsatAddition02: LIA overflow unsoundness canary — must NOT be TRUE
+    ("chc-recursive", "sv-benchmarks/jayhorn-recursive/UnsatEvenOdd01.yml", "FALSE"),
+
     # ── nondetObject replay ────────────────────────────────────────────
     ("canary", "sv-benchmarks/objects/objects03.yml", "FALSE"),
+    # objects14: nondetObject factory inlining (was wrong TRUE via Nondet(Ref))
+    ("canary", "sv-benchmarks/objects/objects14.yml", "FALSE"),
+    # instanceof8: library class instanceof (was wrong FALSE via I32(0) fallback)
+    ("canary", "sv-benchmarks/jbmc-regression/instanceof8.yml", "TRUE"),
+    # instanceof3: array covariance — String[] instanceof Object[] (was wrong FALSE, skip fixed)
+    ("canary", "sv-benchmarks/jbmc-regression/instanceof3.yml", "TRUE"),
+
+    # ── String constraint solving (Z3 string theory) ───────────────────
+    # Securibench: nondetString() → field store → field load → string op → contains → assert false
+    # These exercise the fresh_str propagation for unresolved String-returning calls.
+    ("string-flow", "sv-benchmarks/securibench/Basic3.yml", "FALSE"),
+    ("string-flow", "sv-benchmarks/securibench/Basic11.yml", "FALSE"),
+    ("string-flow", "sv-benchmarks/securibench/Basic4.yml", "FALSE"),
+    ("string-flow", "sv-benchmarks/securibench/Inter1.yml", "FALSE"),
+    ("string-flow", "sv-benchmarks/securibench/Inter5.yml", "FALSE"),
 
     # ── Aliasing / strong updates ────────────────────────────────────────
     ("aliasing", "sv-benchmarks/securibench/Aliasing3.yml", "TRUE"),
@@ -177,6 +212,17 @@ TESTS = [
     # Inheritance1: constructor chain writes fields with parent class key,
     # reads with subclass key. Tests field_key_resolved.
     ("inheritance", "sv-benchmarks/jbmc-regression/Inheritance1.yml", "TRUE"),
+
+    # ── Collections modeling ──────────────────────────────────────────
+    # Securibench-Micro collection taint flow through addLast/getLast etc.
+    ("collections", "sv-benchmarks/securibench/Collections1.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections2.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections3.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections4.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections5.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections6.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections7.yml", "FALSE"),
+    ("collections", "sv-benchmarks/securibench/Collections10.yml", "FALSE"),
 ]
 
 import yaml

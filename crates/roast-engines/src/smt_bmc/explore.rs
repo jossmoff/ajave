@@ -9,6 +9,77 @@ use roast_models;
 
 use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 
+/// Whether a havoced method call could throw a RuntimeException.
+/// Conservative: returns true for any call to a class whose methods are known
+/// to throw checked or unchecked exceptions (String, parse methods, etc.).
+/// Safe methods (Verifier, System.out, pure getters) return false.
+fn could_throw_runtime_exception(target: &MethodKey) -> bool {
+    let class = target.class.as_str();
+    let name = target.name.as_str();
+
+    // Known-safe: Verifier helper methods never throw.
+    if class.contains("Verifier") || class.contains("verifier") {
+        return false;
+    }
+    // Known-safe: print/println/format on output streams.
+    if (class == "java/io/PrintStream" || class == "java/io/PrintWriter")
+        && (name.starts_with("print") || name == "format" || name == "flush" || name == "close")
+    {
+        return false;
+    }
+    // Known-safe: System methods.
+    if class == "java/lang/System" && (name == "exit" || name == "currentTimeMillis" || name == "nanoTime" || name == "arraycopy") {
+        return false;
+    }
+    // Known-safe: Object methods that don't throw.
+    if class == "java/lang/Object" && (name == "getClass" || name == "hashCode" || name == "equals" || name == "toString" || name == "<init>") {
+        return false;
+    }
+    // Known-safe: simple wrapper methods that don't throw.
+    if (class == "java/lang/Integer" || class == "java/lang/Long" || class == "java/lang/Boolean"
+        || class == "java/lang/Short" || class == "java/lang/Byte" || class == "java/lang/Character"
+        || class == "java/lang/Float" || class == "java/lang/Double")
+        && (name == "intValue" || name == "longValue" || name == "booleanValue"
+            || name == "shortValue" || name == "byteValue" || name == "charValue"
+            || name == "floatValue" || name == "doubleValue"
+            || name == "valueOf" || name == "toString" || name == "hashCode"
+            || name == "equals" || name == "compare" || name == "compareTo"
+            || name == "<init>" || name == "TYPE")
+    {
+        return false;
+    }
+    // Known-safe: Math methods.
+    if class == "java/lang/Math" || class == "java/lang/StrictMath" {
+        return false;
+    }
+    // Known-safe: StringBuilder/StringBuffer constructors and append (don't throw on valid args).
+    if (class == "java/lang/StringBuilder" || class == "java/lang/StringBuffer")
+        && (name == "<init>" || name == "append" || name == "toString" || name == "length")
+    {
+        return false;
+    }
+    // Known-safe: String methods that never throw RuntimeException.
+    if class == "java/lang/String"
+        && (name == "length" || name == "isEmpty" || name == "equals" || name == "equalsIgnoreCase"
+            || name == "hashCode" || name == "toString" || name == "valueOf"
+            || name == "intern" || name == "contains" || name == "startsWith"
+            || name == "endsWith" || name == "trim" || name == "toUpperCase"
+            || name == "toLowerCase" || name == "concat" || name == "replace"
+            || name == "compareTo" || name == "compareToIgnoreCase"
+            || name == "<init>" || name == "format" || name == "join"
+            || name == "matches" || name == "replaceAll" || name == "replaceFirst"
+            || name == "split" || name == "toCharArray" || name == "getBytes")
+    {
+        return false;
+    }
+    // Known-safe: Arrays and Collections utility methods.
+    if class == "java/util/Arrays" || class == "java/util/Collections" {
+        return false;
+    }
+    // Everything else could potentially throw.
+    true
+}
+
 impl<'a> ExploreCtx<'a> {
     /// Set str_vars for `var_id` and all other vars that share the same SMT term.
     fn propagate_str_to_aliases(&mut self, var_id: VarId, str_term: Term) {
@@ -77,6 +148,9 @@ impl<'a> ExploreCtx<'a> {
         is_virtual: bool,
     ) -> bool {
         if self.call_depth >= MAX_CALL_DEPTH || !self.budget_left() {
+            if self.call_depth >= MAX_CALL_DEPTH {
+                self.completeness.has_depth_limited_havoc = true;
+            }
             return false;
         }
 
@@ -215,11 +289,7 @@ impl<'a> ExploreCtx<'a> {
             ret_tainted = ret_tainted || callee_return_tainted;
         }
 
-        let ret_desc = target.desc.split(')').nth(1).unwrap_or("V");
-        let ret_w = match ret_desc.as_bytes().first() {
-            Some(b'J') | Some(b'D') => 64,
-            _ => 32,
-        };
+        let ret_w = Self::ret_width_from_desc(&target.desc);
         let ret_t = self.inline_return.unwrap_or_else(|| {
             ret_tainted = true;
             self.solver.fresh_bv(&format!("ret_{}", target.name), ret_w)
@@ -227,6 +297,12 @@ impl<'a> ExploreCtx<'a> {
         self.vars.insert(dest_var, ret_t);
         self.var_widths.insert(dest_var, ret_w);
         if let Some(st) = self.inline_return_str {
+            self.str_vars.insert(dest_var, st);
+        } else if Self::returns_string(&target.desc) {
+            // Inlined method didn't produce a string term (e.g., returned
+            // through an unexplored path). Create a fresh string to maintain
+            // the constraint chain for downstream string operations.
+            let st = self.solver.fresh_str(&format!("ret_s_{}", target.name));
             self.str_vars.insert(dest_var, st);
         }
         if ret_tainted {
@@ -309,7 +385,7 @@ impl<'a> ExploreCtx<'a> {
     fn handle_stmts(&mut self, stmts: &[Stmt]) -> bool {
         for stmt in stmts {
             if !self.budget_left() {
-                self.all_paths_complete = false;
+                self.completeness.all_paths_complete = false;
                 return false;
             }
             match stmt {
@@ -406,15 +482,29 @@ impl<'a> ExploreCtx<'a> {
                     return false;
                 } else {
                     // Call was not resolved — havoced.
-                    self.all_calls_resolved = false;
+                    self.completeness.all_calls_resolved = false;
                     // If this block has exception edges, the havoced call
                     // could throw to a handler containing an assertion.
                     if let Some(bid) = self.current_block {
                         if !self.body.block(bid).exceptional.is_empty() {
-                            self.has_unresolved_in_try = true;
+                            self.completeness.has_unresolved_in_try = true;
                         }
                     }
-                    (self.encode_rvalue(rv), None)
+                    // Check if this call could throw a RuntimeException
+                    // (for NRE soundness).
+                    if could_throw_runtime_exception(target) {
+                        self.completeness.has_potentially_throwing_havoc = true;
+                    }
+                    let bv = self.encode_rvalue(rv);
+                    // If the return type is String, create a fresh string
+                    // term so downstream string operations (contains, equals,
+                    // etc.) can be constrained by Z3's string solver.
+                    let st = if Self::returns_string(&target.desc) {
+                        Some(self.solver.fresh_str(&format!("hvc_{}", target.name)))
+                    } else {
+                        None
+                    };
+                    (bv, st)
                 }
             }
             Rvalue::Use(op) => {
@@ -433,13 +523,34 @@ impl<'a> ExploreCtx<'a> {
             }
             Rvalue::GetStatic(fk) => {
                 let k = Self::field_key_raw(fk);
-                let st = self.static_str.get(&k).copied();
+                let st = self.static_str.get(&k).copied().or_else(|| {
+                    // Non-program String static: create a fresh string term
+                    // so downstream operations can be constrained.
+                    if fk.desc == "Ljava/lang/String;" && !self.is_program_class(&fk.class) {
+                        Some(self.solver.fresh_str(&format!("sf_{}_{}", fk.class.replace('/', "_"), fk.name)))
+                    } else {
+                        None
+                    }
+                });
                 (self.encode_rvalue(rv), st)
             }
-            Rvalue::GetField { field, .. } => {
+            Rvalue::GetField { field, obj } => {
                 let k = self.field_key_resolved(field);
-                let st = self.field_str.get(&k).copied();
-                (self.encode_rvalue(rv), st)
+                let bv = self.encode_rvalue(rv);
+                let st = if self.field_str_arrays.contains_key(&k) {
+                    let obj_term = self.encode_operand(obj);
+                    let str_arr = self.get_field_str_array(&k);
+                    Some(self.solver.array_select(str_arr, obj_term))
+                } else if field.desc == "Ljava/lang/String;" {
+                    // String field not yet tracked — create a fresh string
+                    // so downstream operations maintain the constraint chain.
+                    let obj_term = self.encode_operand(obj);
+                    let str_arr = self.get_field_str_array(&k);
+                    Some(self.solver.array_select(str_arr, obj_term))
+                } else {
+                    None
+                };
+                (bv, st)
             }
             _ => (self.encode_rvalue(rv), None),
         };
@@ -509,17 +620,24 @@ impl<'a> ExploreCtx<'a> {
         let is_tainted = self.operand_tainted(&ob_cond);
         let cond = self.encode_operand(&ob_cond);
         let violation_cond = self.zero_constraint(cond);
-        let res = self.check_sat_with_path_and(violation_cond);
+        let (res, witness) = self.check_sat_with_path_and_witness(violation_cond);
         log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
             oid, self.body.key, ob_kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
         if res == SatResult::Sat && !is_tainted {
-            let witness = self.extract_witness();
-            self.violations.push((self.body.key.clone(), oid, witness));
+            // Record violations even when path_tainted — the JVM replay
+            // certifier will filter out spurious witnesses from imprecise
+            // float/string modeling. This lets us falsify programs where the
+            // violation is real but the path went through havoced operations.
+            if let Some(w) = witness {
+                self.violations.push((self.body.key.clone(), oid, w));
+            }
         }
         if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown) {
             self.skipped_obligations.insert(oid);
         }
-        self.solver.pop();
+        if self.path_tainted {
+            self.completeness.has_tainted_paths = true;
+        }
     }
 
     fn handle_put_static(&mut self, fk: &FieldKey, val: &Operand) {
@@ -556,15 +674,15 @@ impl<'a> ExploreCtx<'a> {
         } else {
             self.field_tainted.remove(&k);
         }
-        // Track string terms through instance fields
+        // Track string terms through instance fields (per-object via string arrays)
         if let Some(st) = match val {
             Operand::Var(v) => self.str_vars.get(v).copied(),
             Operand::Const(Const::Str(s)) => Some(self.solver.str_const(s)),
             _ => None,
         } {
-            self.field_str.insert(k, st);
-        } else {
-            self.field_str.remove(&k);
+            let str_arr = self.get_field_str_array(&k);
+            let new_str_arr = self.solver.array_store(str_arr, obj_term, st);
+            self.field_str_arrays.insert(k, new_str_arr);
         }
     }
 
@@ -584,7 +702,7 @@ impl<'a> ExploreCtx<'a> {
 
         let Some(thrown_class) = thrown_class else {
             // Can't determine type — mark incomplete.
-            self.all_paths_complete = false;
+            self.completeness.all_paths_complete = false;
             return;
         };
 
@@ -628,7 +746,7 @@ impl<'a> ExploreCtx<'a> {
             debug!("smt-bmc: exception propagating from callee: throw {}", thrown_class);
             self.inline_throw = Some((thrown_term, thrown_class));
         } else {
-            self.all_paths_complete = false;
+            self.completeness.all_paths_complete = false;
         }
     }
 
@@ -674,7 +792,7 @@ impl<'a> ExploreCtx<'a> {
         if self.call_depth > 0 {
             self.inline_throw = Some((thrown_term, thrown_class.to_string()));
         } else {
-            self.all_paths_complete = false;
+            self.completeness.all_paths_complete = false;
         }
     }
 
@@ -684,7 +802,7 @@ impl<'a> ExploreCtx<'a> {
             let count = self.loop_visits.entry(loop_key).or_insert(0);
             *count += 1;
             if *count > MAX_LOOP_UNROLL {
-                self.all_paths_complete = false;
+                self.completeness.all_paths_complete = false;
             } else {
                 self.explore_block_until(target, 0, stop_at);
             }
@@ -1023,7 +1141,7 @@ impl<'a> ExploreCtx<'a> {
         }
         self.block_visits += 1;
         if self.depth > self.max_depth || !self.budget_left() {
-            self.all_paths_complete = false;
+            self.completeness.all_paths_complete = false;
             return;
         }
 
@@ -1031,6 +1149,8 @@ impl<'a> ExploreCtx<'a> {
         let term = self.body.block(block_id).term.clone();
 
         self.current_block = Some(block_id);
+        // Apply AI interval hints for this block (prunes infeasible regions).
+        self.apply_ai_hints(block_id);
         if !self.handle_stmts(&stmts) {
             // If a callee threw an unhandled exception, dispatch to this
             // block's exception handlers (cross-method propagation).
@@ -1074,7 +1194,7 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
             Terminator::Diverge(_) => {
-                self.all_paths_complete = false;
+                self.completeness.all_paths_complete = false;
             }
         }
         self.depth -= 1;

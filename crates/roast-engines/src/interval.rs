@@ -94,7 +94,7 @@ impl Interval {
     pub fn definitely_zero(&self) -> bool {
         *self == Interval::point(0)
     }
-    fn join(self, o: Interval) -> Interval {
+    pub fn join(self, o: Interval) -> Interval {
         if self.is_bottom() {
             return o;
         }
@@ -220,6 +220,26 @@ impl Neg for Interval {
     }
 }
 
+/// Nullness lattice for reference variables.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Nullness {
+    /// Definitely non-null (e.g. result of `new`, string constant).
+    NonNull,
+    /// Definitely null (assigned from `Const::Null`).
+    Null,
+    /// Unknown — could be either.
+    Unknown,
+}
+
+impl Nullness {
+    fn join(self, other: Self) -> Self {
+        if self == other { self } else { Nullness::Unknown }
+    }
+    fn leq(self, other: Self) -> bool {
+        self == other || other == Nullness::Unknown
+    }
+}
+
 /// `VarId -> Interval`. A variable missing from the map is implicitly Top:
 /// this keeps the map small (only entries we've learned something about)
 /// rather than pre-populating every variable in the body.
@@ -227,6 +247,8 @@ impl Neg for Interval {
 pub struct IState {
     pub at: ProgramPoint,
     pub vars: BTreeMap<VarId, Interval>,
+    /// Nullness tracking for reference variables. Missing = Unknown.
+    pub nullness: BTreeMap<VarId, Nullness>,
 }
 
 impl IState {
@@ -240,6 +262,25 @@ impl IState {
             self.vars.remove(&v);
         } else {
             self.vars.insert(v, i);
+        }
+    }
+    pub fn get_nullness(&self, v: VarId) -> Nullness {
+        self.nullness.get(&v).copied().unwrap_or(Nullness::Unknown)
+    }
+    fn set_nullness(&mut self, v: VarId, n: Nullness) {
+        if n == Nullness::Unknown {
+            self.nullness.remove(&v);
+        } else {
+            self.nullness.insert(v, n);
+        }
+    }
+    /// Get nullness for an operand.
+    fn operand_nullness(&self, op: &Operand) -> Nullness {
+        match op {
+            Operand::Var(v) => self.get_nullness(*v),
+            Operand::Const(Const::Null) => Nullness::Null,
+            Operand::Const(Const::Str(_) | Const::Class(_)) => Nullness::NonNull,
+            _ => Nullness::Unknown,
         }
     }
     /// Evaluate an operand under this state.
@@ -264,6 +305,26 @@ impl IState {
             Rvalue::Use(o) => self.eval_operand(o),
             Rvalue::Neg(o) => self.eval_operand(o).neg(),
             Rvalue::Bin(op, a, b) => {
+                // Nullness-aware comparison: if one side is Null and the other
+                // has known nullness, we can resolve the comparison precisely.
+                if matches!(op, BinOp::Ne | BinOp::Eq) {
+                    let na = self.operand_nullness(a);
+                    let nb = self.operand_nullness(b);
+                    let null_cmp = match (na, nb) {
+                        // NonNull != null → definitely true; NonNull == null → definitely false
+                        (Nullness::NonNull, Nullness::Null) | (Nullness::Null, Nullness::NonNull) => {
+                            Some(matches!(op, BinOp::Ne))
+                        }
+                        // Null != null → definitely false; Null == null → definitely true
+                        (Nullness::Null, Nullness::Null) => {
+                            Some(matches!(op, BinOp::Eq))
+                        }
+                        _ => None,
+                    };
+                    if let Some(result) = null_cmp {
+                        return Interval::point(if result { 1 } else { 0 });
+                    }
+                }
                 let (ia, ib) = (self.eval_operand(a), self.eval_operand(b));
                 match op {
                     BinOp::Add => ia.add(ib),
@@ -304,6 +365,21 @@ fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
     }
 }
 
+impl IState {
+    /// Compute the nullness of a reference-producing rvalue.
+    pub fn eval_nullness(&self, rv: &Rvalue) -> Nullness {
+        match rv {
+            Rvalue::Use(Operand::Const(Const::Null)) => Nullness::Null,
+            Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => Nullness::NonNull,
+            Rvalue::Use(Operand::Var(v)) => self.get_nullness(*v),
+            Rvalue::New(_) => Nullness::NonNull,
+            Rvalue::NewArray { .. } => Nullness::NonNull,
+            // Call results, field loads, array loads, etc. are Unknown.
+            _ => Nullness::Unknown,
+        }
+    }
+}
+
 impl Lattice for IState {
     fn leq(&self, other: &Self) -> bool {
         // Every variable known in `self` must be narrower-or-equal in
@@ -319,6 +395,18 @@ impl Lattice for IState {
                 return false; // self is Top where other is narrower: not leq.
             }
         }
+        // Nullness: same rule — self must be narrower-or-equal.
+        for (v, n) in &self.nullness {
+            let other_n = other.nullness.get(v).copied().unwrap_or(Nullness::Unknown);
+            if !n.leq(other_n) {
+                return false;
+            }
+        }
+        for v in other.nullness.keys() {
+            if !self.nullness.contains_key(v) {
+                return false;
+            }
+        }
         true
     }
     fn join(&self, other: &Self) -> Self {
@@ -331,9 +419,19 @@ impl Lattice for IState {
                 vars.insert(k, j);
             }
         }
+        let mut nullness = BTreeMap::new();
+        let nkeys: std::collections::BTreeSet<_> =
+            self.nullness.keys().chain(other.nullness.keys()).copied().collect();
+        for k in nkeys {
+            let j = self.get_nullness(k).join(other.get_nullness(k));
+            if j != Nullness::Unknown {
+                nullness.insert(k, j);
+            }
+        }
         IState {
             at: self.at.clone(),
             vars,
+            nullness,
         }
     }
     fn is_bottom(&self) -> bool {
@@ -347,18 +445,72 @@ impl HasLocation for IState {
     }
 }
 
+/// Count the number of local slots consumed by a method's parameters from its
+/// JVM descriptor. For a static method `([Ljava/lang/String;)V` this returns 1.
+/// For `(IJ)V` it returns 3 (int=1 slot, long=2 slots).
+fn param_slot_count(desc: &str) -> usize {
+    let inner = desc.trim_start_matches('(');
+    let bytes = inner.as_bytes();
+    let mut pos = 0;
+    let mut slot = 0;
+    while pos < bytes.len() && bytes[pos] != b')' {
+        match bytes[pos] {
+            b'J' | b'D' => { pos += 1; slot += 2; }
+            b'L' => {
+                while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                pos += 1;
+                slot += 1;
+            }
+            b'[' => {
+                while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                if pos < bytes.len() && bytes[pos] == b'L' {
+                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                    pos += 1;
+                } else if pos < bytes.len() {
+                    pos += 1;
+                }
+                slot += 1;
+            }
+            _ => { pos += 1; slot += 1; }
+        }
+    }
+    slot
+}
+
 /// Find the statement in `body`'s block that defines `v` as `Bin(op, a, b)`,
 /// searching backward from the end of the block. This is how branch edges
-pub struct IntervalCpa;
+pub struct IntervalCpa {
+    /// Fields known to be non-null after constructor completes.
+    /// When loading such a field from a NonNull object, the result is NonNull.
+    pub nonnull_fields: std::collections::HashSet<roast_ir::FieldKey>,
+}
 
 impl Cpa for IntervalCpa {
     type State = IState;
     type Prec = ();
 
-    fn initial(&self, _prog: &Program, at: &ProgramPoint) -> IState {
+    fn initial(&self, prog: &Program, at: &ProgramPoint) -> IState {
+        let mut nullness = BTreeMap::new();
+        // Mark Ref-typed parameters as NonNull at method entry.
+        // For instance methods, slot 0 = `this` (always non-null).
+        // For static methods, slot 0 = first param (non-null from caller).
+        // Use param_slot_count + 1 to cover both cases (instance `this` slot).
+        if let Some(body) = prog.body(&at.method) {
+            let max_param_slot = param_slot_count(&at.method.desc) + 1;
+            for (idx, vi) in body.vars.iter().enumerate() {
+                if vi.ty == roast_ir::Ty::Ref {
+                    if let roast_ir::VarKind::Local(slot) = vi.kind {
+                        if (slot as usize) < max_param_slot {
+                            nullness.insert(VarId(idx as u32), Nullness::NonNull);
+                        }
+                    }
+                }
+            }
+        }
         IState {
             at: at.clone(),
             vars: BTreeMap::new(),
+            nullness,
         }
     }
 
@@ -382,6 +534,21 @@ impl Cpa for IntervalCpa {
                     Stmt::Assign(v, rv) => {
                         let val = next.eval_rvalue(rv);
                         next.set(*v, val);
+                        // Track nullness for reference-producing rvalues.
+                        let mut n = next.eval_nullness(rv);
+                        // Field nullness: if loading from a NonNull object and
+                        // the field is known-initialized in the constructor,
+                        // the result is NonNull.
+                        if n == Nullness::Unknown {
+                            if let Rvalue::GetField { obj: Operand::Var(ov), field } = rv {
+                                if next.get_nullness(*ov) == Nullness::NonNull
+                                    && self.nonnull_fields.contains(field)
+                                {
+                                    n = Nullness::NonNull;
+                                }
+                            }
+                        }
+                        next.set_nullness(*v, n);
                     }
                     Stmt::Assume(op) => {
                         let iv = next.eval_operand(op);
@@ -413,6 +580,24 @@ impl Cpa for IntervalCpa {
                             }
                             if let Operand::Var(bv) = b {
                                 next.set(*bv, nb);
+                            }
+                        }
+                        // Nullness narrowing on null comparisons.
+                        // `Ne(obj, null)` true → obj is NonNull, false → obj is Null
+                        // `Eq(obj, null)` true → obj is Null, false → obj is NonNull
+                        let is_null_cmp_a = matches!(b, Operand::Const(Const::Null));
+                        let is_null_cmp_b = matches!(a, Operand::Const(Const::Null));
+                        if is_null_cmp_a || is_null_cmp_b {
+                            let ref_operand = if is_null_cmp_a { a } else { b };
+                            if let Operand::Var(rv) = ref_operand {
+                                let narrowed_null = match eff_op {
+                                    BinOp::Ne => Nullness::NonNull,
+                                    BinOp::Eq => Nullness::Null,
+                                    _ => Nullness::Unknown,
+                                };
+                                if narrowed_null != Nullness::Unknown {
+                                    next.set_nullness(*rv, narrowed_null);
+                                }
                             }
                         }
                     }

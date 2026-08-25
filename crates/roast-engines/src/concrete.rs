@@ -455,10 +455,11 @@ impl<'a> ConcreteState<'a> {
                 Ok(match obj_val {
                     Value::Ref(0) => Value::I32(0),
                     Value::Ref(aid) => match self.alloc_types.get(&aid) {
+                        Some(known) if known == class => Value::I32(1),
                         Some(known) if self.prog.supers.contains_key(known.as_str()) => {
                             Value::I32(self.prog.is_subtype(known, class) as i32)
                         }
-                        Some(_) => Value::I32(0),
+                        Some(_) => Value::Unknown,
                         None => Value::Unknown,
                     },
                     _ => Value::Unknown,

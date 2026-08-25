@@ -3,16 +3,23 @@
 //! Two jobs: keep an append-only log so engines can pull deltas since their own
 //! cursor, and refuse artifacts that violate the direction discipline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::artifact::*;
 use log::{debug, trace, warn};
 use roast_ir::verdict::Verdict;
-use roast_ir::Program;
+use roast_ir::{BlockId, MethodKey, Program, VarId};
 
 #[derive(Debug)]
 pub struct Rejected {
     pub reason: String,
+}
+
+/// An interval bound [lo, hi] discovered by abstract interpretation.
+#[derive(Clone, Debug)]
+pub struct IntervalHint {
+    pub lo: i64,
+    pub hi: i64,
 }
 
 #[derive(Default)]
@@ -27,6 +34,12 @@ pub struct Blackboard {
     /// Total assertion obligations in the program (seeded + unreachable).
     /// Used to detect vacuous TRUE when reachability is incomplete.
     total_assertions: usize,
+    /// Whether we are checking only assertions (valid-assert property).
+    /// When false (no-runtime-exception), the vacuous-TRUE guard is skipped.
+    assertion_only: bool,
+    /// Interval bounds from abstract interpretation, keyed by (method, block, var).
+    /// Only populated when AI analysis is complete (sound over-approximation).
+    interval_hints: HashMap<(MethodKey, BlockId, VarId), IntervalHint>,
 }
 
 impl Blackboard {
@@ -45,28 +58,41 @@ impl Blackboard {
     /// obligations nothing ever analyses, which is exactly the bug that
     /// showed up the first time this ran end to end.
     pub fn seed(&mut self, prog: &Program, assertion_only: bool) {
+        self.assertion_only = assertion_only;
         let reachable: std::collections::HashSet<_> =
             prog.reachable_from_entry().into_iter().collect();
-        // Count total assertions in reachable methods (for vacuous-TRUE guard).
+        // Count total assertions across ALL loaded methods (not just reachable).
+        // If assertions exist somewhere but none are reachable, our call-graph
+        // analysis may be incomplete (e.g. reflection via Class.forName), so
+        // we should return Unknown rather than a vacuous TRUE.
         self.total_assertions = prog
             .obligations()
             .iter()
             .filter(|(method, id)| {
-                reachable.contains(method)
-                    && prog
-                        .body(method)
-                        .map(|b| b.obligation(*id).kind.is_assertion())
-                        .unwrap_or(false)
+                prog.body(method)
+                    .map(|b| b.obligation(*id).kind.is_assertion())
+                    .unwrap_or(false)
             })
             .count();
         for (method, id) in prog.obligations() {
             if !reachable.contains(&method) {
                 continue;
             }
+            let body = prog.body(&method).unwrap();
+            let ob = body.obligation(id);
             if assertion_only {
-                let body = prog.body(&method).unwrap();
-                let ob = body.obligation(id);
+                // valid-assert: only Assertion obligations
                 if !ob.kind.is_assertion() {
+                    continue;
+                }
+            } else {
+                // no-runtime-exception: all runtime-exception kinds,
+                // but NOT Assertion (separate property) and NOT guarded
+                // (exceptions caught within the method don't escape main)
+                if ob.kind.is_assertion() {
+                    continue;
+                }
+                if ob.guarded {
                     continue;
                 }
             }
@@ -203,17 +229,67 @@ impl Blackboard {
         self.traces.iter().filter(|t| t.feasible != Some(true))
     }
 
+    /// Publish an interval bound discovered by abstract interpretation.
+    /// Only call this when the analysis was complete (sound over-approximation).
+    pub fn publish_interval_hint(
+        &mut self,
+        method: MethodKey,
+        block: BlockId,
+        var: VarId,
+        lo: i64,
+        hi: i64,
+    ) {
+        self.interval_hints
+            .insert((method, block, var), IntervalHint { lo, hi });
+    }
+
+    /// Retrieve all interval hints for a given method and block.
+    pub fn interval_hints_for(
+        &self,
+        method: &MethodKey,
+        block: BlockId,
+    ) -> Vec<(VarId, i64, i64)> {
+        self.interval_hints
+            .iter()
+            .filter(|((m, b, _), _)| m == method && *b == block)
+            .map(|((_, _, v), h)| (*v, h.lo, h.hi))
+            .collect()
+    }
+
+    /// Whether any interval hints have been published.
+    pub fn has_interval_hints(&self) -> bool {
+        !self.interval_hints.is_empty()
+    }
+
+    /// Retrieve all interval hints for a given method, as (block, var) → (lo, hi).
+    pub fn interval_hints_for_method(
+        &self,
+        method: &MethodKey,
+    ) -> HashMap<(BlockId, VarId), (i64, i64)> {
+        self.interval_hints
+            .iter()
+            .filter(|((m, _, _), _)| m == method)
+            .map(|((_, b, v), h)| ((*b, *v), (h.lo, h.hi)))
+            .collect()
+    }
+
     pub fn statuses(&self) -> impl Iterator<Item = (&ObligationRef, &Status)> {
         self.statuses.iter()
+    }
+
+    /// Whether we are checking the assert property (vs no-runtime-exception).
+    pub fn is_assertion_only(&self) -> bool {
+        self.assertion_only
     }
 
     /// The whole-task verdict. One violation is enough to say FALSE; TRUE
     /// requires every obligation discharged.
     pub fn verdict(&self) -> Verdict {
         if self.statuses.is_empty() {
-            if self.total_assertions > 0 {
+            if self.assertion_only && self.total_assertions > 0 {
                 // Program has assertions but none were reachable — incomplete
                 // reachability analysis. Return Unknown rather than vacuous TRUE.
+                // For no-runtime-exception, empty = no runtime checks = TRUE.
                 return Verdict::Unknown;
             }
             return Verdict::True;

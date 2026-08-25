@@ -29,8 +29,18 @@ Format: `("category", "sv-benchmarks/path/to.yml", "EXPECTED_VERDICT"),`
 
 ## Design Rules
 - **No hardcoded nondet patterns in concrete engine.** Single all-zero probe only. Finding specific input values is the SMT engine's job.
+- **No hardcoded witness values anywhere.** Engines must discover witness values through formal reasoning (SMT solving, abstract interpretation, symbolic execution), never by embedding benchmark-specific constants (e.g. known trigger strings). If an engine cannot construct a witness through its own analysis, it must not publish a violation.
+- **No benchmark-specific pattern matching.** Every engine must be grounded in a well-defined formal method with a soundness argument. If you can't sketch a proof of why the engine's answers are correct in general, it's not a real engine — it's overfitting. Ad-hoc recognizers that work on known benchmarks but break on novel inputs are not acceptable.
+- **IR changes must not regress other engines.** Changing the IR representation (e.g. lifting `Havoc` to `Call`) to benefit one analysis must be evaluated for performance impact on ALL engines, especially BMC. Run smoke tests AND check that borderline benchmarks don't timeout.
 - **Update `changes.md`** whenever implementing a new technique, engine, or notable design decision.
 - **Run smoke tests** after any engine change before full scoring.
+
+## Code Quality Rules
+- **FK is a struct, not a tuple.** Use `FK::new(class, name, desc)` for field keys. Never use raw `(String, String, String)` for field identification.
+- **Use `ret_width_from_desc()`** to get return type width from JVM descriptors. Don't inline descriptor parsing.
+- **Use `Completeness` struct** for tracking exploration completeness. Don't use bare boolean flags for `all_paths_complete`, `all_calls_resolved`, `has_unresolved_in_try`.
+- **Solver push/pop must be paired.** Use `check_sat_with_path_and_witness()` which handles push, check, witness extraction, and pop atomically. Never leave a dangling push for the caller to pop.
+- **Discharge logic lives in `Completeness::can_discharge()`.** Don't spread discharge criteria across multiple ad-hoc conditionals.
 
 ## Issue Labels and Experiment Tracking
 

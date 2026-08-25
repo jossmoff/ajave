@@ -3,7 +3,7 @@
 use roast_core::smt::Term;
 use roast_ir::*;
 
-use super::ExploreCtx;
+use super::{ExploreCtx, FK};
 
 impl<'a> ExploreCtx<'a> {
     /// Returns true only for methods that have a precise SMT encoding in
@@ -305,7 +305,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Integer", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = (class.to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new(class, "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let a = self.solver.array_select(arr, this_ref);
                 let b = self.solver.array_select(arr, other_ref);
@@ -320,7 +320,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Short" | "java/lang/Byte" | "java/lang/Character", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = (class.to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new(class, "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let a = self.solver.array_select(arr, this_ref);
                 let b = self.solver.array_select(arr, other_ref);
@@ -338,7 +338,7 @@ impl<'a> ExploreCtx<'a> {
                 } else {
                     // instance hashCode()
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Boolean".to_string(), "$$value".to_string(), "I".to_string());
+                    let k = FK::new("java/lang/Boolean", "$$value", "I");
                     let arr = self.get_field_array(&k, 32);
                     let v = self.solver.array_select(arr, this_ref);
                     let zero = self.solver.bv_const(0, 32);
@@ -351,7 +351,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Boolean", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = (class.to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new(class, "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let a = self.solver.array_select(arr, this_ref);
                 let b = self.solver.array_select(arr, other_ref);
@@ -360,7 +360,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Long", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = ("java/lang/Long".to_string(), "$$value".to_string(), "J".to_string());
+                let k = FK::new("java/lang/Long", "$$value", "J");
                 let w = 64u32;
                 let arr = self.get_field_array(&k, w);
                 let a = self.solver.array_select(arr, this_ref);
@@ -672,7 +672,7 @@ impl<'a> ExploreCtx<'a> {
                 } else {
                     // Instance method: read $$value
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                    let k = FK::new("java/lang/Float", "$$value", "I");
                     let arr = self.get_field_array(&k, 32);
                     self.solver.array_select(arr, this_ref)
                 };
@@ -693,7 +693,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(&args[0])
                 } else {
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                    let k = FK::new("java/lang/Double", "$$value", "D");
                     let arr = self.get_field_array(&k, 64);
                     self.solver.array_select(arr, this_ref)
                 };
@@ -716,7 +716,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(&args[0])
                 } else {
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                    let k = FK::new("java/lang/Float", "$$value", "I");
                     let arr = self.get_field_array(&k, 32);
                     self.solver.array_select(arr, this_ref)
                 };
@@ -736,7 +736,7 @@ impl<'a> ExploreCtx<'a> {
                     self.encode_operand(&args[0])
                 } else {
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                    let k = FK::new("java/lang/Double", "$$value", "D");
                     let arr = self.get_field_array(&k, 64);
                     self.solver.array_select(arr, this_ref)
                 };
@@ -787,7 +787,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Float", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let a = self.solver.array_select(arr, this_ref);
                 let b = self.solver.array_select(arr, other_ref);
@@ -796,7 +796,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Double", "compareTo") => {
                 let this_ref = self.encode_operand(&args[0]);
                 let other_ref = self.encode_operand(&args[1]);
-                let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                let k = FK::new("java/lang/Double", "$$value", "D");
                 let arr = self.get_field_array(&k, 64);
                 let a = self.solver.array_select(arr, this_ref);
                 let b = self.solver.array_select(arr, other_ref);
@@ -822,7 +822,7 @@ impl<'a> ExploreCtx<'a> {
                 } else {
                     // Instance: read $$value
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                    let k = FK::new("java/lang/Float", "$$value", "I");
                     let arr = self.get_field_array(&k, 32);
                     self.solver.array_select(arr, this_ref)
                 }
@@ -848,7 +848,7 @@ impl<'a> ExploreCtx<'a> {
                     self.solver.extract(xored, 31, 0)
                 } else {
                     let this_ref = self.encode_operand(&args[0]);
-                    let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                    let k = FK::new("java/lang/Double", "$$value", "D");
                     let arr = self.get_field_array(&k, 64);
                     let v = self.solver.array_select(arr, this_ref);
                     let c32 = self.solver.bv_const(32, 64);
@@ -905,7 +905,7 @@ impl<'a> ExploreCtx<'a> {
             // Float/Double byteValue/shortValue: (byte/short)(int)value
             ("java/lang/Float", "byteValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let float_bits = self.solver.array_select(arr, this_ref);
                 let int_val = self.encode_f2i(float_bits);
@@ -914,7 +914,7 @@ impl<'a> ExploreCtx<'a> {
             }
             ("java/lang/Float", "shortValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let float_bits = self.solver.array_select(arr, this_ref);
                 let int_val = self.encode_f2i(float_bits);
@@ -923,7 +923,7 @@ impl<'a> ExploreCtx<'a> {
             }
             ("java/lang/Double", "byteValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                let k = FK::new("java/lang/Double", "$$value", "D");
                 let arr = self.get_field_array(&k, 64);
                 let double_bits = self.solver.array_select(arr, this_ref);
                 let int_val = self.encode_d2i(double_bits);
@@ -932,7 +932,7 @@ impl<'a> ExploreCtx<'a> {
             }
             ("java/lang/Double", "shortValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                let k = FK::new("java/lang/Double", "$$value", "D");
                 let arr = self.get_field_array(&k, 64);
                 let double_bits = self.solver.array_select(arr, this_ref);
                 let int_val = self.encode_d2i(double_bits);
@@ -943,28 +943,28 @@ impl<'a> ExploreCtx<'a> {
             // ── Integer/Long/Short/Byte floatValue/doubleValue (int→float/double) ──
             ("java/lang/Integer" | "java/lang/Short" | "java/lang/Byte", "doubleValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = (class.to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new(class, "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let int_val = self.solver.array_select(arr, this_ref);
                 self.encode_i2d(int_val)
             }
             ("java/lang/Long", "doubleValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Long".to_string(), "$$value".to_string(), "J".to_string());
+                let k = FK::new("java/lang/Long", "$$value", "J");
                 let arr = self.get_field_array(&k, 64);
                 let long_val = self.solver.array_select(arr, this_ref);
                 self.encode_l2d(long_val)
             }
             ("java/lang/Integer" | "java/lang/Short" | "java/lang/Byte", "floatValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = (class.to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new(class, "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let int_val = self.solver.array_select(arr, this_ref);
                 self.encode_i2f(int_val)
             }
             ("java/lang/Long", "floatValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Long".to_string(), "$$value".to_string(), "J".to_string());
+                let k = FK::new("java/lang/Long", "$$value", "J");
                 let arr = self.get_field_array(&k, 64);
                 let long_val = self.solver.array_select(arr, this_ref);
                 self.encode_l2f(long_val)
@@ -973,21 +973,21 @@ impl<'a> ExploreCtx<'a> {
             // ── Float intValue/longValue/doubleValue (float→int/long/double) ──
             ("java/lang/Float", "intValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let float_bits = self.solver.array_select(arr, this_ref);
                 self.encode_f2i(float_bits)
             }
             ("java/lang/Float", "longValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let float_bits = self.solver.array_select(arr, this_ref);
                 self.encode_f2l(float_bits)
             }
             ("java/lang/Float", "doubleValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Float".to_string(), "$$value".to_string(), "I".to_string());
+                let k = FK::new("java/lang/Float", "$$value", "I");
                 let arr = self.get_field_array(&k, 32);
                 let float_bits = self.solver.array_select(arr, this_ref);
                 self.encode_f2d(float_bits)
@@ -996,14 +996,14 @@ impl<'a> ExploreCtx<'a> {
             // ── Double intValue/longValue/floatValue (double→int/long/float) ──
             ("java/lang/Double", "intValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                let k = FK::new("java/lang/Double", "$$value", "D");
                 let arr = self.get_field_array(&k, 64);
                 let double_bits = self.solver.array_select(arr, this_ref);
                 self.encode_d2i(double_bits)
             }
             ("java/lang/Double", "longValue") => {
                 let this_ref = self.encode_operand(&args[0]);
-                let k = ("java/lang/Double".to_string(), "$$value".to_string(), "D".to_string());
+                let k = FK::new("java/lang/Double", "$$value", "D");
                 let arr = self.get_field_array(&k, 64);
                 let double_bits = self.solver.array_select(arr, this_ref);
                 self.encode_d2l(double_bits)

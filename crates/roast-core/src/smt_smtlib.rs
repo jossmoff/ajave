@@ -72,6 +72,7 @@ impl SmtLib {
             Sort::Int => "Int",
             Sort::Array { idx: 32, elem: 32 } => "(Array (_ BitVec 32) (_ BitVec 32))",
             Sort::Array { idx: 32, elem: 64 } => "(Array (_ BitVec 32) (_ BitVec 64))",
+            Sort::StrArray => "(Array (_ BitVec 32) String)",
             _ => "", // fallback handled below
         }
     }
@@ -493,12 +494,13 @@ impl Solver for SmtLib {
     fn array_select(&mut self, arr: Term, idx: Term) -> Term {
         let an = self.name(arr).to_string();
         let in_ = self.name(idx).to_string();
-        let elem_width = match self.sort(arr) {
-            Sort::Array { elem, .. } => elem,
-            _ => 32,
+        let elem_sort = match self.sort(arr) {
+            Sort::StrArray => Sort::Str,
+            Sort::Array { elem, .. } => Sort::Bv(elem),
+            _ => Sort::Bv(32),
         };
         let expr = format!("(select {an} {in_})");
-        self.define_term("t", &expr, Sort::Bv(elem_width))
+        self.define_term("t", &expr, elem_sort)
     }
 
     fn array_store(&mut self, arr: Term, idx: Term, val: Term) -> Term {
@@ -508,6 +510,18 @@ impl Solver for SmtLib {
         let sort = self.sort(arr);
         let expr = format!("(store {an} {in_} {vn})");
         self.define_term("t", &expr, sort)
+    }
+
+    fn fresh_str_array(&mut self, name: &str) -> Term {
+        let sname = format!("{name}_{}", self.next_id);
+        self.send(&format!("(declare-const {sname} (Array (_ BitVec 32) String))"));
+        self.alloc(sname, Sort::StrArray)
+    }
+
+    fn const_str_array(&mut self, val: Term) -> Term {
+        let vn = self.name(val).to_string();
+        let expr = format!("((as const (Array (_ BitVec 32) String)) {vn})");
+        self.define_term("carr", &expr, Sort::StrArray)
     }
 
     fn assert(&mut self, t: Term) {

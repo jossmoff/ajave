@@ -25,8 +25,19 @@ use roast_ir::verdict::{NondetEntry, NondetValue, Witness};
 use roast_ir::*;
 use roast_models;
 
-/// Triple key for field identification: (class, name, desc).
-type FK = (String, String, String);
+/// Field identification key with named fields for type safety.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FK {
+    class: String,
+    name: String,
+    desc: String,
+}
+
+impl FK {
+    fn new(class: impl Into<String>, name: impl Into<String>, desc: impl Into<String>) -> Self {
+        FK { class: class.into(), name: name.into(), desc: desc.into() }
+    }
+}
 
 /// Maximum number of solver check-sat calls per run to prevent hangs.
 const MAX_SOLVER_CALLS: u32 = 10_000;
@@ -35,7 +46,7 @@ const MAX_SOLVER_CALLS: u32 = 10_000;
 const MAX_VIOLATIONS: usize = 50;
 
 /// Maximum call inlining depth to prevent infinite recursion.
-const MAX_CALL_DEPTH: u32 = 10;
+const MAX_CALL_DEPTH: u32 = 15;
 
 /// Maximum number of times a loop back-edge may be taken on a single path.
 const MAX_LOOP_UNROLL: u32 = 5;
@@ -48,6 +59,75 @@ const MAX_BLOCK_VISITS: u64 = 50_000;
 /// Maximum number of path forks. Path forking (as opposed to diamond merging)
 /// doubles the work at each fork. This limit prevents exponential blowup.
 const MAX_FORKS: u32 = 500;
+
+/// Tracks why exploration may be incomplete, replacing ad-hoc boolean flags.
+/// Each field records a specific reason the engine cannot fully discharge.
+#[derive(Clone, Debug, Default)]
+struct Completeness {
+    /// All paths were fully explored (no budget cuts, no unhandled throws).
+    all_paths_complete: bool,
+    /// Every call rvalue was resolved (inlined or math-modelled).
+    all_calls_resolved: bool,
+    /// A havoced (unresolved) call exists inside a try block, meaning an
+    /// exception handler containing an assertion may be unreachable.
+    has_unresolved_in_try: bool,
+    /// A havoced call exists to a method that could throw a RuntimeException
+    /// (e.g. String.substring, Float.parseFloat). For NRE, this blocks
+    /// discharge because the exception isn't modelled as an obligation.
+    has_potentially_throwing_havoc: bool,
+    /// A call was havoced because MAX_CALL_DEPTH was reached (recursion cutoff).
+    /// This means the callee's body was not explored — it could contain
+    /// assertions reachable via deeper recursion. Blocks relaxed discharge.
+    has_depth_limited_havoc: bool,
+    /// Some paths had `path_tainted=true` (e.g. float/double imprecision).
+    /// This means some obligation checks may have been skipped or never reached
+    /// because tainted branch conditions prevented exploration. Blocks relaxed
+    /// assertion discharge for non-entry methods.
+    has_tainted_paths: bool,
+}
+
+impl Completeness {
+    fn new() -> Self {
+        Completeness {
+            all_paths_complete: true,
+            all_calls_resolved: true,
+            has_unresolved_in_try: false,
+            has_potentially_throwing_havoc: false,
+            has_depth_limited_havoc: false,
+            has_tainted_paths: false,
+        }
+    }
+
+    /// Can we discharge an obligation for `method` given this completeness state?
+    ///
+    /// For NRE (assertion_only=false), havoced calls to methods that could
+    /// throw RuntimeException block discharge — the exception isn't modelled
+    /// as an obligation and could cause an undetected runtime exception.
+    fn can_discharge(&self, method: &MethodKey, entry: &MethodKey, method_explored: bool, assertion_only: bool) -> bool {
+        if !assertion_only && self.has_potentially_throwing_havoc {
+            return false;
+        }
+        if method == entry {
+            !self.has_unresolved_in_try
+        } else if method_explored {
+            // For assertions: if there are no unresolved calls in try blocks,
+            // havoced calls can only affect values (not control flow to exception
+            // handlers). The obligation check was evaluated at every reachable
+            // point with the havoced values modeled as unconstrained — if the
+            // solver proved it unreachable, that's sound.
+            // Guard: has_unresolved_in_try=true means a havoced call in a try
+            // block could throw to a handler containing the assertion, so we
+            // can't discharge.
+            if assertion_only && !self.has_unresolved_in_try && !self.has_depth_limited_havoc && !self.has_tainted_paths {
+                true
+            } else {
+                self.all_calls_resolved
+            }
+        } else {
+            self.all_paths_complete && self.all_calls_resolved
+        }
+    }
+}
 
 pub struct SmtBmc {
     factory: Box<dyn SolverFactory>,
@@ -67,6 +147,16 @@ impl SmtBmc {
             done: false,
             ascii_only: false,
         }
+    }
+}
+
+impl SmtBmc {
+    /// Collect interval hints from the blackboard for the entry method.
+    fn collect_ai_hints(
+        bb: &Blackboard,
+        entry: &MethodKey,
+    ) -> HashMap<(BlockId, VarId), (i64, i64)> {
+        bb.interval_hints_for_method(entry)
     }
 }
 
@@ -120,13 +210,13 @@ impl Engine for SmtBmc {
             max_depth: self.max_depth,
             solver_calls: 0,
             exhausted: false,
-            all_paths_complete: true,
+            completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
             field_arrays: HashMap::new(),
-            field_str: HashMap::new(),
+            field_str_arrays: HashMap::new(),
             field_tainted: HashSet::new(),
             array_map: Vec::new(),
             type_array,
@@ -146,13 +236,17 @@ impl Engine for SmtBmc {
             inline_return_str: None,
             inline_return_tainted: false,
             inline_throw: None,
-            all_calls_resolved: true,
-            has_unresolved_in_try: false,
             current_block: None,
             path_constraints: Vec::new(),
             inlined_methods: HashSet::new(),
             ascii_only: self.ascii_only,
+            ai_hints: Self::collect_ai_hints(bb, entry),
+            ai_hints_applied: HashSet::new(),
         };
+
+        if !ctx.ai_hints.is_empty() {
+            info!("smt-bmc: loaded {} AI interval hints", ctx.ai_hints.len());
+        }
 
         // Constrain entry method's Ref-typed parameters to be non-null.
         // JVM guarantees main()'s args is non-null; for other entry methods
@@ -164,16 +258,85 @@ impl Engine for SmtBmc {
 
         let violations = std::mem::take(&mut ctx.violations);
         let violations_empty = violations.is_empty();
+        // Collect violated obligation IDs before consuming violations.
+        let violated_oids: HashSet<ObligationId> = violations.iter()
+            .map(|(_, oid, _)| *oid)
+            .collect();
+        // Check if a runtime-exception violation could dispatch to an exception
+        // handler containing an Assertion. When the BMC finds e.g. ArrayBounds
+        // violated, it records the violation but does NOT follow the JVM's
+        // exceptional control flow to the catch block. If that handler contains
+        // `assert false`, we must not discharge the Assertion obligation.
+        let has_exc_handler_with_assertion = {
+            let mut found = false;
+            if let Some(body) = prog.body(entry) {
+                // Collect blocks that are exception handler targets.
+                let mut handler_blocks: HashSet<BlockId> = HashSet::new();
+                for (_, oid, _) in &violations {
+                    // Find which block contains this violated obligation.
+                    for block in &body.blocks {
+                        let is_violation_block = block.stmts.iter().any(|s| {
+                            matches!(s, Stmt::Check(o) if *o == *oid)
+                        });
+                        if is_violation_block && !block.exceptional.is_empty() {
+                            // This block has exception edges — the violation
+                            // could dispatch to a handler.
+                            for edge in &block.exceptional {
+                                handler_blocks.insert(edge.target);
+                            }
+                        }
+                    }
+                }
+                // Check if any handler block (or block reachable from it)
+                // contains an Assertion check.
+                if !handler_blocks.is_empty() {
+                    // BFS from handler blocks to find Assertion checks.
+                    let mut visited = handler_blocks.clone();
+                    let mut queue: Vec<BlockId> = handler_blocks.into_iter().collect();
+                    while let Some(bid) = queue.pop() {
+                        let blk = body.block(bid);
+                        for stmt in &blk.stmts {
+                            if let Stmt::Check(oid) = stmt {
+                                if body.obligation(*oid).kind.is_assertion() {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found { break; }
+                        // Follow successors.
+                        match &blk.term {
+                            Terminator::Goto(t) => {
+                                if visited.insert(*t) { queue.push(*t); }
+                            }
+                            Terminator::Branch { then_, else_, .. } => {
+                                if visited.insert(*then_) { queue.push(*then_); }
+                                if visited.insert(*else_) { queue.push(*else_); }
+                            }
+                            Terminator::Switch { default, cases, .. } => {
+                                if visited.insert(*default) { queue.push(*default); }
+                                for (_, t) in cases {
+                                    if visited.insert(*t) { queue.push(*t); }
+                                }
+                            }
+                            _ => {}
+                        }
+                        for edge in &blk.exceptional {
+                            if visited.insert(edge.target) { queue.push(edge.target); }
+                        }
+                    }
+                }
+            }
+            found
+        };
         debug!(
-            "smt-bmc: exploration complete, found {} violation(s), {} solver calls, {} block visits, {} forks, exhausted={}, all_paths_complete={}, all_calls_resolved={}, unresolved_in_try={}, skipped={}",
+            "smt-bmc: exploration complete, found {} violation(s), {} solver calls, {} block visits, {} forks, exhausted={}, completeness={:?}, skipped={}",
             violations.len(),
             ctx.solver_calls,
             ctx.block_visits,
             ctx.fork_count,
             ctx.exhausted,
-            ctx.all_paths_complete,
-            ctx.all_calls_resolved,
-            ctx.has_unresolved_in_try,
+            ctx.completeness,
             ctx.skipped_obligations.len(),
         );
 
@@ -203,30 +366,32 @@ impl Engine for SmtBmc {
             }
         }
 
-        // If exploration completed without hitting budget limits and found
-        // no violations, publish Bounded for obligations in the entry method.
-        if violations_empty && !ctx.exhausted && ctx.budget_left() {
-            if ctx.all_paths_complete {
+        // Per-obligation discharge: an obligation can be discharged if the
+        // exploration was complete enough AND this specific obligation has no
+        // violation and was not skipped. This is strictly more powerful than
+        // the old "violations_empty" global gate — a violation on obligation A
+        // no longer prevents discharging obligation B.
+        if !ctx.exhausted && ctx.budget_left() {
+            if ctx.completeness.all_paths_complete {
                 let open_list = bb.open();
-                log::trace!("smt-bmc: exhaustive discharge check: entry={entry:?}, inlined={:?}, open={:?}, skipped={:?}", ctx.inlined_methods, open_list, ctx.skipped_obligations);
+                log::trace!("smt-bmc: per-obligation discharge check: entry={entry:?}, inlined={:?}, open={:?}, skipped={:?}, violated={:?}",
+                    ctx.inlined_methods, open_list, ctx.skipped_obligations, violated_oids);
+                let assertion_only = bb.is_assertion_only();
                 for oref in open_list {
                     let method_explored = &oref.method == entry || ctx.inlined_methods.contains(&oref.method);
-                    // For the entry method: only block discharge when a
-                    // havoced call is in a try block (exception edges).
-                    // For inlined callees: require all_calls_resolved since
-                    // havoced calls could have been the path to reach the
-                    // callee with different data.
-                    // For unexplored methods: require both all_paths_complete
-                    // and all_calls_resolved to prove unreachability.
-                    let can_discharge = if &oref.method == entry {
-                        !ctx.has_unresolved_in_try
-                    } else if method_explored {
-                        ctx.all_calls_resolved
-                    } else {
-                        ctx.all_paths_complete && ctx.all_calls_resolved
-                    };
-                    if can_discharge
+                    // If a runtime-exception violation could dispatch to an
+                    // exception handler containing an Assertion, don't discharge
+                    // that Assertion (BMC doesn't explore exception dispatch paths).
+                    if has_exc_handler_with_assertion && &oref.method == entry {
+                        if let Some(b) = prog.body(&oref.method) {
+                            if b.obligation(oref.id).kind.is_assertion() {
+                                continue;
+                            }
+                        }
+                    }
+                    if ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only)
                         && !ctx.skipped_obligations.contains(&oref.id)
+                        && !violated_oids.contains(&oref.id)
                     {
                         debug!("smt-bmc: discharging {oref:?} (exhaustive exploration)");
                         let _ = bb.publish(
@@ -243,9 +408,14 @@ impl Engine for SmtBmc {
                         advanced = true;
                     }
                 }
-            } else {
+            } else if violations_empty {
+                // Bounded publishing only when no violations at all
+                // (conservative: bounded status is only useful when clean).
+                // Also skip obligations that had a tainted-path violation
+                // suppressed — their bounded status is unsound because the
+                // solver DID find a satisfying assignment for the error path.
                 for oref in bb.open() {
-                    if &oref.method == entry {
+                    if &oref.method == entry && !ctx.skipped_obligations.contains(&oref.id) {
                         let _ = bb.publish(
                             self.id(),
                             self.direction(),
@@ -279,7 +449,7 @@ struct ExploreCtx<'a> {
     max_depth: u32,
     solver_calls: u32,
     exhausted: bool,
-    all_paths_complete: bool,
+    completeness: Completeness,
     skipped_obligations: HashSet<ObligationId>,
 
     // ── Heap model ──────────────────────────────────────────────────────
@@ -287,7 +457,7 @@ struct ExploreCtx<'a> {
     static_str: HashMap<FK, Term>,
     static_tainted: HashSet<FK>,
     field_arrays: HashMap<FK, Term>,
-    field_str: HashMap<FK, Term>,
+    field_str_arrays: HashMap<FK, Term>,
     field_tainted: HashSet<FK>,
     array_map: Vec<(Term, Term, Term)>,
     type_array: Term,
@@ -320,18 +490,16 @@ struct ExploreCtx<'a> {
     /// Set when an inlined callee throws an exception that has no local handler.
     /// (thrown_ref_term, concrete_class_name)
     inline_throw: Option<(Term, String)>,
-    /// True when every Call rvalue was resolved (inlined or math-modelled).
-    /// When false, some calls were havoced and transitive callees may be hidden.
-    all_calls_resolved: bool,
-    /// True when a havoced (unresolved) call is in a block with exception edges.
-    /// Only in this case can the havoced call throw to an unexplored handler
-    /// containing an assertion.
-    has_unresolved_in_try: bool,
     /// Current block being explored (for exception edge checks).
     current_block: Option<BlockId>,
     path_constraints: Vec<Term>,
     inlined_methods: HashSet<MethodKey>,
     ascii_only: bool,
+    /// Interval bounds from AI, keyed by (block, var). Sound over-approximation:
+    /// asserting these in the solver prunes infeasible regions of the search space.
+    ai_hints: HashMap<(BlockId, VarId), (i64, i64)>,
+    /// Variables whose AI hints have already been asserted (avoid re-asserting).
+    ai_hints_applied: HashSet<(BlockId, VarId)>,
 }
 
 /// Snapshot of mutable state for save/restore across forks and diamond merges.
@@ -349,7 +517,7 @@ struct SavedState {
     static_str: HashMap<FK, Term>,
     static_tainted: HashSet<FK>,
     field_arrays: HashMap<FK, Term>,
-    field_str: HashMap<FK, Term>,
+    field_str_arrays: HashMap<FK, Term>,
     field_tainted: HashSet<FK>,
     array_map: Vec<(Term, Term, Term)>,
     type_array: Term,
@@ -390,16 +558,7 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
             Rvalue::New(_) | Rvalue::NewArray { .. } => 32,
-            Rvalue::Call { target, .. } => {
-                let ret = target.desc.rsplit(')').nth(1).unwrap_or("");
-                let _ = ret;
-                // Parse return type from descriptor
-                let after_paren = target.desc.split(')').nth(1).unwrap_or("V");
-                match after_paren.as_bytes().first() {
-                    Some(b'J') | Some(b'D') => 64,
-                    _ => 32,
-                }
-            }
+            Rvalue::Call { target, .. } => Self::ret_width_from_desc(&target.desc),
         }
     }
 
@@ -448,13 +607,13 @@ impl<'a> ExploreCtx<'a> {
         matches!(op, Operand::Var(v) if self.float_tainted.contains(v))
     }
 
-    fn field_key_raw(fk: &FieldKey) -> (String, String, String) {
-        (fk.class.clone(), fk.name.clone(), fk.desc.clone())
+    fn field_key_raw(fk: &FieldKey) -> FK {
+        FK { class: fk.class.clone(), name: fk.name.clone(), desc: fk.desc.clone() }
     }
 
-    fn field_key_resolved(&self, fk: &FieldKey) -> (String, String, String) {
+    fn field_key_resolved(&self, fk: &FieldKey) -> FK {
         let resolved_class = self.prog.resolve_field_class(&fk.class, &fk.name, &fk.desc);
-        (resolved_class, fk.name.clone(), fk.desc.clone())
+        FK { class: resolved_class, name: fk.name.clone(), desc: fk.desc.clone() }
     }
 
     fn rvalue_tainted(&mut self, rv: &Rvalue) -> bool {
@@ -559,17 +718,45 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
+    /// Width of the return type parsed from a JVM method descriptor like "(II)J".
+    fn ret_width_from_desc(desc: &str) -> u32 {
+        let after_paren = desc.split(')').nth(1).unwrap_or("V");
+        match after_paren.as_bytes().first() {
+            Some(b'J') | Some(b'D') => 64,
+            _ => 32,
+        }
+    }
+
+    /// Whether the method descriptor returns `Ljava/lang/String;`.
+    fn returns_string(desc: &str) -> bool {
+        desc.ends_with(")Ljava/lang/String;")
+    }
+
     fn get_field_array(&mut self, k: &FK, elem_width: u32) -> Term {
         if let Some(&arr) = self.field_arrays.get(k) {
             return arr;
         }
-        let arr = if self.is_program_class(&k.0) {
+        let arr = if self.is_program_class(&k.class) {
             let zero = self.solver.bv_const(0, elem_width);
             self.solver.const_array(zero, elem_width)
         } else {
-            self.solver.fresh_array(&format!("f_{}_{}", k.0.replace('/', "_"), k.1), elem_width)
+            self.solver.fresh_array(&format!("f_{}_{}", k.class.replace('/', "_"), k.name), elem_width)
         };
         self.field_arrays.insert(k.clone(), arr);
+        arr
+    }
+
+    fn get_field_str_array(&mut self, k: &FK) -> Term {
+        if let Some(&arr) = self.field_str_arrays.get(k) {
+            return arr;
+        }
+        let arr = if self.is_program_class(&k.class) {
+            let empty = self.solver.str_const("");
+            self.solver.const_str_array(empty)
+        } else {
+            self.solver.fresh_str_array(&format!("fs_{}_{}", k.class.replace('/', "_"), k.name))
+        };
+        self.field_str_arrays.insert(k.clone(), arr);
         arr
     }
 
@@ -589,10 +776,21 @@ impl<'a> ExploreCtx<'a> {
         let target_id = self.get_type_id(class);
         result.push(target_id);
         for c in &all_classes {
-            if c != class && self.prog.is_subtype(c, class) {
-                let id = self.get_type_id(c);
-                if !result.contains(&id) {
-                    result.push(id);
+            if c != class {
+                // Only include c as a subtype if its hierarchy is known.
+                // Unknown classes get is_subtype() == true (conservative for
+                // over-approx) but that's wrong for instanceof where we need
+                // the actual answer. Skip unknown hierarchies.
+                // Exception: array types ([Lfoo;) have their own covariance
+                // rules handled by is_subtype() even without supers entries.
+                if !c.starts_with('[') && !self.prog.supers.contains_key(c.as_str()) {
+                    continue;
+                }
+                if self.prog.is_subtype(c, class) {
+                    let id = self.get_type_id(c);
+                    if !result.contains(&id) {
+                        result.push(id);
+                    }
                 }
             }
         }
@@ -660,6 +858,44 @@ impl<'a> ExploreCtx<'a> {
         result
     }
 
+    /// Assert AI interval hints for variables at the given block.
+    /// Only applies in the entry method body (call_depth == 0), since hints
+    /// are keyed by block ID within the entry method only.
+    fn apply_ai_hints(&mut self, block_id: BlockId) {
+        if self.ai_hints.is_empty() || self.call_depth > 0 {
+            return;
+        }
+        // Collect applicable hints for this block
+        let hints: Vec<(VarId, i64, i64)> = self
+            .ai_hints
+            .iter()
+            .filter(|((bid, _), _)| *bid == block_id)
+            .filter(|(key, _)| !self.ai_hints_applied.contains(key))
+            .map(|((_, vid), (lo, hi))| (*vid, *lo, *hi))
+            .collect();
+
+        for (vid, lo, hi) in hints {
+            // Only constrain variables we already have a term for
+            if let Some(&t) = self.vars.get(&vid) {
+                let w = self.width_of_var(vid);
+                // Only apply to 32-bit integer variables (AI domain is i32)
+                if w == 32 {
+                    let lo_t = self.solver.bv_const(lo, w);
+                    let hi_t = self.solver.bv_const(hi, w);
+                    let ge = self.solver.bvsge(t, lo_t);
+                    let le = self.solver.bvsle(t, hi_t);
+                    let bound = self.solver.and(ge, le);
+                    self.path_constraints.push(bound);
+                    self.ai_hints_applied.insert((block_id, vid));
+                    log::trace!(
+                        "smt-bmc: applied AI hint v{} ∈ [{}, {}] at bb{}",
+                        vid.0, lo, hi, block_id.0
+                    );
+                }
+            }
+        }
+    }
+
     fn assert_nonzero(&mut self, t: Term) {
         let zero = self.solver.bv_const(0, 32);
         let eq = self.solver.bveq(t, zero);
@@ -693,11 +929,14 @@ impl<'a> ExploreCtx<'a> {
         res
     }
 
-    fn check_sat_with_path_and(&mut self, extra: Term) -> SatResult {
+    /// Check satisfiability with path constraints and an extra condition.
+    /// If SAT, extracts a witness before popping the solver scope.
+    /// Returns (result, optional witness).
+    fn check_sat_with_path_and_witness(&mut self, extra: Term) -> (SatResult, Option<Witness>) {
         self.solver_calls += 1;
         if self.solver_calls > MAX_SOLVER_CALLS {
             self.exhausted = true;
-            return SatResult::Unknown;
+            return (SatResult::Unknown, None);
         }
         self.solver.push();
         for &pc in &self.path_constraints {
@@ -705,8 +944,13 @@ impl<'a> ExploreCtx<'a> {
         }
         self.solver.assert(extra);
         let res = self.solver.check_sat();
-        // Don't pop yet — caller may need to extract witness
-        res
+        let witness = if res == SatResult::Sat {
+            Some(self.extract_witness())
+        } else {
+            None
+        };
+        self.solver.pop();
+        (res, witness)
     }
 
     fn extract_witness(&mut self) -> Witness {
