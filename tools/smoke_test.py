@@ -229,6 +229,12 @@ TESTS = [
     ("collections", "sv-benchmarks/securibench/Collections7.yml", "FALSE"),
     ("collections", "sv-benchmarks/securibench/Collections10.yml", "FALSE"),
 
+    # Float widening: unbounded float loops proved via interval fixpoint
+    ("float-widen", "sv-benchmarks/float_unboundedloop/Ramp-and-Hold.yml", "TRUE"),
+    ("float-widen", "sv-benchmarks/float_unboundedloop/Bounded-Reset-Linear-Growth.yml", "TRUE"),
+    ("float-widen", "sv-benchmarks/float_unboundedloop/Saturating-Integrator.yml", "TRUE"),
+    ("float-widen", "sv-benchmarks/float_unboundedloop/Two-Variable_Averaging_Filter.yml", "TRUE"),
+
     # NRA engine: transcendental math via CVC5
     ("nra", "sv-benchmarks/float-nonlinear-calculation/coral4.yml", "FALSE"),
     ("nra", "sv-benchmarks/float-nonlinear-calculation/coral29.yml", "FALSE"),

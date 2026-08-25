@@ -35,6 +35,21 @@ pub fn body_uses_wide_types(body: &Body) -> bool {
     body.vars.iter().any(|vi| matches!(vi.ty, Ty::Long | Ty::Double))
 }
 
+/// Returns `true` if the body uses Float or Double typed variables (but not
+/// necessarily Long). Used to route bodies to the widening interval CPA.
+pub fn body_uses_float_types(body: &Body) -> bool {
+    use roast_ir::Ty;
+    body.vars.iter().any(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+}
+
+/// Returns `true` if the body uses Long typed variables. The i32-based
+/// interval domain is unsound for Long arithmetic; these bodies must be
+/// skipped entirely by the standard interval analysis.
+pub fn body_uses_long_types(body: &Body) -> bool {
+    use roast_ir::Ty;
+    body.vars.iter().any(|vi| matches!(vi.ty, Ty::Long))
+}
+
 /// Returns `true` if the body calls transcendental Math methods (sin, cos, exp,
 /// log, pow, sqrt, etc.) that require a nonlinear real arithmetic solver.
 pub fn body_uses_transcendental_math(body: &Body) -> bool {

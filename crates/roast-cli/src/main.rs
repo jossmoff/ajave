@@ -178,6 +178,12 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     // via cvc5's native support. BMC havoces these calls and produces garbage
     // witnesses, so NRA must claim them first.
     engines.push(Box::new(roast_engines::nra::NraEngine::new()));
+    // AI before BMC: for float-loop bodies, the AI's widening analysis can
+    // prove safety via interval fixpoint. BMC finds spurious violations on
+    // bounded unrollings that fail JVM replay; AI discharges first to prevent
+    // this. For non-float bodies, AI only publishes hints during init (no
+    // discharge), so BMC is unaffected.
+    engines.push(Box::new(roast_engines::ai::AiEngine::new()));
     if let Some(factory) = roast_core::smt_smtlib::SmtLibFactory::from_env() {
         let factory2 = roast_core::smt_smtlib::SmtLibFactory::from_env();
         let mut bmc = roast_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
@@ -197,7 +203,6 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(chc));
         }
     }
-    engines.push(Box::new(roast_engines::ai::AiEngine::new()));
     {
         let imc = roast_engines::imc::ImcEngine::new();
         if imc.available() {

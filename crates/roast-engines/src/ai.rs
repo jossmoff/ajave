@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::body_analysis::body_uses_wide_types;
-use crate::interval::{IntervalCpa, Interval, Nullness, NEG_INF, POS_INF};
+use crate::body_analysis::{body_uses_wide_types, body_uses_float_types, body_uses_long_types, body_has_loops};
+use crate::interval::{IntervalCpa, WideningIntervalCpa, Interval, Nullness, NEG_INF, POS_INF};
 use log::{debug, info};
 use roast_core::artifact::*;
 use roast_core::blackboard::Blackboard;
@@ -181,6 +181,86 @@ impl AiEngine {
     }
 }
 
+impl AiEngine {
+    /// Discharge obligations proved safe by the interval analysis.
+    fn discharge_obligations(
+        &self,
+        method: &roast_ir::MethodKey,
+        reached: &[crate::interval::IState],
+        bb: &mut Blackboard,
+        body: &roast_ir::Body,
+        _prog: &Program,
+    ) -> bool {
+        let mut safe: HashMap<ObligationId, bool> =
+            body.obligations.iter().map(|o| (o.id, true)).collect();
+
+        for state in reached {
+            let loc = state.location();
+            if loc.method != *method {
+                continue;
+            }
+            let Some(Stmt::Check(oid)) = body.block(loc.block).stmts.get(loc.index) else {
+                continue;
+            };
+            let ob = body.obligation(*oid);
+            let cond_ok = match &ob.cond {
+                Operand::Const(Const::Int(v)) => *v != 0,
+                _ => state.eval_operand(&ob.cond).definitely_nonzero(),
+            };
+            if !cond_ok {
+                debug!(
+                    "interval-ai: obligation {:?} NOT safe at block {:?}, float_vars={:?}, vars={:?}",
+                    oid, loc.block, state.float_vars, state.vars,
+                );
+            }
+            let entry_flag = safe.entry(*oid).or_insert(true);
+            *entry_flag = *entry_flag && cond_ok;
+        }
+
+        let safe_count = safe.values().filter(|&&v| v).count();
+        if safe_count > 0 {
+            debug!(
+                "interval-ai: {safe_count}/{} obligations proved safe for {:?}",
+                safe.len(),
+                method,
+            );
+        }
+
+        let mut advanced = false;
+        for (oid, is_safe) in safe {
+            if !is_safe {
+                continue;
+            }
+            if bb.is_assertion_only() {
+                let ob = body.obligation(oid);
+                if !ob.kind.is_assertion() {
+                    continue;
+                }
+            }
+            let oref = ObligationRef {
+                method: method.clone(),
+                id: oid,
+            };
+            let inv_id = bb.fresh_invariant_id();
+            let published = bb.publish(
+                EngineId("interval-ai"),
+                Direction::Over,
+                Artifact::Status(
+                    oref,
+                    Status::Discharged {
+                        by: EngineId("interval-ai"),
+                        proof: ProofKind::Invariant(inv_id),
+                    },
+                ),
+            );
+            if published.is_ok() {
+                advanced = true;
+            }
+        }
+        advanced
+    }
+}
+
 impl Engine for AiEngine {
     fn id(&self) -> EngineId {
         EngineId("interval-ai")
@@ -202,10 +282,28 @@ impl Engine for AiEngine {
         let Some(entry) = &prog.entry else { return; };
         let Some(body) = prog.body(entry) else { return; };
         if !body.is_fully_lifted() { return; }
-        // The interval domain uses i32 arithmetic. When the body has Long/Double
-        // variables, intermediate int values (e.g. cmp results) get wrong
-        // intervals due to i32 wrapping of 64-bit constants. Skip hints entirely.
-        if body_uses_wide_types(body) { return; }
+        if body_uses_long_types(body) { return; }
+
+        // Float-loop bodies: run widening CPA and discharge obligations during
+        // init, before BMC gets a chance to publish spurious violations.
+        if body_uses_float_types(body) && body_has_loops(body) {
+            let wcpa = WideningIntervalCpa::from_body(body);
+            info!("interval-ai: init — float widening analysis on entry method");
+            let start = ProgramPoint {
+                method: entry.clone(),
+                block: body.entry,
+                index: 0,
+            };
+            let (reached, complete) = reachability(&wcpa, prog, &start, (), 2000);
+            if complete {
+                self.discharge_obligations(entry, &reached, bb, body, prog);
+            } else {
+                debug!("interval-ai: float widening incomplete ({} states), skipping discharge", reached.len());
+            }
+            return;
+        }
+
+        if body_uses_float_types(body) { return; }
 
         let cpa = IntervalCpa { nonnull_fields: self.nonnull_fields.clone() };
         info!("interval-ai: init — running abstract interpretation for hints");
@@ -263,8 +361,8 @@ impl Engine for AiEngine {
             if !body.is_fully_lifted() {
                 continue;
             }
-            // Skip methods with wide types (AI domain is i32-based).
-            if body_uses_wide_types(body) {
+            // Skip methods with Long types (AI domain is i32-based).
+            if body_uses_long_types(body) {
                 continue;
             }
 
@@ -273,7 +371,20 @@ impl Engine for AiEngine {
                 block: body.entry,
                 index: 0,
             };
-            let (reached, complete) = reachability(&cpa, prog, &start, (), max_states_per_method);
+
+            // Use widening CPA for float-loop bodies, standard CPA otherwise.
+            let use_widening = body_uses_float_types(body) && body_has_loops(body);
+            let (reached, complete) = if use_widening {
+                let wcpa = WideningIntervalCpa::from_body(body);
+                info!("interval-ai: using widening CPA for {:?}", method);
+                reachability(&wcpa, prog, &start, (), max_states_per_method)
+            } else if body_uses_float_types(body) {
+                // Float body without loops: skip (no widening needed, and
+                // the standard CPA doesn't handle floats).
+                continue;
+            } else {
+                reachability(&cpa, prog, &start, (), max_states_per_method)
+            };
 
             if !complete {
                 debug!("interval-ai: analysis incomplete for {:?}, skipping", method);
@@ -281,71 +392,8 @@ impl Engine for AiEngine {
             }
             debug!("interval-ai: reached {} abstract states for {:?}", reached.len(), method);
 
-            // For each obligation, every reached state sitting at its check
-            // point must show the safety condition can never be false there.
-            // An obligation the search never reaches is also safe (complete
-            // over-approximation means no concrete execution reaches it).
-            let mut safe: HashMap<ObligationId, bool> =
-                body.obligations.iter().map(|o| (o.id, true)).collect();
-
-            for state in &reached {
-                let loc = state.location();
-                if loc.method != *method {
-                    continue;
-                }
-                let Some(Stmt::Check(oid)) = body.block(loc.block).stmts.get(loc.index) else {
-                    continue;
-                };
-                let ob = body.obligation(*oid);
-                let cond_ok = match &ob.cond {
-                    Operand::Const(Const::Int(v)) => *v != 0,
-                    _ => state.eval_operand(&ob.cond).definitely_nonzero(),
-                };
-                let entry_flag = safe.entry(*oid).or_insert(true);
-                *entry_flag = *entry_flag && cond_ok;
-            }
-
-            let safe_count = safe.values().filter(|&&v| v).count();
-            if safe_count > 0 {
-                debug!(
-                    "interval-ai: {safe_count}/{} obligations proved safe for {:?}",
-                    safe.len(),
-                    method,
-                );
-            }
-
-            for (oid, is_safe) in safe {
-                if !is_safe {
-                    continue;
-                }
-                // For assert property, only discharge Assertion obligations.
-                // Discharging NullDeref/ArrayBounds can expose latent BMC bugs
-                // where exception propagation from callees is incomplete.
-                if bb.is_assertion_only() {
-                    let ob = body.obligation(oid);
-                    if !ob.kind.is_assertion() {
-                        continue;
-                    }
-                }
-                let oref = ObligationRef {
-                    method: method.clone(),
-                    id: oid,
-                };
-                let inv_id = bb.fresh_invariant_id();
-                let published = bb.publish(
-                    self.id(),
-                    self.direction(),
-                    Artifact::Status(
-                        oref,
-                        Status::Discharged {
-                            by: self.id(),
-                            proof: ProofKind::Invariant(inv_id),
-                        },
-                    ),
-                );
-                if published.is_ok() {
-                    advanced = true;
-                }
+            if self.discharge_obligations(method, &reached, bb, body, prog) {
+                advanced = true;
             }
         }
 

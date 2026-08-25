@@ -2,6 +2,31 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Float interval widening for unbounded float loops (2026-08-25)
+
+### Path-sensitive float interval analysis
+Extended the interval AI engine with a `FloatInterval` domain over IEEE 754 doubles and a
+`WideningIntervalCpa` that handles both integer and float variables. For float-loop bodies
+(detected via `body_uses_float_types && body_has_loops`), the analysis runs with the float-aware
+CPA using path-sensitive `merge_sep` semantics — no widening needed for these benchmarks because
+the discrete float values (constant-step accumulation bounded by guards) naturally converge within
+the state cap.
+
+### Float narrowing through CMP chains
+JVM float comparisons go through `Cmp(FloatL/FloatG, a, b)` → int result → branch. The float
+narrowing traces back through two definition levels: from the branch condition to the `Bin(Lt, cmp, 0)`
+to the `Cmp(FloatL, float_a, float_b)`, deriving the effective float comparison and narrowing the
+float intervals accordingly. This is critical for proving guards like `if (x >= 8.0)` establish
+invariant bounds.
+
+### Engine ordering: AI before BMC
+Moved the AI engine before BMC in the portfolio and made float-loop discharge happen during `init()`
+(not `step()`). BMC finds spurious violations on bounded unrollings of infinite float loops — the
+violations fail JVM replay because the assertion is actually safe. By discharging in `init()`,
+the AI's proof preempts BMC's spurious violations.
+
+**Impact**: +14 TRUE on float_unboundedloop benchmarks (0→14 of 28 TRUE, +28 pts).
+
 ## Character Unicode tables + String compareTo exact encoding (2026-08-25)
 
 ### Character method modeling via ITE chains
