@@ -1,8 +1,0 @@
-[package]
-name = "roast-ir"
-description = "Program representation for roast: obligations, CFG, verdicts. Zero internal dependencies."
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]

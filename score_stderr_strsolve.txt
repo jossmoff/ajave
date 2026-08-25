@@ -1,0 +1,1468 @@
+  ✓ [1/1013] spec1-5_product14: FALSE (expected FALSE) [16s] score=1
+  ✓ [2/1013] spec1-5_product15: FALSE (expected FALSE) [17s] score=2
+  ✓ [3/1013] spec1-5_product10: FALSE (expected FALSE) [18s] score=3
+  ✓ [4/1013] spec1-5_product17: FALSE (expected FALSE) [18s] score=4
+  ✓ [5/1013] spec1-5_product11: FALSE (expected FALSE) [18s] score=5
+  ✓ [6/1013] spec1-5_product13: FALSE (expected FALSE) [18s] score=6
+  ✓ [7/1013] spec1-5_product18: FALSE (expected FALSE) [18s] score=7
+  ✓ [8/1013] spec1-5_product21: FALSE (expected FALSE) [18s] score=8
+  ✓ [9/1013] spec1-5_product1: FALSE (expected FALSE) [19s] score=9
+  ✓ [10/1013] spec1-5_product22: FALSE (expected FALSE) [19s] score=10
+  ✓ [11/1013] spec1-5_product19: FALSE (expected FALSE) [19s] score=11
+  ✓ [12/1013] spec1-5_product23: FALSE (expected FALSE) [19s] score=12
+  ✓ [13/1013] spec1-5_product16: FALSE (expected FALSE) [20s] score=13
+  ✓ [14/1013] spec1-5_product12: FALSE (expected FALSE) [20s] score=14
+  ✓ [15/1013] spec1-5_product20: FALSE (expected FALSE) [20s] score=15
+  ✓ [16/1013] spec1-5_product2: FALSE (expected FALSE) [21s] score=16
+  ✓ [17/1013] spec1-5_product24: FALSE (expected FALSE) [34s] score=17
+  ✓ [18/1013] spec1-5_product28: FALSE (expected FALSE) [35s] score=18
+  ✓ [19/1013] spec1-5_product31: FALSE (expected FALSE) [36s] score=19
+  ✓ [20/1013] spec1-5_product27: FALSE (expected FALSE) [36s] score=20
+  ✓ [21/1013] spec1-5_product26: FALSE (expected FALSE) [36s] score=21
+  ✓ [22/1013] spec1-5_product25: FALSE (expected FALSE) [37s] score=22
+  ✓ [23/1013] spec1-5_product30: FALSE (expected FALSE) [37s] score=23
+  ✓ [24/1013] spec1-5_product29: FALSE (expected FALSE) [37s] score=24
+  ✓ [25/1013] spec1-5_product32: FALSE (expected FALSE) [38s] score=25
+  ✓ [26/1013] spec1-5_product34: FALSE (expected FALSE) [38s] score=26
+  ✓ [27/1013] spec1-5_product3: FALSE (expected FALSE) [38s] score=27
+  ✓ [28/1013] spec1-5_product37: FALSE (expected FALSE) [39s] score=28
+  ✓ [29/1013] spec1-5_product33: FALSE (expected FALSE) [39s] score=29
+  ✓ [30/1013] spec1-5_product36: FALSE (expected FALSE) [40s] score=30
+  ✓ [31/1013] spec1-5_product35: FALSE (expected FALSE) [40s] score=31
+  ✓ [32/1013] spec1-5_product38: FALSE (expected FALSE) [43s] score=32
+  · [33/1013] spec1-5_product46: UNKNOWN (expected FALSE) [49s] score=32
+  · [34/1013] spec1-5_product45: UNKNOWN (expected FALSE) [50s] score=32
+  · [35/1013] spec1-5_product47: UNKNOWN (expected FALSE) [51s] score=32
+  · [36/1013] spec1-5_product48: UNKNOWN (expected FALSE) [52s] score=32
+  ✓ [37/1013] spec1-5_product41: FALSE (expected FALSE) [53s] score=33
+  ✓ [38/1013] spec1-5_product4: FALSE (expected FALSE) [53s] score=34
+  ✓ [39/1013] spec1-5_product39: FALSE (expected FALSE) [54s] score=35
+  ✓ [40/1013] spec1-5_product42: FALSE (expected FALSE) [54s] score=36
+  ✓ [41/1013] spec1-5_product40: FALSE (expected FALSE) [54s] score=37
+  ✓ [42/1013] spec1-5_product5: FALSE (expected FALSE) [54s] score=38
+  ✓ [43/1013] spec1-5_product44: FALSE (expected FALSE) [56s] score=39
+  ✓ [44/1013] spec1-5_product43: FALSE (expected FALSE) [56s] score=40
+  ✓ [45/1013] spec1-5_product49: FALSE (expected FALSE) [56s] score=41
+  ✓ [46/1013] spec1-5_product51: FALSE (expected FALSE) [59s] score=42
+  ✓ [47/1013] spec1-5_product50: FALSE (expected FALSE) [60s] score=43
+  ✓ [48/1013] spec1-5_product52: FALSE (expected FALSE) [64s] score=44
+  · [49/1013] spec1-5_product58: UNKNOWN (expected TRUE) [66s] score=44
+  · [50/1013] spec1-5_product60: UNKNOWN (expected TRUE) [67s] score=44
+  ✓ [51/1013] spec1-5_product53: FALSE (expected FALSE) [67s] score=45
+  · [52/1013] spec1-5_product61: UNKNOWN (expected TRUE) [67s] score=45
+  ✓ [53/1013] spec1-5_product54: FALSE (expected FALSE) [68s] score=46
+  · [54/1013] spec1-5_product57: UNKNOWN (expected TRUE) [68s] score=46
+  · [55/1013] spec1-5_product62: UNKNOWN (expected TRUE) [69s] score=46
+  · [56/1013] spec1-5_product63: UNKNOWN (expected TRUE) [69s] score=46
+  · [57/1013] spec1-5_product64: UNKNOWN (expected TRUE) [70s] score=46
+  · [58/1013] spec1-5_product59: UNKNOWN (expected TRUE) [70s] score=46
+  ✓ [59/1013] spec1-5_product6: FALSE (expected FALSE) [71s] score=47
+  ✓ [60/1013] spec1-5_product55: FALSE (expected FALSE) [71s] score=48
+  ✓ [61/1013] spec1-5_product56: FALSE (expected FALSE) [75s] score=49
+  · [62/1013] BellmanFord-MemSat02: UNKNOWN (expected TRUE) [76s] score=49
+  · [63/1013] BellmanFord-MemUnsat01: UNKNOWN (expected FALSE) [77s] score=49
+  ✓ [64/1013] spec1-5_product7: FALSE (expected FALSE) [77s] score=50
+  ✓ [65/1013] spec1-5_product8: FALSE (expected FALSE) [78s] score=51
+  · [66/1013] BinaryTreeSearch-MemUnsat01: UNKNOWN (expected FALSE) [79s] score=51
+  · [67/1013] BellmanFord-MemUnsat02: UNKNOWN (expected FALSE) [80s] score=51
+  ✓ [68/1013] BellmanFord-MemSat01: TRUE (expected TRUE) [81s] score=53
+  ✓ [69/1013] spec1-5_product9: FALSE (expected FALSE) [82s] score=54
+  ✓ [70/1013] BellmanFord-FunUnsat02: FALSE (expected FALSE) [83s] score=55
+  · [71/1013] BellmanFord-FunSat02: UNKNOWN (expected FALSE) [83s] score=55
+  ✓ [72/1013] BellmanFord-FunUnsat01: FALSE (expected FALSE) [84s] score=56
+  · [73/1013] InsertionSort-MemUnsat01: UNKNOWN (expected FALSE) [85s] score=56
+  ✓ [74/1013] InsertionSort-MemSat01: TRUE (expected TRUE) [85s] score=58
+  · [75/1013] InsertionSort-FunSat01: UNKNOWN (expected TRUE) [88s] score=58
+  · [76/1013] BellmanFord-FunSat01: UNKNOWN (expected TRUE) [89s] score=58
+  · [77/1013] InsertionSort-FunSat02: UNKNOWN (expected TRUE) [90s] score=58
+  ✓ [78/1013] RedBlackTree-FunSat01: TRUE (expected TRUE) [91s] score=60
+  · [79/1013] MergeSortIterative-FunSat01: UNKNOWN (expected TRUE) [91s] score=60
+  · [80/1013] MergeSortIterative-FunSat02: UNKNOWN (expected TRUE) [92s] score=60
+  · [81/1013] MergeSortIterative-MemSat01: UNKNOWN (expected FALSE) [92s] score=60
+  · [82/1013] RedBlackTree-MemUnsat01: UNKNOWN (expected FALSE) [95s] score=60
+  · [83/1013] MergeSortIterative-MemUnsat01: UNKNOWN (expected FALSE) [96s] score=60
+  ✓ [84/1013] RedBlackTree-FunUnsat01: FALSE (expected FALSE) [97s] score=61
+  · [85/1013] SortedListInsert-MemUnsat01: UNKNOWN (expected FALSE) [98s] score=61
+  · [86/1013] MergeSortIterative-FunUnsat01: UNKNOWN (expected FALSE) [99s] score=61
+  · [87/1013] InsertionSort-FunUnsat01: UNKNOWN (expected FALSE) [104s] score=61
+  · [88/1013] Tsp-FunSat01: UNKNOWN (expected FALSE) [108s] score=61
+  ✓ [89/1013] Tsp-FunUnsat01: FALSE (expected FALSE) [109s] score=62
+  · [90/1013] Tsp-MemSat01: UNKNOWN (expected TRUE) [109s] score=62
+  · [91/1013] Tsp-MemUnsat01: UNKNOWN (expected FALSE) [114s] score=62
+  · [92/1013] AbstractSerializationStreamReader_true: UNKNOWN (expected FALSE) [119s] score=62
+  ✓ [93/1013] AbstractSerializationStreamReader_false: FALSE (expected FALSE) [123s] score=63
+  · [94/1013] AccelerometerListener_false: UNKNOWN (expected FALSE) [123s] score=63
+  ✓ [95/1013] AccelerometerListener_true: TRUE (expected TRUE) [125s] score=65
+  ✓ [96/1013] Trie-FunSat01: TRUE (expected TRUE) [127s] score=67
+  ✓ [97/1013] Trie-MemSat01: TRUE (expected TRUE) [128s] score=69
+  · [98/1013] BinaryTreeSearch-FunUnsat01: TIMEOUT (expected FALSE) [130s] score=69
+  · [99/1013] BinaryTreeSearch-FunSat01: TIMEOUT (expected TRUE) [130s] score=69
+  · [100/1013] BinaryTreeSearch-MemSat01: TIMEOUT (expected TRUE) [131s] score=69
+  ✓ [101/1013] Trie-FunUnsat01: FALSE (expected FALSE) [133s] score=70
+  · [102/1013] BinaryTreeSearch-MemUnsat02: TIMEOUT (expected FALSE) [135s] score=70
+  · [103/1013] ActiveCheck: UNKNOWN (expected TRUE) [136s] score=70
+  ✓ [104/1013] CustomViewAbove: TRUE (expected TRUE) [140s] score=72
+  · [105/1013] RedBlackTree-MemSat01: TIMEOUT (expected TRUE) [145s] score=72
+  · [106/1013] Trie-MemUnsat01: UNKNOWN (expected FALSE) [146s] score=72
+  · [107/1013] BufferedBlockCipher: UNKNOWN (expected TRUE) [147s] score=72
+  · [108/1013] Constant_false2: UNKNOWN (expected FALSE) [147s] score=72
+  ✓ [109/1013] Constant_false: FALSE (expected FALSE) [147s] score=73
+  · [110/1013] Constant_true: UNKNOWN (expected TRUE) [148s] score=73
+  · [111/1013] Base: UNKNOWN (expected TRUE) [149s] score=73
+  · [112/1013] SortedListInsert-FunSat01: TIMEOUT (expected TRUE) [149s] score=73
+  · [113/1013] SortedListInsert-FunSat02: TIMEOUT (expected TRUE) [150s] score=73
+  · [114/1013] SortedListInsert-FunUnsat01: TIMEOUT (expected FALSE) [151s] score=73
+  · [115/1013] SortedListInsert-MemSat01: TIMEOUT (expected TRUE) [151s] score=73
+  · [116/1013] HPack: UNKNOWN (expected TRUE) [156s] score=73
+  · [117/1013] EquidistantConicProjection_false: UNKNOWN (expected FALSE) [156s] score=73
+  · [118/1013] EquidistantConicProjection_true: UNKNOWN (expected TRUE) [157s] score=73
+  ✓ [119/1013] HighlightView_true: TRUE (expected TRUE) [158s] score=75
+  ✓ [120/1013] HttpConnectionHandler: TRUE (expected TRUE) [162s] score=77
+  · [121/1013] FractalTouchHandler_true: UNKNOWN (expected TRUE) [162s] score=77
+  · [122/1013] HotspotIntegerGenerator_true: UNKNOWN (expected TRUE) [163s] score=77
+  ✓ [123/1013] FractalTouchHandler_false: FALSE (expected FALSE) [163s] score=78
+  ✓ [124/1013] DiskBasedCache: FALSE (expected FALSE) [165s] score=79
+  · [125/1013] HttpTransport_false: UNKNOWN (expected FALSE) [168s] score=79
+  · [126/1013] Base64: UNKNOWN (expected TRUE) [168s] score=79
+  · [127/1013] HttpTransport_true: UNKNOWN (expected TRUE) [168s] score=79
+  · [128/1013] Piecewise_true: UNKNOWN (expected TRUE) [174s] score=79
+  · [129/1013] PieSegment_false: UNKNOWN (expected FALSE) [174s] score=79
+  ✓ [130/1013] HighlightView_false: FALSE (expected FALSE) [175s] score=80
+  ✓ [131/1013] MathHelper_true: FALSE (expected FALSE) [175s] score=81
+  ✓ [132/1013] MathHelper_false: FALSE (expected FALSE) [175s] score=82
+  ✓ [133/1013] HotspotIntegerGenerator_false: FALSE (expected FALSE) [176s] score=83
+  · [134/1013] PieSegment_true: UNKNOWN (expected TRUE) [176s] score=83
+  · [135/1013] ImageRequest: UNKNOWN (expected TRUE) [177s] score=83
+  ✓ [136/1013] SunTimes_true: TRUE (expected TRUE) [180s] score=85
+  · [137/1013] ReverseInterpolator_false: UNKNOWN (expected FALSE) [181s] score=85
+  · [138/1013] AlbersProjection_false: TIMEOUT (expected FALSE) [183s] score=85
+  · [139/1013] AlbersProjection_true: TIMEOUT (expected TRUE) [185s] score=85
+  ✓ [140/1013] SunTimes_false: FALSE (expected FALSE) [186s] score=86
+  ✓ [141/1013] SpdyStream: FALSE (expected FALSE) [186s] score=87
+  ✓ [142/1013] ReverseInterpolator_false2: FALSE (expected FALSE) [188s] score=88
+  · [143/1013] VelocityTracker_false: UNKNOWN (expected FALSE) [188s] score=88
+  · [144/1013] ReverseInterpolator_true: UNKNOWN (expected TRUE) [188s] score=88
+  · [145/1013] TallyCounts_true: UNKNOWN (expected TRUE) [190s] score=88
+  · [146/1013] VelocityTracker_true: UNKNOWN (expected TRUE) [192s] score=88
+  · [147/1013] StrictLineReader: UNKNOWN (expected TRUE) [192s] score=88
+  ✓ [148/1013] Boolean_public_int_java_lang_Boolean_compareTo_java_lang_Boolean: FALSE (expected FALSE) [197s] score=89
+  ✓ [149/1013] Boolean_public_boolean_java_lang_Boolean_booleanValue: FALSE (expected FALSE) [197s] score=90
+  · [150/1013] DistinguishedNameParser: TIMEOUT (expected FALSE) [200s] score=90
+  ✓ [151/1013] Boolean_public_static_boolean_java_lang_Boolean_logicalOr_boolean_boolean: FALSE (expected FALSE) [200s] score=91
+  ✓ [152/1013] Boolean_public_static_boolean_java_lang_Boolean_logicalAnd_boolean_boolean: FALSE (expected FALSE) [200s] score=92
+  ✓ [153/1013] Boolean_public_java_lang_String_java_lang_Boolean_toString: FALSE (expected FALSE) [201s] score=93
+  ✓ [154/1013] TallyCounts_false: FALSE (expected FALSE) [203s] score=94
+  ✓ [155/1013] Boolean_public_static_boolean_java_lang_Boolean_logicalXor_boolean_boolean: FALSE (expected FALSE) [203s] score=95
+  ✓ [156/1013] Boolean_public_static_int_java_lang_Boolean_compare_boolean_boolean: FALSE (expected FALSE) [203s] score=96
+  ✓ [157/1013] Boolean_public_static_java_lang_Boolean_java_lang_Boolean_valueOf_boolean: FALSE (expected FALSE) [204s] score=97
+  · [158/1013] GraphFragment_false: TIMEOUT (expected FALSE) [207s] score=97
+  · [159/1013] GraphFragment_true: TIMEOUT (expected TRUE) [208s] score=97
+  ✓ [160/1013] Byte_public_byte_java_lang_Byte_byteValue: FALSE (expected FALSE) [209s] score=98
+  · [161/1013] TouchPadView: UNKNOWN (expected TRUE) [209s] score=98
+  · [162/1013] HebrewDate: TIMEOUT (expected TRUE) [209s] score=98
+  ✓ [163/1013] Boolean_public_static_java_lang_String_java_lang_Boolean_toString_boolean: FALSE (expected FALSE) [210s] score=99
+  ✓ [164/1013] Byte_public_int_java_lang_Byte_compareTo_java_lang_Byte: FALSE (expected FALSE) [212s] score=100
+  ✓ [165/1013] Byte_public_double_java_lang_Byte_doubleValue: FALSE (expected FALSE) [212s] score=101
+  ✓ [166/1013] Byte_public_int_java_lang_Byte_intValue: FALSE (expected FALSE) [213s] score=102
+  ✓ [167/1013] Byte_public_float_java_lang_Byte_floatValue: FALSE (expected FALSE) [214s] score=103
+  ✓ [168/1013] Byte_public_static_int_java_lang_Byte_compare_byte_byte: FALSE (expected FALSE) [214s] score=104
+  ✓ [169/1013] Byte_public_long_java_lang_Byte_longValue: FALSE (expected FALSE) [214s] score=105
+  ✓ [170/1013] Byte_public_short_java_lang_Byte_shortValue: FALSE (expected FALSE) [215s] score=106
+  ✓ [171/1013] Byte_public_static_int_java_lang_Byte_toUnsignedInt_byte: FALSE (expected FALSE) [220s] score=107
+  ✓ [172/1013] Byte_public_static_java_lang_Byte_java_lang_Byte_valueOf_byte: FALSE (expected FALSE) [221s] score=108
+  ✓ [173/1013] Byte_public_static_long_java_lang_Byte_toUnsignedLong_byte: FALSE (expected FALSE) [221s] score=109
+  ✓ [174/1013] Character_public_int_java_lang_Character_compareTo_java_lang_Character: FALSE (expected FALSE) [222s] score=110
+  ✓ [175/1013] Character_public_char_java_lang_Character_charValue: FALSE (expected FALSE) [222s] score=111
+  ✓ [176/1013] Character_public_static_boolean_java_lang_Character_isBmpCodePoint_int: FALSE (expected FALSE) [224s] score=112
+  ✓ [177/1013] Character_public_static_boolean_java_lang_Character_isAlphabetic_int: FALSE (expected FALSE) [225s] score=113
+  · [178/1013] Character_public_static_boolean_java_lang_Character_isDefined_int: UNKNOWN (expected FALSE) [225s] score=113
+  ✓ [179/1013] Character_public_static_boolean_java_lang_Character_isDigit_char: FALSE (expected FALSE) [226s] score=114
+  ✓ [180/1013] Character_public_static_boolean_java_lang_Character_isDigit_int: FALSE (expected FALSE) [226s] score=115
+  ✓ [181/1013] Character_public_static_boolean_java_lang_Character_isISOControl_int: FALSE (expected FALSE) [227s] score=116
+  · [182/1013] Piecewise_false: TIMEOUT (expected FALSE) [228s] score=116
+  · [183/1013] Character_public_static_boolean_java_lang_Character_isIdentifierIgnorable_int: UNKNOWN (expected FALSE) [234s] score=116
+  · [184/1013] Character_public_static_boolean_java_lang_Character_isIdeographic_int: UNKNOWN (expected FALSE) [235s] score=116
+  · [185/1013] Character_public_static_boolean_java_lang_Character_isJavaIdentifierPart_int: UNKNOWN (expected FALSE) [235s] score=116
+  ✓ [186/1013] Character_public_static_boolean_java_lang_Character_isJavaIdentifierPart_char: FALSE (expected FALSE) [236s] score=117
+  ✓ [187/1013] Character_public_static_boolean_java_lang_Character_isJavaIdentifierStart_int: FALSE (expected FALSE) [236s] score=118
+  ✓ [188/1013] Character_public_static_boolean_java_lang_Character_isJavaIdentifierStart_char: FALSE (expected FALSE) [236s] score=119
+  ✓ [189/1013] Character_public_static_boolean_java_lang_Character_isJavaLetter_char: FALSE (expected FALSE) [239s] score=120
+  ✓ [190/1013] Character_public_static_boolean_java_lang_Character_isJavaLetterOrDigit_char: FALSE (expected FALSE) [239s] score=121
+  ✓ [191/1013] Character_public_static_boolean_java_lang_Character_isLetterOrDigit_char: FALSE (expected FALSE) [240s] score=122
+  ✓ [192/1013] Character_public_static_boolean_java_lang_Character_isLetterOrDigit_int: FALSE (expected FALSE) [241s] score=123
+  · [193/1013] TimeChart: TIMEOUT (expected TRUE) [241s] score=123
+  ✓ [194/1013] Character_public_static_boolean_java_lang_Character_isLetter_int: FALSE (expected FALSE) [241s] score=124
+  ✓ [195/1013] Character_public_static_boolean_java_lang_Character_isLetter_char: FALSE (expected FALSE) [241s] score=125
+  ✓ [196/1013] Character_public_static_boolean_java_lang_Character_isLowerCase_int: FALSE (expected FALSE) [247s] score=126
+  ✓ [197/1013] Character_public_static_boolean_java_lang_Character_isLowerCase_char: FALSE (expected FALSE) [247s] score=127
+  · [198/1013] Character_public_static_boolean_java_lang_Character_isMirrored_int: UNKNOWN (expected FALSE) [248s] score=127
+  · [199/1013] Character_public_static_boolean_java_lang_Character_isMirrored_char: UNKNOWN (expected FALSE) [248s] score=127
+  ✓ [200/1013] Character_public_static_boolean_java_lang_Character_isSpaceChar_char: FALSE (expected FALSE) [249s] score=128
+  ✓ [201/1013] Character_public_static_boolean_java_lang_Character_isSpaceChar_int: FALSE (expected FALSE) [250s] score=129
+  ✓ [202/1013] Character_public_static_boolean_java_lang_Character_isSupplementaryCodePoint_int: FALSE (expected FALSE) [250s] score=130
+  · [203/1013] Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierPart_char: UNKNOWN (expected FALSE) [252s] score=130
+  ✓ [204/1013] Character_public_static_boolean_java_lang_Character_isSpace_char: FALSE (expected FALSE) [252s] score=131
+  · [205/1013] Character_public_static_boolean_java_lang_Character_isTitleCase_int: UNKNOWN (expected FALSE) [252s] score=131
+  · [206/1013] Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierStart_char: UNKNOWN (expected FALSE) [253s] score=131
+  · [207/1013] Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierPart_int: UNKNOWN (expected FALSE) [253s] score=131
+  · [208/1013] Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierStart_int: UNKNOWN (expected FALSE) [253s] score=131
+  ✓ [209/1013] Character_public_static_boolean_java_lang_Character_isWhitespace_int: FALSE (expected FALSE) [259s] score=132
+  ✓ [210/1013] Character_public_static_boolean_java_lang_Character_isUpperCase_int: FALSE (expected FALSE) [260s] score=133
+  ✓ [211/1013] Character_public_static_boolean_java_lang_Character_isValidCodePoint_int: FALSE (expected FALSE) [260s] score=134
+  ✓ [212/1013] Character_public_static_boolean_java_lang_Character_isWhitespace_char: FALSE (expected FALSE) [261s] score=135
+  ✓ [213/1013] Character_public_static_boolean_java_lang_Character_isUpperCase_char: FALSE (expected FALSE) [261s] score=136
+  · [214/1013] Character_public_static_byte_java_lang_Character_getDirectionality_char: UNKNOWN (expected FALSE) [262s] score=136
+  · [215/1013] Character_public_static_byte_java_lang_Character_getDirectionality_int: UNKNOWN (expected FALSE) [263s] score=136
+  · [216/1013] Byte_public_java_lang_String_java_lang_Byte_toString: TIMEOUT (expected FALSE) [263s] score=136
+  · [217/1013] Character_public_static_char_java_lang_Character_toUpperCase_char: UNKNOWN (expected FALSE) [265s] score=136
+  · [218/1013] Character_public_static_char_java_lang_Character_toTitleCase_char: UNKNOWN (expected FALSE) [265s] score=136
+  · [219/1013] Character_public_static_char_java_lang_Character_toLowerCase_char: UNKNOWN (expected FALSE) [265s] score=136
+  ✓ [220/1013] Character_public_static_char_java_lang_Character_forDigit_int_int: FALSE (expected FALSE) [266s] score=137
+  ✓ [221/1013] Character_public_static_int_java_lang_Character_charCount_int: FALSE (expected FALSE) [266s] score=138
+  ✓ [222/1013] Character_public_static_int_java_lang_Character_compare_char_char: FALSE (expected FALSE) [267s] score=139
+  · [223/1013] Byte_public_static_java_lang_String_java_lang_Byte_toString_byte: TIMEOUT (expected FALSE) [269s] score=139
+  ✓ [224/1013] Character_public_static_int_java_lang_Character_digit_char_int: FALSE (expected FALSE) [272s] score=140
+  · [225/1013] Character_public_java_lang_String_java_lang_Character_toString: TIMEOUT (expected FALSE) [272s] score=140
+  · [226/1013] Character_public_static_int_java_lang_Character_getType_char: UNKNOWN (expected FALSE) [272s] score=140
+  ✓ [227/1013] Character_public_static_int_java_lang_Character_digit_int_int: FALSE (expected FALSE) [273s] score=141
+  · [228/1013] Character_public_static_int_java_lang_Character_getNumericValue_int: UNKNOWN (expected FALSE) [274s] score=141
+  · [229/1013] Character_public_static_int_java_lang_Character_getNumericValue_char: UNKNOWN (expected FALSE) [274s] score=141
+  ✓ [230/1013] Character_public_static_int_java_lang_Character_toCodePoint_char_char: FALSE (expected FALSE) [275s] score=142
+  · [231/1013] Character_public_static_int_java_lang_Character_getType_int: UNKNOWN (expected FALSE) [276s] score=142
+  · [232/1013] Character_public_static_int_java_lang_Character_toLowerCase_int: UNKNOWN (expected FALSE) [278s] score=142
+  ✓ [233/1013] Character_public_static_java_lang_Character_java_lang_Character_valueOf_char: FALSE (expected FALSE) [278s] score=143
+  · [234/1013] Character_public_static_int_java_lang_Character_toUpperCase_int: UNKNOWN (expected FALSE) [278s] score=143
+  · [235/1013] Character_public_static_int_java_lang_Character_toTitleCase_int: UNKNOWN (expected FALSE) [279s] score=143
+  ✓ [236/1013] Double_public_boolean_java_lang_Double_isNaN: FALSE (expected FALSE) [279s] score=144
+  ✓ [237/1013] Double_public_boolean_java_lang_Double_isInfinite: FALSE (expected FALSE) [279s] score=145
+  ✓ [238/1013] Double_public_byte_java_lang_Double_byteValue: FALSE (expected FALSE) [282s] score=146
+  ✓ [239/1013] Character_public_static_java_lang_String_java_lang_Character_toString_char: FALSE (expected FALSE) [284s] score=147
+  ✓ [240/1013] Double_public_int_java_lang_Double_intValue: FALSE (expected FALSE) [284s] score=148
+  ✓ [241/1013] Double_public_long_java_lang_Double_longValue: FALSE (expected FALSE) [285s] score=149
+  ✓ [242/1013] Double_public_int_java_lang_Double_compareTo_java_lang_Double: FALSE (expected FALSE) [286s] score=150
+  · [243/1013] Double_public_java_lang_String_java_lang_Double_toString: UNKNOWN (expected FALSE) [287s] score=150
+  ✓ [244/1013] Double_public_short_java_lang_Double_shortValue: FALSE (expected FALSE) [287s] score=151
+  ✓ [245/1013] Double_public_static_boolean_java_lang_Double_isFinite_double: FALSE (expected FALSE) [287s] score=152
+  ✓ [246/1013] Double_public_static_boolean_java_lang_Double_isInfinite_double: FALSE (expected FALSE) [288s] score=153
+  ✓ [247/1013] Double_public_static_boolean_java_lang_Double_isNaN_double: FALSE (expected FALSE) [290s] score=154
+  ✓ [248/1013] Double_public_static_long_java_lang_Double_doubleToLongBits_double: FALSE (expected FALSE) [291s] score=155
+  · [249/1013] Double_public_static_java_lang_String_java_lang_Double_toString_double: UNKNOWN (expected FALSE) [291s] score=155
+  · [250/1013] Double_public_static_java_lang_String_java_lang_Double_toHexString_double: UNKNOWN (expected FALSE) [291s] score=155
+  ✓ [251/1013] Double_public_static_int_java_lang_Double_compare_double_double: FALSE (expected FALSE) [292s] score=156
+  ✓ [252/1013] Float_public_boolean_java_lang_Float_isInfinite: FALSE (expected FALSE) [292s] score=157
+  ✓ [253/1013] Double_public_static_native_long_java_lang_Double_doubleToRawLongBits_double: FALSE (expected FALSE) [292s] score=158
+  ✓ [254/1013] Float_public_boolean_java_lang_Float_isNaN: FALSE (expected FALSE) [296s] score=159
+  ✓ [255/1013] Float_public_int_java_lang_Float_intValue: FALSE (expected FALSE) [297s] score=160
+  ✓ [256/1013] Float_public_int_java_lang_Float_compareTo_java_lang_Float: FALSE (expected FALSE) [297s] score=161
+  ✓ [257/1013] Float_public_byte_java_lang_Float_byteValue: FALSE (expected FALSE) [297s] score=162
+  ✓ [258/1013] Float_public_static_boolean_java_lang_Float_isFinite_float: FALSE (expected FALSE) [299s] score=163
+  · [259/1013] Float_public_java_lang_String_java_lang_Float_toString: UNKNOWN (expected FALSE) [299s] score=163
+  ✓ [260/1013] Float_public_short_java_lang_Float_shortValue: FALSE (expected FALSE) [300s] score=164
+  ✓ [261/1013] Float_public_long_java_lang_Float_longValue: FALSE (expected FALSE) [300s] score=165
+  ✓ [262/1013] Float_public_static_boolean_java_lang_Float_isInfinite_float: FALSE (expected FALSE) [302s] score=166
+  ✓ [263/1013] Float_public_static_int_java_lang_Float_floatToIntBits_float: FALSE (expected FALSE) [303s] score=167
+  ✓ [264/1013] Float_public_static_int_java_lang_Float_compare_float_float: FALSE (expected FALSE) [303s] score=168
+  · [265/1013] Float_public_static_java_lang_String_java_lang_Float_toString_float: UNKNOWN (expected FALSE) [303s] score=168
+  ✓ [266/1013] Float_public_static_boolean_java_lang_Float_isNaN_float: FALSE (expected FALSE) [304s] score=169
+  ✓ [267/1013] Float_public_static_native_int_java_lang_Float_floatToRawIntBits_float: FALSE (expected FALSE) [304s] score=170
+  · [268/1013] Float_public_static_java_lang_String_java_lang_Float_toHexString_float: UNKNOWN (expected FALSE) [305s] score=170
+  ✓ [269/1013] Integer_public_byte_java_lang_Integer_byteValue: FALSE (expected FALSE) [306s] score=171
+  ✓ [270/1013] Integer_public_float_java_lang_Integer_floatValue: FALSE (expected FALSE) [309s] score=172
+  ✓ [271/1013] Integer_public_int_java_lang_Integer_compareTo_java_lang_Integer: FALSE (expected FALSE) [310s] score=173
+  ✓ [272/1013] Integer_public_int_java_lang_Integer_intValue: FALSE (expected FALSE) [310s] score=174
+  ✓ [273/1013] Integer_public_double_java_lang_Integer_doubleValue: FALSE (expected FALSE) [310s] score=175
+  ✓ [274/1013] Integer_public_static_int_java_lang_Integer_bitCount_int: FALSE (expected FALSE) [311s] score=176
+  ✓ [275/1013] Integer_public_short_java_lang_Integer_shortValue: FALSE (expected FALSE) [312s] score=177
+  ✓ [276/1013] Integer_public_long_java_lang_Integer_longValue: FALSE (expected FALSE) [312s] score=178
+  ✓ [277/1013] Integer_public_static_int_java_lang_Integer_compareUnsigned_int_int: FALSE (expected FALSE) [314s] score=179
+  ✓ [278/1013] Integer_public_static_int_java_lang_Integer_lowestOneBit_int: FALSE (expected FALSE) [315s] score=180
+  ✓ [279/1013] Integer_public_static_int_java_lang_Integer_min_int_int: FALSE (expected FALSE) [315s] score=181
+  ✓ [280/1013] Integer_public_static_int_java_lang_Integer_highestOneBit_int: FALSE (expected FALSE) [315s] score=182
+  ✓ [281/1013] Integer_public_static_int_java_lang_Integer_compare_int_int: FALSE (expected FALSE) [316s] score=183
+  ✓ [282/1013] Integer_public_static_int_java_lang_Integer_max_int_int: FALSE (expected FALSE) [316s] score=184
+  ✓ [283/1013] Integer_public_static_int_java_lang_Integer_numberOfLeadingZeros_int: FALSE (expected FALSE) [318s] score=185
+  ✓ [284/1013] Integer_public_static_int_java_lang_Integer_numberOfTrailingZeros_int: FALSE (expected FALSE) [318s] score=186
+  ✓ [285/1013] Integer_public_static_int_java_lang_Integer_reverse_int: FALSE (expected FALSE) [321s] score=187
+  ✓ [286/1013] Integer_public_static_int_java_lang_Integer_rotateLeft_int_int: FALSE (expected FALSE) [321s] score=188
+  ✓ [287/1013] Integer_public_static_int_java_lang_Integer_reverseBytes_int: FALSE (expected FALSE) [321s] score=189
+  ✓ [288/1013] Integer_public_static_int_java_lang_Integer_signum_int: FALSE (expected FALSE) [322s] score=190
+  ✓ [289/1013] Integer_public_static_int_java_lang_Integer_rotateRight_int_int: FALSE (expected FALSE) [323s] score=191
+  · [290/1013] Integer_public_static_java_lang_Integer_java_lang_Integer_getInteger_java_lang_String_int: UNKNOWN (expected FALSE) [323s] score=191
+  ✓ [291/1013] Integer_public_static_int_java_lang_Integer_sum_int_int: FALSE (expected FALSE) [324s] score=192
+  ✓ [292/1013] Integer_public_static_java_lang_Integer_java_lang_Integer_valueOf_int: FALSE (expected FALSE) [326s] score=193
+  · [293/1013] Integer_public_static_java_lang_Integer_java_lang_Integer_getInteger_java_lang_String_java_lang_Integer: UNKNOWN (expected FALSE) [326s] score=193
+  · [294/1013] Integer_public_static_java_lang_String_java_lang_Integer_toString_int_int: UNKNOWN (expected FALSE) [328s] score=193
+  ✓ [295/1013] Integer_public_static_java_lang_String_java_lang_Integer_toUnsignedString_int: FALSE (expected FALSE) [328s] score=194
+  · [296/1013] Integer_public_static_java_lang_String_java_lang_Integer_toUnsignedString_int_int: UNKNOWN (expected FALSE) [330s] score=194
+  ✓ [297/1013] Long_public_byte_java_lang_Long_byteValue: FALSE (expected FALSE) [331s] score=195
+  ✓ [298/1013] Integer_public_static_long_java_lang_Integer_toUnsignedLong_int: FALSE (expected FALSE) [332s] score=196
+  ✓ [299/1013] Long_public_int_java_lang_Long_compareTo_java_lang_Long: FALSE (expected FALSE) [334s] score=197
+  · [300/1013] Long_public_float_java_lang_Long_floatValue: UNKNOWN (expected FALSE) [334s] score=197
+  ✓ [301/1013] Long_public_int_java_lang_Long_intValue: FALSE (expected FALSE) [334s] score=198
+  ✓ [302/1013] Long_public_long_java_lang_Long_longValue: FALSE (expected FALSE) [336s] score=199
+  ✓ [303/1013] Long_public_short_java_lang_Long_shortValue: FALSE (expected FALSE) [338s] score=200
+  ✓ [304/1013] Long_public_static_int_java_lang_Long_bitCount_long: FALSE (expected FALSE) [338s] score=201
+  ✓ [305/1013] Long_public_static_int_java_lang_Long_compareUnsigned_long_long: FALSE (expected FALSE) [341s] score=202
+  ✓ [306/1013] Long_public_static_int_java_lang_Long_compare_long_long: FALSE (expected FALSE) [342s] score=203
+  ✓ [307/1013] Long_public_static_int_java_lang_Long_numberOfLeadingZeros_long: FALSE (expected FALSE) [342s] score=204
+  ✓ [308/1013] Long_public_double_java_lang_Long_doubleValue: FALSE (expected FALSE) [343s] score=205
+  · [309/1013] Long_public_static_java_lang_Long_java_lang_Long_getLong_java_lang_String_java_lang_Long: UNKNOWN (expected FALSE) [344s] score=205
+  ✓ [310/1013] Long_public_static_int_java_lang_Long_signum_long: FALSE (expected FALSE) [345s] score=206
+  ✓ [311/1013] Long_public_static_int_java_lang_Long_numberOfTrailingZeros_long: FALSE (expected FALSE) [346s] score=207
+  · [312/1013] Long_public_static_java_lang_Long_java_lang_Long_getLong_java_lang_String_long: UNKNOWN (expected FALSE) [346s] score=207
+  ✓ [313/1013] Long_public_static_java_lang_Long_java_lang_Long_valueOf_long: FALSE (expected FALSE) [348s] score=208
+  · [314/1013] Long_public_static_java_lang_String_java_lang_Long_toString_long_int: UNKNOWN (expected FALSE) [351s] score=208
+  ✓ [315/1013] Long_public_static_java_lang_String_java_lang_Long_toUnsignedString_long: FALSE (expected FALSE) [353s] score=209
+  · [316/1013] Long_public_static_java_lang_String_java_lang_Long_toUnsignedString_long_int: UNKNOWN (expected FALSE) [355s] score=209
+  ✓ [317/1013] Long_public_static_long_java_lang_Long_lowestOneBit_long: FALSE (expected FALSE) [355s] score=210
+  ✓ [318/1013] Long_public_static_long_java_lang_Long_highestOneBit_long: FALSE (expected FALSE) [356s] score=211
+  ✓ [319/1013] Long_public_static_long_java_lang_Long_max_long_long: FALSE (expected FALSE) [357s] score=212
+  · [320/1013] Integer_public_java_lang_String_java_lang_Integer_toString: TIMEOUT (expected FALSE) [359s] score=212
+  ✓ [321/1013] Long_public_static_long_java_lang_Long_min_long_long: FALSE (expected FALSE) [360s] score=213
+  ✓ [322/1013] Long_public_static_long_java_lang_Long_reverseBytes_long: FALSE (expected FALSE) [362s] score=214
+  ✓ [323/1013] Long_public_static_long_java_lang_Long_reverse_long: FALSE (expected FALSE) [365s] score=215
+  ✓ [324/1013] Long_public_static_long_java_lang_Long_rotateRight_long_int: FALSE (expected FALSE) [365s] score=216
+  ✓ [325/1013] Long_public_static_long_java_lang_Long_rotateLeft_long_int: FALSE (expected FALSE) [365s] score=217
+  ✓ [326/1013] Long_public_static_long_java_lang_Long_sum_long_long: FALSE (expected FALSE) [366s] score=218
+  ✓ [327/1013] Math_public_static_int_java_lang_Math_abs_int: FALSE (expected FALSE) [369s] score=219
+  ✓ [328/1013] Math_public_static_int_java_lang_Math_getExponent_double: FALSE (expected FALSE) [371s] score=220
+  ✓ [329/1013] Math_public_static_int_java_lang_Math_getExponent_float: FALSE (expected FALSE) [371s] score=221
+  · [330/1013] Integer_public_static_java_lang_String_java_lang_Integer_toBinaryString_int: TIMEOUT (expected FALSE) [375s] score=221
+  · [331/1013] Integer_public_static_java_lang_String_java_lang_Integer_toHexString_int: TIMEOUT (expected FALSE) [375s] score=221
+  · [332/1013] Integer_public_static_java_lang_String_java_lang_Integer_toOctalString_int: TIMEOUT (expected FALSE) [376s] score=221
+  ✓ [333/1013] Math_public_static_int_java_lang_Math_max_int_int: FALSE (expected FALSE) [376s] score=222
+  · [334/1013] Integer_public_static_java_lang_String_java_lang_Integer_toString_int: TIMEOUT (expected FALSE) [376s] score=222
+  ✓ [335/1013] Math_public_static_int_java_lang_Math_min_int_int: FALSE (expected FALSE) [376s] score=223
+  ✓ [336/1013] Math_public_static_long_java_lang_Math_abs_long: FALSE (expected FALSE) [377s] score=224
+  · [337/1013] Math_public_static_int_java_lang_Math_round_float: UNKNOWN (expected FALSE) [377s] score=224
+  ✓ [338/1013] Math_public_static_long_java_lang_Math_max_long_long: FALSE (expected FALSE) [380s] score=225
+  · [339/1013] Math_public_static_long_java_lang_Math_round_double: UNKNOWN (expected FALSE) [382s] score=225
+  ✓ [340/1013] Math_public_static_long_java_lang_Math_min_long_long: FALSE (expected FALSE) [383s] score=226
+  · [341/1013] Long_public_java_lang_String_java_lang_Long_toString: TIMEOUT (expected FALSE) [386s] score=226
+  ✓ [342/1013] Short_public_byte_java_lang_Short_byteValue: FALSE (expected FALSE) [386s] score=227
+  ✓ [343/1013] Short_public_float_java_lang_Short_floatValue: FALSE (expected FALSE) [387s] score=228
+  ✓ [344/1013] Short_public_double_java_lang_Short_doubleValue: FALSE (expected FALSE) [388s] score=229
+  ✓ [345/1013] Short_public_int_java_lang_Short_compareTo_java_lang_Short: FALSE (expected FALSE) [388s] score=230
+  ✓ [346/1013] Short_public_long_java_lang_Short_longValue: FALSE (expected FALSE) [388s] score=231
+  ✓ [347/1013] Short_public_short_java_lang_Short_shortValue: FALSE (expected FALSE) [389s] score=232
+  ✓ [348/1013] Short_public_int_java_lang_Short_intValue: FALSE (expected FALSE) [389s] score=233
+  ✓ [349/1013] Short_public_static_int_java_lang_Short_compare_short_short: FALSE (expected FALSE) [392s] score=234
+  ✓ [350/1013] Short_public_static_int_java_lang_Short_toUnsignedInt_short: FALSE (expected FALSE) [393s] score=235
+  ✓ [351/1013] Short_public_static_java_lang_Short_java_lang_Short_valueOf_short: FALSE (expected FALSE) [394s] score=236
+  ✓ [352/1013] Short_public_static_short_java_lang_Short_reverseBytes_short: FALSE (expected FALSE) [398s] score=237
+  · [353/1013] Long_public_static_java_lang_String_java_lang_Long_toBinaryString_long: TIMEOUT (expected FALSE) [398s] score=237
+  ✓ [354/1013] Short_public_static_long_java_lang_Short_toUnsignedLong_short: FALSE (expected FALSE) [398s] score=238
+  ✓ [355/1013] StrictMath_public_static_int_java_lang_StrictMath_getExponent_double: FALSE (expected FALSE) [399s] score=239
+  ✓ [356/1013] StrictMath_public_static_int_java_lang_StrictMath_abs_int: FALSE (expected FALSE) [400s] score=240
+  ✓ [357/1013] StrictMath_public_static_int_java_lang_StrictMath_max_int_int: FALSE (expected FALSE) [400s] score=241
+  ✓ [358/1013] StrictMath_public_static_int_java_lang_StrictMath_getExponent_float: FALSE (expected FALSE) [400s] score=242
+  · [359/1013] Long_public_static_java_lang_String_java_lang_Long_toHexString_long: TIMEOUT (expected FALSE) [401s] score=242
+  ✓ [360/1013] StrictMath_public_static_int_java_lang_StrictMath_min_int_int: FALSE (expected FALSE) [401s] score=243
+  · [361/1013] Long_public_static_java_lang_String_java_lang_Long_toOctalString_long: TIMEOUT (expected FALSE) [402s] score=243
+  · [362/1013] Long_public_static_java_lang_String_java_lang_Long_toString_long: TIMEOUT (expected FALSE) [402s] score=243
+  · [363/1013] StrictMath_public_static_int_java_lang_StrictMath_round_float: UNKNOWN (expected FALSE) [403s] score=243
+  ✓ [364/1013] StrictMath_public_static_long_java_lang_StrictMath_abs_long: FALSE (expected FALSE) [405s] score=244
+  ✓ [365/1013] StrictMath_public_static_long_java_lang_StrictMath_max_long_long: FALSE (expected FALSE) [406s] score=245
+  · [366/1013] StrictMath_public_static_long_java_lang_StrictMath_round_double: UNKNOWN (expected FALSE) [409s] score=245
+  ✓ [367/1013] String_public_boolean_java_lang_String_endsWith_java_lang_String: FALSE (expected FALSE) [411s] score=246
+  ✓ [368/1013] String_public_boolean_java_lang_String_equalsIgnoreCase_java_lang_String: FALSE (expected FALSE) [411s] score=247
+  ✓ [369/1013] StrictMath_public_static_long_java_lang_StrictMath_min_long_long: FALSE (expected FALSE) [411s] score=248
+  ✓ [370/1013] String_public_boolean_java_lang_String_isEmpty: FALSE (expected FALSE) [411s] score=249
+  ✓ [371/1013] String_public_boolean_java_lang_String_startsWith_java_lang_String: FALSE (expected FALSE) [412s] score=250
+  · [372/1013] String_public_int_java_lang_String_compareToIgnoreCase_java_lang_String: UNKNOWN (expected FALSE) [415s] score=250
+  · [373/1013] String_public_int_java_lang_String_compareTo_java_lang_String: UNKNOWN (expected FALSE) [415s] score=250
+  ✓ [374/1013] String_public_java_lang_String_java_lang_String_concat_java_lang_String: FALSE (expected FALSE) [425s] score=251
+  ✓ [375/1013] String_public_int_java_lang_String_length: FALSE (expected FALSE) [427s] score=252
+  ✓ [376/1013] String_public_int_java_lang_String_indexOf_java_lang_String: FALSE (expected FALSE) [430s] score=253
+  ✓ [377/1013] String_public_java_lang_String_java_lang_String_toLowerCase: FALSE (expected FALSE) [435s] score=254
+  ✓ [378/1013] String_public_java_lang_String_java_lang_String_toString: FALSE (expected FALSE) [435s] score=255
+  · [379/1013] Short_public_java_lang_String_java_lang_Short_toString: TIMEOUT (expected FALSE) [436s] score=255
+  ✓ [380/1013] String_public_java_lang_String_java_lang_String_toUpperCase: FALSE (expected FALSE) [439s] score=256
+  ✓ [381/1013] String_public_static_java_lang_String_java_lang_String_valueOf_boolean: FALSE (expected FALSE) [443s] score=257
+  · [382/1013] Short_public_static_java_lang_String_java_lang_Short_toString_short: TIMEOUT (expected FALSE) [446s] score=257
+  · [383/1013] String_public_static_java_lang_String_java_lang_String_valueOf_double: UNKNOWN (expected FALSE) [449s] score=257
+  ✓ [384/1013] String_public_static_java_lang_String_java_lang_String_valueOf_char: FALSE (expected FALSE) [450s] score=258
+  · [385/1013] String_public_static_java_lang_String_java_lang_String_valueOf_float: UNKNOWN (expected FALSE) [452s] score=258
+  · [386/1013] String_public_java_lang_String_java_lang_String_trim: UNKNOWN (expected FALSE) [454s] score=258
+  ✓ [387/1013] Bessel: TRUE (expected TRUE) [456s] score=260
+  · [388/1013] EulerMethod: UNKNOWN (expected FALSE) [460s] score=260
+  · [389/1013] String_public_boolean_java_lang_String_regionMatches_boolean_int_java_lang_String_int_int: TIMEOUT (expected FALSE) [460s] score=260
+  · [390/1013] String_public_boolean_java_lang_String_regionMatches_int_java_lang_String_int_int: TIMEOUT (expected FALSE) [460s] score=260
+  · [391/1013] String_public_int_java_lang_String_indexOf_int: UNKNOWN (expected FALSE) [460s] score=260
+  · [392/1013] String_public_boolean_java_lang_String_startsWith_java_lang_String_int: TIMEOUT (expected FALSE) [461s] score=260
+  · [393/1013] String_public_int_java_lang_String_indexOf_int_int: TIMEOUT (expected FALSE) [465s] score=260
+  · [394/1013] Conflict: UNKNOWN (expected TRUE) [467s] score=260
+  · [395/1013] String_public_int_java_lang_String_indexOf_java_lang_String_int: TIMEOUT (expected FALSE) [469s] score=260
+  · [396/1013] String_public_int_java_lang_String_lastIndexOf_int: TIMEOUT (expected FALSE) [471s] score=260
+  · [397/1013] String_public_int_java_lang_String_lastIndexOf_int_int: TIMEOUT (expected FALSE) [471s] score=260
+  · [398/1013] String_public_int_java_lang_String_lastIndexOf_java_lang_String: TIMEOUT (expected FALSE) [471s] score=260
+  · [399/1013] String_public_int_java_lang_String_lastIndexOf_java_lang_String_int: TIMEOUT (expected FALSE) [472s] score=260
+  · [400/1013] MathSin: UNKNOWN (expected FALSE) [472s] score=260
+  · [401/1013] String_public_java_lang_String_java_lang_String_replace_char_char: TIMEOUT (expected FALSE) [475s] score=260
+  · [402/1013] Optimization1: UNKNOWN (expected FALSE) [475s] score=260
+  · [403/1013] Optimization2: UNKNOWN (expected FALSE) [478s] score=260
+  · [404/1013] Optimization4: UNKNOWN (expected FALSE) [478s] score=260
+  · [405/1013] Optimization3: UNKNOWN (expected FALSE) [478s] score=260
+  · [406/1013] Optimization5: UNKNOWN (expected FALSE) [479s] score=260
+  · [407/1013] PartitionEx: UNKNOWN (expected TRUE) [482s] score=260
+  · [408/1013] Optimization6: UNKNOWN (expected FALSE) [483s] score=260
+  · [409/1013] TurnLogic: UNKNOWN (expected TRUE) [485s] score=260
+  · [410/1013] coral10: UNKNOWN (expected FALSE) [490s] score=260
+  ✓ [411/1013] coral1: FALSE (expected FALSE) [492s] score=261
+  ✓ [412/1013] coral11: FALSE (expected FALSE) [493s] score=262
+  ✓ [413/1013] coral13: FALSE (expected FALSE) [494s] score=263
+  ✓ [414/1013] coral12: FALSE (expected FALSE) [494s] score=264
+  · [415/1013] coral15: UNKNOWN (expected FALSE) [495s] score=264
+  ✓ [416/1013] coral14: FALSE (expected FALSE) [496s] score=265
+  · [417/1013] coral18: UNKNOWN (expected FALSE) [497s] score=265
+  · [418/1013] coral17: UNKNOWN (expected FALSE) [498s] score=265
+  · [419/1013] coral16: UNKNOWN (expected FALSE) [499s] score=265
+  · [420/1013] coral19: UNKNOWN (expected FALSE) [501s] score=265
+  · [421/1013] coral2: UNKNOWN (expected FALSE) [503s] score=265
+  · [422/1013] coral20: UNKNOWN (expected FALSE) [504s] score=265
+  · [423/1013] coral21: UNKNOWN (expected FALSE) [505s] score=265
+  · [424/1013] String_public_static_java_lang_String_java_lang_String_valueOf_int: TIMEOUT (expected FALSE) [506s] score=265
+  · [425/1013] String_public_static_java_lang_String_java_lang_String_valueOf_long: TIMEOUT (expected FALSE) [509s] score=265
+  · [426/1013] coral22: UNKNOWN (expected FALSE) [509s] score=265
+  · [427/1013] coral23: UNKNOWN (expected TRUE) [515s] score=265
+  · [428/1013] coral28: UNKNOWN (expected FALSE) [515s] score=265
+  · [429/1013] coral27: UNKNOWN (expected FALSE) [516s] score=265
+  · [430/1013] coral26: UNKNOWN (expected TRUE) [516s] score=265
+  · [431/1013] coral30: UNKNOWN (expected FALSE) [517s] score=265
+  · [432/1013] coral3: UNKNOWN (expected TRUE) [517s] score=265
+  · [433/1013] coral31: UNKNOWN (expected FALSE) [518s] score=265
+  · [434/1013] coral29: UNKNOWN (expected FALSE) [518s] score=265
+  · [435/1013] coral32: UNKNOWN (expected FALSE) [520s] score=265
+  · [436/1013] coral33: UNKNOWN (expected FALSE) [524s] score=265
+  ✓ [437/1013] coral34: FALSE (expected FALSE) [527s] score=266
+  ✓ [438/1013] coral35: FALSE (expected FALSE) [528s] score=267
+  · [439/1013] coral38: UNKNOWN (expected FALSE) [529s] score=267
+  · [440/1013] coral36: UNKNOWN (expected FALSE) [529s] score=267
+  · [441/1013] coral46: UNKNOWN (expected TRUE) [532s] score=267
+  ✓ [442/1013] coral4: FALSE (expected FALSE) [532s] score=268
+  ✓ [443/1013] coral39: FALSE (expected FALSE) [532s] score=269
+  ✓ [444/1013] coral42: FALSE (expected FALSE) [537s] score=270
+  · [445/1013] coral41: UNKNOWN (expected FALSE) [537s] score=270
+  · [446/1013] coral43: UNKNOWN (expected FALSE) [538s] score=270
+  · [447/1013] coral5: UNKNOWN (expected TRUE) [538s] score=270
+  ✓ [448/1013] coral40: FALSE (expected FALSE) [538s] score=271
+  · [449/1013] coral44: UNKNOWN (expected FALSE) [539s] score=271
+  · [450/1013] coral48: UNKNOWN (expected FALSE) [540s] score=271
+  · [451/1013] coral45: UNKNOWN (expected FALSE) [541s] score=271
+  · [452/1013] coral49: UNKNOWN (expected FALSE) [542s] score=271
+  · [453/1013] coral50: UNKNOWN (expected FALSE) [548s] score=271
+  · [454/1013] coral51: UNKNOWN (expected FALSE) [550s] score=271
+  · [455/1013] coral53: UNKNOWN (expected FALSE) [551s] score=271
+  · [456/1013] coral52: UNKNOWN (expected FALSE) [552s] score=271
+  · [457/1013] coral54: UNKNOWN (expected FALSE) [552s] score=271
+  · [458/1013] coral56: UNKNOWN (expected FALSE) [553s] score=271
+  · [459/1013] coral55: UNKNOWN (expected TRUE) [554s] score=271
+  · [460/1013] coral58: UNKNOWN (expected FALSE) [559s] score=271
+  · [461/1013] coral61: UNKNOWN (expected FALSE) [559s] score=271
+  ✓ [462/1013] coral6: FALSE (expected FALSE) [559s] score=272
+  · [463/1013] coral57: UNKNOWN (expected FALSE) [560s] score=272
+  · [464/1013] coral59: UNKNOWN (expected FALSE) [561s] score=272
+  · [465/1013] coral60: UNKNOWN (expected FALSE) [561s] score=272
+  · [466/1013] coral62: UNKNOWN (expected FALSE) [561s] score=272
+  · [467/1013] coral63: UNKNOWN (expected FALSE) [563s] score=272
+  · [468/1013] coral64: UNKNOWN (expected FALSE) [563s] score=272
+  · [469/1013] coral65: UNKNOWN (expected FALSE) [569s] score=272
+  · [470/1013] coral66: UNKNOWN (expected FALSE) [572s] score=272
+  · [471/1013] coral69: UNKNOWN (expected FALSE) [573s] score=272
+  · [472/1013] coral68: UNKNOWN (expected FALSE) [573s] score=272
+  · [473/1013] coral67: UNKNOWN (expected FALSE) [573s] score=272
+  · [474/1013] coral71: UNKNOWN (expected FALSE) [575s] score=272
+  · [475/1013] coral72: UNKNOWN (expected FALSE) [576s] score=272
+  · [476/1013] coral73: UNKNOWN (expected FALSE) [580s] score=272
+  · [477/1013] coral74: UNKNOWN (expected FALSE) [581s] score=272
+  · [478/1013] coral75: UNKNOWN (expected FALSE) [582s] score=272
+  · [479/1013] coral80: UNKNOWN (expected TRUE) [583s] score=272
+  ✓ [480/1013] coral79: FALSE (expected FALSE) [583s] score=273
+  · [481/1013] coral81: UNKNOWN (expected FALSE) [584s] score=273
+  ✓ [482/1013] coral76: FALSE (expected FALSE) [584s] score=274
+  · [483/1013] coral84: UNKNOWN (expected FALSE) [585s] score=274
+  ✓ [484/1013] coral77: FALSE (expected FALSE) [586s] score=275
+  · [485/1013] Adjustable-Inner-Count-Halving: UNKNOWN (expected FALSE) [588s] score=275
+  ✓ [486/1013] coral9: FALSE (expected FALSE) [589s] score=276
+  · [487/1013] Alternating-Step-Schedule: UNKNOWN (expected TRUE) [590s] score=276
+  · [488/1013] Batch-Conveyor-Counter: UNKNOWN (expected TRUE) [590s] score=276
+  · [489/1013] Bounded-Proportional-Update: UNKNOWN (expected TRUE) [592s] score=276
+  · [490/1013] coral91: UNKNOWN (expected TRUE) [593s] score=276
+  · [491/1013] Bounded-Reset-Linear-Growth: UNKNOWN (expected TRUE) [596s] score=276
+  · [492/1013] Fixed-Block-Accumulator: UNKNOWN (expected TRUE) [600s] score=276
+  · [493/1013] Clamped-Triangular-Drift: UNKNOWN (expected TRUE) [601s] score=276
+  · [494/1013] Leak-and-Refill: UNKNOWN (expected TRUE) [601s] score=276
+  · [495/1013] Nested-MinStep-Regulator: UNKNOWN (expected TRUE) [601s] score=276
+  · [496/1013] Cyclic-Preset-Inner-ABC: UNKNOWN (expected TRUE) [601s] score=276
+  · [497/1013] Hysteresis-On-Off-with-Deadband: UNKNOWN (expected FALSE) [602s] score=276
+  · [498/1013] Mixed-Phase-AddHalve-with-Slack-Box: UNKNOWN (expected TRUE) [605s] score=276
+  · [499/1013] Nested-PingPong-with-Caps: UNKNOWN (expected TRUE) [605s] score=276
+  · [500/1013] Nested-Windowed-Add-Remove: UNKNOWN (expected TRUE) [606s] score=276
+  · [501/1013] Inner-Retry-Until-OK: UNKNOWN (expected TRUE) [607s] score=276
+  · [502/1013] Nested-Drain-Then-Step: UNKNOWN (expected TRUE) [607s] score=276
+  · [503/1013] Producer-Consumer-Level: UNKNOWN (expected TRUE) [609s] score=276
+  · [504/1013] Nested-Saturation-Then-Reset: UNKNOWN (expected TRUE) [609s] score=276
+  · [505/1013] Ramp-and-Hold: UNKNOWN (expected TRUE) [610s] score=276
+  · [506/1013] Safe-Accumulator-with-Bounded-Noise: UNKNOWN (expected TRUE) [613s] score=276
+  · [507/1013] Saturating-Integrator: UNKNOWN (expected TRUE) [614s] score=276
+  · [508/1013] Two-Band-Piecewise-Linear-Oscillator: UNKNOWN (expected TRUE) [617s] score=276
+  · [509/1013] Two-State-FP-Oscillator: UNKNOWN (expected TRUE) [618s] score=276
+  · [510/1013] Two-Counter-Lexicographic-Small: UNKNOWN (expected TRUE) [619s] score=276
+  · [511/1013] Two-Level-Nested-Scheduler: UNKNOWN (expected TRUE) [619s] score=276
+  · [512/1013] Switched-Linear-Plant: UNKNOWN (expected TRUE) [619s] score=276
+  · [513/1013] Slew-Rate-Limiter: UNKNOWN (expected TRUE) [621s] score=276
+  · [514/1013] Two-Variable_Averaging_Filter: UNKNOWN (expected TRUE) [622s] score=276
+  ✓ [515/1013] WBS_prop2: TRUE (expected TRUE) [624s] score=278
+  ✓ [516/1013] WBS_prop1: FALSE (expected FALSE) [625s] score=279
+  · [517/1013] Two-Var-Nested-Handshake: UNKNOWN (expected TRUE) [625s] score=279
+  · [518/1013] Unbounded-Outer-Inner-Safety-Gate: UNKNOWN (expected TRUE) [627s] score=279
+  · [519/1013] TCAS_prop1: UNKNOWN (expected FALSE) [631s] score=279
+  ✓ [520/1013] WBS_prop3: FALSE (expected FALSE) [632s] score=280
+  · [521/1013] TCAS_prop2: UNKNOWN (expected TRUE) [632s] score=280
+  · [522/1013] TCAS_prop3: UNKNOWN (expected TRUE) [632s] score=280
+  ✓ [523/1013] Infusion_prop12: TRUE (expected TRUE) [660s] score=282
+  ✓ [524/1013] Infusion_prop1: TRUE (expected TRUE) [661s] score=284
+  ✓ [525/1013] Infusion_prop11: TRUE (expected TRUE) [661s] score=286
+  ✓ [526/1013] Infusion_prop10: TRUE (expected TRUE) [662s] score=288
+  · [527/1013] LoopCharAt: TIMEOUT (expected FALSE) [667s] score=288
+  · [528/1013] WBS_prop4: TIMEOUT (expected FALSE) [677s] score=288
+  · [529/1013] Alarm_prop1: TIMEOUT (expected TRUE) [678s] score=288
+  · [530/1013] Alarm_prop10: TIMEOUT (expected TRUE) [679s] score=288
+  · [531/1013] Alarm_prop2: TIMEOUT (expected TRUE) [679s] score=288
+  · [532/1013] Alarm_prop3: TIMEOUT (expected TRUE) [679s] score=288
+  · [533/1013] Alarm_prop4: TIMEOUT (expected TRUE) [681s] score=288
+  · [534/1013] Alarm_prop5: TIMEOUT (expected TRUE) [682s] score=288
+  · [535/1013] Alarm_prop6: TIMEOUT (expected TRUE) [684s] score=288
+  · [536/1013] Alarm_prop8: TIMEOUT (expected TRUE) [685s] score=288
+  · [537/1013] Alarm_prop9: TIMEOUT (expected TRUE) [685s] score=288
+  · [538/1013] apachecli_eqchk: TIMEOUT (expected TRUE) [687s] score=288
+  ✓ [539/1013] Infusion_prop2: TRUE (expected TRUE) [693s] score=290
+  ✓ [540/1013] Infusion_prop3: TRUE (expected TRUE) [694s] score=292
+  · [541/1013] nanoxml_prop1: UNKNOWN (expected TRUE) [694s] score=292
+  ✓ [542/1013] Infusion_prop4: TRUE (expected TRUE) [696s] score=294
+  ✓ [543/1013] Infusion_prop13: TRUE (expected TRUE) [696s] score=296
+  · [544/1013] nanoxml_prop3: UNKNOWN (expected FALSE) [696s] score=296
+  · [545/1013] nanoxml_prop2: UNKNOWN (expected FALSE) [697s] score=296
+  ✓ [546/1013] Infusion_prop5: TRUE (expected TRUE) [706s] score=298
+  ✓ [547/1013] SatAckermann01: TRUE (expected TRUE) [710s] score=300
+  ✓ [548/1013] InfiniteLoop: FALSE (expected FALSE) [711s] score=301
+  · [549/1013] Addition: UNKNOWN (expected TRUE) [711s] score=301
+  ✓ [550/1013] Infusion_prop6: TRUE (expected TRUE) [711s] score=303
+  ✓ [551/1013] Infusion_prop8: TRUE (expected TRUE) [715s] score=305
+  ✓ [552/1013] Infusion_prop7: TRUE (expected TRUE) [715s] score=307
+  ✓ [553/1013] Ackermann01: FALSE (expected FALSE) [715s] score=308
+  ✓ [554/1013] Infusion_prop9: TRUE (expected TRUE) [717s] score=310
+  ✓ [555/1013] SatFibonacci02: TRUE (expected TRUE) [722s] score=312
+  · [556/1013] SatEvenOdd01: UNKNOWN (expected TRUE) [726s] score=312
+  · [557/1013] SatAddition01: UNKNOWN (expected TRUE) [726s] score=312
+  ✓ [558/1013] SatAckermann03: TRUE (expected TRUE) [728s] score=314
+  ✓ [559/1013] SatMccarthy91: TRUE (expected TRUE) [729s] score=316
+  · [560/1013] SatHanoi01: UNKNOWN (expected TRUE) [730s] score=316
+  · [561/1013] UnsatAckermann01: UNKNOWN (expected FALSE) [739s] score=316
+  · [562/1013] UnsatAddition01: UNKNOWN (expected FALSE) [744s] score=316
+  · [563/1013] printtokens_prop1: TIMEOUT (expected TRUE) [744s] score=316
+  · [564/1013] printtokens_prop2: TIMEOUT (expected FALSE) [745s] score=316
+  · [565/1013] replace5_prop1: TIMEOUT (expected TRUE) [745s] score=316
+  · [566/1013] UnsatAddition02: UNKNOWN (expected FALSE) [745s] score=316
+  · [567/1013] SatMultCommutative01: UNKNOWN (expected TRUE) [746s] score=316
+  · [568/1013] replace5_prop2: TIMEOUT (expected FALSE) [747s] score=316
+  ✓ [569/1013] SatAckermann02: TRUE (expected TRUE) [747s] score=318
+  ✓ [570/1013] SatFibonacci01: TRUE (expected TRUE) [752s] score=320
+  · [571/1013] schedule_eqchk: TIMEOUT (expected TRUE) [753s] score=320
+  ✓ [572/1013] ArithmeticException5: TRUE (expected TRUE) [753s] score=322
+  ✓ [573/1013] UnsatEvenOdd01: FALSE (expected FALSE) [753s] score=323
+  · [574/1013] siena_prop1: TIMEOUT (expected TRUE) [754s] score=323
+  · [575/1013] siena_prop2: TIMEOUT (expected FALSE) [754s] score=323
+  · [576/1013] ArrayIndexOutOfBoundsException2: UNKNOWN (expected FALSE) [754s] score=323
+  · [577/1013] ArrayIndexOutOfBoundsException1: UNKNOWN (expected FALSE) [755s] score=323
+  ✓ [578/1013] SatFibonacci03: TRUE (expected TRUE) [758s] score=325
+  · [579/1013] ArrayIndexOutOfBoundsException3: UNKNOWN (expected FALSE) [760s] score=325
+  ✓ [580/1013] CharSequenceToString: TRUE (expected TRUE) [761s] score=327
+  ✓ [581/1013] UnsatMccarthy91: FALSE (expected FALSE) [761s] score=328
+  ✓ [582/1013] ArithmeticException1: FALSE (expected FALSE) [761s] score=329
+  ✓ [583/1013] ArithmeticException6: FALSE (expected FALSE) [761s] score=330
+  ✓ [584/1013] Class_method1: TRUE (expected TRUE) [762s] score=332
+  ✓ [585/1013] ClassCastException2: TRUE (expected TRUE) [762s] score=334
+  · [586/1013] ClassCastException1: UNKNOWN (expected FALSE) [763s] score=334
+  ✓ [587/1013] Inheritance1: TRUE (expected TRUE) [764s] score=336
+  ✓ [588/1013] SatPrimes01: TRUE (expected TRUE) [765s] score=338
+  ✓ [589/1013] BufferedReaderReadLine: FALSE (expected FALSE) [769s] score=339
+  ✓ [590/1013] ClassCastException3: FALSE (expected FALSE) [771s] score=340
+  ✓ [591/1013] NegativeArraySizeException2: FALSE (expected FALSE) [775s] score=341
+  ✓ [592/1013] NegativeArraySizeException1: FALSE (expected FALSE) [775s] score=342
+  · [593/1013] SatGcd: TIMEOUT (expected TRUE) [775s] score=342
+  · [594/1013] NullPointerException1: UNKNOWN (expected TRUE) [776s] score=342
+  ✓ [595/1013] NullPointerException2: FALSE (expected FALSE) [777s] score=343
+  ✓ [596/1013] NullPointerException3: FALSE (expected FALSE) [777s] score=344
+  ✓ [597/1013] NullPointerException4: FALSE (expected FALSE) [778s] score=345
+  · [598/1013] RegexMatches01: UNKNOWN (expected TRUE) [779s] score=345
+  · [599/1013] RegexMatches02: UNKNOWN (expected FALSE) [780s] score=345
+  ✓ [600/1013] RegexSubstitution02: FALSE (expected FALSE) [786s] score=346
+  · [601/1013] RegexSubstitution03: UNKNOWN (expected TRUE) [788s] score=346
+  · [602/1013] UnsatFibonacci02: UNKNOWN (expected FALSE) [791s] score=346
+  ✓ [603/1013] StaticCharMethods04: FALSE (expected FALSE) [791s] score=347
+  · [604/1013] UnsatFibonacci01: UNKNOWN (expected FALSE) [792s] score=347
+  ✓ [605/1013] StringBuilderAppend02: FALSE (expected FALSE) [793s] score=348
+  ✓ [606/1013] StaticCharMethods03: FALSE (expected FALSE) [793s] score=349
+  · [607/1013] StaticCharMethods02: UNKNOWN (expected FALSE) [793s] score=349
+  · [608/1013] StringBuilderAppend01: UNKNOWN (expected TRUE) [794s] score=349
+  · [609/1013] StaticCharMethods06: UNKNOWN (expected TRUE) [795s] score=349
+  · [610/1013] StaticCharMethods01: UNKNOWN (expected TRUE) [796s] score=349
+  ✓ [611/1013] StringBuilderCapLen02: FALSE (expected FALSE) [796s] score=350
+  · [612/1013] StaticCharMethods05: UNKNOWN (expected FALSE) [800s] score=350
+  · [613/1013] StringBuilderCapLen01: UNKNOWN (expected TRUE) [803s] score=350
+  ✓ [614/1013] StringBuilderCapLen04: FALSE (expected FALSE) [805s] score=351
+  ✓ [615/1013] StringBuilderConstructors01: TRUE (expected TRUE) [805s] score=353
+  ✓ [616/1013] StringBuilderChars02: FALSE (expected FALSE) [807s] score=354
+  · [617/1013] StringBuilderChars05: UNKNOWN (expected FALSE) [809s] score=354
+  ✓ [618/1013] StringBuilderChars06: FALSE (expected FALSE) [809s] score=355
+  ✓ [619/1013] StringBuilderInsertDelete02: FALSE (expected FALSE) [812s] score=356
+  ✓ [620/1013] StringBuilderConstructors02: FALSE (expected FALSE) [812s] score=357
+  · [621/1013] CharSequenceBug: TIMEOUT (expected FALSE) [813s] score=357
+  ✓ [622/1013] StringBuilderInsertDelete03: FALSE (expected FALSE) [817s] score=358
+  · [623/1013] StringBuilderInsertDelete01: UNKNOWN (expected TRUE) [820s] score=358
+  ✓ [624/1013] StringCompare02: FALSE (expected FALSE) [821s] score=359
+  ✓ [625/1013] StringCompare03: FALSE (expected FALSE) [821s] score=360
+  · [626/1013] RegexSubstitution01: UNKNOWN (expected TRUE) [823s] score=360
+  ✓ [627/1013] StringCompare04: FALSE (expected FALSE) [824s] score=361
+  ✓ [628/1013] StringCompare05: FALSE (expected FALSE) [825s] score=362
+  · [629/1013] StringBuilderChars01: UNKNOWN (expected TRUE) [826s] score=362
+  ✓ [630/1013] StringConcatenation03: FALSE (expected FALSE) [828s] score=363
+  ✓ [631/1013] StringConcatenation04: FALSE (expected FALSE) [830s] score=364
+  · [632/1013] StringConstructors01: UNKNOWN (expected TRUE) [834s] score=364
+  ✓ [633/1013] StringConstructors02: FALSE (expected FALSE) [836s] score=365
+  ✓ [634/1013] StringIndexMethods01: TRUE (expected TRUE) [836s] score=367
+  · [635/1013] StringCompare01: UNKNOWN (expected TRUE) [836s] score=367
+  ✓ [636/1013] StringConcatenation02: FALSE (expected FALSE) [836s] score=368
+  · [637/1013] StringConstructors03: UNKNOWN (expected FALSE) [837s] score=368
+  ✓ [638/1013] StringConstructors04: FALSE (expected FALSE) [838s] score=369
+  ✓ [639/1013] StringContains01: FALSE (expected FALSE) [839s] score=370
+  ✓ [640/1013] StringConstructors05: FALSE (expected FALSE) [840s] score=371
+  ✓ [641/1013] StringContains02: FALSE (expected FALSE) [840s] score=372
+  · [642/1013] StringMiscellaneous01: UNKNOWN (expected TRUE) [845s] score=372
+  · [643/1013] StringBuilderCapLen03: TIMEOUT (expected FALSE) [847s] score=372
+  · [644/1013] StringConcatenation01: UNKNOWN (expected TRUE) [852s] score=372
+  · [645/1013] StringBuilderChars03: TIMEOUT (expected FALSE) [852s] score=372
+  · [646/1013] StringBuilderChars04: TIMEOUT (expected FALSE) [853s] score=372
+  · [647/1013] StringMiscellaneous04: UNKNOWN (expected TRUE) [854s] score=372
+  ✓ [648/1013] StringStartEnd02: FALSE (expected FALSE) [856s] score=373
+  ✓ [649/1013] StringStartEnd03: FALSE (expected FALSE) [857s] score=374
+  ✓ [650/1013] StringMiscellaneous02: FALSE (expected FALSE) [860s] score=375
+  · [651/1013] StringValueOf02: UNKNOWN (expected FALSE) [861s] score=375
+  · [652/1013] StringValueOf03: UNKNOWN (expected FALSE) [865s] score=375
+  ✓ [653/1013] StringValueOf04: FALSE (expected FALSE) [867s] score=376
+  · [654/1013] StringValueOf05: UNKNOWN (expected FALSE) [867s] score=376
+  ✓ [655/1013] SubString01: TRUE (expected TRUE) [869s] score=378
+  · [656/1013] StringValueOf08: UNKNOWN (expected FALSE) [870s] score=378
+  · [657/1013] StringValueOf09: UNKNOWN (expected FALSE) [872s] score=378
+  · [658/1013] StringStartEnd01: UNKNOWN (expected TRUE) [874s] score=378
+  ✓ [659/1013] StringValueOf10: FALSE (expected FALSE) [876s] score=379
+  · [660/1013] StringValueOf01: UNKNOWN (expected TRUE) [878s] score=379
+  ✓ [661/1013] aastore_aaload1: TRUE (expected TRUE) [882s] score=381
+  · [662/1013] SubString03: UNKNOWN (expected FALSE) [884s] score=381
+  ✓ [663/1013] array1: TRUE (expected TRUE) [885s] score=383
+  · [664/1013] TokenTest02: UNKNOWN (expected FALSE) [886s] score=383
+  ✓ [665/1013] StringIndexMethods02: FALSE (expected FALSE) [886s] score=384
+  ✓ [666/1013] array2: TRUE (expected TRUE) [886s] score=386
+  · [667/1013] SubString02: UNKNOWN (expected FALSE) [887s] score=386
+  ✓ [668/1013] Validate02: FALSE (expected FALSE) [888s] score=387
+  · [669/1013] StringIndexMethods03: TIMEOUT (expected FALSE) [890s] score=387
+  ✓ [670/1013] arraylength1: TRUE (expected TRUE) [891s] score=389
+  ✓ [671/1013] arrayread1: TRUE (expected TRUE) [893s] score=391
+  ✓ [672/1013] assert1: TRUE (expected TRUE) [894s] score=393
+  · [673/1013] StringIndexMethods04: TIMEOUT (expected FALSE) [894s] score=393
+  · [674/1013] StringIndexMethods05: TIMEOUT (expected FALSE) [896s] score=393
+  · [675/1013] StringMiscellaneous03: TIMEOUT (expected FALSE) [897s] score=393
+  ✓ [676/1013] assert5: TRUE (expected TRUE) [897s] score=395
+  ✓ [677/1013] assert6: TRUE (expected TRUE) [897s] score=397
+  ✓ [678/1013] StringValueOf06: FALSE (expected FALSE) [898s] score=398
+  ✓ [679/1013] basic1: TRUE (expected TRUE) [901s] score=400
+  ✓ [680/1013] assert3: FALSE (expected FALSE) [903s] score=401
+  ✓ [681/1013] bitwise1: TRUE (expected TRUE) [903s] score=403
+  ✓ [682/1013] boolean1: TRUE (expected TRUE) [903s] score=405
+  ✓ [683/1013] boolean2: TRUE (expected TRUE) [904s] score=407
+  ✓ [684/1013] assert2: FALSE (expected FALSE) [906s] score=408
+  ✓ [685/1013] bug-test-gen-119-2: TRUE (expected TRUE) [906s] score=410
+  ✓ [686/1013] assert4: FALSE (expected FALSE) [906s] score=411
+  ✓ [687/1013] bug-test-gen-119: TRUE (expected TRUE) [906s] score=413
+  ✓ [688/1013] athrow1: FALSE (expected FALSE) [909s] score=414
+  ✓ [689/1013] catch1: TRUE (expected TRUE) [912s] score=416
+  · [690/1013] Validate01: UNKNOWN (expected TRUE) [913s] score=416
+  ✓ [691/1013] classtest1: TRUE (expected TRUE) [913s] score=418
+  · [692/1013] StringValueOf07: TIMEOUT (expected FALSE) [914s] score=418
+  ✓ [693/1013] const1: TRUE (expected TRUE) [914s] score=420
+  ✓ [694/1013] bug-test-gen-095: FALSE (expected FALSE) [915s] score=421
+  ✓ [695/1013] enum1: TRUE (expected TRUE) [916s] score=423
+  ✓ [696/1013] constructor1: TRUE (expected TRUE) [916s] score=425
+  · [697/1013] TokenTest01: UNKNOWN (expected TRUE) [923s] score=425
+  ✓ [698/1013] exceptions14: TRUE (expected TRUE) [923s] score=427
+  ✓ [699/1013] exceptions15: TRUE (expected TRUE) [924s] score=429
+  ✓ [700/1013] exceptions18: TRUE (expected TRUE) [925s] score=431
+  · [701/1013] calc: UNKNOWN (expected TRUE) [926s] score=431
+  ✓ [702/1013] exceptions1: FALSE (expected FALSE) [926s] score=432
+  ✓ [703/1013] exceptions10: FALSE (expected FALSE) [927s] score=433
+  ✓ [704/1013] exceptions11: FALSE (expected FALSE) [930s] score=434
+  ✓ [705/1013] exceptions13: FALSE (expected FALSE) [932s] score=435
+  ✓ [706/1013] exceptions5: TRUE (expected TRUE) [932s] score=437
+  ✓ [707/1013] exceptions12: FALSE (expected FALSE) [932s] score=438
+  ✓ [708/1013] exceptions4: TRUE (expected TRUE) [932s] score=440
+  · [709/1013] charArray: UNKNOWN (expected TRUE) [933s] score=440
+  ✓ [710/1013] exceptions16: FALSE (expected FALSE) [933s] score=441
+  ✓ [711/1013] exceptions2: FALSE (expected FALSE) [933s] score=442
+  ✓ [712/1013] exceptions9: TRUE (expected TRUE) [937s] score=444
+  ✓ [713/1013] fcmpx_dcmpx1: TRUE (expected TRUE) [939s] score=446
+  · [714/1013] cast1: UNKNOWN (expected TRUE) [940s] score=446
+  ✓ [715/1013] exceptions3: FALSE (expected FALSE) [940s] score=447
+  ✓ [716/1013] if_expr1: TRUE (expected TRUE) [941s] score=449
+  ✓ [717/1013] instanceof1: TRUE (expected TRUE) [941s] score=451
+  ✓ [718/1013] iarith1: TRUE (expected TRUE) [941s] score=453
+  ✓ [719/1013] iarith2: TRUE (expected TRUE) [941s] score=455
+  ✓ [720/1013] ifxx1: TRUE (expected TRUE) [942s] score=457
+  ✓ [721/1013] if_icmp1: TRUE (expected TRUE) [942s] score=459
+  ✓ [722/1013] if_acmp1: TRUE (expected TRUE) [942s] score=461
+  ✓ [723/1013] exceptions8: FALSE (expected FALSE) [943s] score=462
+  ✓ [724/1013] exceptions7: FALSE (expected FALSE) [944s] score=463
+  ✓ [725/1013] exceptions6: FALSE (expected FALSE) [945s] score=464
+  ✓ [726/1013] instanceof2: TRUE (expected TRUE) [948s] score=466
+  ✓ [727/1013] instanceof5: TRUE (expected TRUE) [949s] score=468
+  ✓ [728/1013] instanceof3: TRUE (expected TRUE) [949s] score=470
+  ✓ [729/1013] instanceof4: TRUE (expected TRUE) [950s] score=472
+  · [730/1013] astore_aload1: TIMEOUT (expected TRUE) [950s] score=472
+  ✓ [731/1013] instanceof8: TRUE (expected TRUE) [950s] score=474
+  ✓ [732/1013] instanceof7: TRUE (expected TRUE) [950s] score=476
+  ✓ [733/1013] instanceof6: TRUE (expected TRUE) [952s] score=478
+  ✓ [734/1013] list1: TRUE (expected TRUE) [953s] score=480
+  ✓ [735/1013] lazyloading4: TRUE (expected TRUE) [953s] score=482
+  ✓ [736/1013] long1: TRUE (expected TRUE) [953s] score=484
+  ✓ [737/1013] lookupswitch1: TRUE (expected TRUE) [953s] score=486
+  ✓ [738/1013] overloading1: TRUE (expected TRUE) [956s] score=488
+  ✓ [739/1013] package1: TRUE (expected TRUE) [958s] score=490
+  ✓ [740/1013] interface1: FALSE (expected FALSE) [958s] score=491
+  ✓ [741/1013] putfield_getfield1: TRUE (expected TRUE) [958s] score=493
+  ✓ [742/1013] recursion2: TRUE (expected TRUE) [959s] score=495
+  ✓ [743/1013] putstatic_getstatic1: TRUE (expected TRUE) [960s] score=497
+  · [744/1013] java_append_char: UNKNOWN (expected FALSE) [962s] score=497
+  ✓ [745/1013] uninitialised1: TRUE (expected TRUE) [962s] score=499
+  ✓ [746/1013] swap1: TRUE (expected TRUE) [962s] score=501
+  ✓ [747/1013] tableswitch1: TRUE (expected TRUE) [962s] score=503
+  · [748/1013] char1: TIMEOUT (expected TRUE) [963s] score=503
+  ✓ [749/1013] virtual1: TRUE (expected TRUE) [965s] score=505
+  ✓ [750/1013] virtual4: TRUE (expected TRUE) [967s] score=507
+  · [751/1013] store_load1: UNKNOWN (expected TRUE) [967s] score=507
+  ✓ [752/1013] return2: FALSE (expected FALSE) [970s] score=508
+  ✓ [753/1013] return1: FALSE (expected FALSE) [971s] score=509
+  · [754/1013] synchronized: UNKNOWN (expected TRUE) [971s] score=509
+  · [755/1013] virtual_function_unwinding: UNKNOWN (expected TRUE) [977s] score=509
+  ✓ [756/1013] virtual2: FALSE (expected FALSE) [978s] score=510
+  · [757/1013] URLDecoder01: UNKNOWN (expected TRUE) [979s] score=510
+  ✓ [758/1013] OverapproximationString01: FALSE (expected FALSE) [979s] score=511
+  · [759/1013] URLDecoder02: UNKNOWN (expected FALSE) [982s] score=511
+  ✓ [760/1013] list2: TRUE (expected TRUE) [983s] score=513
+  ✓ [761/1013] array-iteration01: FALSE (expected FALSE) [983s] score=514
+  ✓ [762/1013] addition01: FALSE (expected FALSE) [984s] score=515
+  · [763/1013] multinewarray: UNKNOWN (expected TRUE) [985s] score=515
+  ✓ [764/1013] boundcheck100: FALSE (expected FALSE) [986s] score=516
+  ✓ [765/1013] boundcheck200: FALSE (expected FALSE) [986s] score=517
+  · [766/1013] double2long: UNKNOWN (expected FALSE) [987s] score=517
+  ✓ [767/1013] boundcheck30: FALSE (expected FALSE) [987s] score=518
+  · [768/1013] float: UNKNOWN (expected FALSE) [988s] score=518
+  · [769/1013] radians: UNKNOWN (expected FALSE) [990s] score=518
+  ✓ [770/1013] shifting: FALSE (expected FALSE) [991s] score=519
+  ✓ [771/1013] ExDarko_true: TRUE (expected TRUE) [992s] score=521
+  ✓ [772/1013] ExException_true: TRUE (expected TRUE) [994s] score=523
+  ✓ [773/1013] ExLazy_true: TRUE (expected TRUE) [996s] score=525
+  ✓ [774/1013] ExGenSymExe_true: TRUE (expected TRUE) [996s] score=527
+  ✓ [775/1013] shifting2: FALSE (expected FALSE) [998s] score=528
+  ✓ [776/1013] ExMIT_true: TRUE (expected TRUE) [998s] score=530
+  ✓ [777/1013] shifting3: FALSE (expected FALSE) [998s] score=531
+  ✓ [778/1013] ExDarko_false: FALSE (expected FALSE) [999s] score=532
+  · [779/1013] startswith: UNKNOWN (expected TRUE) [1000s] score=532
+  ✓ [780/1013] ExSymExe10_true: TRUE (expected TRUE) [1000s] score=534
+  ✓ [781/1013] ExSymExe11_true: TRUE (expected TRUE) [1002s] score=536
+  ✓ [782/1013] ExException_false: FALSE (expected FALSE) [1003s] score=537
+  ✓ [783/1013] ExSymExe12_true: TRUE (expected TRUE) [1005s] score=539
+  ✓ [784/1013] ExMIT_false: FALSE (expected FALSE) [1006s] score=540
+  ✓ [785/1013] ExGenSymExe_false: FALSE (expected FALSE) [1006s] score=541
+  ✓ [786/1013] ExLazy_false: FALSE (expected FALSE) [1006s] score=542
+  ✓ [787/1013] ExSymExe10_false: FALSE (expected FALSE) [1007s] score=543
+  ✓ [788/1013] ExSymExe13_true: TRUE (expected TRUE) [1008s] score=545
+  ✓ [789/1013] ExSymExe14_true: TRUE (expected TRUE) [1008s] score=547
+  ✓ [790/1013] ExSymExe11_false: FALSE (expected FALSE) [1010s] score=548
+  ✓ [791/1013] ExSymExe15_true: TRUE (expected TRUE) [1010s] score=550
+  ✓ [792/1013] ExSymExe12_false: FALSE (expected FALSE) [1012s] score=551
+  ✓ [793/1013] ExSymExe16_true: TRUE (expected TRUE) [1012s] score=553
+  ✓ [794/1013] ExSymExe17_true: TRUE (expected TRUE) [1015s] score=555
+  ✓ [795/1013] ExSymExe18_true: TRUE (expected TRUE) [1015s] score=557
+  ✓ [796/1013] ExSymExe13_false: FALSE (expected FALSE) [1017s] score=558
+  ✓ [797/1013] ExSymExe14_false: FALSE (expected FALSE) [1017s] score=559
+  ✓ [798/1013] ExSymExe15_false: FALSE (expected FALSE) [1018s] score=560
+  ✓ [799/1013] ExSymExe1_true: TRUE (expected TRUE) [1018s] score=562
+  ✓ [800/1013] ExSymExe19_true: TRUE (expected TRUE) [1018s] score=564
+  ✓ [801/1013] ExSymExe16_false: FALSE (expected FALSE) [1020s] score=565
+  ✓ [802/1013] ExSymExe20_true: TRUE (expected TRUE) [1022s] score=567
+  ✓ [803/1013] ExSymExe21_true: TRUE (expected TRUE) [1022s] score=569
+  ✓ [804/1013] ExSymExe17_false: FALSE (expected FALSE) [1023s] score=570
+  ✓ [805/1013] ExSymExe25_true: TRUE (expected TRUE) [1025s] score=572
+  ✓ [806/1013] ExSymExe18_false: FALSE (expected FALSE) [1026s] score=573
+  ✓ [807/1013] ExSymExe26_true: TRUE (expected TRUE) [1027s] score=575
+  ✓ [808/1013] ExSymExe19_false: FALSE (expected FALSE) [1028s] score=576
+  ✓ [809/1013] ExSymExe28_true: TRUE (expected TRUE) [1028s] score=578
+  ✓ [810/1013] ExSymExe27_true: TRUE (expected TRUE) [1028s] score=580
+  ✓ [811/1013] ExSymExe20_false: FALSE (expected FALSE) [1031s] score=581
+  ✓ [812/1013] ExSymExe29_true: TRUE (expected TRUE) [1032s] score=583
+  ✓ [813/1013] ExSymExe21_false: FALSE (expected FALSE) [1034s] score=584
+  ✓ [814/1013] ExSymExe25_false: FALSE (expected FALSE) [1034s] score=585
+  ✓ [815/1013] ExSymExe2_true: TRUE (expected TRUE) [1036s] score=587
+  ✓ [816/1013] ExSymExe26_false: FALSE (expected FALSE) [1037s] score=588
+  ✓ [817/1013] ExSymExe4_true: TRUE (expected TRUE) [1037s] score=590
+  ✓ [818/1013] ExSymExe1_false: FALSE (expected FALSE) [1038s] score=591
+  ✓ [819/1013] ExSymExe3_true: TRUE (expected TRUE) [1038s] score=593
+  ✓ [820/1013] ExSymExe28_false: FALSE (expected FALSE) [1038s] score=594
+  ✓ [821/1013] ExSymExe27_false: FALSE (expected FALSE) [1038s] score=595
+  ✓ [822/1013] ExSymExe5_true: TRUE (expected TRUE) [1041s] score=597
+  ✓ [823/1013] ExSymExe6_true: TRUE (expected TRUE) [1043s] score=599
+  ✓ [824/1013] ExSymExe29_false: FALSE (expected FALSE) [1044s] score=600
+  ✓ [825/1013] ExSymExe3_false: FALSE (expected FALSE) [1045s] score=601
+  ✓ [826/1013] ExSymExe7_true: TRUE (expected TRUE) [1046s] score=603
+  ✓ [827/1013] ExSymExe9_true: TRUE (expected TRUE) [1047s] score=605
+  ✓ [828/1013] ExSymExe4_false: FALSE (expected FALSE) [1047s] score=606
+  ✓ [829/1013] ExSymExe8_true: TRUE (expected TRUE) [1048s] score=608
+  ✓ [830/1013] ExSymExeArrays_true: TRUE (expected TRUE) [1049s] score=610
+  ✓ [831/1013] ExSymExe5_false: FALSE (expected FALSE) [1049s] score=611
+  ✓ [832/1013] ExSymExe6_false: FALSE (expected FALSE) [1051s] score=612
+  ✓ [833/1013] ExSymExe7_false: FALSE (expected FALSE) [1054s] score=613
+  ✓ [834/1013] ExSymExe8_false: FALSE (expected FALSE) [1055s] score=614
+  ✓ [835/1013] ExSymExeBool_true: TRUE (expected TRUE) [1055s] score=616
+  ✓ [836/1013] ExSymExe2_false: FALSE (expected FALSE) [1056s] score=617
+  ✓ [837/1013] ExSymExeArrays_false: FALSE (expected FALSE) [1056s] score=618
+  ✓ [838/1013] ExSymExe9_false: FALSE (expected FALSE) [1057s] score=619
+  ✓ [839/1013] ExSymExeBool_false: FALSE (expected FALSE) [1061s] score=620
+  ✓ [840/1013] ExSymExeD2I_false: FALSE (expected FALSE) [1066s] score=621
+  ✓ [841/1013] ExSymExeComplexMath_false: FALSE (expected FALSE) [1066s] score=622
+  ✓ [842/1013] ExSymExeGetStatic_true: TRUE (expected TRUE) [1067s] score=624
+  ✓ [843/1013] ExSymExeD2L_false: FALSE (expected FALSE) [1068s] score=625
+  · [844/1013] ExSymExeD2I_true: UNKNOWN (expected TRUE) [1068s] score=625
+  · [845/1013] ExSymExeComplexMath_true: UNKNOWN (expected TRUE) [1068s] score=625
+  ✓ [846/1013] ExSymExeF2I_false: FALSE (expected FALSE) [1068s] score=626
+  · [847/1013] ExSymExeD2L_true: UNKNOWN (expected TRUE) [1068s] score=626
+  · [848/1013] ExSymExeF2I_true: UNKNOWN (expected TRUE) [1068s] score=626
+  ✓ [849/1013] ExSymExeF2L_false: FALSE (expected FALSE) [1071s] score=627
+  ✓ [850/1013] ExSymExeFNEG_false: FALSE (expected FALSE) [1074s] score=628
+  ✓ [851/1013] ExSymExeGetStatic_false: FALSE (expected FALSE) [1075s] score=629
+  · [852/1013] ExSymExeF2L_true: UNKNOWN (expected TRUE) [1075s] score=629
+  · [853/1013] ExSymExeFNEG_true: UNKNOWN (expected TRUE) [1077s] score=629
+  ✓ [854/1013] ExSymExeI2F_true: TRUE (expected TRUE) [1077s] score=631
+  ✓ [855/1013] ExSymExeLongBytecodes_true: TRUE (expected TRUE) [1078s] score=633
+  ✓ [856/1013] ExSymExeResearch_true: TRUE (expected TRUE) [1078s] score=635
+  ✓ [857/1013] ExSymExeI2D_true: TRUE (expected TRUE) [1078s] score=637
+  ✓ [858/1013] ExSymExeLCMP_true: TRUE (expected TRUE) [1078s] score=639
+  ✓ [859/1013] ExSymExeI2D_false: FALSE (expected FALSE) [1079s] score=640
+  ✓ [860/1013] ExSymExeSimple_true: TRUE (expected TRUE) [1081s] score=642
+  ✓ [861/1013] ExSymExeSuzette_true: TRUE (expected TRUE) [1085s] score=644
+  ✓ [862/1013] ExSymExeI2F_false: FALSE (expected FALSE) [1085s] score=645
+  ✓ [863/1013] ExSymExeSwitch_true: TRUE (expected TRUE) [1087s] score=647
+  ✓ [864/1013] ExSymExeLongBytecodes_false: FALSE (expected FALSE) [1088s] score=648
+  ✓ [865/1013] ExSymExeTestAssignments_true: TRUE (expected TRUE) [1088s] score=650
+  ✓ [866/1013] ExSymExeLCMP_false: FALSE (expected FALSE) [1088s] score=651
+  ✓ [867/1013] ExSymExeResearch_false: FALSE (expected FALSE) [1088s] score=652
+  ✓ [868/1013] ExSymExeTestClassFields_true: TRUE (expected TRUE) [1089s] score=654
+  ✓ [869/1013] ExSymExeSimple_false: FALSE (expected FALSE) [1089s] score=655
+  ✓ [870/1013] ExSymExe_true: TRUE (expected TRUE) [1090s] score=657
+  ✓ [871/1013] ExSymExeSuzette_false: FALSE (expected FALSE) [1096s] score=658
+  ✓ [872/1013] ExSymExeSwitch_false: FALSE (expected FALSE) [1097s] score=659
+  ✓ [873/1013] TestLazy_true: TRUE (expected TRUE) [1098s] score=661
+  ✓ [874/1013] ExSymExeTestAssignments_false: FALSE (expected FALSE) [1098s] score=662
+  ✓ [875/1013] ExSymExe_false: FALSE (expected FALSE) [1098s] score=663
+  ✓ [876/1013] ExSymExeTestClassFields_false: FALSE (expected FALSE) [1099s] score=664
+  ✓ [877/1013] TestLazy_false: FALSE (expected FALSE) [1101s] score=665
+  · [878/1013] objects01: UNKNOWN (expected TRUE) [1109s] score=665
+  · [879/1013] objects02: UNKNOWN (expected TRUE) [1110s] score=665
+  · [880/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_01_bad: UNKNOWN (expected FALSE) [1110s] score=665
+  · [881/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_01_bad_version2: UNKNOWN (expected FALSE) [1112s] score=665
+  · [882/1013] CWE369_Divide_by_Zero__float_console_readLine_divide_54_bad_version2: UNKNOWN (expected FALSE) [1113s] score=665
+  · [883/1013] CWE369_Divide_by_Zero__float_console_readLine_divide_54_bad: UNKNOWN (expected FALSE) [1114s] score=665
+  ✓ [884/1013] objects08: TRUE (expected TRUE) [1119s] score=667
+  ✓ [885/1013] objects03: FALSE (expected FALSE) [1121s] score=668
+  · [886/1013] objects04: UNKNOWN (expected FALSE) [1122s] score=668
+  · [887/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_81a_bad_version2: UNKNOWN (expected FALSE) [1123s] score=668
+  · [888/1013] objects06: UNKNOWN (expected FALSE) [1123s] score=668
+  · [889/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_01_good: UNKNOWN (expected TRUE) [1124s] score=668
+  ✓ [890/1013] objects07: FALSE (expected FALSE) [1124s] score=669
+  · [891/1013] CWE369_Divide_by_Zero__float_console_readLine_divide_54_good: UNKNOWN (expected TRUE) [1125s] score=669
+  · [892/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_81a_bad: UNKNOWN (expected FALSE) [1126s] score=669
+  · [893/1013] objects09: UNKNOWN (expected TRUE) [1134s] score=669
+  ✓ [894/1013] objects10: FALSE (expected FALSE) [1135s] score=670
+  · [895/1013] CWE369_Divide_by_Zero__float_connect_tcp_divide_81a_good: UNKNOWN (expected TRUE) [1135s] score=670
+  · [896/1013] objects11: UNKNOWN (expected FALSE) [1135s] score=670
+  ✓ [897/1013] objects13: FALSE (expected FALSE) [1138s] score=671
+  · [898/1013] objects14: UNKNOWN (expected FALSE) [1142s] score=671
+  ✓ [899/1013] Aliasing3: TRUE (expected TRUE) [1149s] score=673
+  ✓ [900/1013] Aliasing2: TRUE (expected TRUE) [1150s] score=675
+  · [901/1013] objects05: TIMEOUT (expected TRUE) [1158s] score=675
+  ✓ [902/1013] Aliasing1: FALSE (expected FALSE) [1161s] score=676
+  · [903/1013] Arrays1: UNKNOWN (expected FALSE) [1162s] score=676
+  ✓ [904/1013] Aliasing4: FALSE (expected FALSE) [1162s] score=677
+  · [905/1013] Aliasing6: UNKNOWN (expected FALSE) [1163s] score=677
+  ✓ [906/1013] Aliasing5: FALSE (expected FALSE) [1163s] score=678
+  · [907/1013] Arrays10: UNKNOWN (expected FALSE) [1164s] score=678
+  · [908/1013] Arrays2: UNKNOWN (expected FALSE) [1173s] score=678
+  · [909/1013] objects12: TIMEOUT (expected FALSE) [1174s] score=678
+  · [910/1013] Arrays4: UNKNOWN (expected FALSE) [1175s] score=678
+  · [911/1013] Arrays5: UNKNOWN (expected TRUE) [1175s] score=678
+  · [912/1013] Arrays3: UNKNOWN (expected FALSE) [1176s] score=678
+  · [913/1013] Arrays6: UNKNOWN (expected FALSE) [1178s] score=678
+  · [914/1013] Arrays7: UNKNOWN (expected FALSE) [1181s] score=678
+  · [915/1013] Arrays8: UNKNOWN (expected FALSE) [1189s] score=678
+  · [916/1013] Arrays9: UNKNOWN (expected FALSE) [1190s] score=678
+  · [917/1013] Basic15: UNKNOWN (expected FALSE) [1192s] score=678
+  ✓ [918/1013] Basic11: FALSE (expected FALSE) [1197s] score=679
+  ✓ [919/1013] Basic1: FALSE (expected FALSE) [1198s] score=680
+  ✓ [920/1013] Basic10: FALSE (expected FALSE) [1199s] score=681
+  · [921/1013] Basic12: UNKNOWN (expected FALSE) [1202s] score=681
+  ✓ [922/1013] Basic16: FALSE (expected FALSE) [1202s] score=682
+  · [923/1013] Basic18: UNKNOWN (expected FALSE) [1203s] score=682
+  ✓ [924/1013] Basic17: FALSE (expected FALSE) [1204s] score=683
+  · [925/1013] Basic19: UNKNOWN (expected FALSE) [1213s] score=683
+  ✓ [926/1013] Basic2: FALSE (expected FALSE) [1214s] score=684
+  · [927/1013] Basic20: UNKNOWN (expected FALSE) [1217s] score=684
+  · [928/1013] Basic24: UNKNOWN (expected FALSE) [1219s] score=684
+  · [929/1013] Basic25: UNKNOWN (expected FALSE) [1220s] score=684
+  · [930/1013] Basic28: UNKNOWN (expected TRUE) [1221s] score=684
+  · [931/1013] Basic21: UNKNOWN (expected FALSE) [1227s] score=684
+  ✓ [932/1013] Basic29: FALSE (expected FALSE) [1232s] score=685
+  ✓ [933/1013] Basic3: FALSE (expected FALSE) [1233s] score=686
+  ✓ [934/1013] Basic26: FALSE (expected FALSE) [1237s] score=687
+  ✓ [935/1013] Basic30: FALSE (expected FALSE) [1238s] score=688
+  ✓ [936/1013] Basic32: FALSE (expected FALSE) [1239s] score=689
+  ✓ [937/1013] Basic31: FALSE (expected FALSE) [1240s] score=690
+  · [938/1013] Basic33: UNKNOWN (expected FALSE) [1244s] score=690
+  · [939/1013] Basic27: TIMEOUT (expected FALSE) [1250s] score=690
+  · [940/1013] Basic37: UNKNOWN (expected FALSE) [1252s] score=690
+  · [941/1013] Basic38: UNKNOWN (expected FALSE) [1254s] score=690
+  · [942/1013] Basic39: UNKNOWN (expected FALSE) [1254s] score=690
+  ✓ [943/1013] Basic35: FALSE (expected FALSE) [1255s] score=691
+  ✓ [944/1013] Basic4: FALSE (expected FALSE) [1256s] score=692
+  · [945/1013] Basic6: UNKNOWN (expected TRUE) [1263s] score=692
+  · [946/1013] Basic34: TIMEOUT (expected FALSE) [1264s] score=692
+  · [947/1013] Basic8: UNKNOWN (expected TRUE) [1270s] score=692
+  ✓ [948/1013] Collections1: FALSE (expected FALSE) [1272s] score=693
+  · [949/1013] Collections12: UNKNOWN (expected FALSE) [1274s] score=693
+  ✓ [950/1013] Basic9: FALSE (expected FALSE) [1274s] score=694
+  · [951/1013] Collections14: UNKNOWN (expected FALSE) [1276s] score=694
+  · [952/1013] Collections13: UNKNOWN (expected FALSE) [1280s] score=694
+  · [953/1013] Basic5: TIMEOUT (expected FALSE) [1281s] score=694
+  ✓ [954/1013] Collections10: FALSE (expected FALSE) [1285s] score=695
+  ✓ [955/1013] Collections2: FALSE (expected FALSE) [1290s] score=696
+  ✓ [956/1013] Collections3: FALSE (expected FALSE) [1291s] score=697
+  ✓ [957/1013] Collections8: TRUE (expected TRUE) [1291s] score=699
+  ✓ [958/1013] Collections4: FALSE (expected FALSE) [1291s] score=700
+  ✓ [959/1013] Collections6: FALSE (expected FALSE) [1291s] score=701
+  · [960/1013] Basic7: TIMEOUT (expected FALSE) [1293s] score=701
+  ✓ [961/1013] Collections5: FALSE (expected FALSE) [1294s] score=702
+  ✓ [962/1013] Collections9: TRUE (expected TRUE) [1296s] score=704
+  ✓ [963/1013] Datastructures4: TRUE (expected TRUE) [1299s] score=706
+  · [964/1013] Datastructures6: UNKNOWN (expected FALSE) [1308s] score=706
+  ✓ [965/1013] Datastructures3: FALSE (expected FALSE) [1310s] score=707
+  ✓ [966/1013] Datastructures2: FALSE (expected FALSE) [1310s] score=708
+  ✓ [967/1013] Datastructures1: FALSE (expected FALSE) [1311s] score=709
+  ✓ [968/1013] Datastructures5: FALSE (expected FALSE) [1318s] score=710
+  · [969/1013] Inter14: UNKNOWN (expected FALSE) [1320s] score=710
+  · [970/1013] Inter13: UNKNOWN (expected FALSE) [1320s] score=710
+  ✓ [971/1013] Collections7: FALSE (expected FALSE) [1322s] score=711
+  ✓ [972/1013] Factories1: FALSE (expected FALSE) [1324s] score=712
+  ✓ [973/1013] Factories2: FALSE (expected FALSE) [1327s] score=713
+  ✓ [974/1013] Inter1: FALSE (expected FALSE) [1327s] score=714
+  ✓ [975/1013] Inter11: FALSE (expected FALSE) [1327s] score=715
+  ✓ [976/1013] Inter12: FALSE (expected FALSE) [1329s] score=716
+  ✓ [977/1013] Factories3: FALSE (expected FALSE) [1330s] score=717
+  ✓ [978/1013] Inter2: FALSE (expected FALSE) [1335s] score=718
+  ✓ [979/1013] Inter10: FALSE (expected FALSE) [1336s] score=719
+  · [980/1013] Inter6: UNKNOWN (expected FALSE) [1336s] score=719
+  ✓ [981/1013] Inter3: FALSE (expected FALSE) [1346s] score=720
+  ✓ [982/1013] Inter5: FALSE (expected FALSE) [1346s] score=721
+  ✓ [983/1013] Inter4: FALSE (expected FALSE) [1347s] score=722
+  · [984/1013] Pred1: UNKNOWN (expected TRUE) [1347s] score=722
+  ✓ [985/1013] Pred3: TRUE (expected TRUE) [1352s] score=724
+  ✓ [986/1013] Inter7: FALSE (expected FALSE) [1353s] score=725
+  ✓ [987/1013] Pred6: TRUE (expected TRUE) [1355s] score=727
+  ✓ [988/1013] Pred7: TRUE (expected TRUE) [1355s] score=729
+  ✓ [989/1013] Inter9: FALSE (expected FALSE) [1358s] score=730
+  ✓ [990/1013] Inter8: FALSE (expected FALSE) [1359s] score=731
+  ✓ [991/1013] Pred2: FALSE (expected FALSE) [1360s] score=732
+  ✓ [992/1013] Pred4: FALSE (expected FALSE) [1365s] score=733
+  ✓ [993/1013] Pred5: FALSE (expected FALSE) [1365s] score=734
+  ✓ [994/1013] Pred8: FALSE (expected FALSE) [1369s] score=735
+  · [995/1013] Refl3: UNKNOWN (expected FALSE) [1370s] score=735
+  · [996/1013] Pred9: UNKNOWN (expected TRUE) [1371s] score=735
+  · [997/1013] Refl4: UNKNOWN (expected FALSE) [1372s] score=735
+  · [998/1013] Refl1: UNKNOWN (expected FALSE) [1375s] score=735
+  · [999/1013] Refl2: UNKNOWN (expected FALSE) [1379s] score=735
+  · [1000/1013] Sanitizers5: UNKNOWN (expected FALSE) [1385s] score=735
+  ✓ [1001/1013] StrongUpdates1: TRUE (expected TRUE) [1385s] score=737
+  · [1002/1013] Sanitizers3: UNKNOWN (expected TRUE) [1386s] score=737
+  ✓ [1003/1013] StrongUpdates2: TRUE (expected TRUE) [1388s] score=739
+  ✓ [1004/1013] StrongUpdates3: TRUE (expected TRUE) [1388s] score=741
+  ✓ [1005/1013] Session1: FALSE (expected FALSE) [1389s] score=742
+  ✓ [1006/1013] StrongUpdates5: TRUE (expected TRUE) [1389s] score=744
+  ✓ [1007/1013] StrongUpdates4: TRUE (expected TRUE) [1389s] score=746
+  ✓ [1008/1013] Session2: FALSE (expected FALSE) [1390s] score=747
+  · [1009/1013] Sanitizers4: UNKNOWN (expected FALSE) [1395s] score=747
+  ✓ [1010/1013] Session3: FALSE (expected FALSE) [1398s] score=748
+  · [1011/1013] Sanitizers1: TIMEOUT (expected FALSE) [1407s] score=748
+  · [1012/1013] Sanitizers2: TIMEOUT (expected TRUE) [1412s] score=748
+  · [1013/1013] Sanitizers6: TIMEOUT (expected TRUE) [1418s] score=748
+valid-assert tasks
+  Expected TRUE: 313
+  Expected FALSE: 700
+
+
+Results (1407s):
+  Correct TRUE:   157  (+314)
+  Correct FALSE:  438  (+438)
+  Wrong TRUE:       0  (-0)
+  Wrong FALSE:      0  (-0)
+  UNKNOWN:        335
+  TIMEOUT:         83
+  ERROR:            0
+
+  TOTAL SCORE: 752
+
+CORRECT FALSE (438):
+  AbstractSerializationStreamReader_false
+  Ackermann01
+  Aliasing1
+  Aliasing4
+  Aliasing5
+  ArithmeticException1
+  ArithmeticException6
+  Basic1
+  Basic10
+  Basic11
+  Basic16
+  Basic17
+  Basic2
+  Basic26
+  Basic29
+  Basic3
+  Basic30
+  Basic31
+  Basic32
+  Basic35
+  Basic4
+  Basic9
+  BellmanFord-FunUnsat01
+  BellmanFord-FunUnsat02
+  Boolean_public_boolean_java_lang_Boolean_booleanValue
+  Boolean_public_int_java_lang_Boolean_compareTo_java_lang_Boolean
+  Boolean_public_java_lang_String_java_lang_Boolean_toString
+  Boolean_public_static_boolean_java_lang_Boolean_logicalAnd_boolean_boolean
+  Boolean_public_static_boolean_java_lang_Boolean_logicalOr_boolean_boolean
+  Boolean_public_static_boolean_java_lang_Boolean_logicalXor_boolean_boolean
+  Boolean_public_static_int_java_lang_Boolean_compare_boolean_boolean
+  Boolean_public_static_java_lang_Boolean_java_lang_Boolean_valueOf_boolean
+  Boolean_public_static_java_lang_String_java_lang_Boolean_toString_boolean
+  BufferedReaderReadLine
+  Byte_public_byte_java_lang_Byte_byteValue
+  Byte_public_double_java_lang_Byte_doubleValue
+  Byte_public_float_java_lang_Byte_floatValue
+  Byte_public_int_java_lang_Byte_compareTo_java_lang_Byte
+  Byte_public_int_java_lang_Byte_intValue
+  Byte_public_long_java_lang_Byte_longValue
+  Byte_public_short_java_lang_Byte_shortValue
+  Byte_public_static_int_java_lang_Byte_compare_byte_byte
+  Byte_public_static_int_java_lang_Byte_toUnsignedInt_byte
+  Byte_public_static_java_lang_Byte_java_lang_Byte_valueOf_byte
+  Byte_public_static_long_java_lang_Byte_toUnsignedLong_byte
+  Character_public_char_java_lang_Character_charValue
+  Character_public_int_java_lang_Character_compareTo_java_lang_Character
+  Character_public_static_boolean_java_lang_Character_isAlphabetic_int
+  Character_public_static_boolean_java_lang_Character_isBmpCodePoint_int
+  Character_public_static_boolean_java_lang_Character_isDigit_char
+  Character_public_static_boolean_java_lang_Character_isDigit_int
+  Character_public_static_boolean_java_lang_Character_isISOControl_int
+  Character_public_static_boolean_java_lang_Character_isJavaIdentifierPart_char
+  Character_public_static_boolean_java_lang_Character_isJavaIdentifierStart_char
+  Character_public_static_boolean_java_lang_Character_isJavaIdentifierStart_int
+  Character_public_static_boolean_java_lang_Character_isJavaLetterOrDigit_char
+  Character_public_static_boolean_java_lang_Character_isJavaLetter_char
+  Character_public_static_boolean_java_lang_Character_isLetterOrDigit_char
+  Character_public_static_boolean_java_lang_Character_isLetterOrDigit_int
+  Character_public_static_boolean_java_lang_Character_isLetter_char
+  Character_public_static_boolean_java_lang_Character_isLetter_int
+  Character_public_static_boolean_java_lang_Character_isLowerCase_char
+  Character_public_static_boolean_java_lang_Character_isLowerCase_int
+  Character_public_static_boolean_java_lang_Character_isSpaceChar_char
+  Character_public_static_boolean_java_lang_Character_isSpaceChar_int
+  Character_public_static_boolean_java_lang_Character_isSpace_char
+  Character_public_static_boolean_java_lang_Character_isSupplementaryCodePoint_int
+  Character_public_static_boolean_java_lang_Character_isUpperCase_char
+  Character_public_static_boolean_java_lang_Character_isUpperCase_int
+  Character_public_static_boolean_java_lang_Character_isValidCodePoint_int
+  Character_public_static_boolean_java_lang_Character_isWhitespace_char
+  Character_public_static_boolean_java_lang_Character_isWhitespace_int
+  Character_public_static_char_java_lang_Character_forDigit_int_int
+  Character_public_static_int_java_lang_Character_charCount_int
+  Character_public_static_int_java_lang_Character_compare_char_char
+  Character_public_static_int_java_lang_Character_digit_char_int
+  Character_public_static_int_java_lang_Character_digit_int_int
+  Character_public_static_int_java_lang_Character_toCodePoint_char_char
+  Character_public_static_java_lang_Character_java_lang_Character_valueOf_char
+  Character_public_static_java_lang_String_java_lang_Character_toString_char
+  ClassCastException3
+  Collections1
+  Collections10
+  Collections2
+  Collections3
+  Collections4
+  Collections5
+  Collections6
+  Collections7
+  Constant_false
+  Datastructures1
+  Datastructures2
+  Datastructures3
+  Datastructures5
+  DiskBasedCache
+  Double_public_boolean_java_lang_Double_isInfinite
+  Double_public_boolean_java_lang_Double_isNaN
+  Double_public_byte_java_lang_Double_byteValue
+  Double_public_int_java_lang_Double_compareTo_java_lang_Double
+  Double_public_int_java_lang_Double_intValue
+  Double_public_long_java_lang_Double_longValue
+  Double_public_short_java_lang_Double_shortValue
+  Double_public_static_boolean_java_lang_Double_isFinite_double
+  Double_public_static_boolean_java_lang_Double_isInfinite_double
+  Double_public_static_boolean_java_lang_Double_isNaN_double
+  Double_public_static_int_java_lang_Double_compare_double_double
+  Double_public_static_long_java_lang_Double_doubleToLongBits_double
+  Double_public_static_native_long_java_lang_Double_doubleToRawLongBits_double
+  ExDarko_false
+  ExException_false
+  ExGenSymExe_false
+  ExLazy_false
+  ExMIT_false
+  ExSymExe10_false
+  ExSymExe11_false
+  ExSymExe12_false
+  ExSymExe13_false
+  ExSymExe14_false
+  ExSymExe15_false
+  ExSymExe16_false
+  ExSymExe17_false
+  ExSymExe18_false
+  ExSymExe19_false
+  ExSymExe1_false
+  ExSymExe20_false
+  ExSymExe21_false
+  ExSymExe25_false
+  ExSymExe26_false
+  ExSymExe27_false
+  ExSymExe28_false
+  ExSymExe29_false
+  ExSymExe2_false
+  ExSymExe3_false
+  ExSymExe4_false
+  ExSymExe5_false
+  ExSymExe6_false
+  ExSymExe7_false
+  ExSymExe8_false
+  ExSymExe9_false
+  ExSymExeArrays_false
+  ExSymExeBool_false
+  ExSymExeComplexMath_false
+  ExSymExeD2I_false
+  ExSymExeD2L_false
+  ExSymExeF2I_false
+  ExSymExeF2L_false
+  ExSymExeFNEG_false
+  ExSymExeGetStatic_false
+  ExSymExeI2D_false
+  ExSymExeI2F_false
+  ExSymExeLCMP_false
+  ExSymExeLongBytecodes_false
+  ExSymExeResearch_false
+  ExSymExeSimple_false
+  ExSymExeSuzette_false
+  ExSymExeSwitch_false
+  ExSymExeTestAssignments_false
+  ExSymExeTestClassFields_false
+  ExSymExe_false
+  Factories1
+  Factories2
+  Factories3
+  Float_public_boolean_java_lang_Float_isInfinite
+  Float_public_boolean_java_lang_Float_isNaN
+  Float_public_byte_java_lang_Float_byteValue
+  Float_public_int_java_lang_Float_compareTo_java_lang_Float
+  Float_public_int_java_lang_Float_intValue
+  Float_public_long_java_lang_Float_longValue
+  Float_public_short_java_lang_Float_shortValue
+  Float_public_static_boolean_java_lang_Float_isFinite_float
+  Float_public_static_boolean_java_lang_Float_isInfinite_float
+  Float_public_static_boolean_java_lang_Float_isNaN_float
+  Float_public_static_int_java_lang_Float_compare_float_float
+  Float_public_static_int_java_lang_Float_floatToIntBits_float
+  Float_public_static_native_int_java_lang_Float_floatToRawIntBits_float
+  FractalTouchHandler_false
+  HighlightView_false
+  HotspotIntegerGenerator_false
+  InfiniteLoop
+  Integer_public_byte_java_lang_Integer_byteValue
+  Integer_public_double_java_lang_Integer_doubleValue
+  Integer_public_float_java_lang_Integer_floatValue
+  Integer_public_int_java_lang_Integer_compareTo_java_lang_Integer
+  Integer_public_int_java_lang_Integer_intValue
+  Integer_public_long_java_lang_Integer_longValue
+  Integer_public_short_java_lang_Integer_shortValue
+  Integer_public_static_int_java_lang_Integer_bitCount_int
+  Integer_public_static_int_java_lang_Integer_compareUnsigned_int_int
+  Integer_public_static_int_java_lang_Integer_compare_int_int
+  Integer_public_static_int_java_lang_Integer_highestOneBit_int
+  Integer_public_static_int_java_lang_Integer_lowestOneBit_int
+  Integer_public_static_int_java_lang_Integer_max_int_int
+  Integer_public_static_int_java_lang_Integer_min_int_int
+  Integer_public_static_int_java_lang_Integer_numberOfLeadingZeros_int
+  Integer_public_static_int_java_lang_Integer_numberOfTrailingZeros_int
+  Integer_public_static_int_java_lang_Integer_reverseBytes_int
+  Integer_public_static_int_java_lang_Integer_reverse_int
+  Integer_public_static_int_java_lang_Integer_rotateLeft_int_int
+  Integer_public_static_int_java_lang_Integer_rotateRight_int_int
+  Integer_public_static_int_java_lang_Integer_signum_int
+  Integer_public_static_int_java_lang_Integer_sum_int_int
+  Integer_public_static_java_lang_Integer_java_lang_Integer_valueOf_int
+  Integer_public_static_java_lang_String_java_lang_Integer_toUnsignedString_int
+  Integer_public_static_long_java_lang_Integer_toUnsignedLong_int
+  Inter1
+  Inter10
+  Inter11
+  Inter12
+  Inter2
+  Inter3
+  Inter4
+  Inter5
+  Inter7
+  Inter8
+  Inter9
+  Long_public_byte_java_lang_Long_byteValue
+  Long_public_double_java_lang_Long_doubleValue
+  Long_public_int_java_lang_Long_compareTo_java_lang_Long
+  Long_public_int_java_lang_Long_intValue
+  Long_public_long_java_lang_Long_longValue
+  Long_public_short_java_lang_Long_shortValue
+  Long_public_static_int_java_lang_Long_bitCount_long
+  Long_public_static_int_java_lang_Long_compareUnsigned_long_long
+  Long_public_static_int_java_lang_Long_compare_long_long
+  Long_public_static_int_java_lang_Long_numberOfLeadingZeros_long
+  Long_public_static_int_java_lang_Long_numberOfTrailingZeros_long
+  Long_public_static_int_java_lang_Long_signum_long
+  Long_public_static_java_lang_Long_java_lang_Long_valueOf_long
+  Long_public_static_java_lang_String_java_lang_Long_toUnsignedString_long
+  Long_public_static_long_java_lang_Long_highestOneBit_long
+  Long_public_static_long_java_lang_Long_lowestOneBit_long
+  Long_public_static_long_java_lang_Long_max_long_long
+  Long_public_static_long_java_lang_Long_min_long_long
+  Long_public_static_long_java_lang_Long_reverseBytes_long
+  Long_public_static_long_java_lang_Long_reverse_long
+  Long_public_static_long_java_lang_Long_rotateLeft_long_int
+  Long_public_static_long_java_lang_Long_rotateRight_long_int
+  Long_public_static_long_java_lang_Long_sum_long_long
+  MathHelper_false
+  MathHelper_true
+  Math_public_static_int_java_lang_Math_abs_int
+  Math_public_static_int_java_lang_Math_getExponent_double
+  Math_public_static_int_java_lang_Math_getExponent_float
+  Math_public_static_int_java_lang_Math_max_int_int
+  Math_public_static_int_java_lang_Math_min_int_int
+  Math_public_static_long_java_lang_Math_abs_long
+  Math_public_static_long_java_lang_Math_max_long_long
+  Math_public_static_long_java_lang_Math_min_long_long
+  NegativeArraySizeException1
+  NegativeArraySizeException2
+  NullPointerException2
+  NullPointerException3
+  NullPointerException4
+  OverapproximationString01
+  Pred2
+  Pred4
+  Pred5
+  Pred8
+  RedBlackTree-FunUnsat01
+  RegexSubstitution02
+  ReverseInterpolator_false2
+  Session1
+  Session2
+  Session3
+  Short_public_byte_java_lang_Short_byteValue
+  Short_public_double_java_lang_Short_doubleValue
+  Short_public_float_java_lang_Short_floatValue
+  Short_public_int_java_lang_Short_compareTo_java_lang_Short
+  Short_public_int_java_lang_Short_intValue
+  Short_public_long_java_lang_Short_longValue
+  Short_public_short_java_lang_Short_shortValue
+  Short_public_static_int_java_lang_Short_compare_short_short
+  Short_public_static_int_java_lang_Short_toUnsignedInt_short
+  Short_public_static_java_lang_Short_java_lang_Short_valueOf_short
+  Short_public_static_long_java_lang_Short_toUnsignedLong_short
+  Short_public_static_short_java_lang_Short_reverseBytes_short
+  SpdyStream
+  StaticCharMethods03
+  StaticCharMethods04
+  StrictMath_public_static_int_java_lang_StrictMath_abs_int
+  StrictMath_public_static_int_java_lang_StrictMath_getExponent_double
+  StrictMath_public_static_int_java_lang_StrictMath_getExponent_float
+  StrictMath_public_static_int_java_lang_StrictMath_max_int_int
+  StrictMath_public_static_int_java_lang_StrictMath_min_int_int
+  StrictMath_public_static_long_java_lang_StrictMath_abs_long
+  StrictMath_public_static_long_java_lang_StrictMath_max_long_long
+  StrictMath_public_static_long_java_lang_StrictMath_min_long_long
+  StringBuilderAppend02
+  StringBuilderCapLen02
+  StringBuilderCapLen04
+  StringBuilderChars02
+  StringBuilderChars06
+  StringBuilderConstructors02
+  StringBuilderInsertDelete02
+  StringBuilderInsertDelete03
+  StringCompare02
+  StringCompare03
+  StringCompare04
+  StringCompare05
+  StringConcatenation02
+  StringConcatenation03
+  StringConcatenation04
+  StringConstructors02
+  StringConstructors04
+  StringConstructors05
+  StringContains01
+  StringContains02
+  StringIndexMethods02
+  StringMiscellaneous02
+  StringStartEnd02
+  StringStartEnd03
+  StringValueOf04
+  StringValueOf06
+  StringValueOf10
+  String_public_boolean_java_lang_String_endsWith_java_lang_String
+  String_public_boolean_java_lang_String_equalsIgnoreCase_java_lang_String
+  String_public_boolean_java_lang_String_isEmpty
+  String_public_boolean_java_lang_String_startsWith_java_lang_String
+  String_public_int_java_lang_String_indexOf_java_lang_String
+  String_public_int_java_lang_String_length
+  String_public_java_lang_String_java_lang_String_concat_java_lang_String
+  String_public_java_lang_String_java_lang_String_toLowerCase
+  String_public_java_lang_String_java_lang_String_toString
+  String_public_java_lang_String_java_lang_String_toUpperCase
+  String_public_static_java_lang_String_java_lang_String_valueOf_boolean
+  String_public_static_java_lang_String_java_lang_String_valueOf_char
+  SunTimes_false
+  TallyCounts_false
+  TestLazy_false
+  Trie-FunUnsat01
+  Tsp-FunUnsat01
+  UnsatEvenOdd01
+  UnsatMccarthy91
+  Validate02
+  WBS_prop1
+  WBS_prop3
+  addition01
+  array-iteration01
+  assert2
+  assert3
+  assert4
+  athrow1
+  boundcheck100
+  boundcheck200
+  boundcheck30
+  bug-test-gen-095
+  coral1
+  coral11
+  coral12
+  coral13
+  coral14
+  coral34
+  coral35
+  coral39
+  coral4
+  coral40
+  coral42
+  coral6
+  coral76
+  coral77
+  coral79
+  coral9
+  exceptions1
+  exceptions10
+  exceptions11
+  exceptions12
+  exceptions13
+  exceptions16
+  exceptions2
+  exceptions3
+  exceptions6
+  exceptions7
+  exceptions8
+  interface1
+  objects03
+  objects07
+  objects10
+  objects12
+  objects13
+  objects14
+  return1
+  return2
+  shifting
+  shifting2
+  shifting3
+  spec1-5_product1
+  spec1-5_product10
+  spec1-5_product11
+  spec1-5_product12
+  spec1-5_product13
+  spec1-5_product14
+  spec1-5_product15
+  spec1-5_product16
+  spec1-5_product17
+  spec1-5_product18
+  spec1-5_product19
+  spec1-5_product2
+  spec1-5_product20
+  spec1-5_product21
+  spec1-5_product22
+  spec1-5_product23
+  spec1-5_product24
+  spec1-5_product25
+  spec1-5_product26
+  spec1-5_product27
+  spec1-5_product28
+  spec1-5_product29
+  spec1-5_product3
+  spec1-5_product30
+  spec1-5_product31
+  spec1-5_product32
+  spec1-5_product33
+  spec1-5_product34
+  spec1-5_product35
+  spec1-5_product36
+  spec1-5_product37
+  spec1-5_product38
+  spec1-5_product39
+  spec1-5_product4
+  spec1-5_product40
+  spec1-5_product41
+  spec1-5_product42
+  spec1-5_product43
+  spec1-5_product44
+  spec1-5_product49
+  spec1-5_product5
+  spec1-5_product50
+  spec1-5_product51
+  spec1-5_product52
+  spec1-5_product53
+  spec1-5_product54
+  spec1-5_product55
+  spec1-5_product56
+  spec1-5_product6
+  spec1-5_product7
+  spec1-5_product8
+  spec1-5_product9
+  virtual2

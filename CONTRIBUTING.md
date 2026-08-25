@@ -10,7 +10,7 @@ just review.
 
 ## Adding a verification strategy
 
-Every technique in `crates/roast-engines/src/` needs a doc in
+Every technique in `crates/ajave-engines/src/` needs a doc in
 `docs/strategies/` before it's registered — enforced by
 `scripts/check-strategy-docs.sh` (CI job `strategy-docs`). See
 [`docs/README.md`](docs/README.md) for the template and workflow.
@@ -48,7 +48,7 @@ Key conventions:
 
 ## Soundness
 
-If a change touches `roast-core` (the blackboard, the CPA substrate) or any
+If a change touches `ajave-core` (the blackboard, the CPA substrate) or any
 `Engine`/`Cpa` implementation, state explicitly in the PR description which
 direction it approximates in (`Over`/`Under`/`Exact`) and why the change
 preserves that. Two real soundness bugs were found during development by

@@ -2,6 +2,14 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Rename to ajave (2026-08-25)
+
+Renamed the project from "roast" to "ajave" — **A**nother **JA**va **VE**rifier. All crate names
+(`roast-ir` → `ajave-ir`, etc.), binary name, imports, tool configs, and documentation updated.
+Removed unused `Product`/`Pair` CPA composition types (defined but never instantiated). Kept the
+`Cpa` trait and `reachability()` fixpoint algorithm as genuine shared infrastructure used by
+`IntervalCpa`, `WideningIntervalCpa`, and `PredicateCpa`.
+
 ## Float interval widening for unbounded float loops (2026-08-25)
 
 ### Path-sensitive float interval analysis

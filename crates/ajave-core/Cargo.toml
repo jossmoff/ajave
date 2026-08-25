@@ -1,0 +1,11 @@
+[package]
+name = "ajave-core"
+description = "The verification core: blackboard, CPA substrate, engine/certifier traits, orchestrator. Language-agnostic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }
+ajave-models = { path = "../ajave-models" }
+log.workspace = true

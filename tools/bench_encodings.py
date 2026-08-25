@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-ROAST = "./target/release/roast"
+ROAST = "./target/release/ajave"
 BASELINE_FILE = "tools/encoding_baselines.json"
 
 # (category, method, benchmark_yml, timeout_budget_secs)

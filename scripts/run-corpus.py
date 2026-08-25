@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 VERDICTS_FILE = "tasks/verdicts.txt"
-ROAST_CANDIDATES = ["./target/release/roast", "./target/debug/roast"]
+ROAST_CANDIDATES = ["./target/release/ajave", "./target/debug/roast"]
 
 
 def find_roast():

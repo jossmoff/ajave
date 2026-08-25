@@ -1,7 +1,7 @@
-# roast — concepts, definitions, and training material
+# ajave — concepts, definitions, and training material
 
 Every entry has an **ELI5** (what you'd tell a smart person with no background),
-an **Actually** (the real definition), and where relevant an **In roast** (how it
+an **Actually** (the real definition), and where relevant an **In ajave** (how it
 lands in this codebase).
 
 ---
@@ -15,7 +15,7 @@ programs at the same few thousand test programs and see who scores highest.
 Dirk Beyer (LMU Munich) and Jan Strejček (Masaryk), results announced at TACAS
 each spring. Tracks for C, Java, and now SV-LIB, plus a separate witness
 validation track.
-**In roast.** The Java track had 11 verifiers in 2026 against C's 61 — the
+**In ajave.** The Java track had 11 verifiers in 2026 against C's 61 — the
 thinness of the field is the entire strategic opening.
 
 ### Java.Overall
@@ -23,7 +23,7 @@ thinness of the field is the entire strategic opening.
 **Actually.** The meta-category aggregating all Java verification tasks. In 2026
 it ran 1,731 tasks with a maximum score of 2,821; JBMC won on 1,561, GDart took
 1,470, JLiSA 1,311.
-**In roast.** The winner captures ~55% of available points. That headroom is the
+**In ajave.** The winner captures ~55% of available points. That headroom is the
 thing to attack.
 
 ### Scoring schema
@@ -32,7 +32,7 @@ they earn. Saying "I don't know" is free.
 **Actually.** Correct TRUE is worth 2, correct FALSE 1, wrong TRUE −32, wrong
 FALSE −16, unknown 0. Results also need their witness confirmed by a validator
 to count fully.
-**In roast.** The asymmetry drives everything: never guess. A tool that is merely
+**In ajave.** The asymmetry drives everything: never guess. A tool that is merely
 *never wrong* closes a real part of the gap before proving anything clever.
 
 ### Verification task
@@ -55,7 +55,7 @@ verifiers are expected to treat as "any value at all".
 `assume(boolean)`, and friends. `assume` is implemented as
 `Runtime.getRuntime().halt(1)` on failure — worth knowing for replay, since an
 assumption violation exits 1 rather than throwing.
-**In roast.** Modelled directly in the lifter: `nondet*` becomes
+**In ajave.** Modelled directly in the lifter: `nondet*` becomes
 `Rvalue::Nondet`, `assume` becomes `Stmt::Assume`.
 
 ### BenchExec
@@ -76,7 +76,7 @@ that triggers it".
 **Actually.** A machine-readable artifact justifying a verdict. *Violation
 witnesses* describe a path to the error; *correctness witnesses* carry
 invariants. Java currently uses witness format 1.0.
-**In roast.** `roast_ir::verdict::Witness` holds the nondeterministic value sequence. The
+**In ajave.** `ajave_ir::verdict::Witness` holds the nondeterministic value sequence. The
 `UnderApprox` trait cannot be implemented without producing one — deliberately.
 
 ### Witness validation
@@ -84,7 +84,7 @@ invariants. Java currently uses witness format 1.0.
 marks.
 **Actually.** A separate competition track where validators confirm or refute
 witnesses. Unconfirmed results score less or nothing.
-**In roast.** This is your home turf — wit4java and polywit are validators. Most
+**In ajave.** This is your home turf — wit4java and polywit are validators. Most
 teams bolt witness generation on in November and bleed points; building it
 alongside the engine is a structural advantage.
 
@@ -105,14 +105,14 @@ You essentially cannot have both, so you pick which way to be wrong.
 **Actually.** A sound analysis never reports TRUE for an unsafe program; a
 complete one never reports UNKNOWN for a safe one. Undecidability forces a
 trade.
-**In roast.** Encoded as `roast_core::artifact::Direction`.
+**In ajave.** Encoded as `ajave_core::artifact::Direction`.
 
 ### Over-approximation
 **ELI5.** You draw a big generous circle around everything the program could
 possibly do. If the bug isn't inside the circle, it can't happen.
 **Actually.** The analysis computes a superset of reachable states. May prove
 safety; any "bug" it finds may be spurious.
-**In roast.** Abstract interpretation and k-induction are `Over`. The blackboard
+**In ajave.** Abstract interpretation and k-induction are `Over`. The blackboard
 rejects any attempt by them to publish a violation.
 
 ### Under-approximation
@@ -120,7 +120,7 @@ rejects any attempt by them to publish a violation.
 happens — but you haven't seen everything.
 **Actually.** The analysis computes a subset of reachable states. May exhibit a
 genuine bug; silence proves nothing.
-**In roast.** BMC and concolic execution are `Under` and can never discharge an
+**In ajave.** BMC and concolic execution are `Under` and can never discharge an
 obligation.
 
 ### Proof obligation
@@ -128,7 +128,7 @@ obligation.
 "this division must not be by zero, right here".
 **Actually.** A safety condition attached to a program point. The task is TRUE
 when all obligations are discharged, FALSE the moment one is violated.
-**In roast.** The central unit of work (`roast_ir::Obligation`). Both SV-COMP Java
+**In ajave.** The central unit of work (`ajave_ir::Obligation`). Both SV-COMP Java
 properties reduce to obligation reachability, so the core never needs to know
 which property it's checking.
 
@@ -150,7 +150,7 @@ makes them usable as proofs.
 program takes a step. That combination is a proof by itself.
 **Actually.** `Init ⇒ I` and `I ∧ T ⇒ I'`. The workhorse of unbounded safety
 proof, and small enough to check independently.
-**In roast.** `InvStatus::Candidate` until `certify::InductiveCheck` promotes it
+**In ajave.** `InvStatus::Candidate` until `certify::InductiveCheck` promotes it
 to `Inductive`. Only inductive invariants may discharge anything.
 
 ### Lattice / join / fixpoint
@@ -159,14 +159,14 @@ partial pictures, and a stopping condition for when merging stops teaching you
 anything new.
 **Actually.** A partially ordered set with least upper bounds. Analyses iterate
 a monotone function until it stabilises — the least fixpoint.
-**In roast.** `cpa::Lattice` (`leq`, `join`, `is_bottom`).
+**In ajave.** `cpa::Lattice` (`leq`, `join`, `is_bottom`).
 
 ### Belnap four-valued lattice
 **ELI5.** Four answers instead of two: I don't know, true, false, and "two
 sources told me contradictory things".
 **Actually.** A bilattice with bottom (no information) and top (contradiction).
 Contradiction is informative — it always means a bug in the tooling.
-**In roast.** `roast_ir::verdict::Verdict`. `Contradiction` reports as UNKNOWN externally:
+**In ajave.** `ajave_ir::verdict::Verdict`. `Contradiction` reports as UNKNOWN externally:
 we'd rather score zero than emit a verdict we know is internally inconsistent.
 
 ---
@@ -180,7 +180,7 @@ that many steps.
 **Actually.** Encode executions up to depth *k* as an SMT formula; SAT means a
 bug with a concrete counterexample, UNSAT means no bug *within k*. Fundamentally
 under-approximating.
-**In roast.** `roast_engines::concrete` (the enumerate-don't-solve falsifier --
+**In ajave.** `ajave_engines::concrete` (the enumerate-don't-solve falsifier --
 see `docs/strategies/concrete.md`). JBMC is real BMC, which is exactly why it can't
 prove unbounded safety.
 
@@ -191,7 +191,7 @@ held for the last few steps it holds for the next one. Together those give you
 **Actually.** Base case = BMC to depth *k*. Step case = assume the property on
 *k* consecutive states, prove it at *k+1*. Both discharging yields an unbounded
 proof.
-**In roast.** The route from `Status::Bounded { k }` to `Status::Discharged`.
+**In ajave.** The route from `Status::Bounded { k }` to `Status::Discharged`.
 
 ### Invariant injection (auxiliary invariants)
 **ELI5.** k-induction usually gets stuck. You hand it a few extra facts you
@@ -199,7 +199,7 @@ proved cheaply elsewhere, and suddenly it goes through.
 **Actually.** Strengthening the k-induction step case with externally computed
 invariants. Most properties aren't k-inductive for any usable *k*; this is what
 fixes that.
-**In roast.** Combination (A), the highest-leverage pairing available and one no
+**In ajave.** Combination (A), the highest-leverage pairing available and one no
 Java-track tool currently does.
 
 ### Abstract interpretation
@@ -208,7 +208,7 @@ Java-track tool currently does.
 **Actually.** Sound approximation of program semantics over an abstract domain
 connected to the concrete one by a Galois connection. Fast, always terminates,
 imprecise.
-**In roast.** The growth path for `roast_engines::presolve`. JLiSA is an abstract
+**In ajave.** The growth path for `ajave_engines::presolve`. JLiSA is an abstract
 interpreter.
 
 ### Interval / nullness domains
@@ -216,7 +216,7 @@ interpreter.
 and can this reference be null.
 **Actually.** Non-relational domains mapping each variable to a range or a
 nullness lattice. Cheap enough to run on everything.
-**In roast.** Between them these discharge a large fraction of runtime-exception
+**In ajave.** Between them these discharge a large fraction of runtime-exception
 obligations — array bounds, division by zero, null dereference — in under a
 second. Free score nobody is collecting cleanly.
 
@@ -238,7 +238,7 @@ path; solve it to get concrete inputs. Suffers path explosion.
 so you can flip one decision and get a genuinely new test.
 **Actually.** Concrete + symbolic execution combined; the concrete run keeps
 things grounded when the symbolic reasoning can't cope.
-**In roast.** GDart is concolic — strong at falsification, structurally unable to
+**In ajave.** GDart is concolic — strong at falsification, structurally unable to
 prove.
 
 ### Path explosion
@@ -258,7 +258,7 @@ Java Ranger extended this to dynamic dispatch and exceptional control flow.
 "reason why" — the minimal fact that explains the impossibility.
 **Actually.** Given UNSAT `A ∧ B`, an interpolant `I` with `A ⇒ I`, `I ∧ B`
 unsat, over shared variables only. Extracted from the refutation proof.
-**In roast.** The engine that turns infeasible traces into reusable predicates.
+**In ajave.** The engine that turns infeasible traces into reusable predicates.
 
 ### Interpolation-based model checking (IMC)
 **ELI5.** Run BMC; when it comes back "no bug at this depth", harvest the reason
@@ -281,7 +281,7 @@ whether the bug is real. If it isn't, un-blur exactly the part that fooled you,
 and go again.
 **Actually.** Counterexample-Guided Abstraction Refinement: abstract, model
 check, check counterexample feasibility, refine on spurious ones.
-**In roast.** Lives in the `Cpa::prec` hook (dynamic precision adjustment), fed
+**In ajave.** Lives in the `Cpa::prec` hook (dynamic precision adjustment), fed
 by traces from the blackboard rather than hard-wired to one producer.
 
 ### Predicate abstraction
@@ -310,7 +310,7 @@ hand it to somebody else's very good puzzle solver.
 **Actually.** A fragment of first-order logic; program safety becomes CHC
 satisfiability, with the solution being the invariants. Solvers: Golem,
 Eldarica, Spacer.
-**In roast.** Tier 5 — cheap to build once the IR exists, and an
+**In ajave.** Tier 5 — cheap to build once the IR exists, and an
 under-explored angle for Java specifically.
 
 ### SMT solving
@@ -325,7 +325,7 @@ a tiny, separately-trusted program can check.
 **Actually.** Proof formats for SAT refutations. `cake_lpr` is a checker verified
 in HOL4, so "this unrolling is UNSAT" can be discharged without trusting the
 solver.
-**In roast.** How the highest-risk component gets pulled out of the trusted core.
+**In ajave.** How the highest-risk component gets pulled out of the trusted core.
 
 ### Program slicing
 **ELI5.** Delete every line that can't possibly affect the thing you care about,
@@ -345,7 +345,7 @@ trivially decidable by *some* cheap method.
 of this region, you only need to look at the rest".
 **Actually.** Output a *condition* summarising the covered state space; the next
 verifier analyses only the residual.
-**In roast.** `Artifact::Residual`, combination (C) — the least-exploited idea in
+**In ajave.** `Artifact::Residual`, combination (C) — the least-exploited idea in
 the competition and the most natural fit for a blackboard.
 
 ### Cooperative verification
@@ -353,7 +353,7 @@ the competition and the most natural fit for a blackboard.
 from scratch.
 **Actually.** Beyer's programme of exchanging invariants, conditions and
 residual programs between verifiers rather than only verdicts.
-**In roast.** The whole reason the blackboard exists.
+**In ajave.** The whole reason the blackboard exists.
 
 ---
 
@@ -366,7 +366,7 @@ the same loop becomes a completely different verification technique.
 Beyer/Henzinger/Théoduloz. `merge_sep`+`stop_sep` = explicit-state model
 checking; `merge_join`+`stop_join` = abstract interpretation; predicate domain
 with refining `prec` = lazy abstraction.
-**In roast.** `roast_core::cpa`. The extensibility story: a new domain is a new `Cpa`
+**In ajave.** `ajave_core::cpa`. The extensibility story: a new domain is a new `Cpa`
 impl and nothing else changes.
 
 ### Transfer relation
@@ -393,7 +393,7 @@ reads what's new since they last looked, and nobody needs to know who else is in
 the room.
 **Actually.** A shared knowledge store with independent contributors and a
 scheduler. Contributors couple to the board, not to each other.
-**In roast.** `roast_core::blackboard`. Append-only log plus per-engine cursors, so
+**In ajave.** `ajave_core::blackboard`. Append-only log plus per-engine cursors, so
 engines can be added, removed or restarted without coordination.
 
 ### Artifact
@@ -408,8 +408,8 @@ learned.
 wrong, so nobody draws a conclusion they aren't entitled to.
 **Actually.** `Over` / `Under` / `Exact`. The blackboard rejects a discharge from
 an `Under` producer and a violation from an `Over` one, at runtime, in addition
-to the type-level rule in `roast-ir/src/verdict.rs`.
-**In roast.** The single most safety-critical line of code in the system.
+to the type-level rule in `ajave-ir/src/verdict.rs`.
+**In ajave.** The single most safety-critical line of code in the system.
 
 ### Engine
 **ELI5.** One strategy, doing a small slice of work each time it's called, so
@@ -433,7 +433,7 @@ assurance of a verified verifier for a fraction of the cost.
 ### Trusted computing base (TCB)
 **ELI5.** The small set of parts that have to be right. Everything else can be
 buggy without producing a wrong answer.
-**Actually.** In roast: the lifter, the memory model, and the transfer functions.
+**Actually.** In ajave: the lifter, the memory model, and the transfer functions.
 Strategy selection, scheduling and heuristics are soundness-irrelevant by
 construction.
 
@@ -442,7 +442,7 @@ construction.
 proves you right — nobody has to trust anything else about you.
 **Actually.** A replayed violation witness is correct independently of whether
 the IR, solver or semantics are right.
-**In roast.** Why stages 0–3 can ship before anything is trustworthy.
+**In ajave.** Why stages 0–3 can ship before anything is trustworthy.
 
 ### Differential / metamorphic / mutation testing
 **ELI5.** Three ways to catch yourself being wrong: compare against other tools,
@@ -460,21 +460,21 @@ Mutation = injected faults in known-safe tasks.
 **ELI5.** Java compiles to instructions for an imaginary machine that does
 everything on a stack of plates instead of in named boxes.
 **Actually.** A stack-based instruction set. `iadd` pops two, pushes their sum.
-**In roast.** Eliminated at lift time — invariant inference over a stack machine
+**In ajave.** Eliminated at lift time — invariant inference over a stack machine
 is miserable, over registers it's routine.
 
 ### Constant pool
 **ELI5.** A lookup table at the top of every class file holding all its strings,
 numbers and names, so instructions can just reference an index.
 **Actually.** A 1-based, gappy table (`long` and `double` consume two slots).
-**In roast.** `classfile::Cp`, with `Cp::Unusable` preserving the gaps so indices
+**In ajave.** `classfile::Cp`, with `Cp::Unusable` preserving the gaps so indices
 line up.
 
 ### `Code` attribute / exception table
 **ELI5.** The actual instructions of a method, plus a side table saying "if
 something goes wrong between here and here, jump there".
 **Actually.** Holds `max_stack`, `max_locals`, the bytecode, and handler ranges.
-**In roast.** A method with handlers currently lifts to a single `Diverge` block
+**In ajave.** A method with handlers currently lifts to a single `Diverge` block
 — sound, useless, and clearly labelled as stage 4.
 
 ### `StackMapTable`
@@ -493,7 +493,7 @@ returns void".
 touched, one that runs for each new object.
 **Actually.** Static initialiser and constructor. Ordering semantics are subtle
 and a classic source of frontend bugs.
-**In roast.** Deliberately modelled away, which is why the completeness check is
+**In ajave.** Deliberately modelled away, which is why the completeness check is
 scoped to bodies reachable from `main`.
 
 ### `$assertionsDisabled`
@@ -501,7 +501,7 @@ scoped to bodies reachable from `main`.
 and wraps every assert in a check of it.
 **Actually.** A synthetic static field initialised in `<clinit>` via
 `Class.desiredAssertionStatus()`. SV-COMP runs with `-ea`, so it's false.
-**In roast.** Pinned to `0` in the lifter — deliberately, rather than discovering
+**In ajave.** Pinned to `0` in the lifter — deliberately, rather than discovering
 three weeks later that every task reports TRUE.
 
 ### Basic block / leader / CFG
@@ -516,7 +516,7 @@ next.
 easier to reason about than a stack.
 **Actually.** Soot's Jimple is the canonical JVM version. Produced by simulating
 the operand stack abstractly and materialising entries into registers.
-**In roast.** `roast_ir::Stmt`, with stack registers `s0..sn` spilled at block
+**In ajave.** `ajave_ir::Stmt`, with stack registers `s0..sn` spilled at block
 boundaries as a parallel copy so entries reading each other can't clobber.
 
 ### SSA / phi node
@@ -524,7 +524,7 @@ boundaries as a parallel copy so entries reading each other can't clobber.
 meet, add a marker saying "the value here is whichever one we came from".
 **Actually.** Static Single Assignment. Makes def-use chains explicit and helps
 invariant generation considerably.
-**In roast.** Deliberately deferred — non-SSA is enough until loops arrive, and
+**In ajave.** Deliberately deferred — non-SSA is enough until loops arrive, and
 deferring keeps the lifter debuggable while the frontend is the risky part.
 
 ### Class hierarchy analysis / devirtualisation
@@ -532,14 +532,14 @@ deferring keeps the lifter debuggable while the frontend is the risky part.
 method through an interface you can narrow down what actually runs.
 **Actually.** CHA computes the subtype relation; devirtualisation resolves
 `invokevirtual`/`invokeinterface` to concrete targets where possible.
-**In roast.** Rust has no Soot or WALA, so this is hand-rolled. Budget for it.
+**In ajave.** Rust has no Soot or WALA, so this is hand-rolled. Budget for it.
 
 ### Havoc / nondeterminism
 **ELI5.** "This could be anything." The safe thing to assume when you don't know.
 **Actually.** Assigning an unconstrained fresh value. A sound over-approximation
 of any unmodelled *pure* computation — but not of side effects, which is why
 unmodelled calls must diverge rather than havoc.
-**In roast.** `Rvalue::Nondet`.
+**In ajave.** `Rvalue::Nondet`.
 
 ### Divergence (explicit unlifted regions)
 **ELI5.** Instead of quietly skipping the bits you don't understand, plant a
@@ -558,5 +558,5 @@ in Rust compilers; avoids `Rc` and threaded lifetimes.
 descriptions of what `String` and friends do.
 **Actually.** Hand-written models of `String`, `StringBuilder`, collections and
 the exception hierarchy, instead of analysing `java.base` bytecode.
-**In roast.** Every tool that tried to be faithful to the JDK drowned. This is
+**In ajave.** Every tool that tried to be faithful to the JDK drowned. This is
 where a large share of the remaining person-months go.

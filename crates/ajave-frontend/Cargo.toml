@@ -1,0 +1,11 @@
+[package]
+name = "ajave-frontend"
+description = "Bytecode-to-IR frontend: classfile parsing and the stack-to-CFG lifter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }
+ajave-models = { path = "../ajave-models" }
+log.workspace = true

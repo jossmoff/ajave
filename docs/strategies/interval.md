@@ -3,12 +3,12 @@
 **Direction:** Over
 **Tier:** 1
 **Status:** working
-**Source:** `roast-engines/src/interval.rs` (the `Cpa` domain), `roast-engines/src/ai.rs` (the engine that runs it)
+**Source:** `ajave-engines/src/interval.rs` (the `Cpa` domain), `ajave-engines/src/ai.rs` (the engine that runs it)
 
 ## What it proves or finds
 
 Tracks `[lo, hi]` per integer-typed variable, narrows both operands of a
-comparison at branch edges, and runs to a fixpoint via `roast_core::cpa::reachability`.
+comparison at branch edges, and runs to a fixpoint via `ajave_core::cpa::reachability`.
 An obligation is discharged if every reached state at its `Check` point proves
 the safety condition non-zero — including obligations the search never
 visits at all, which counts as a proof (not silence) once the search has
@@ -75,7 +75,7 @@ far short of the obligations that mattered.
 This produced 12 confirmed wrong `TRUE` verdicts on the `jbmc-regression`
 corpus before it was caught by measuring against ground truth rather than
 trusting four hand-picked test cases. The fix — location-aware subsumption —
-landed in `roast_core::cpa`'s default `stop`, not in this domain, because the
+landed in `ajave_core::cpa`'s default `stop`, not in this domain, because the
 bug was general to *any* `Cpa` implementation riding the shared substrate,
 not specific to intervals. Correctness went from "51 correct, 12 wrong" to
 "32 correct, 0 wrong" — a lower headline number and a strictly better tool.

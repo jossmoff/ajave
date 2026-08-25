@@ -1,0 +1,9 @@
+[package]
+name = "ajave-models"
+description = "Standard-library modelling: what ajave assumes java.* calls do, without analysing their bytecode."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }

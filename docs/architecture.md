@@ -1,4 +1,4 @@
-# roast — architecture
+# ajave — architecture
 
 ## 0. The thesis
 
@@ -8,7 +8,7 @@ only ~55% of available score (1561 / 2821 in 2026). The gap is in `TRUE`, which
 is worth double, and it widened when the runtime-exception property tripled the
 task count.
 
-roast is built around three commitments that follow from that:
+ajave is built around three commitments that follow from that:
 
 1. **Obligations, not programs.** The unit of work is a single proof obligation
    (one implicit or explicit check), not a whole-program verdict. Partial
@@ -194,9 +194,9 @@ and it covers cases the hand-built domains miss.
 Adding a technique means implementing one of three traits, and nothing else in
 the tree changes:
 
-- `Cpa` (`roast-core::cpa`) — a new abstract domain riding the shared fixpoint loop, implemented in `roast-engines`.
-- `Engine` (`roast-core::engine`) — a new strategy with its own control flow and step budget, implemented in `roast-engines` and registered in `roast-cli`.
-- `Certifier` (`roast-core::certify`) — a new way of checking an artifact you don't trust.
+- `Cpa` (`ajave-core::cpa`) — a new abstract domain riding the shared fixpoint loop, implemented in `ajave-engines`.
+- `Engine` (`ajave-core::engine`) — a new strategy with its own control flow and step budget, implemented in `ajave-engines` and registered in `ajave-cli`.
+- `Certifier` (`ajave-core::certify`) — a new way of checking an artifact you don't trust.
 
 See `docs/crates.md` for the dependency graph these boundaries are enforced
 against, and `docs/strategies/` for the write-up each concrete `Engine`/`Cpa`

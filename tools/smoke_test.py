@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast smoke test for roast engine changes.
+"""Fast smoke test for ajave engine changes.
 
 Run this BEFORE full scoring to catch regressions early. Tests a curated set
 of benchmarks that exercise sensitive engine behaviors:
@@ -14,7 +14,7 @@ of benchmarks that exercise sensitive engine behaviors:
   - Wrong-answer canaries (known-tricky benchmarks)
 
 Usage:
-    python3 tools/smoke_test.py [--binary ./target/release/roast]
+    python3 tools/smoke_test.py [--binary ./target/release/ajave]
 
 Exit code 0 = all pass, 1 = regressions detected.
 """
@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-ROAST = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--binary" else "./target/release/roast"
+ROAST = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--binary" else "./target/release/ajave"
 TIMEOUT = 60
 
 # Each entry: (category, benchmark_yml_path, expected_verdict)

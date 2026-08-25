@@ -1,0 +1,8 @@
+target/
+sv-benchmarks/
+score*.txt
+score*.py
+*.md
+.git/
+.claude/
+feedback.md

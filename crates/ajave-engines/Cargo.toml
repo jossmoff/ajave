@@ -1,0 +1,13 @@
+[package]
+name = "ajave-engines"
+description = "Concrete verification strategies (interval AI, concolic falsification, presolve) built on ajave-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }
+ajave-models = { path = "../ajave-models" }
+ajave-core = { path = "../ajave-core" }
+log.workspace = true
+cvc5.workspace = true

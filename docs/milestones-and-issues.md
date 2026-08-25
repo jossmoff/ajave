@@ -34,16 +34,16 @@ verifier being bad). Java 8 validation lands here too: getting bytecode
 version assumptions wrong is exactly the kind of thing that passes locally
 and fails on the actual competition corpus.
 
-**Exit criteria:** `roast` can be invoked exactly as BenchExec would invoke
+**Exit criteria:** `ajave` can be invoked exactly as BenchExec would invoke
 it, against a real (if small) slice of `sv-benchmarks`, and produce correct
 verdicts under a Java 8 toolchain, in CI, unattended.
 
-- [ ] Write the BenchExec tool-info Python module (`roast.py`) `area:benchexec` `priority:p1-blocker`
-- [ ] Register `roast` in `fm-tools` (metadata, archive DOI placeholder, jury rep) `area:benchexec`
+- [ ] Write the BenchExec tool-info Python module (`ajave.py`) `area:benchexec` `priority:p1-blocker`
+- [ ] Register `ajave` in `fm-tools` (metadata, archive DOI placeholder, jury rep) `area:benchexec`
 - [ ] `scripts/check-java8.sh`: validate classfile major version 52 end-to-end `area:cli` `java8-compat` — **done**
 - [ ] `.github/workflows/java8.yml`: CI signal separate from general build health `type:ci` `java8-compat` — **done**
 - [ ] `.github/workflows/corpus.yml`: scheduled soundness regression against `jbmc-regression` `type:ci` `priority:p0-soundness` — **done**
-- [ ] Package `roast` as a competition archive (static binary or vendored toolchain, per fm-tools archive format) `area:benchexec`
+- [ ] Package `ajave` as a competition archive (static binary or vendored toolchain, per fm-tools archive format) `area:benchexec`
 - [ ] Document the BenchExec invocation contract (exit codes, stdout format, `--trace`/`--ir` are debug-only and must not appear in competition mode) `type:docs` `area:cli`
 - [ ] Dry-run against a 50-task local BenchExec invocation, compare wall-clock and memory against the 15s/2GB-ish per-task competition limits `type:test`
 
@@ -82,7 +82,7 @@ gone for anything the heap model actually covers.
 
 **Target: 2026-10-15** (3–4 weeks)
 
-**Why this is more urgent than it looks:** `roast` currently certifies its
+**Why this is more urgent than it looks:** `ajave` currently certifies its
 own `FALSE` results by replaying them internally (`JvmReplay`) and never
 writes an actual witness file. That's necessary but not sufficient —
 SV-COMP's scoring depends on an *external* witness validator checking a

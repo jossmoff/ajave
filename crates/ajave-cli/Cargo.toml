@@ -1,0 +1,19 @@
+[package]
+name = "ajave"
+description = "ajave (Another JAva VErifier): an SV-COMP Java verifier. Compiles/loads a program, runs the engine portfolio, reports a certified verdict."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ajave"
+path = "src/main.rs"
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }
+ajave-frontend = { path = "../ajave-frontend" }
+ajave-core = { path = "../ajave-core" }
+ajave-engines = { path = "../ajave-engines" }
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

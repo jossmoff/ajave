@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/roast-ir", "crates/roast-models", "crates/roast-frontend", "crates/roast-core", "crates/roast-engines", "crates/roast-cli"]
+members = ["crates/ajave-ir", "crates/ajave-models", "crates/ajave-frontend", "crates/ajave-core", "crates/ajave-engines", "crates/ajave-cli"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/jossmoff/roast"
+repository = "https://github.com/jossmoff/ajave"
 
 [workspace.dependencies]
 log = "0.4"

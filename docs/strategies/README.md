@@ -1,6 +1,6 @@
 # Strategies
 
-Every entry in the engine portfolio (`roast-engines/src/*.rs`), one file each.
+Every entry in the engine portfolio (`ajave-engines/src/*.rs`), one file each.
 Coverage enforced by `scripts/check-strategy-docs.sh` (CI job
 `strategy-docs`) — a module here with no matching doc fails the build.
 

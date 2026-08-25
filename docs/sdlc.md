@@ -14,7 +14,7 @@ every push to `main` that touches that file. Six families:
   `test`, `ci`, `chore`). Drives `release-drafter`'s categorisation.
 - **`tier:*`** — which layer of the engine portfolio, matching
   `docs/architecture.md` §6 exactly (0 presolve through 5 CHC). An issue
-  about `roast-engines/src/interval.rs` gets `tier:1-ai`; nothing else needs
+  about `ajave-engines/src/interval.rs` gets `tier:1-ai`; nothing else needs
   to guess which tier a change belongs to.
 - **`area:*`** — which crate or subsystem. Maps directly onto
   `docs/crates.md`'s table, plus `witness` and `benchexec` for the two
@@ -23,7 +23,7 @@ every push to `main` that touches that file. Six families:
   `p1-blocker` (blocks the current milestone), `p2-normal` (default),
   `p3-later` (not scheduled).
 - **`direction:*`** — `over`/`under`/`exact`, mirroring
-  `core::artifact::Direction`. Attached to any issue touching `roast-core`
+  `core::artifact::Direction`. Attached to any issue touching `ajave-core`
   or an `Engine`/`Cpa` implementation, so a reviewer knows what the change
   is and isn't entitled to conclude before reading a line of diff.
 - **Meta labels** — `good-first-issue`, `help-wanted`, `needs-design-doc`
@@ -142,7 +142,7 @@ check rather than a one-time cleanup.
 **Compile Java source itself, not assume pre-built classfiles.** SV-COMP
 task YAMLs list `.java` sourcepaths, not classfiles — confirmed by checking
 how JBMC handles this (a wrapper script compiles before invoking the
-binary). `roast` does the compile step inline in `roast-cli` rather than as
+binary). `ajave` does the compile step inline in `ajave-cli` rather than as
 a separate wrapper, trading "javac's wall-clock time counts against our own
 CPU budget" for "one binary, no separate script to keep in sync". Worth
 revisiting if SV-COMP's resource accounting rules make the wrapper-script
@@ -151,8 +151,8 @@ split matter competitively — noted as an open question, not resolved.
 **JVM replay for FALSE, not trust the engine.** A violation is only ever
 reported after an independent replay against a real JVM — a deterministic
 shadow `Verifier` stand-in, compiled and executed, not just re-run through
-`roast`'s own interpreter. This makes a confirmed `FALSE` correct
-independently of whether `roast`'s IR, lifter, or interpreter semantics are
+`ajave`'s own interpreter. This makes a confirmed `FALSE` correct
+independently of whether `ajave`'s IR, lifter, or interpreter semantics are
 right. The equivalent for `TRUE` (`InductiveCheck`, independently
 re-verifying an interval invariant) is still stubbed — tracked as M4's
 prerequisite, and it's the largest asymmetry in the certification story
@@ -188,8 +188,8 @@ lesson as the `stop_sep` bug from a completely different subsystem:
 soundness bugs in this codebase have so far always been found by running
 against real tasks, never by reasoning about the code in the abstract.**
 
-**Tool renamed `jvmv` → `roast`.** Purely naming; the roast-level metaphor
-(light roast = cheap fast passes, dark roast = deep proof) happened to map
+**Tool renamed `jvmv` → `ajave`.** Purely naming; the ajave-level metaphor
+(light ajave = cheap fast passes, dark ajave = deep proof) happened to map
 cleanly onto the tier system already in `docs/architecture.md` §6, which is
 the actual justification beyond "it sounded fun" — a name that fights the
 architecture's own vocabulary would have been a worse trade than a

@@ -3,7 +3,7 @@
 **Direction:** Under
 **Tier:** 2
 **Status:** working
-**Source:** `roast-engines/src/concrete.rs`
+**Source:** `ajave-engines/src/concrete.rs`
 
 ## What it proves or finds
 
@@ -15,7 +15,7 @@ with the exact value sequence used, which doubles as the witness.
 
 Exceptional control flow is routed properly, not just detected: a `Check`
 failure inside a `try` region looks up the enclosing block's exceptional
-edges (computed by the frontend, `roast_frontend::lift`) and transfers
+edges (computed by the frontend, `ajave_frontend::lift`) and transfers
 execution to the matching handler rather than reporting a violation directly.
 This is what makes `ArithmeticException1` (division-by-zero caught, `assert
 false` inside the handler) come out correctly — get this wrong and every
@@ -86,5 +86,5 @@ Every `Violated` status this engine publishes is fed to
 sequence instead of calling `Random`) is compiled and run against the actual
 task classpath. Only `CertResult::Confirmed` results survive to the final
 verdict — an unconfirmed `FALSE` is downgraded to `UNKNOWN` in
-`roast-cli/src/main.rs` rather than reported. This is the one strategy in the
+`ajave-cli/src/main.rs` rather than reported. This is the one strategy in the
 portfolio whose output is fully independently checked end to end.

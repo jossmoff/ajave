@@ -12,6 +12,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "ajave"
+version = "0.1.0"
+dependencies = [
+ "ajave-core",
+ "ajave-engines",
+ "ajave-frontend",
+ "ajave-ir",
+ "clap",
+ "env_logger",
+ "log",
+]
+
+[[package]]
+name = "ajave-core"
+version = "0.1.0"
+dependencies = [
+ "ajave-ir",
+ "ajave-models",
+ "log",
+]
+
+[[package]]
+name = "ajave-engines"
+version = "0.1.0"
+dependencies = [
+ "ajave-core",
+ "ajave-ir",
+ "ajave-models",
+ "cvc5",
+ "log",
+]
+
+[[package]]
+name = "ajave-frontend"
+version = "0.1.0"
+dependencies = [
+ "ajave-ir",
+ "ajave-models",
+ "log",
+]
+
+[[package]]
+name = "ajave-ir"
+version = "0.1.0"
+
+[[package]]
+name = "ajave-models"
+version = "0.1.0"
+dependencies = [
+ "ajave-ir",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,59 +519,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "roast"
-version = "0.1.0"
-dependencies = [
- "clap",
- "env_logger",
- "log",
- "roast-core",
- "roast-engines",
- "roast-frontend",
- "roast-ir",
-]
-
-[[package]]
-name = "roast-core"
-version = "0.1.0"
-dependencies = [
- "log",
- "roast-ir",
- "roast-models",
-]
-
-[[package]]
-name = "roast-engines"
-version = "0.1.0"
-dependencies = [
- "cvc5",
- "log",
- "roast-core",
- "roast-ir",
- "roast-models",
-]
-
-[[package]]
-name = "roast-frontend"
-version = "0.1.0"
-dependencies = [
- "log",
- "roast-ir",
- "roast-models",
-]
-
-[[package]]
-name = "roast-ir"
-version = "0.1.0"
-
-[[package]]
-name = "roast-models"
-version = "0.1.0"
-dependencies = [
- "roast-ir",
-]
 
 [[package]]
 name = "rustc-hash"

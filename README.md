@@ -1,14 +1,10 @@
-# roast 🔥
+# ajave 🌵
 
-An SV-COMP Java verifier, written in Rust. Point it at a Java program and it
-answers one question: can `assert` ever fail, or can a runtime exception ever
-escape uncaught? It answers `TRUE`, `FALSE`, or — when it genuinely doesn't
-know — `UNKNOWN`, and it never guesses.
+**A**nother **JA**va **VE**rifier — an SV-COMP Java verifier, written in Rust.
 
-The name is the mental model for the engine portfolio: verification runs from
-a fast, cheap sweep through to slower, deeper proof — light roast to dark
-roast. See [`docs/architecture.md`](docs/architecture.md) §6 for the actual
-tiers.
+Point it at a Java program and it answers one question: can `assert` ever fail,
+or can a runtime exception ever escape uncaught? It answers `TRUE`, `FALSE`,
+or — when it genuinely doesn't know — `UNKNOWN`, and it never guesses.
 
 ## Building
 
@@ -16,7 +12,7 @@ tiers.
 cargo build --workspace --release
 ```
 
-Requires a JDK on `PATH` (`javac`/`java`) — `roast` compiles `.java` task
+Requires a JDK on `PATH` (`javac`/`java`) — `ajave` compiles `.java` task
 sources itself and replays every `FALSE` result on a real JVM before
 reporting it. See [`docs/architecture.md`](docs/architecture.md) for why
 that's not optional.
@@ -24,7 +20,7 @@ that's not optional.
 ## Running
 
 ```sh
-./target/release/roast <path>... [--ir] [--trace]
+./target/release/ajave <path>... [--ir] [--trace]
 ```
 
 Every path given is scanned for `.java` and `.class` files, matching how
@@ -32,7 +28,7 @@ BenchExec invokes the tool against an SV-COMP task's `input_files` list —
 usually a shared `common/` directory plus the task's own directory:
 
 ```sh
-./target/release/roast tasks/common tasks/stage01_nondet
+./target/release/ajave tasks/common tasks/stage01_nondet
 ```
 
 `--ir` prints the lifted intermediate representation; `--trace` prints the
@@ -45,12 +41,12 @@ things it's allowed to depend on — see [`docs/crates.md`](docs/crates.md).
 
 ```
 crates/
-  roast-ir/        program representation -- zero dependencies
-  roast-models/    what roast assumes java.* library calls do
-  roast-frontend/  classfile parsing + bytecode lifter
-  roast-core/      blackboard, CPA substrate, engine/certifier traits
-  roast-engines/   concrete strategies (interval AI, concolic falsifier, ...)
-  roast-cli/       the `roast` binary: wires everything together
+  ajave-ir/        program representation -- zero dependencies
+  ajave-models/    what ajave assumes java.* library calls do
+  ajave-frontend/  classfile parsing + bytecode lifter
+  ajave-core/      blackboard, CPA substrate, engine/certifier traits
+  ajave-engines/   concrete strategies (interval AI, concolic falsifier, ...)
+  ajave-cli/       the `ajave` binary: wires everything together
 ```
 
 ## Documentation
