@@ -13,6 +13,19 @@ use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 /// Conservative: returns true for any call to a class whose methods are known
 /// to throw checked or unchecked exceptions (String, parse methods, etc.).
 /// Safe methods (Verifier, System.out, pure getters) return false.
+/// Returns true if a modelled string call (StrCall) could throw a RuntimeException
+/// (e.g. StringIndexOutOfBoundsException, NumberFormatException).
+/// These calls are resolved by encode_str_call but their exception behavior
+/// isn't modelled, so NRE discharge must be blocked.
+fn str_call_can_throw(target: &MethodKey) -> bool {
+    let name = target.name.as_str();
+    matches!(name,
+        "charAt" | "substring" | "codePointAt" | "codePointBefore"
+        | "setCharAt" | "deleteCharAt" | "delete" | "insert"
+        | "getChars" | "subSequence"
+    )
+}
+
 fn could_throw_runtime_exception(target: &MethodKey) -> bool {
     let class = target.class.as_str();
     let name = target.name.as_str();
@@ -455,6 +468,9 @@ impl<'a> ExploreCtx<'a> {
                     "append" | "setLength" | "deleteCharAt" | "delete" | "insert" | "reverse"
                 ) {
                     // Mutating method — update str_vars for receiver and all aliases
+                    if str_call_can_throw(target) {
+                        self.completeness.has_potentially_throwing_havoc = true;
+                    }
                     match self.encode_str_call(target, args) {
                         Some((bv, st)) => {
                             if let Some(st) = st {
@@ -467,6 +483,9 @@ impl<'a> ExploreCtx<'a> {
                         None => (self.encode_rvalue(rv), None),
                     }
                 } else {
+                    if str_call_can_throw(target) {
+                        self.completeness.has_potentially_throwing_havoc = true;
+                    }
                     match self.encode_str_call(target, args) {
                         Some((bv, st)) => (bv, st),
                         None => (self.encode_rvalue(rv), None),
@@ -474,6 +493,13 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
             Rvalue::Call { target, args, is_virtual } => {
+                // For any modelled call (wrapper str, math), still check
+                // if the original method could throw a RuntimeException.
+                // The model resolves the return value but doesn't capture
+                // exception behavior — NRE discharge must be blocked.
+                if could_throw_runtime_exception(target) {
+                    self.completeness.has_potentially_throwing_havoc = true;
+                }
                 if let Some((bv, st)) = self.encode_wrapper_str_call(target, args) {
                     (bv, st)
                 } else if self.math_call_modelled(target) {

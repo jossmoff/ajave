@@ -240,6 +240,13 @@ TESTS = [
     ("nra", "sv-benchmarks/float-nonlinear-calculation/coral29.yml", "FALSE"),
     ("nra", "sv-benchmarks/float-nonlinear-calculation/coral48.yml", "FALSE"),
     ("nra", "sv-benchmarks/float-nonlinear-calculation/Optimization1.yml", "FALSE"),
+
+    # NRE soundness canaries: these benchmarks should NOT return TRUE in NRE mode.
+    # Expected UNKNOWN (we can't prove safety, and we must not falsely claim it).
+    # If any returns TRUE, it's a soundness regression (wrong answer).
+    ("nre-canary", "sv-benchmarks/jbmc-regression/SubString02.yml", "UNKNOWN", "no-runtime-exception"),
+    ("nre-canary", "sv-benchmarks/jbmc-regression/StringBuilderChars05.yml", "UNKNOWN", "no-runtime-exception"),
+    ("nre-canary", "sv-benchmarks/jbmc-regression/StringValueOf08.yml", "UNKNOWN", "no-runtime-exception"),
 ]
 
 import yaml
@@ -252,13 +259,17 @@ def resolve_inputs(yml_path):
     task_dir = os.path.dirname(yml_path)
     return [os.path.join(task_dir, inp) for inp in data["input_files"]]
 
-def run_one(yml_path):
+def run_one(yml_path, prop=None):
     inputs = resolve_inputs(yml_path)
     if inputs is None:
         return "SKIP"
     try:
+        cmd = [ROAST]
+        if prop:
+            cmd.extend(["--property", prop])
+        cmd.extend(inputs)
         result = subprocess.run(
-            [ROAST] + inputs,
+            cmd,
             capture_output=True, text=True, timeout=TIMEOUT
         )
         verdict = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else "ERROR"
@@ -275,10 +286,13 @@ def main():
         sys.exit(1)
 
     # Filter to existing benchmarks
+    # Each test is (category, yml, expected) or (category, yml, expected, property)
     valid_tests = []
-    for cat, yml, expected in TESTS:
+    for entry in TESTS:
+        cat, yml, expected = entry[0], entry[1], entry[2]
+        prop = entry[3] if len(entry) > 3 else None
         if os.path.exists(yml):
-            valid_tests.append((cat, yml, expected))
+            valid_tests.append((cat, yml, expected, prop))
         else:
             print(f"  SKIP {yml} (not found)")
 
@@ -290,9 +304,9 @@ def main():
     unknown = 0
     failures = []
 
-    for cat, yml, expected in valid_tests:
+    for cat, yml, expected, prop in valid_tests:
         name = os.path.basename(yml).replace(".yml", "")
-        verdict = run_one(yml)
+        verdict = run_one(yml, prop)
 
         if verdict == expected:
             passed += 1

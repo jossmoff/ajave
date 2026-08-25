@@ -2,6 +2,26 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## NRE soundness: modelled-call exception tracking (2026-08-25)
+
+Fixed 8 wrong TRUE verdicts in NRE (no-runtime-exception) mode. Root cause: string methods
+(`substring`, `charAt`, `setCharAt`) and parse methods (`Float.parseFloat`, `Double.parseDouble`)
+were modelled for their return values but not flagged as potentially throwing RuntimeException.
+
+Three-layer fix:
+1. **StrCall path**: new `str_call_can_throw()` helper flags bounds-sensitive string operations
+   (`charAt`, `substring`, `setCharAt`, `deleteCharAt`, `insert`, etc.) so the BMC sets
+   `has_potentially_throwing_havoc` even when the call is resolved by `encode_str_call`.
+2. **MathCall/wrapper path**: moved `could_throw_runtime_exception()` check before call resolution,
+   so modelled calls that can throw (like `parseInt` via MathCall) still block NRE discharge.
+3. **Model layer**: parse methods (`parseFloat`, `parseDouble`, `decode`, `getInteger`, `getLong`)
+   changed from `Pure(Some(Ty))` → `Unmodelled` so the call survives in the IR and the BMC can
+   see it. These methods throw `NumberFormatException`/`IllegalArgumentException` which was being
+   silently erased by the `Pure` → `Havoc(ty)` lowering.
+
+The `has_potentially_throwing_havoc` flag is only checked in NRE mode (`!assertion_only`), so
+valid-assert scoring is completely unaffected.
+
 ## Rename to ajave (2026-08-25)
 
 Renamed the project from "roast" to "ajave" — **A**nother **JA**va **VE**rifier. All crate names

@@ -259,6 +259,17 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return model;
     }
 
+    // Methods that can throw RuntimeException (NumberFormatException,
+    // IllegalArgumentException, etc.) must NOT be Pure — the call must
+    // remain visible so the BMC can flag it as potentially throwing for NRE.
+    if matches!(name,
+        "parseInt" | "parseLong" | "parseShort" | "parseByte"
+        | "parseFloat" | "parseDouble" | "parseUnsignedInt" | "parseUnsignedLong"
+        | "decode" | "getInteger" | "getLong"
+    ) {
+        return CallModel::Unmodelled;
+    }
+
     if PURE_OWNERS.contains(&owner) {
         return CallModel::Pure(ret_ty(desc));
     }
