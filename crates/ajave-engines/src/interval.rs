@@ -42,7 +42,7 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use ajave_core::artifact::ProgramPoint;
 use ajave_core::cpa::{Cpa, HasLocation, Lattice, MergeResult};
-use ajave_ir::{BinOp, BlockId, CmpKind, Const, Edge, Operand, Program, Rvalue, Stmt, Ty, VarId};
+use ajave_ir::{BinOp, BlockId, CmpKind, Const, Edge, FieldKey, Operand, Program, Rvalue, Stmt, Ty, VarId};
 
 use crate::body_analysis::{find_defining_bin, negate_binop};
 
@@ -749,6 +749,23 @@ fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
     }
 }
 
+/// Static fields guaranteed non-null by the JLS / JDK contract.
+fn is_nonnull_static(fk: &FieldKey) -> bool {
+    matches!(
+        (fk.class.as_str(), fk.name.as_str()),
+        ("java/lang/System", "out" | "err" | "in")
+            | ("java/lang/Boolean", "TRUE" | "FALSE" | "TYPE")
+            | ("java/lang/Integer", "TYPE")
+            | ("java/lang/Long", "TYPE")
+            | ("java/lang/Double", "TYPE")
+            | ("java/lang/Float", "TYPE")
+            | ("java/lang/Byte", "TYPE")
+            | ("java/lang/Short", "TYPE")
+            | ("java/lang/Character", "TYPE")
+            | ("java/util/Collections", "EMPTY_LIST" | "EMPTY_MAP" | "EMPTY_SET")
+    )
+}
+
 impl IState {
     /// Compute the nullness of a reference-producing rvalue.
     pub fn eval_nullness(&self, rv: &Rvalue) -> Nullness {
@@ -758,6 +775,7 @@ impl IState {
             Rvalue::Use(Operand::Var(v)) => self.get_nullness(*v),
             Rvalue::New(_) => Nullness::NonNull,
             Rvalue::NewArray { .. } => Nullness::NonNull,
+            Rvalue::GetStatic(fk) if is_nonnull_static(fk) => Nullness::NonNull,
             // Call results, field loads, array loads, etc. are Unknown.
             _ => Nullness::Unknown,
         }
@@ -854,7 +872,7 @@ impl HasLocation for IState {
 /// Count the number of local slots consumed by a method's parameters from its
 /// JVM descriptor. For a static method `([Ljava/lang/String;)V` this returns 1.
 /// For `(IJ)V` it returns 3 (int=1 slot, long=2 slots).
-fn param_slot_count(desc: &str) -> usize {
+pub fn param_slot_count(desc: &str) -> usize {
     let inner = desc.trim_start_matches('(');
     let bytes = inner.as_bytes();
     let mut pos = 0;

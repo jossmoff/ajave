@@ -30,11 +30,18 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
         // Track which variables are known non-null and which are copies of `this`.
         let mut nonnull_vars: HashSet<VarId> = HashSet::new();
         let mut this_vars: HashSet<VarId> = HashSet::new();
-        // Seed `this` (Local 0).
+        // Seed `this` (Local 0) and all reference-typed parameters as non-null.
+        let max_param_slot = crate::interval::param_slot_count(&mk.desc) + 1;
         for (idx, vi) in body.vars.iter().enumerate() {
-            if matches!(vi.kind, ajave_ir::VarKind::Local(0)) && vi.ty == ajave_ir::Ty::Ref {
-                this_vars.insert(VarId(idx as u32));
-                nonnull_vars.insert(VarId(idx as u32));
+            if vi.ty == ajave_ir::Ty::Ref {
+                if let ajave_ir::VarKind::Local(slot) = vi.kind {
+                    if (slot as usize) < max_param_slot {
+                        nonnull_vars.insert(VarId(idx as u32));
+                        if slot == 0 {
+                            this_vars.insert(VarId(idx as u32));
+                        }
+                    }
+                }
             }
         }
         // Pass 1: find all New/Str/Class/GetStatic assignments and this-copies.

@@ -494,18 +494,20 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
             Rvalue::Call { target, args, is_virtual } => {
-                // For any modelled call (wrapper str, math), still check
-                // if the original method could throw a RuntimeException.
-                // The model resolves the return value but doesn't capture
-                // exception behavior — NRE discharge must be blocked.
-                if could_throw_runtime_exception(target) {
-                    self.completeness.has_potentially_throwing_havoc = true;
-                }
                 if let Some((bv, st)) = self.encode_wrapper_str_call(target, args) {
+                    // Modelled call — check if the original method could throw
+                    // a RuntimeException. The model resolves the return value
+                    // but doesn't capture exception behavior.
+                    if could_throw_runtime_exception(target) {
+                        self.completeness.has_potentially_throwing_havoc = true;
+                    }
                     (bv, st)
                 } else if self.math_call_modelled(target) {
+                    // Math calls never throw RuntimeException.
                     (self.encode_math_call(target, args), None)
                 } else if self.try_inline_call(target, args, v, *is_virtual) {
+                    // Inlined — callee body is analyzed directly, so its
+                    // exception behavior is fully captured. No havoc flag.
                     return false;
                 } else {
                     // Call was not resolved — havoced.

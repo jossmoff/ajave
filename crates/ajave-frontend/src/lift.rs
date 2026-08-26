@@ -24,6 +24,34 @@ use log::{debug, warn};
 use ajave_ir::*;
 use ajave_models::{self as models, CallModel};
 
+/// Is `class` a known `RuntimeException` subclass (excluding `AssertionError`,
+/// which is handled by the `Assertion` obligation kind)?
+fn is_runtime_exception(class: &str) -> bool {
+    matches!(
+        class,
+        "java/lang/RuntimeException"
+            | "java/lang/IllegalArgumentException"
+            | "java/lang/IllegalStateException"
+            | "java/lang/UnsupportedOperationException"
+            | "java/lang/NumberFormatException"
+            | "java/lang/NullPointerException"
+            | "java/lang/IndexOutOfBoundsException"
+            | "java/lang/ArrayIndexOutOfBoundsException"
+            | "java/lang/StringIndexOutOfBoundsException"
+            | "java/lang/ArithmeticException"
+            | "java/lang/ClassCastException"
+            | "java/lang/NegativeArraySizeException"
+            | "java/lang/SecurityException"
+            | "java/lang/ConcurrentModificationException"
+            | "java/util/NoSuchElementException"
+            | "java/lang/ClassNotFoundException"
+            | "java/util/ConcurrentModificationException"
+            | "java/lang/ArrayStoreException"
+            | "java/util/EmptyStackException"
+            | "java/lang/StackOverflowError"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Pass 1: decode
 // ---------------------------------------------------------------------------
@@ -285,9 +313,29 @@ impl<'a> Lifter<'a> {
             .map(|(_, l)| *l)
     }
 
-    /// Could an exception raised here be caught inside this method?
+    /// Could a *runtime* exception raised here be caught inside this method?
+    ///
+    /// Only handlers that can actually catch `RuntimeException` (or a
+    /// supertype like `Exception`/`Throwable`) count.  A handler for a
+    /// checked exception (e.g. `IOException`) does *not* catch NPE/AIOOBE/etc.
     fn guarded_at(&self, off: u16) -> bool {
-        self.handlers.iter().any(|h| off >= h.start && off < h.end)
+        self.handlers.iter().any(|h| {
+            if off < h.start || off >= h.end {
+                return false;
+            }
+            if h.catch_type == 0 {
+                return true; // catch-all / finally
+            }
+            let Ok(name) = self.cf.class_name(h.catch_type) else {
+                return false; // unresolvable → assume checked
+            };
+            matches!(
+                name.as_str(),
+                "java/lang/Throwable"
+                    | "java/lang/Exception"
+                    | "java/lang/RuntimeException"
+            )
+        })
     }
 
     fn obligation(&mut self, kind: ObligationKind, cond: Operand, off: u16) -> ObligationId {
@@ -1568,12 +1616,19 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     Operand::Var(id) => self.lifter.new_classes.get(id).cloned(),
                     _ => None,
                 };
-                if thrown.as_deref() == Some(models::ASSERTION_ERROR) {
-                    // The assert property is exactly "is an AssertionError throw
-                    // reachable". A safety condition of `false` says: violated if
-                    // control ever gets here.
-                    let id = self.lifter.obligation(ObligationKind::Assertion, Operand::int(0), off);
-                    self.stmts.push(Stmt::Check(id));
+                if let Some(cls) = &thrown {
+                    if cls == models::ASSERTION_ERROR {
+                        // The assert property is exactly "is an AssertionError throw
+                        // reachable". A safety condition of `false` says: violated if
+                        // control ever gets here.
+                        let id = self.lifter.obligation(ObligationKind::Assertion, Operand::int(0), off);
+                        self.stmts.push(Stmt::Check(id));
+                    } else if is_runtime_exception(cls) {
+                        // NRE property: an explicit throw of a RuntimeException
+                        // subclass is a violation if reachable.
+                        let id = self.lifter.obligation(ObligationKind::ExplicitThrow, Operand::int(0), off);
+                        self.stmts.push(Stmt::Check(id));
+                    }
                 }
                 return Ok(Some((Terminator::Throw(v), vec![])));
             }

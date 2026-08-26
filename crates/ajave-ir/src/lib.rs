@@ -284,6 +284,8 @@ pub enum ObligationKind {
     ArrayBounds,
     NegArraySize,
     ClassCast,
+    /// An explicit `throw` of a `RuntimeException` subclass is reachable.
+    ExplicitThrow,
 }
 
 impl ObligationKind {

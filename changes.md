@@ -2,6 +2,39 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## NRE completeness: inlined-call havoc flag fix + getstatic nullness (2026-08-26)
+
+Two fixes that together yield **+246 NRE points** (551→797) with 0 wrong answers:
+
+1. **Premature `has_potentially_throwing_havoc` for inlined calls**: the BMC was setting this
+   flag for ALL `Rvalue::Call` before checking whether the call was inlined. For inlined calls,
+   the callee body is analyzed directly and exception behavior is fully captured — no havoc
+   flag is needed. Fix: moved the `could_throw_runtime_exception` check to only trigger for
+   calls that are actually havoced (modelled or unresolved), not inlined ones. This alone
+   unlocked ~200 NRE proofs.
+
+2. **`GetStatic` nullness**: `eval_nullness()` returned `Unknown` for all `GetStatic` loads.
+   Added `is_nonnull_static()` recognizing JLS-guaranteed non-null static fields (`System.out`,
+   `System.err`, `System.in`, boxed-type `TRUE`/`FALSE`/`TYPE` constants, `Collections.EMPTY_*`).
+   This lets the interval AI discharge NullDeref obligations on `System.out.println()` receivers.
+
+## NRE soundness: guarded-at precision + ExplicitThrow obligations (2026-08-26)
+
+Fixed 3 wrong TRUE verdicts in NRE mode from two independent bugs:
+
+1. **`guarded_at()` was too broad**: an obligation at a bytecode offset inside ANY exception
+   handler was marked `guarded=true` and excluded from NRE seeding — even when the handler
+   caught a checked exception (e.g. `UnsupportedEncodingException`) that cannot catch
+   `NullPointerException` or other RuntimeExceptions. Fix: only consider a handler as
+   guarding if its catch type is `Throwable`, `Exception`, `RuntimeException`, or a
+   catch-all (finally). This fixes URLDecoder01/02.
+
+2. **No obligation for explicit `throw new RuntimeException(...)`**: the lifter generated
+   `Assertion` obligations for `throw new AssertionError` but ignored explicit throws of
+   RuntimeException subclasses (`IllegalArgumentException`, `IllegalStateException`, etc.).
+   Added `ObligationKind::ExplicitThrow` with a known-RE-subclass list in the lifter.
+   This fixes StdRandom_exceptionprone.
+
 ## NRE soundness: modelled-call exception tracking (2026-08-25)
 
 Fixed 8 wrong TRUE verdicts in NRE (no-runtime-exception) mode. Root cause: string methods

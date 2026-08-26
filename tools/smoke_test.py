@@ -247,6 +247,14 @@ TESTS = [
     ("nre-canary", "sv-benchmarks/jbmc-regression/SubString02.yml", "UNKNOWN", "no-runtime-exception"),
     ("nre-canary", "sv-benchmarks/jbmc-regression/StringBuilderChars05.yml", "UNKNOWN", "no-runtime-exception"),
     ("nre-canary", "sv-benchmarks/jbmc-regression/StringValueOf08.yml", "UNKNOWN", "no-runtime-exception"),
+    # NRE soundness: explicit throw of RuntimeException subclass
+    ("nre-canary", "sv-benchmarks/argv-tasks/StdRandom_exceptionprone.yml", "UNKNOWN", "no-runtime-exception"),
+    # NRE soundness: checked-exception handler must not guard RuntimeException obligations
+    ("nre-canary", "sv-benchmarks/jdart-regression/URLDecoder01.yml", "UNKNOWN", "no-runtime-exception"),
+
+    # NRE proof canaries: benchmarks that should be provably TRUE for NRE.
+    ("nre-true", "sv-benchmarks/jpf-regression/ExDarko_true.yml", "TRUE", "no-runtime-exception"),
+    ("nre-true", "sv-benchmarks/jpf-regression/ExException_true.yml", "TRUE", "no-runtime-exception"),
 ]
 
 import yaml

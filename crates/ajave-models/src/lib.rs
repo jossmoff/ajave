@@ -608,5 +608,6 @@ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
         ArrayBounds => Some("java/lang/ArrayIndexOutOfBoundsException"),
         NegArraySize => Some("java/lang/NegativeArraySizeException"),
         ClassCast => Some("java/lang/ClassCastException"),
+        ExplicitThrow => Some("java/lang/RuntimeException"),
     }
 }
