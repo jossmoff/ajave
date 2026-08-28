@@ -269,11 +269,15 @@ TESTS = [
     # NRE soundness canaries: these benchmarks should NOT return TRUE in NRE mode.
     # Expected UNKNOWN (we can't prove safety, and we must not falsely claim it).
     # If any returns TRUE, it's a soundness regression (wrong answer).
-    ("nre-canary", "sv-benchmarks/jbmc-regression/SubString02.yml", "UNKNOWN", "no-runtime-exception"),
+    # Ground truth is FALSE for both of these. They were recorded as UNKNOWN when
+    # we could not solve them; the replay exception-family fix (2026-08-28) made
+    # them solvable and both are now JVM-confirmed. Expected verdicts must be the
+    # known-correct answer, never a snapshot of current behaviour.
+    ("nre-canary", "sv-benchmarks/jbmc-regression/SubString02.yml", "FALSE", "no-runtime-exception"),
     ("nre-canary", "sv-benchmarks/jbmc-regression/StringBuilderChars05.yml", "UNKNOWN", "no-runtime-exception"),
     ("nre-canary", "sv-benchmarks/jbmc-regression/StringValueOf08.yml", "UNKNOWN", "no-runtime-exception"),
     # NRE soundness: explicit throw of RuntimeException subclass
-    ("nre-canary", "sv-benchmarks/argv-tasks/StdRandom_exceptionprone.yml", "UNKNOWN", "no-runtime-exception"),
+    ("nre-canary", "sv-benchmarks/argv-tasks/StdRandom_exceptionprone.yml", "FALSE", "no-runtime-exception"),
     # NRE soundness: checked-exception handler must not guard RuntimeException obligations
     ("nre-canary", "sv-benchmarks/jdart-regression/URLDecoder01.yml", "UNKNOWN", "no-runtime-exception"),
 
