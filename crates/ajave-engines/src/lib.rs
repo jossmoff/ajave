@@ -7,6 +7,9 @@
 //! change. See `docs/strategies/` for the write-up of each one.
 
 pub mod body_analysis;
+// Re-exported for the CLI's verdict guard: an unmodelled throwing call means a
+// TRUE for no-runtime-exception is not ours to claim.
+pub use body_analysis::{body_has_unmodelled_throwing_call, first_unmodelled_throwing_call};
 pub mod body_shape;
 pub mod ai;
 pub mod cegar;

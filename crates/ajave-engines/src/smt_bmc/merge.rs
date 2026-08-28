@@ -12,6 +12,7 @@ impl<'a> ExploreCtx<'a> {
         SavedState {
             vars: self.vars.clone(),
             str_vars: self.str_vars.clone(),
+            fp_vars: self.fp_vars.clone(),
             str_consts: self.str_consts.clone(),
             nondet_terms: self.nondet_terms.clone(),
             var_widths: self.var_widths.clone(),
@@ -34,6 +35,7 @@ impl<'a> ExploreCtx<'a> {
     pub(super) fn restore_state(&mut self, s: SavedState) {
         self.vars = s.vars;
         self.str_vars = s.str_vars;
+        self.fp_vars = s.fp_vars;
         self.str_consts = s.str_consts;
         self.nondet_terms = s.nondet_terms;
         self.var_widths = s.var_widths;
@@ -180,6 +182,22 @@ impl<'a> ExploreCtx<'a> {
                 (Some(t), Some(e)) => {
                     let m = self.solver.ite(cond, t, e);
                     self.str_vars.insert(vid, m);
+                }
+                _ => {}
+            }
+        }
+
+        // Float vars: ITE-merge exactly as the string terms above. A float
+        // present on only one side is dropped, which falls back to the
+        // bitvector view rather than inventing a value.
+        let all_fv: HashSet<VarId> = a.fp_vars.keys().chain(b.fp_vars.keys()).copied().collect();
+        self.fp_vars.clear();
+        for vid in all_fv {
+            match (a.fp_vars.get(&vid).copied(), b.fp_vars.get(&vid).copied()) {
+                (Some(t), Some(e)) if t == e => { self.fp_vars.insert(vid, t); }
+                (Some(t), Some(e)) => {
+                    let m = self.solver.ite(cond, t, e);
+                    self.fp_vars.insert(vid, m);
                 }
                 _ => {}
             }

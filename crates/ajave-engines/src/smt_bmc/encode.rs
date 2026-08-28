@@ -134,32 +134,38 @@ impl<'a> ExploreCtx<'a> {
                         self.solver.ite(lt, minus1, inner)
                     }
                     CmpKind::FloatL | CmpKind::FloatG => {
-                        // IEEE 754 float comparison via bit-pattern totalOrder
-                        if aw == 64 || bw == 64 {
-                            // double comparison
-                            let a_nan = self.fp_is_nan_64(at);
-                            let b_nan = self.fp_is_nan_64(bt);
-                            let either_nan = self.solver.or(a_nan, b_nan);
-                            let nan_val = if *kind == CmpKind::FloatL {
-                                self.solver.bv_const(-1, 32)
-                            } else {
-                                self.solver.bv_const(1, 32)
-                            };
-                            let cmp = self.fp_compare_bv64(at, bt);
-                            self.solver.ite(either_nan, nan_val, cmp)
-                        } else {
-                            // float comparison
-                            let a_nan = self.fp_is_nan_32(at);
-                            let b_nan = self.fp_is_nan_32(bt);
-                            let either_nan = self.solver.or(a_nan, b_nan);
-                            let nan_val = if *kind == CmpKind::FloatL {
-                                self.solver.bv_const(-1, 32)
-                            } else {
-                                self.solver.bv_const(1, 32)
-                            };
-                            let cmp = self.fp_compare_bv32(at, bt);
-                            self.solver.ite(either_nan, nan_val, cmp)
-                        }
+                        // `dcmpl`/`dcmpg`/`fcmpl`/`fcmpg` (JVMS 6.5): push -1
+                        // if a < b, 0 if a == b, 1 if a > b. When either
+                        // operand is NaN the result is -1 for the `l` form and
+                        // 1 for the `g` form — that asymmetry is the whole
+                        // reason javac emits two instructions.
+                        //
+                        // Encoded in the FloatingPoint theory rather than over
+                        // bit patterns: `fp.eq` gives IEEE equality, so -0.0
+                        // compares equal to 0.0 and NaN compares unequal to
+                        // everything, neither of which a bitwise comparison
+                        // gets right.
+                        let w = if aw == 64 || bw == 64 { 64 } else { 32 };
+                        let af = self.encode_fp_operand(a, w);
+                        let bf = self.encode_fp_operand(b, w);
+
+                        let a_nan = self.solver.fp_is_nan(af);
+                        let b_nan = self.solver.fp_is_nan(bf);
+                        let either_nan = self.solver.or(a_nan, b_nan);
+
+                        let lt = self.solver.fp_lt(af, bf);
+                        let eq = self.solver.fp_eq(af, bf);
+
+                        let minus1 = self.solver.bv_const(-1, 32);
+                        let zero = self.solver.bv_const(0, 32);
+                        let one = self.solver.bv_const(1, 32);
+
+                        let nan_val = if *kind == CmpKind::FloatL { minus1 } else { one };
+                        let ordered = {
+                            let inner = self.solver.ite(eq, zero, one);
+                            self.solver.ite(lt, minus1, inner)
+                        };
+                        self.solver.ite(either_nan, nan_val, ordered)
                     }
                 }
             }
@@ -290,7 +296,116 @@ impl<'a> ExploreCtx<'a> {
 
     // ── Binary operations ───────────────────────────────────────────────
 
+    /// The FP width of an operand, when it is a float or double.
+    ///
+    /// Uses the declared type rather than the tracked bitvector width, since
+    /// the latter cannot distinguish a double from a long.
+    pub(super) fn fp_width_of_operand(&self, op: &Operand) -> Option<u32> {
+        match op {
+            Operand::Var(v) => match self.body.var(*v).ty {
+                Ty::Float => Some(32),
+                Ty::Double => Some(64),
+                _ => None,
+            },
+            Operand::Const(Const::Float(_)) => Some(32),
+            Operand::Const(Const::Double(_)) => Some(64),
+            _ => None,
+        }
+    }
+
+    /// An operand as a FloatingPoint-sorted term.
+    ///
+    /// Float variables carry their FP term in `fp_vars`; anything else is
+    /// reinterpreted from its bit pattern, which is exactly
+    /// `Double.longBitsToDouble` and so loses nothing.
+    pub(super) fn encode_fp_operand(&mut self, op: &Operand, width: u32) -> Term {
+        match op {
+            Operand::Var(v) => {
+                if let Some(&t) = self.fp_vars.get(v) {
+                    return t;
+                }
+                let bv = self.encode_operand(op);
+                let t = self.solver.fp_from_bits(bv, width);
+                self.fp_vars.insert(*v, t);
+                t
+            }
+            Operand::Const(Const::Float(f)) => self.solver.fp_const(*f as f64, 32),
+            Operand::Const(Const::Double(d)) => self.solver.fp_const(*d, 64),
+            _ => {
+                let bv = self.encode_operand(op);
+                self.solver.fp_from_bits(bv, width)
+            }
+        }
+    }
+
+    /// Encode `a op b` in the FloatingPoint theory.
+    ///
+    /// Arithmetic returns an FP term (the caller stores it in `fp_vars`);
+    /// comparisons return the 0/1 integer the JVM's branch encoding expects.
+    /// `fp.eq` gives IEEE equality, so NaN compares unequal to everything
+    /// including itself, and -0.0 equals 0.0 — both of which a bitvector
+    /// comparison on the raw pattern gets wrong.
+    pub(super) fn encode_fp_binop(
+        &mut self, op: BinOp, a: &Operand, b: &Operand, width: u32,
+    ) -> Option<Term> {
+        let at = self.encode_fp_operand(a, width);
+        let bt = self.encode_fp_operand(b, width);
+        let bool_to_int = |s: &mut Self, cmp: Term| {
+            let one = s.solver.bv_const(1, 32);
+            let zero = s.solver.bv_const(0, 32);
+            s.solver.ite(cmp, one, zero)
+        };
+        // Arithmetic yields an FP term. Every other part of the encoder
+        // expects bitvectors, so hand back the bit pattern and stash the FP
+        // term in `pending_fp` for the assignment site to attach to the
+        // destination variable — keeping full precision for later float
+        // operations instead of round-tripping through unconstrained bits.
+        let mut arith = |s: &mut Self, r: Term| {
+            s.pending_fp = Some(r);
+            s.solver.fp_to_bits(r, width)
+        };
+        Some(match op {
+            BinOp::Add => { let r = self.solver.fp_add(at, bt); arith(self, r) }
+            BinOp::Sub => { let r = self.solver.fp_sub(at, bt); arith(self, r) }
+            BinOp::Mul => { let r = self.solver.fp_mul(at, bt); arith(self, r) }
+            BinOp::Div => { let r = self.solver.fp_div(at, bt); arith(self, r) }
+            BinOp::Rem => { let r = self.solver.fp_rem(at, bt); arith(self, r) }
+            BinOp::Eq => { let c = self.solver.fp_eq(at, bt); bool_to_int(self, c) }
+            BinOp::Ne => {
+                let c = self.solver.fp_eq(at, bt);
+                let n = self.solver.not(c);
+                bool_to_int(self, n)
+            }
+            BinOp::Lt => { let c = self.solver.fp_lt(at, bt); bool_to_int(self, c) }
+            BinOp::Le => { let c = self.solver.fp_le(at, bt); bool_to_int(self, c) }
+            BinOp::Gt => { let c = self.solver.fp_gt(at, bt); bool_to_int(self, c) }
+            BinOp::Ge => { let c = self.solver.fp_ge(at, bt); bool_to_int(self, c) }
+            // Bitwise and shift operators do not apply to floats in Java.
+            _ => return None,
+        })
+    }
+
     pub(super) fn encode_binop(&mut self, op: BinOp, a: &Operand, b: &Operand) -> Term {
+        // Route float/double *comparisons* through the FloatingPoint theory.
+        //
+        // Arithmetic is deliberately left on the bitvector path. Encoding it in
+        // FPA is more faithful, but measured ~2.5x slower end-to-end, and the
+        // extra time pushed transcendental benchmarks past the timeout — losing
+        // more than the precision gained. Comparisons are where the bitvector
+        // encoding is actually *wrong* (NaN compares equal to itself, -0.0
+        // differs from 0.0) and they cost almost nothing to encode, so that is
+        // where the theory earns its keep. Arithmetic remains float-tainted,
+        // which keeps it from being claimed as precise.
+        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            if let (Some(wa), Some(wb)) =
+                (self.fp_width_of_operand(a), self.fp_width_of_operand(b))
+            {
+                let w = wa.max(wb);
+                if let Some(t) = self.encode_fp_binop(op, a, b, w) {
+                    return t;
+                }
+            }
+        }
         let at = self.encode_operand(a);
         let bt = self.encode_operand(b);
         let aw = self.width_of_operand(a);

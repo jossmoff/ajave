@@ -113,3 +113,65 @@ pub fn negate_binop(op: BinOp) -> BinOp {
         other => other,
     }
 }
+
+/// Does this body call a method whose exceptional behaviour we do not model?
+///
+/// A library method with no body is either havoced or modelled for its *value*.
+/// Neither captures the exceptions it may raise: `"abc".charAt(5)` throws
+/// `StringIndexOutOfBoundsException`, but the IR emits no `Check` for it, so no
+/// engine can find a violation and the program looks safe by vacuity.
+///
+/// Any engine that wants to discharge a **no-runtime-exception** obligation has
+/// to account for that. The BMC does it via
+/// `Completeness::has_potentially_throwing_havoc`; the interval AI has no
+/// equivalent notion of a call at all, so it needs this check instead.
+///
+/// Methods with bodies are excluded: those are analysed directly, and whatever
+/// they throw shows up as an obligation in the callee.
+pub fn body_has_unmodelled_throwing_call(prog: &ajave_ir::Program, body: &Body) -> bool {
+    first_unmodelled_throwing_call(prog, body).is_some()
+}
+
+/// The first such call, for diagnostics: knowing *which* signature blocks a
+/// proof is what tells us whether the allowlist is too tight or the program
+/// genuinely does something we cannot reason about.
+pub fn first_unmodelled_throwing_call<'a>(
+    prog: &ajave_ir::Program,
+    body: &'a Body,
+) -> Option<&'a ajave_ir::MethodKey> {
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Assign(_, Rvalue::Call { target, .. }) = stmt {
+                if prog.body(target).is_some() {
+                    continue; // has a body — analysed on its own terms
+                }
+                // An interface or abstract method has no body of its own, but
+                // the call is still resolvable when every implementation we can
+                // see does. `ObjectFactory.createObject()` is declared on an
+                // interface and implemented by the benchmark, so treating it as
+                // an unanalysable library call blocked those tasks outright.
+                let impls = prog.devirtualise(target);
+                if !impls.is_empty() && impls.iter().all(|k| prog.body(k).is_some()) {
+                    continue;
+                }
+                // A call only blocks the verdict when we cannot state *why*
+                // it might throw. If its contract names conditions over the
+                // arguments, the lifter has already seeded them as obligations
+                // and the engines either discharge them or leave them open —
+                // either way the burden is carried explicitly, and vetoing here
+                // as well would double-count it and lose every program that
+                // merely *mentions* such a method.
+                match ajave_models::contract_of(&target.class, &target.name, &target.desc) {
+                    Some(c) if c.preconditions_all_seeded() => continue,
+                    Some(_) => return Some(target),
+                    None => {
+                        if crate::smt_bmc::could_throw_runtime_exception(target) {
+                            return Some(target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}

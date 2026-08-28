@@ -24,6 +24,316 @@ pub const BOX_VALUE_FIELD: &str = "$$value";
 /// Synthetic field name for the last element stored in a collection.
 /// Used by `CollectionStore` / `CollectionLoad` to model add/get as field ops.
 pub const COLL_LAST_FIELD: &str = "$$coll_last";
+/// Synthetic field holding a collection's element count.
+///
+/// Without a size, `list.get(i)` has no expressible bound and every program
+/// touching a collection is unprovable. Tracking it as an ordinary field means
+/// the existing flat field abstraction reasons about it for free: `add` bumps
+/// it, `size()` reads it, and `get(i)` carries an `i < size` obligation the
+/// interval domain can discharge.
+pub const COLL_SIZE_FIELD: &str = "$$coll_size";
+
+/// What must hold at a call site for an external method not to throw.
+///
+/// The point of naming preconditions rather than just flagging a method as
+/// "may throw" is that a named condition can be *discharged*. `s.charAt(i)`
+/// throws only when `i` is out of range; if the analysis can show it is in
+/// range, the call is safe and the program can still be proved. A bare
+/// may-throw flag forces us to give up on every such program instead.
+///
+/// Argument indices are into the call's argument list *including* the
+/// receiver at position 0 for instance methods, matching `Rvalue::Call`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precondition {
+    /// Argument `n` must not be null, else `NullPointerException`.
+    NonNull(u8),
+    /// `0 <= arg[index] < length(arg[seq])`, else an out-of-bounds exception.
+    /// `seq` is a String, CharSequence or array-like receiver.
+    IndexInRange { index: u8, seq: u8 },
+    /// `0 <= arg[start] <= arg[end] <= length(arg[seq])` — the `substring`
+    /// shape, where the bound is inclusive and the pair must be ordered.
+    RangeInBounds { start: u8, end: Option<u8>, seq: u8 },
+    /// Argument `n` must be >= 0, else `NegativeArraySizeException` or
+    /// `IllegalArgumentException`.
+    NonNegative(u8),
+    /// Argument `n` must be != 0, else `ArithmeticException`.
+    NonZero(u8),
+    /// The receiver must be non-empty, else `NoSuchElementException` or
+    /// `EmptyStackException`.
+    NonEmpty,
+    /// The method can throw for a reason we cannot express as a condition over
+    /// the call's arguments — a malformed format string, an overflow check, a
+    /// comparator contract. Presence of this blocks a no-runtime-exception
+    /// proof, which is the honest outcome: we genuinely do not know.
+    Unexpressible,
+}
+
+impl Precondition {
+    /// Does the lifter emit this as an obligation today?
+    ///
+    /// Only these may let the verdict guard stand down. The index-range kinds
+    /// need the receiver's length, which means materialising a `length()` call
+    /// during lifting — worth doing, but until it exists they must keep
+    /// blocking rather than being silently assumed.
+    pub fn is_seeded(&self) -> bool {
+        matches!(
+            self,
+            Precondition::NonNull(_)
+                | Precondition::NonNegative(_)
+                | Precondition::NonZero(_)
+                | Precondition::IndexInRange { .. }
+                | Precondition::RangeInBounds { .. }
+        )
+    }
+}
+
+/// What an external method may write.
+///
+/// Replaces the previous rule that any callee without a body clobbers every
+/// field the program writes — which made the flat field abstraction nearly
+/// useless as soon as a single library call appeared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// Writes nothing we track.
+    Pure,
+    /// Mutates only its receiver.
+    Receiver,
+    /// May write anything; the conservative fallback.
+    Unknown,
+}
+
+/// Everything we claim about an external method, in one place.
+///
+/// Previously this knowledge was spread across `could_throw_runtime_exception`,
+/// `pure_owner_member_may_throw`, `str_call_can_throw`, `PURE_OWNERS` and the
+/// field-abstraction clobber sets — five representations that drifted apart and
+/// produced the same class of unsoundness repeatedly (issues #48, #49). One
+/// table, derived everywhere, is the fix.
+#[derive(Clone, Copy, Debug)]
+pub struct Contract {
+    pub requires: &'static [Precondition],
+    pub effect: Effect,
+}
+
+impl Contract {
+    /// Total: cannot throw for any input.
+    const TOTAL: Contract = Contract { requires: &[], effect: Effect::Pure };
+
+    /// Cannot throw, but mutates its receiver.
+    const TOTAL_MUT: Contract = Contract { requires: &[], effect: Effect::Receiver };
+
+    /// `true` when no input can make this call raise a `RuntimeException`.
+    pub fn is_total(&self) -> bool {
+        self.requires.is_empty()
+    }
+
+    /// `true` when every precondition is actually emitted as an obligation by
+    /// the lifter.
+    ///
+    /// This is the invariant the verdict guard depends on, and it must be
+    /// *seeded*, not merely *expressible*: the guard skips a call only because
+    /// the obligations carry the burden instead. Declaring a condition
+    /// expressible while the lifter does not emit it reinstates exactly the
+    /// TRUE-by-vacuity bug this whole layer exists to remove — which is how
+    /// `CharAtOutOfBounds` regressed the moment the two drifted apart.
+    ///
+    /// Keep in lockstep with the seeding loop in `lift.rs`.
+    pub fn preconditions_all_seeded(&self) -> bool {
+        self.requires.iter().all(|p| p.is_seeded())
+    }
+}
+
+
+/// The contract for an external method, if we have one.
+///
+/// `None` means we know nothing and must stay conservative. A `Some` with
+/// non-empty `requires` is the interesting case: the call *can* throw, but only
+/// under a stated condition, so the lifter emits a `Check` the analysis may be
+/// able to discharge — which is what lets a program using `s.contains(t)` still
+/// be proved free of runtime exceptions.
+///
+/// Argument indices include the receiver at 0 for instance methods.
+pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+    // Argument-null preconditions, the single most common shape in the JDK.
+    const NN1: &[Precondition] = &[Precondition::NonNull(1)];
+    // Index-into-receiver, e.g. `charAt`.
+    const IDX1: &[Precondition] = &[Precondition::IndexInRange { index: 1, seq: 0 }];
+    // Regex and format methods throw for reasons we cannot state over arguments.
+    const OPAQUE: &[Precondition] = &[Precondition::Unexpressible];
+
+    let c = match (class, name) {
+        // ── java.lang.String ────────────────────────────────────────────
+        // The no-argument queries are total.
+        ("java/lang/String", "length" | "isEmpty" | "hashCode" | "toString"
+            | "intern" | "trim" | "toCharArray" | "toUpperCase" | "toLowerCase") => {
+            Contract::TOTAL
+        }
+        // `equals` is specified null-tolerant; the others throw NPE on null.
+        ("java/lang/String", "equals") => Contract::TOTAL,
+        ("java/lang/String", "contains" | "startsWith" | "endsWith" | "concat"
+            | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase"
+            | "indexOf" | "lastIndexOf" | "replace") => {
+            Contract { requires: NN1, effect: Effect::Pure }
+        }
+        // Index-bounded accessors.
+        ("java/lang/String", "charAt" | "codePointAt") => {
+            Contract { requires: IDX1, effect: Effect::Pure }
+        }
+        ("java/lang/String", "substring") => Contract {
+            requires: &[Precondition::RangeInBounds { start: 1, end: None, seq: 0 }],
+            effect: Effect::Pure,
+        },
+        // PatternSyntaxException / IllegalFormatException are not conditions
+        // over the argument values we track.
+        ("java/lang/String", "matches" | "split" | "replaceAll" | "replaceFirst"
+            | "format" | "join") => {
+            Contract { requires: OPAQUE, effect: Effect::Pure }
+        }
+
+        // ── java.lang.Object ────────────────────────────────────────────
+        ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+            Contract::TOTAL
+        }
+
+        // ── StringBuilder / StringBuffer ────────────────────────────────
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+            Contract::TOTAL_MUT
+        }
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+            // `StringBuilder(int)` throws on a negative capacity;
+            // `StringBuilder(String)` throws NPE on null.
+            requires: if desc == "(I)V" {
+                &[Precondition::NonNegative(1)]
+            } else {
+                NN1
+            },
+            effect: Effect::Receiver,
+        },
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {
+            Contract::TOTAL
+        }
+        // `append` renders null as "null" for the reference overloads and is
+        // total for the primitive ones.
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => {
+            Contract { requires: IDX1, effect: Effect::Pure }
+        }
+
+        // ── Boxing ──────────────────────────────────────────────────────
+        ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+            | "java/lang/Float" | "java/lang/Double" | "java/lang/Character"
+            | "java/lang/Boolean", "valueOf") => {
+            if desc.starts_with("(Ljava/lang/String;)") {
+                // Parsing: NumberFormatException is not a condition over a
+                // value we model.
+                Contract { requires: OPAQUE, effect: Effect::Pure }
+            } else {
+                Contract::TOTAL
+            }
+        }
+        ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+            | "java/lang/Float" | "java/lang/Double" | "java/lang/Character"
+            | "java/lang/Boolean",
+            "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue"
+            | "doubleValue" | "charValue" | "booleanValue" | "hashCode"
+            | "toString" | "equals") => Contract::TOTAL,
+
+        // ── Math ────────────────────────────────────────────────────────
+        ("java/lang/Math" | "java/lang/StrictMath", n) => {
+            if matches!(n,
+                "addExact" | "subtractExact" | "multiplyExact" | "incrementExact"
+                    | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
+            ) {
+                // Overflow is a property of the result, not of a tracked input.
+                Contract { requires: OPAQUE, effect: Effect::Pure }
+            } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
+                Contract { requires: &[Precondition::NonZero(2)], effect: Effect::Pure }
+            } else if matches!(n,
+                "abs" | "min" | "max" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
+                    | "asin" | "acos" | "atan" | "atan2" | "exp" | "expm1"
+                    | "log" | "log10" | "log1p" | "pow" | "floor" | "ceil"
+                    | "rint" | "round" | "signum" | "hypot" | "random"
+                    | "toRadians" | "toDegrees" | "ulp" | "copySign" | "fma"
+            ) {
+                Contract::TOTAL
+            } else {
+                return None;
+            }
+        }
+
+        // ── System ──────────────────────────────────────────────────────
+        ("java/lang/System", "currentTimeMillis" | "nanoTime" | "identityHashCode"
+            | "lineSeparator") => Contract::TOTAL,
+
+        // ── Enum ────────────────────────────────────────────────────────
+        ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
+            Contract::TOTAL
+        }
+
+        // ── Collections ─────────────────────────────────────────────────
+        // Now that element counts are tracked in `$$coll_size`, the bound on
+        // an indexed access is expressible, so these stop being dead ends.
+        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+            | "java/util/AbstractList" | "java/util/Vector", "get") => {
+            Contract { requires: IDX1, effect: Effect::Pure }
+        }
+        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+            | "java/util/AbstractList" | "java/util/Vector", "size" | "isEmpty") => {
+            Contract::TOTAL
+        }
+        // Appending cannot fail for the unbounded collections; the indexed
+        // `add(int, E)` and `set(int, E)` overloads can.
+        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+            | "java/util/AbstractList" | "java/util/Vector", "add") => {
+            if desc.starts_with("(I") {
+                Contract { requires: IDX1, effect: Effect::Receiver }
+            } else {
+                Contract::TOTAL_MUT
+            }
+        }
+        ("java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set", "add"
+            | "contains" | "size" | "isEmpty") => Contract::TOTAL_MUT,
+        // Hash maps tolerate null keys; sorted maps do not, so they are absent.
+        ("java/util/HashMap" | "java/util/LinkedHashMap", "put" | "get"
+            | "containsKey" | "size" | "isEmpty") => Contract::TOTAL_MUT,
+
+        // ── Output streams ──────────────────────────────────────────────
+        // The constructors throw NPE on a null sink; printing is total and
+        // renders null as "null". IOException is checked, so irrelevant here.
+        ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => {
+            Contract { requires: NN1, effect: Effect::Receiver }
+        }
+        ("java/io/PrintWriter" | "java/io/PrintStream",
+            "println" | "print" | "write" | "flush" | "close" | "append") => {
+            // `format`/`printf` are excluded: IllegalFormatException is not a
+            // condition over a value we track.
+            Contract::TOTAL_MUT
+        }
+        ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => {
+            Contract { requires: OPAQUE, effect: Effect::Receiver }
+        }
+
+        // ── CharSequence ────────────────────────────────────────────────
+        ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
+        ("java/lang/CharSequence", "charAt") => {
+            Contract { requires: IDX1, effect: Effect::Pure }
+        }
+
+        // ── java.util.Objects ───────────────────────────────────────────
+        ("java/util/Objects", "requireNonNull") => {
+            Contract { requires: NN1, effect: Effect::Pure }
+        }
+        ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") => {
+            Contract::TOTAL
+        }
+
+        // ── The nondet source ───────────────────────────────────────────
+        (VERIFIER, _) => Contract::TOTAL,
+
+        _ => return None,
+    };
+    Some(c)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallModel {
@@ -72,6 +382,10 @@ pub enum CallModel {
     /// `iterator()` / `listIterator()` — return the receiver itself so that
     /// subsequent `next()` reads the same `$$coll_last`.
     CollectionIterator,
+    /// `size()` — read the synthetic `$$coll_size` field from the receiver.
+    CollectionSize,
+    /// `isEmpty()` — `$$coll_size == 0`.
+    CollectionIsEmpty,
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -270,11 +584,74 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return CallModel::Unmodelled;
     }
 
+    // Members of `PURE_OWNERS` classes that are *not* total. `Pure` erases the
+    // call — the lifter rewrites it to a `Havoc`, or drops it entirely when the
+    // return type is void — so no engine ever sees a call node, and neither the
+    // NRE allowlist nor the verdict guard can fire. For a method that throws,
+    // that is a silent wrong TRUE: `System.arraycopy` out of bounds simply
+    // disappeared from the IR (issue #49).
+    //
+    // These must stay `Unmodelled` so the call survives into the IR and the
+    // engines can reason about its exceptional behaviour.
+    if pure_owner_member_may_throw(owner, name, desc) {
+        return CallModel::Unmodelled;
+    }
+
     if PURE_OWNERS.contains(&owner) {
         return CallModel::Pure(ret_ty(desc));
     }
 
     CallModel::Unmodelled
+}
+
+/// `true` for members of `PURE_OWNERS` classes that can raise a
+/// `RuntimeException`, and so must not be modelled as pure.
+///
+/// Keyed on the descriptor where overloads differ in totality —
+/// `Integer.valueOf(int)` is total, `Integer.valueOf(String)` throws
+/// `NumberFormatException`.
+fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
+    match owner {
+        // Overflow (`*Exact`) and zero-divisor (`floorDiv`/`floorMod`) checks.
+        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+            name,
+            "addExact" | "subtractExact" | "multiplyExact" | "incrementExact"
+                | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
+                | "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod" | "divideExact"
+        ),
+        // IndexOutOfBounds / ArrayStore / NPE.
+        "java/lang/System" => name == "arraycopy",
+        // Boxing from a String parses, and parsing throws.
+        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short"
+        | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" => {
+            name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
+        }
+        // Bounds and comparator contracts.
+        "java/util/Arrays" => matches!(
+            name,
+            "copyOfRange" | "fill" | "sort" | "binarySearch" | "asList" | "setAll"
+        ),
+        // `max`/`min` throw on an empty collection; `nCopies` on a negative count.
+        "java/util/Collections" => matches!(
+            name,
+            "max" | "min" | "nCopies" | "unmodifiableList" | "unmodifiableMap"
+                | "unmodifiableSet" | "sort" | "binarySearch"
+        ),
+        // Partial by contract: out-of-range index, empty receiver, null key.
+        "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+        | "java/util/AbstractList" => matches!(name, "get" | "set" | "remove" | "add"),
+        "java/util/Map" | "java/util/HashMap" | "java/util/TreeMap"
+        | "java/util/LinkedHashMap" | "java/util/AbstractMap" => {
+            // Sorted maps throw on null/incomparable keys; the hash maps do not,
+            // but `TreeMap` shares this owner set, so stay conservative.
+            matches!(name, "put" | "get" | "remove")
+        }
+        "java/util/TreeSet" | "java/util/Set" => matches!(name, "add" | "first" | "last"),
+        "java/util/Iterator" | "java/util/ListIterator" => {
+            matches!(name, "next" | "previous" | "remove")
+        }
+        _ => false,
+    }
 }
 
 /// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.
@@ -571,6 +948,11 @@ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
 
         // Iterator creation — return the collection itself
         "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+
+        // Size queries read the tracked element count, which is what makes an
+        // `i < size` bound provable rather than merely stated.
+        "size" if desc == "()I" => Some(CallModel::CollectionSize),
+        "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),
 
         _ => None,
     }

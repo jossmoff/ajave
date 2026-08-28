@@ -684,6 +684,164 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         self.stmts.push(Stmt::Check(id));
     }
 
+    /// The synthetic `$$coll_size` field key.
+    fn coll_size_field() -> FieldKey {
+        FieldKey {
+            class: "$$coll".into(),
+            name: models::COLL_SIZE_FIELD.into(),
+            desc: "I".into(),
+        }
+    }
+
+    /// Materialise `seq.length()` for a String or CharSequence receiver.
+    ///
+    /// Returns `None` for owners with no length method we model, in which case
+    /// the caller seeds nothing and the precondition keeps blocking.
+    fn seq_length(&mut self, owner: &str, seq: &Operand) -> Option<Operand> {
+        let (class, desc) = match owner {
+            "java/lang/String" => ("java/lang/String", "()I"),
+            "java/lang/CharSequence" => ("java/lang/CharSequence", "()I"),
+            "java/lang/StringBuilder" => ("java/lang/StringBuilder", "()I"),
+            "java/lang/StringBuffer" => ("java/lang/StringBuffer", "()I"),
+            // Collections carry their length in a tracked field rather than a
+            // modelled call, so read it directly.
+            "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+            | "java/util/AbstractList" | "java/util/Vector" => {
+                return Some(self.assign(
+                    Ty::Int,
+                    Rvalue::GetField { obj: seq.clone(), field: Self::coll_size_field() },
+                ));
+            }
+            _ => return None,
+        };
+        let target = MethodKey {
+            class: class.to_string(),
+            name: "length".to_string(),
+            desc: desc.to_string(),
+        };
+        Some(self.assign(
+            Ty::Int,
+            Rvalue::Call { target, args: vec![seq.clone()], is_virtual: true },
+        ))
+    }
+
+    /// Emit `Check` obligations for a call's declared preconditions.
+    ///
+    /// Argument indices in a contract include the receiver at 0, matching
+    /// `Rvalue::Call::args`. Only the kinds `Precondition::is_seeded` reports
+    /// are emitted here, and that predicate is what the verdict guard trusts
+    /// when it stands down — the two must stay in lockstep.
+    fn seed_call_preconditions(
+        &mut self,
+        target: &MethodKey,
+        receiver: Option<&Operand>,
+        args: &[Operand],
+    ) {
+        let Some(contract) =
+            models::contract_of(&target.class, &target.name, &target.desc)
+        else {
+            return;
+        };
+        if contract.requires.is_empty() {
+            return;
+        }
+        let mut all: Vec<Operand> = Vec::new();
+        if let Some(r) = receiver {
+            all.push(r.clone());
+        }
+        all.extend(args.iter().cloned());
+
+        for req in contract.requires {
+            match req {
+                models::Precondition::NonNull(n) => {
+                    if let Some(arg) = all.get(*n as usize).cloned() {
+                        self.nullcheck(&arg);
+                    }
+                }
+                models::Precondition::NonNegative(n) => {
+                    if let Some(arg) = all.get(*n as usize).cloned() {
+                        let ok = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Ge, arg, Operand::Const(Const::Int(0))),
+                        );
+                        let id = self.lifter.obligation(
+                            ObligationKind::NegArraySize, ok, self.insn.off as u16,
+                        );
+                        self.stmts.push(Stmt::Check(id));
+                    }
+                }
+                models::Precondition::NonZero(n) => {
+                    if let Some(arg) = all.get(*n as usize).cloned() {
+                        let ok = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Ne, arg, Operand::Const(Const::Int(0))),
+                        );
+                        let id = self.lifter.obligation(
+                            ObligationKind::DivByZero, ok, self.insn.off as u16,
+                        );
+                        self.stmts.push(Stmt::Check(id));
+                    }
+                }
+                models::Precondition::IndexInRange { index, seq } => {
+                    if let (Some(idx), Some(s)) = (
+                        all.get(*index as usize).cloned(),
+                        all.get(*seq as usize).cloned(),
+                    ) {
+                        // Materialise `seq.length()`. It carries a total
+                        // contract, so it introduces no obligation of its own,
+                        // and the BMC's string theory models it exactly —
+                        // which is what makes `0 <= i < len` provable rather
+                        // than merely stated.
+                        if let Some(len) = self.seq_length(&target.class, &s) {
+                            let lo = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(BinOp::Ge, idx.clone(), Operand::Const(Const::Int(0))),
+                            );
+                            let hi = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(BinOp::Lt, idx, len),
+                            );
+                            let ok = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(BinOp::And, lo, hi),
+                            );
+                            let id = self.lifter.obligation(
+                                ObligationKind::ArrayBounds, ok, self.insn.off as u16,
+                            );
+                            self.stmts.push(Stmt::Check(id));
+                        }
+                    }
+                }
+                models::Precondition::RangeInBounds { start, end, seq } => {
+                    if let (Some(b), Some(s)) = (
+                        all.get(*start as usize).cloned(),
+                        all.get(*seq as usize).cloned(),
+                    ) {
+                        if let Some(len) = self.seq_length(&target.class, &s) {
+                            // `substring(b)` requires `0 <= b <= len`; the
+                            // upper bound is inclusive, unlike an index.
+                            let lo = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(BinOp::Ge, b.clone(), Operand::Const(Const::Int(0))),
+                            );
+                            let hi = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(BinOp::Le, b, len),
+                            );
+                            let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
+                            let id = self.lifter.obligation(
+                                ObligationKind::ArrayBounds, ok, self.insn.off as u16,
+                            );
+                            self.stmts.push(Stmt::Check(id));
+                            let _ = end; // the two-argument form is not seeded yet
+                        }
+                    }
+                }
+                models::Precondition::NonEmpty | models::Precondition::Unexpressible => {}
+            }
+        }
+    }
+
     fn branch(&mut self, cond: Operand) -> Result<LiftOut, String> {
         let then_block = *self.block_of.get(&self.insn.targets[0]).ok_or("bad branch target")?;
         let next = self.insn.off + self.insn.len;
@@ -1288,6 +1446,19 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             desc: r.desc.clone(),
         };
 
+        // Seed the call's stated preconditions before dispatching on how the
+        // call itself is modelled. This has to happen for *every* path, not
+        // just the unmodelled one: `new StringBuilder(-1)` throws, but
+        // StringBuilder is a string-owner class and so takes the `StrCall`
+        // path, which would otherwise skip the check entirely.
+        //
+        // A library method that throws only under a nameable condition is not
+        // a dead end — seeding that condition lets the analysis prove the call
+        // safe instead of forcing the program to UNKNOWN. Conditions we cannot
+        // state are deliberately not seeded; those keep blocking, which is the
+        // honest answer.
+        self.seed_call_preconditions(&target, receiver.as_ref(), &args);
+
         match models::model_for(&r.owner, &r.name, &r.desc) {
             CallModel::Assume => self.stmts.push(Stmt::Assume(args[0].clone())),
             CallModel::NoOp => {}
@@ -1461,6 +1632,8 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // add(elem) / put(key, elem) / set(idx, elem):
                 // Store the element to synthetic $$coll_last field on receiver.
                 let this = receiver.unwrap_or_else(|| args.remove(0));
+                let this_for_size = this.clone();
+                let name_is_growing = r.name != "set";
                 let elem = args
                     .get(elem_idx as usize)
                     .cloned()
@@ -1474,6 +1647,24 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     },
                     val: elem,
                 });
+                // Growing operations bump the tracked element count. `set`
+                // replaces rather than appends, so it leaves the size alone.
+                if name_is_growing {
+                    let old = self.assign(
+                        Ty::Int,
+                        Rvalue::GetField { obj: this_for_size.clone(), field: Self::coll_size_field() },
+                    );
+                    let inc = self.assign(
+                        Ty::Int,
+                        Rvalue::Bin(BinOp::Add, old, Operand::Const(Const::Int(1))),
+                    );
+                    self.stmts.push(Stmt::PutField {
+                        obj: this_for_size,
+                        field: Self::coll_size_field(),
+                        val: inc,
+                    });
+                }
+
                 // add() returns boolean true; put()/set()/remove() return old value (null).
                 if let Some(ty) = ret {
                     let result = match ty {
@@ -1506,6 +1697,26 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // Return the collection itself so next() reads $$coll_last.
                 let this = receiver.unwrap_or_else(|| args.remove(0));
                 self.stack.push(this);
+            }
+            CallModel::CollectionSize => {
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                let n = self.assign(
+                    Ty::Int,
+                    Rvalue::GetField { obj: this, field: Self::coll_size_field() },
+                );
+                self.stack.push(n);
+            }
+            CallModel::CollectionIsEmpty => {
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                let n = self.assign(
+                    Ty::Int,
+                    Rvalue::GetField { obj: this, field: Self::coll_size_field() },
+                );
+                let empty = self.assign(
+                    Ty::Int,
+                    Rvalue::Bin(BinOp::Eq, n, Operand::Const(Const::Int(0))),
+                );
+                self.stack.push(empty);
             }
             CallModel::Unmodelled => {
                 if let Some(obj) = receiver.clone() {

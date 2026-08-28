@@ -18,6 +18,13 @@ pub enum Sort {
     Array { idx: u32, elem: u32 },
     /// `(Array (_ BitVec 32) String)`
     StrArray,
+    /// IEEE-754 binary float: `Float32` (width 32) or `Float64` (width 64).
+    ///
+    /// Distinct from `Bv(32)`/`Bv(64)` on purpose. Encoding a double as a
+    /// bitvector and applying `bvadd`/`bvmul` to its bit pattern computes
+    /// something that is not floating-point addition at all, so any witness
+    /// derived from it fails to reproduce the bug on a real JVM.
+    Fp(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,6 +80,38 @@ pub trait Solver {
     fn concat(&mut self, hi: Term, lo: Term) -> Term;
 
     // -- Boolean / control --
+
+    // ── IEEE-754 floating point ─────────────────────────────────────────
+    // Modelled with the SMT-LIB FloatingPoint theory so that NaN, the signed
+    // zeroes, the infinities and rounding all behave as the JVM specifies.
+    // Java arithmetic uses round-nearest-even, which is what these emit.
+    fn fresh_fp(&mut self, name: &str, width: u32) -> Term;
+    fn fp_const(&mut self, value: f64, width: u32) -> Term;
+    fn fp_add(&mut self, a: Term, b: Term) -> Term;
+    fn fp_sub(&mut self, a: Term, b: Term) -> Term;
+    fn fp_mul(&mut self, a: Term, b: Term) -> Term;
+    fn fp_div(&mut self, a: Term, b: Term) -> Term;
+    fn fp_rem(&mut self, a: Term, b: Term) -> Term;
+    fn fp_neg(&mut self, a: Term) -> Term;
+    fn fp_abs(&mut self, a: Term) -> Term;
+    /// `fp.eq`: IEEE equality, so NaN != NaN and -0.0 == 0.0.
+    fn fp_eq(&mut self, a: Term, b: Term) -> Term;
+    fn fp_lt(&mut self, a: Term, b: Term) -> Term;
+    fn fp_le(&mut self, a: Term, b: Term) -> Term;
+    fn fp_gt(&mut self, a: Term, b: Term) -> Term;
+    fn fp_ge(&mut self, a: Term, b: Term) -> Term;
+    fn fp_is_nan(&mut self, a: Term) -> Term;
+    fn fp_is_infinite(&mut self, a: Term) -> Term;
+    /// Reinterpret a bit pattern as a float — `Double.longBitsToDouble`.
+    fn fp_from_bits(&mut self, bits: Term, width: u32) -> Term;
+    /// Reinterpret a float as its bit pattern — `Double.doubleToRawLongBits`.
+    fn fp_to_bits(&mut self, f: Term, width: u32) -> Term;
+    /// Widen/narrow between Float32 and Float64 (`f2d`, `d2f`).
+    fn fp_convert(&mut self, f: Term, to_width: u32) -> Term;
+    /// Signed integer to float (`i2d`, `l2f`, ...).
+    fn sbv_to_fp(&mut self, bv: Term, width: u32) -> Term;
+    /// Float to signed integer, truncating toward zero (`d2i`, `f2l`).
+    fn fp_to_sbv(&mut self, f: Term, width: u32) -> Term;
 
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term;
     fn not(&mut self, t: Term) -> Term;

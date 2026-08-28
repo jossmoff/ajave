@@ -10,6 +10,10 @@
 mod char_encode;
 mod encode;
 mod explore;
+// Re-exported so the AI engine can apply the same soundness rule: a call whose
+// exceptional behaviour we do not model must block an NRE discharge, whichever
+// engine is doing the discharging.
+pub(crate) use explore::could_throw_runtime_exception;
 mod math_encode;
 mod merge;
 mod str_encode;
@@ -129,6 +133,19 @@ impl Completeness {
     }
 }
 
+/// Is this operator encoded in the FloatingPoint theory for float operands?
+///
+/// Java has no bitwise or shift operators on floats, so the arithmetic and
+/// comparison operators below are the complete set that can appear.
+fn fp_binop_modelled(op: BinOp) -> bool {
+    // Comparisons only: float arithmetic stays on the bitvector path for
+    // speed, so it must keep tainting its result.
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
+}
+
 pub struct SmtBmc {
     factory: Box<dyn SolverFactory>,
     max_depth: u32,
@@ -202,6 +219,8 @@ impl Engine for SmtBmc {
             body,
             vars: HashMap::new(),
             str_vars: HashMap::new(),
+            fp_vars: HashMap::new(),
+            pending_fp: None,
             str_consts: HashMap::new(),
             nondet_terms: Vec::new(),
             var_widths: HashMap::new(),
@@ -441,6 +460,16 @@ struct ExploreCtx<'a> {
     body: &'a Body,
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
+    /// FP term produced by the most recent float arithmetic, awaiting
+    /// attachment to the destination variable by the assignment site.
+    pending_fp: Option<Term>,
+    /// FP-sorted terms for float/double variables, mirroring `str_vars`.
+    ///
+    /// `vars` holds every variable as a bitvector, which for a float is its
+    /// raw IEEE-754 bit pattern — `bvadd` on that is not addition. Real
+    /// floating-point reasoning needs terms in the FloatingPoint sort, so
+    /// float variables carry a second term here and arithmetic uses it.
+    fp_vars: HashMap<VarId, Term>,
     /// Tracks constant string values for variables (for precise compareTo).
     str_consts: HashMap<VarId, String>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
@@ -507,6 +536,13 @@ struct ExploreCtx<'a> {
 struct SavedState {
     vars: HashMap<VarId, Term>,
     str_vars: HashMap<VarId, Term>,
+    /// FP-sorted terms for float/double variables, mirroring `str_vars`.
+    ///
+    /// `vars` holds every variable as a bitvector, which for a float is its
+    /// raw IEEE-754 bit pattern — `bvadd` on that is not addition. Real
+    /// floating-point reasoning needs terms in the FloatingPoint sort, so
+    /// float variables carry a second term here and arithmetic uses it.
+    fp_vars: HashMap<VarId, Term>,
     str_consts: HashMap<VarId, String>,
     nondet_terms: Vec<(usize, Term, u32, Ty, Option<Term>)>,
     var_widths: HashMap<VarId, u32>,
@@ -661,10 +697,17 @@ impl<'a> ExploreCtx<'a> {
                 self.operand_tainted(o)
                     || self.operand_is_float(o) || self.operand_float_tainted(o)
             }
-            Rvalue::Bin(_, a, b) => {
+            // Float arithmetic and comparison are encoded in the SMT
+            // FloatingPoint theory, so a float operand no longer implies an
+            // imprecise result. Only operators outside that encoding — and
+            // pre-existing taint — still contaminate.
+            Rvalue::Bin(op, a, b) => {
+                let float_operand = self.operand_is_float(a) || self.operand_is_float(b);
+                let modelled = float_operand && fp_binop_modelled(*op);
                 self.operand_tainted(a) || self.operand_tainted(b)
-                    || self.operand_is_float(a) || self.operand_is_float(b)
-                    || self.operand_float_tainted(a) || self.operand_float_tainted(b)
+                    || (float_operand && !modelled)
+                    || (!modelled
+                        && (self.operand_float_tainted(a) || self.operand_float_tainted(b)))
             }
             // Float cmp (FloatL/FloatG) is precisely modeled via BV totalOrder,
             // so the result is NOT tainted by float operands. Only propagate
@@ -682,6 +725,16 @@ impl<'a> ExploreCtx<'a> {
     }
 
     fn rvalue_float_tainted(&self, rv: &Rvalue) -> bool {
+        // Modelled float arithmetic produces an exactly-represented result,
+        // so it does not spread float taint.
+        if let Rvalue::Bin(op, a, b) = rv {
+            if (self.operand_is_float(a) || self.operand_is_float(b))
+                && fp_binop_modelled(*op)
+            {
+                return self.operand_float_tainted(a) && self.operand_float_tainted(b)
+                    && false;
+            }
+        }
         match rv {
             Rvalue::Use(o) | Rvalue::Neg(o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)

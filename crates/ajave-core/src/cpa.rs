@@ -111,7 +111,16 @@ pub fn successors(prog: &Program, at: &ProgramPoint) -> Vec<(Edge, ProgramPoint)
             index: at.index + 1,
         };
         let mut out = vec![(Edge::Stmt(at.block, at.index), next)];
-        if matches!(block.stmts[at.index], Stmt::Check(_)) {
+        // A call can propagate any exception its callee raises, so a handler
+        // guarding the call site is genuinely reachable. Omitting this edge
+        // makes such a handler invisible to the analysis — and because a check
+        // that is never visited is treated as vacuously safe, an obligation
+        // inside the handler would be discharged without ever being examined.
+        let throwing_call = matches!(
+            block.stmts[at.index],
+            Stmt::Assign(_, ajave_ir::Rvalue::Call { .. })
+        );
+        if matches!(block.stmts[at.index], Stmt::Check(_)) || throwing_call {
             out.extend(
                 block
                     .exceptional

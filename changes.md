@@ -2,6 +2,200 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## External-method contracts: one table, preconditions instead of vetoes (2026-08-28)
+
+Five separate places encoded "what does this JDK method do" —
+`could_throw_runtime_exception`, `pure_owner_member_may_throw`,
+`str_call_can_throw`, `PURE_OWNERS`/`CallModel`, and the field-abstraction
+clobber sets. Each was incomplete and they drifted independently, which is why
+the same unsoundness resurfaced three times in different disguises (issues #48,
+#49, and the `PURE_OWNERS` call-erasure below).
+
+**One `Contract` table now, in `ajave-models`:**
+
+```rust
+pub struct Contract { requires: &'static [Precondition], effect: Effect }
+pub enum Precondition {
+    NonNull(u8), IndexInRange{index,seq}, RangeInBounds{start,end,seq},
+    NonNegative(u8), NonZero(u8), NonEmpty, Unexpressible,
+}
+```
+
+Everything derives from it: totality is `requires.is_empty()`, the lifter seeds
+`Check` obligations from preconditions, the verdict guard stands down only where
+those obligations carry the burden, and the field abstraction reads `effect`.
+
+**The key idea is naming *why* a method throws rather than flagging *that* it
+might.** `s.contains(t)` raises NPE exactly when `t` is null. Flagging it
+may-throw forces UNKNOWN on every program that calls it; seeding `NonNull(1)`
+lets the existing nullness analysis discharge it. Conditions we cannot state
+(`IllegalFormatException`, overflow in `addExact`) map to `Unexpressible` and
+still block — which is the honest answer, not a gap.
+
+Measured on NRE: **835 → 967**, 0 wrong. securibench 1 → 49 correct-TRUE,
+jbmc-regression 80 → 98. Those are the same answers the pre-refund build gave,
+but now backed by discharged obligations rather than by the call having silently
+vanished from the analysis.
+
+### The invariant that made it safe
+
+`Precondition::is_seeded()` states which kinds the lifter actually emits, and
+the verdict guard trusts *that*, not "expressible". Getting this wrong is not
+theoretical: an intermediate version let the guard skip `IndexInRange` while the
+lifter still ignored it, and three wrong TRUEs appeared in `ajave-benchmarks`
+within a minute. The predicate and the seeding loop are adjacent and
+cross-referenced for that reason.
+
+Seeding also had to be hoisted *above* the `CallModel` dispatch: `new
+StringBuilder(-1)` throws, but StringBuilder takes the `StrCall` path and would
+otherwise skip the check — the same "call disappears down one branch" shape as
+the `PURE_OWNERS` bug.
+
+### Supporting changes
+
+- **Collection size**: `$$coll_size` as an ordinary synthetic field (`add`
+  bumps it, `size()` reads it), so `list.get(i)` carries a real `0 <= i < size`
+  obligation the interval domain can discharge. Deliberately expressed in terms
+  the analysis already understands rather than as a new domain.
+- **Effect-aware clobbering**: a callee without a body no longer discards every
+  tracked field when its contract says `Effect::Pure`. Precision *and*
+  performance — fewer invalidations means tighter states and faster convergence.
+- **Devirtualised interface calls**: `ObjectFactory.createObject()` is declared
+  on an interface with no body, but resolves to a benchmark implementation; it
+  no longer counts as unanalysable.
+- **NRA witness substantiation**: NRA published violations assigning
+  `nondetDouble` in methods that read no nondet input at all. Replay refuted
+  them, but a refuted violation still blocks the TRUE another engine proved.
+  An Under engine may now only publish witnesses naming inputs the program
+  actually reads.
+
+## IEEE-754 float comparisons (2026-08-28)
+
+The SMT layer had no floating-point theory: floats were bitvectors and
+comparisons used `bveq`/`bvslt` on raw IEEE-754 bit patterns, which gets NaN
+and signed zero wrong (NaN compares equal to itself; -0.0 differs from 0.0).
+A `float_tainted` set existed to suppress the resulting garbage.
+
+Added `Sort::Fp(32|64)` and the FPA operations, with `dcmpl`/`dcmpg` encoded via
+`fp.eq`/`fp.lt`/`fp.isNaN` including the NaN asymmetry the two instructions
+exist to express.
+
+**Arithmetic deliberately stays on the bitvector path.** Encoding it in FPA is
+more faithful but measured ~2.5x slower end-to-end (smoke 874s -> 2194s), which
+pushed transcendental benchmarks past the timeout and lost more than the
+precision gained. Comparisons are where bitvectors are *wrong* rather than
+merely imprecise, and they cost nothing. The infrastructure is in place if the
+performance picture changes.
+
+## Soundness fixes found by our own benchmark suite (2026-08-28)
+
+`ajave-benchmarks/` (see below) found six wrong TRUEs the SV-COMP corpus never
+surfaced, in three distinct classes:
+
+1. **Modelled calls dropped exceptions.** `math_call_modelled` claimed
+   `addExact` and encoded it as a plain bitvector add — the exact thing
+   `addExact` exists to detect. Modelling a *value* is not licence to assume
+   totality (#49).
+2. **`PURE_OWNERS` erased throwing calls entirely.** `System.arraycopy` and
+   `Integer.valueOf(String)` classified as `Pure`, which makes the lifter
+   rewrite the call to a `Havoc` — so no engine ever saw a call, and neither the
+   allowlist nor any guard could fire. The call simply vanished from the IR.
+3. **TRUE by vacuity.** With no obligation seeded, the blackboard held *zero*
+   obligations and the verdict was TRUE before any engine ran. The CLI now
+   refuses a no-runtime-exception TRUE when a reachable call has unmodelled
+   exception behaviour.
+
+## Our own benchmark suite: `ajave-benchmarks/` (2026-08-28)
+
+57 benchmarks / 81 property instances across 13 categories, in SV-COMP task
+format so existing tooling works unchanged. Each isolates **one** JVM semantic
+rule or engine capability, so a wrong answer names the broken feature instead of
+reporting that some large program changed verdict.
+
+Categories: `jvm-integers` (overflow wraparound, `MIN_VALUE / -1`, shift
+masking, narrowing casts), `jvm-floats` (NaN, signed zero, non-associativity),
+`jvm-null`, `jvm-arrays`, `jvm-exceptions`, `jvm-types`, `jvm-boxing`,
+`jvm-strings`, `jdk-contracts`, `engine-ai`, `engine-bmc`, `engine-recursion`,
+`witness`. Both TRUE and FALSE variants where meaningful — a one-sided suite
+rewards a tool that always answers one way.
+
+**Ground truth is verified, not asserted.** `tools/validate_own_benchmarks.py`
+compiles and runs each benchmark on a real JVM: deterministic ones are fully
+checked, nondeterministic ones checked for contradictions over many runs (one
+execution can neither confirm a FALSE nor establish a TRUE). A wrong
+`expected_verdict` would be worse than no benchmark at all.
+
+This is the independent signal issue #47 called for: every other measurement we
+have comes from the corpus we also score on.
+
+## AI: array lengths, bitwise ops, real widening, and an exceptional-edge soundness fix (2026-08-27)
+
+Motivated by measurement rather than intuition. Bucketing the *open* obligations on every
+benchmark we answer UNKNOWN showed NRE unknowns are 90.6% `NullDeref` and 7.4% `ArrayBounds`,
+while 76% of valid-assert unknowns have **no open obligations at all** — they are violations
+found but rejected by JVM witness replay. A second survey counting heap usage *per method*
+(the granularity engines bail at, and the only honest one: a whole-program count flags ~100%
+of tasks because every benchmark has `main(String[])` and every enum a synthetic `$values()`)
+found 64% of obligation-bearing methods use no heap ops, 29% only fields, and just 7% need
+array theory. That killed the plan to build array theory first.
+
+1. **Array-length tracking.** `IState` gains `array_lens: VarId -> Interval`, seeded at
+   `NewArray` (met with `[0, MAX]`, since a negative length throws rather than allocating)
+   and propagated through copy chains, with full `leq`/`join`/widening support. A JVM array's
+   length is immutable after allocation, so this is ordinary constant propagation. Also added
+   the `Interval::meet` the domain was missing.
+
+2. **Bitwise `&`/`|`/`^` on intervals.** This was the actual blocker for array bounds: javac
+   lowers `idx >= 0 && idx < len` to a *bitwise* `&` of two 0/1 values, and `eval_rvalue`
+   returned Top for it, so no constant-index bounds check could ever be discharged. Exact on
+   `{0,1}` operands; sound bounds for non-negative ranges; Top when either side may be
+   negative, where the two's-complement result is not interval-representable.
+
+3. **Widening that actually widens.** `WideningIntervalCpa` never overrode `merge`, so it ran
+   with the default `merge_sep` — purely path-sensitive, no widening. Both `widen_state`
+   and `widen_state_thresholded` were dead code and `widen_delay`/`join_counts` were never
+   read; the earlier float-loop gain came from the float *domain*, not from widening. It now
+   joins at loop headers and switches to threshold widening after `widen_delay` joins.
+   Subtlety: `merge` must return `Sep` once the result adds nothing, because the driver skips
+   its `stop` check whenever a merge fires — returning `Joined` unconditionally re-enqueues
+   forever. The two CPAs were also unified: `WideningIntervalCpa` now holds a `base:
+   IntervalCpa` and delegates `initial`/`transfer`, inheriting the nullness and array-length
+   tracking its own copy lacked (which is why it had been safe only for float bodies).
+   `ai.rs` runs the precise CPA first and retries under widening only when it reports
+   incomplete, so bodies that already converge keep their sharper bounds.
+
+4. **Exceptional edges from calls (soundness).** `successors()` emitted exceptional edges only
+   from `Stmt::Check` positions and `Terminator::Throw`, so a call propagating an exception
+   from its callee produced no edge and any handler reachable only that way was invisible.
+   Because `discharge_obligations` treats a never-visited check as vacuously safe, obligations
+   inside such handlers were silently discharged. The bug was masked because those methods
+   returned `complete=false` and were skipped; making widening work exposed it as two wrong
+   TRUEs on `*-MemUnsat01`, where the assertion sits in a `catch` guarding a throwing call.
+   Calls now emit exceptional edges — well-founded, since a call genuinely can throw, unlike
+   the `Assign`/`Assume` positions the original restriction was guarding against.
+
+Net effect: MinePump NRE goes from 0/64 solved to TRUE. Removing the unsoundness costs one
+previously-correct smoke answer, which is the right trade.
+
+## Cross-engine improvements: return-nullness summaries + NRE-safe expansion (2026-08-26)
+
+Three improvements across the engine portfolio:
+
+1. **Interprocedural return-nullness summaries**: `analyze_return_nullness()` scans method bodies
+   to identify methods that always return non-null (via New, string constants, non-null params,
+   non-null field loads, or non-null static loads). The interval AI now recognizes Call results
+   from such methods as `NonNull`, enabling NullDeref discharge for patterns like
+   `p.getEnv().isMethaneLevelCritical()` where `getEnv()` returns `this.env` (a constructor-initialized field).
+
+2. **Expanded NRE-safe call list**: added Enum, Collection/Map/List, Iterator, Stack/Queue,
+   and Scanner methods to `could_throw_runtime_exception()`. These don't throw RuntimeException
+   and were blocking NRE discharge when havoced.
+
+3. **BMC concrete witness validation (attempted and reverted)**: tried using the concrete engine
+   to pre-validate BMC witnesses before publishing. Too many false rejections — the concrete
+   engine doesn't model virtual dispatch, float bit ops, or JDK methods precisely enough.
+   The JVM replay certifier remains the authoritative validator.
+
 ## NRE completeness: inlined-call havoc flag fix + getstatic nullness (2026-08-26)
 
 Two fixes that together yield **+246 NRE points** (551→797) with 0 wrong answers:

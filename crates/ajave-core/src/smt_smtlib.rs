@@ -73,6 +73,8 @@ impl SmtLib {
             Sort::Array { idx: 32, elem: 32 } => "(Array (_ BitVec 32) (_ BitVec 32))",
             Sort::Array { idx: 32, elem: 64 } => "(Array (_ BitVec 32) (_ BitVec 64))",
             Sort::StrArray => "(Array (_ BitVec 32) String)",
+            Sort::Fp(32) => "Float32",
+            Sort::Fp(64) => "Float64",
             _ => "", // fallback handled below
         }
     }
@@ -84,6 +86,9 @@ impl SmtLib {
         }
         match s {
             Sort::Bv(w) => format!("(_ BitVec {w})"),
+            Sort::Fp(w) => format!("(_ FloatingPoint {} {})",
+                                   if w == 32 { 8 } else { 11 },
+                                   if w == 32 { 24 } else { 53 }),
             Sort::Array { idx, elem } => {
                 format!("(Array (_ BitVec {idx}) (_ BitVec {elem}))")
             }
@@ -102,6 +107,54 @@ impl SmtLib {
             self.send(&format!("(define-const {name} {sort_s} {expr})"));
         }
         self.alloc(name, sort)
+    }
+
+
+    /// FP arithmetic carrying the round-nearest-even mode Java mandates.
+    fn fp_binop_rne(&mut self, op: &str, a: Term, b: Term) -> Term {
+        let sort = self.sort(a);
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        let bn = self.name(b);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!(
+            "(define-const {name} {sort_s} ({op} RNE {an} {bn}))"
+        ));
+        self.alloc(name, sort)
+    }
+
+    fn unop_same_sort(&mut self, op: &str, a: Term) -> Term {
+        let sort = self.sort(a);
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!("(define-const {name} {sort_s} ({op} {an}))"));
+        self.alloc(name, sort)
+    }
+
+    fn unop_bool(&mut self, op: &str, a: Term) -> Term {
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        self.send(&format!("(define-const {name} Bool ({op} {an}))"));
+        self.alloc(name, Sort::Bool)
+    }
+
+    /// Apply an indexed conversion operator, optionally with a rounding mode.
+    fn convert(&mut self, op: &str, a: Term, to: Sort, rounded: bool) -> Term {
+        let id = self.next_id;
+        let name = format!("t_{id}");
+        let an = self.name(a);
+        let sort_s = Self::sort_str_dynamic(to);
+        let inner = if rounded {
+            format!("({op} RNE {an})")
+        } else {
+            format!("({op} {an})")
+        };
+        self.send(&format!("(define-const {name} {sort_s} {inner})"));
+        self.alloc(name, to)
     }
 
     fn binop(&mut self, op: &str, a: Term, b: Term) -> Term {
@@ -294,6 +347,120 @@ impl Solver for SmtLib {
         let lo_w = match self.sort(lo) { Sort::Bv(w) => w, _ => 32 };
         let expr = format!("(concat {hn} {ln})");
         self.define_term("t", &expr, Sort::Bv(hi_w + lo_w))
+    }
+
+
+    // ── IEEE-754 floating point ─────────────────────────────────────────
+
+    fn fresh_fp(&mut self, name: &str, width: u32) -> Term {
+        let sort = Sort::Fp(width);
+        let sname = format!("{name}_{}", self.next_id);
+        let sort_s = Self::sort_str_dynamic(sort);
+        self.send(&format!("(declare-const {sname} {sort_s})"));
+        self.alloc(sname, sort)
+    }
+
+    fn fp_const(&mut self, value: f64, width: u32) -> Term {
+        let sort = Sort::Fp(width);
+        // Emit the exact bit pattern rather than a decimal literal: decimal
+        // text would be re-rounded by the solver and need not denote the same
+        // float the JVM had.
+        let name = if value.is_nan() {
+            format!("(_ NaN {} {})", if width == 32 { 8 } else { 11 },
+                    if width == 32 { 24 } else { 53 })
+        } else if value.is_infinite() {
+            let kind = if value > 0.0 { "+oo" } else { "-oo" };
+            format!("(_ {kind} {} {})", if width == 32 { 8 } else { 11 },
+                    if width == 32 { 24 } else { 53 })
+        } else if width == 32 {
+            let bits = (value as f32).to_bits();
+            format!("((_ to_fp 8 24) #x{bits:08x})")
+        } else {
+            let bits = value.to_bits();
+            format!("((_ to_fp 11 53) #x{bits:016x})")
+        };
+        self.alloc(name, sort)
+    }
+
+    fn fp_add(&mut self, a: Term, b: Term) -> Term {
+        self.fp_binop_rne("fp.add", a, b)
+    }
+    fn fp_sub(&mut self, a: Term, b: Term) -> Term {
+        self.fp_binop_rne("fp.sub", a, b)
+    }
+    fn fp_mul(&mut self, a: Term, b: Term) -> Term {
+        self.fp_binop_rne("fp.mul", a, b)
+    }
+    fn fp_div(&mut self, a: Term, b: Term) -> Term {
+        self.fp_binop_rne("fp.div", a, b)
+    }
+    fn fp_rem(&mut self, a: Term, b: Term) -> Term {
+        // fp.rem takes no rounding mode.
+        self.binop("fp.rem", a, b)
+    }
+    fn fp_neg(&mut self, a: Term) -> Term {
+        self.unop_same_sort("fp.neg", a)
+    }
+    fn fp_abs(&mut self, a: Term) -> Term {
+        self.unop_same_sort("fp.abs", a)
+    }
+
+    fn fp_eq(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("fp.eq", a, b)
+    }
+    fn fp_lt(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("fp.lt", a, b)
+    }
+    fn fp_le(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("fp.leq", a, b)
+    }
+    fn fp_gt(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("fp.gt", a, b)
+    }
+    fn fp_ge(&mut self, a: Term, b: Term) -> Term {
+        self.binop_bool("fp.geq", a, b)
+    }
+    fn fp_is_nan(&mut self, a: Term) -> Term {
+        self.unop_bool("fp.isNaN", a)
+    }
+    fn fp_is_infinite(&mut self, a: Term) -> Term {
+        self.unop_bool("fp.isInfinite", a)
+    }
+
+    fn fp_from_bits(&mut self, bits: Term, width: u32) -> Term {
+        let (e, m) = if width == 32 { (8, 24) } else { (11, 53) };
+        self.convert(&format!("(_ to_fp {e} {m})"), bits, Sort::Fp(width), false)
+    }
+
+    fn fp_to_bits(&mut self, f: Term, width: u32) -> Term {
+        // SMT-LIB has no direct float-to-bits, so introduce a fresh bitvector
+        // and tie it to the float by the inverse conversion. Sound: the
+        // constraint pins it to exactly one value, except for NaN where any
+        // NaN payload satisfies it — which matches `doubleToRawLongBits`
+        // being unspecified across NaN payloads.
+        let (e, m) = if width == 32 { (8, 24) } else { (11, 53) };
+        let bv = self.fresh_bv("fpbits", width);
+        let bvn = self.name(bv);
+        let fname = self.name(f);
+        self.send(&format!(
+            "(assert (or (fp.isNaN {fname}) (= ((_ to_fp {e} {m}) {bvn}) {fname})))"
+        ));
+        bv
+    }
+
+    fn fp_convert(&mut self, f: Term, to_width: u32) -> Term {
+        let (e, m) = if to_width == 32 { (8, 24) } else { (11, 53) };
+        self.convert(&format!("(_ to_fp {e} {m})"), f, Sort::Fp(to_width), true)
+    }
+
+    fn sbv_to_fp(&mut self, bv: Term, width: u32) -> Term {
+        let (e, m) = if width == 32 { (8, 24) } else { (11, 53) };
+        self.convert(&format!("(_ to_fp {e} {m})"), bv, Sort::Fp(width), true)
+    }
+
+    fn fp_to_sbv(&mut self, f: Term, width: u32) -> Term {
+        // Java narrowing from float to int truncates toward zero (JLS 5.1.3).
+        self.convert(&format!("(_ fp.to_sbv {width})"), f, Sort::Bv(width), true)
     }
 
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term {

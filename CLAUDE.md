@@ -27,6 +27,76 @@ Format: `("category", "sv-benchmarks/path/to.yml", "EXPECTED_VERDICT"),`
 - Every wrong-answer fix MUST add a canary test.
 - The smoke test must pass before full scoring. Do not skip it.
 
+## Modelling External Code (JDK) — MANDATORY
+
+Any claim that an unmodelled library method is "safe" is a **soundness
+commitment**, not a heuristic. `could_throw_runtime_exception()` returning
+`false` lets the BMC treat a havoced call as non-throwing, claim
+`all_paths_complete`, and discharge NRE obligations as TRUE. A wrong entry is a
+wrong TRUE (−16), not a precision loss.
+
+Issue #48 found 22 wrongly-allowlisted methods that had accumulated because the
+list was grown until the benchmark corpus passed. The rules below exist to stop
+that recurring.
+
+### Rules for allowlisting library behaviour
+1. **Key on the full `(class, name, desc)` signature.** Never on `(class, name)`.
+   `Integer.valueOf(int)` is total; `Integer.valueOf(String)` throws
+   `NumberFormatException`. `StringBuilder()` is total; `StringBuilder(int)`
+   throws `NegativeArraySizeException`. Descriptor-blind matching cannot see
+   the difference.
+2. **Never allowlist an entire class.** `Math`, `Arrays`, `Collections` and
+   `StrictMath` all look total but contain throwing members (`addExact`,
+   `copyOfRange`, `max` on an empty collection).
+3. **Never allowlist a partial function.** `List.get`, `Iterator.next`,
+   `Stack.pop/peek` throw on out-of-range or empty receivers — that *is* their
+   specified contract.
+4. **Match class names exactly.** A substring test on `"Verifier"` also matches
+   a user class called `MyVerifierHelper`.
+5. **Justify from the contract, never from observed benchmark behaviour.** The
+   question is "does the Javadoc/JLS guarantee this cannot throw for *any*
+   input", not "did anything fail when I added it".
+6. **Argument nullability counts.** `String.concat/contains/startsWith` and
+   `TreeMap.put` throw NPE on null arguments.
+7. **When in doubt, leave it out.** Omission costs precision; a wrong entry
+   costs correctness.
+
+### Required evidence
+Adding or changing an entry requires **both**:
+- a case in the Rust tests in `smt_bmc/explore.rs` (`jdk_allowlist_tests`), which
+  assert against `is_total_jdk_method` directly, and
+- a probe in `tools/validate_jdk_allowlist.py`, which establishes ground truth by
+  running the signature on a real JVM with adversarial arguments (empty
+  receivers, out-of-range indices, nulls, overflow boundaries).
+
+Do not validate an allowlist by scraping Rust source text — a source-text check
+cannot distinguish overloads and will silently pass the very bug it is meant to
+catch.
+
+The same standard applies to `is_nonnull_static()` in `interval.rs`: only
+`static final` fields with non-null initialisers qualify. `System.out`/`err`/`in`
+do **not** — they are mutable via `System.setOut(null)`.
+
+## Guarding Against Benchmark Overfitting
+
+Every entry above was added while looking at `sv-benchmarks/`, which is also
+what we score on. Treat any tuning that references benchmark outcomes as
+suspect:
+
+- **Fitted constants are not results.** `MAX_FORKS`, `MAX_LOOP_UNROLL`,
+  `MAX_CALL_DEPTH`, `widen_delay` and friends were chosen by raising them until
+  specific benchmarks passed. Record when you do this, and re-check that the
+  score is not sensitive to the exact value.
+- **A score improvement with no soundness argument is a red flag.** If you
+  cannot state why the change is correct on programs you have never seen, it is
+  overfitting.
+- **Prefer engine-independent evidence.** Tests that exercise real JVM
+  behaviour (`tools/validate_jdk_allowlist.py`) generalise; benchmark canaries
+  do not.
+
+See issue #47 for the planned metamorphic-testing harness, held-out split, and
+constant-sensitivity sweep.
+
 ## Design Rules
 - **No hardcoded nondet patterns in concrete engine.** Single all-zero probe only. Finding specific input values is the SMT engine's job.
 - **No hardcoded witness values anywhere.** Engines must discover witness values through formal reasoning (SMT solving, abstract interpretation, symbolic execution), never by embedding benchmark-specific constants (e.g. known trigger strings). If an engine cannot construct a witness through its own analysis, it must not publish a violation.

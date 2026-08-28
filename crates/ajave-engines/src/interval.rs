@@ -109,6 +109,17 @@ impl Interval {
     fn leq(self, o: Interval) -> bool {
         self.is_bottom() || (!o.is_bottom() && o.lo <= self.lo && self.hi <= o.hi)
     }
+    /// Greatest lower bound: the tightest interval contained in both. Yields
+    /// a bottom interval (`lo > hi`) when the two do not overlap.
+    pub fn meet(self, o: Interval) -> Interval {
+        if self.is_bottom() || o.is_bottom() {
+            return Interval { lo: 1, hi: 0 };
+        }
+        Interval {
+            lo: self.lo.max(o.lo),
+            hi: self.hi.min(o.hi),
+        }
+    }
 
     /// Narrow both operands of `a OP b` given the comparison holds. Returns
     /// `None` for operator/type combinations we don't bother narrowing --
@@ -544,6 +555,26 @@ pub struct IState {
     pub float_vars: BTreeMap<VarId, FloatInterval>,
     /// Nullness tracking for reference variables. Missing = Unknown.
     pub nullness: BTreeMap<VarId, Nullness>,
+    /// Length of the array a reference variable points at. Missing = Top.
+    ///
+    /// Seeded at `NewArray` from the allocation length and propagated through
+    /// copies. A JVM array's length is immutable after allocation, so once a
+    /// variable is known to hold an array of length `n`, every `arraylength`
+    /// on it yields `n` — which is what discharges the constant-index
+    /// `ArrayBounds` checks javac emits for array initialisers.
+    pub array_lens: BTreeMap<VarId, Interval>,
+    /// Value of a field, abstracted **flatly**: one cell per `(class, name)`,
+    /// with the receiving instance ignored. Missing = Top.
+    ///
+    /// Merging every instance of a field into one cell is an over-approximation,
+    /// which is what an Over-direction engine needs, and it is exact whenever a
+    /// class has a single live instance — the common shape in this benchmark
+    /// set. Writes are therefore only allowed to be *strong* (replacing the
+    /// cell) when the receiver is provably unique; otherwise they are *weak*
+    /// (joined into it). See `FieldPrec` for how that is decided.
+    pub fields: BTreeMap<FieldKey, Interval>,
+    /// Nullness of the same flat field cells. Missing = Unknown.
+    pub field_null: BTreeMap<FieldKey, Nullness>,
 }
 
 impl IState {
@@ -557,6 +588,49 @@ impl IState {
             self.vars.remove(&v);
         } else {
             self.vars.insert(v, i);
+        }
+    }
+    pub fn get_array_len(&self, v: VarId) -> Interval {
+        self.array_lens.get(&v).copied().unwrap_or_else(Interval::top)
+    }
+    pub fn get_field(&self, f: &FieldKey) -> Interval {
+        self.fields.get(f).copied().unwrap_or_else(Interval::top)
+    }
+    fn set_field(&mut self, f: &FieldKey, i: Interval, strong: bool) {
+        // A weak update cannot claim the cell now holds only the new value —
+        // some other instance may still hold the old one — so it joins instead.
+        let v = if strong { i } else { self.get_field(f).join(i) };
+        if v == Interval::top() {
+            self.fields.remove(f);
+        } else {
+            self.fields.insert(f.clone(), v);
+        }
+    }
+    pub fn get_field_null(&self, f: &FieldKey) -> Nullness {
+        self.field_null.get(f).copied().unwrap_or(Nullness::Unknown)
+    }
+    fn set_field_null(&mut self, f: &FieldKey, n: Nullness, strong: bool) {
+        let v = if strong { n } else { self.get_field_null(f).join(n) };
+        if v == Nullness::Unknown {
+            self.field_null.remove(f);
+        } else {
+            self.field_null.insert(f.clone(), v);
+        }
+    }
+    /// Drop everything we know about the given field cells. Used when a call
+    /// may have written them: our analysis is intra-procedural, so anything a
+    /// callee touches has to fall back to Top.
+    fn invalidate_fields(&mut self, fs: &std::collections::HashSet<FieldKey>) {
+        for f in fs {
+            self.fields.remove(f);
+            self.field_null.remove(f);
+        }
+    }
+    fn set_array_len(&mut self, v: VarId, i: Interval) {
+        if i == Interval::top() {
+            self.array_lens.remove(&v);
+        } else {
+            self.array_lens.insert(v, i);
         }
     }
     pub fn get_float(&self, v: VarId) -> FloatInterval {
@@ -631,6 +705,23 @@ impl IState {
         match rv {
             Rvalue::Use(o) => self.eval_operand(o),
             Rvalue::Neg(o) => self.eval_operand(o).neg(),
+            // An array's length is fixed at allocation, so reading it back
+            // yields whatever we recorded for that reference. A JVM array
+            // length is also never negative, which is enough on its own to
+            // discharge the `idx >= 0` half of a bounds check.
+            Rvalue::ArrayLength(Operand::Var(a)) => {
+                let known = self.get_array_len(*a);
+                if known == Interval::top() {
+                    Interval { lo: 0, hi: i32::MAX as i64 }
+                } else {
+                    known
+                }
+            }
+            Rvalue::ArrayLength(_) => Interval { lo: 0, hi: i32::MAX as i64 },
+            // Flat field cells. Absent reads as Top, so this is sound even
+            // when field tracking is disabled or the cell was invalidated.
+            Rvalue::GetField { field, .. } => self.get_field(field),
+            Rvalue::GetStatic(fk) => self.get_field(fk),
             Rvalue::Cmp(kind, a, b) => {
                 match kind {
                     CmpKind::FloatL | CmpKind::FloatG => {
@@ -684,6 +775,10 @@ impl IState {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         eval_comparison(*op, ia, ib)
                     }
+                    // javac compiles `a && b` over comparison results into a
+                    // bitwise `&` of two 0/1 values, so a bounds check like
+                    // `idx >= 0 & idx < len` is unprovable without this.
+                    BinOp::And | BinOp::Or | BinOp::Xor => eval_bitwise(*op, ia, ib),
                     _ => Interval::top(),
                 }
             }
@@ -726,6 +821,57 @@ impl IState {
     }
 }
 
+/// Abstract `&`, `|` and `^` on intervals.
+///
+/// Exact when both operands are confined to `{0,1}` — which is the case that
+/// matters, since javac lowers `&&`/`||` over comparison results to bitwise ops
+/// on 0/1 values. Outside that range we fall back to bounds that hold for any
+/// non-negative operands, and to Top when either side may be negative (the
+/// two's-complement result is not interval-representable there).
+fn eval_bitwise(op: BinOp, a: Interval, b: Interval) -> Interval {
+    if a.is_bottom() || b.is_bottom() {
+        return Interval { lo: 1, hi: 0 };
+    }
+    let boolean = |i: Interval| i.lo >= 0 && i.hi <= 1;
+    if boolean(a) && boolean(b) {
+        // Both in {0,1}: evaluate pointwise over the (at most four) pairs.
+        let mut lo = i64::MAX;
+        let mut hi = i64::MIN;
+        for x in a.lo..=a.hi {
+            for y in b.lo..=b.hi {
+                let r = match op {
+                    BinOp::And => x & y,
+                    BinOp::Or => x | y,
+                    _ => x ^ y,
+                };
+                lo = lo.min(r);
+                hi = hi.max(r);
+            }
+        }
+        return Interval { lo, hi };
+    }
+    if a.lo < 0 || b.lo < 0 {
+        return Interval::top();
+    }
+    // Non-negative operands: `x & y <= min(x,y)`, and `x | y` / `x ^ y` are
+    // bounded above by the next power of two covering both maxima.
+    match op {
+        BinOp::And => Interval { lo: 0, hi: a.hi.min(b.hi) },
+        BinOp::Or | BinOp::Xor => {
+            let m = a.hi.max(b.hi);
+            // Smallest all-ones mask that covers `m`.
+            let bound = if m <= 0 {
+                0
+            } else {
+                let bits = 64 - (m as u64).leading_zeros();
+                if bits >= 63 { i64::MAX } else { (1i64 << bits) - 1 }
+            };
+            Interval { lo: 0, hi: bound }
+        }
+        _ => Interval::top(),
+    }
+}
+
 fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
     if a.is_bottom() || b.is_bottom() {
         return Interval::bottom();
@@ -750,11 +896,14 @@ fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
 }
 
 /// Static fields guaranteed non-null by the JLS / JDK contract.
-fn is_nonnull_static(fk: &FieldKey) -> bool {
+pub fn is_nonnull_static(fk: &FieldKey) -> bool {
+    // NOTE: `System.out`/`err`/`in` are deliberately absent. They are not
+    // `final` — `System.setOut(null)` is legal and makes the field null — so
+    // they carry no non-null guarantee. Every entry below is `static final`
+    // with a non-null initialiser, which is what makes it safe to assume.
     matches!(
         (fk.class.as_str(), fk.name.as_str()),
-        ("java/lang/System", "out" | "err" | "in")
-            | ("java/lang/Boolean", "TRUE" | "FALSE" | "TYPE")
+        ("java/lang/Boolean", "TRUE" | "FALSE" | "TYPE")
             | ("java/lang/Integer", "TYPE")
             | ("java/lang/Long", "TYPE")
             | ("java/lang/Double", "TYPE")
@@ -776,7 +925,11 @@ impl IState {
             Rvalue::New(_) => Nullness::NonNull,
             Rvalue::NewArray { .. } => Nullness::NonNull,
             Rvalue::GetStatic(fk) if is_nonnull_static(fk) => Nullness::NonNull,
-            // Call results, field loads, array loads, etc. are Unknown.
+            // Flat field cells: an absent cell reads as Unknown, so this stays
+            // sound when tracking is off or the cell has been invalidated.
+            Rvalue::GetStatic(fk) => self.get_field_null(fk),
+            Rvalue::GetField { field, .. } => self.get_field_null(field),
+            // Call results, array loads, etc. are Unknown.
             _ => Nullness::Unknown,
         }
     }
@@ -820,6 +973,38 @@ impl Lattice for IState {
                 return false;
             }
         }
+        // Array lengths: same rule.
+        for (v, iv) in &self.array_lens {
+            if !iv.leq(other.get_array_len(*v)) {
+                return false;
+            }
+        }
+        for v in other.array_lens.keys() {
+            if !self.array_lens.contains_key(v) {
+                return false;
+            }
+        }
+        // Field cells: same rule again.
+        for (f, iv) in &self.fields {
+            if !iv.leq(other.get_field(f)) {
+                return false;
+            }
+        }
+        for f in other.fields.keys() {
+            if !self.fields.contains_key(f) {
+                return false;
+            }
+        }
+        for (f, n) in &self.field_null {
+            if !n.leq(other.get_field_null(f)) {
+                return false;
+            }
+        }
+        for f in other.field_null.keys() {
+            if !self.field_null.contains_key(f) {
+                return false;
+            }
+        }
         true
     }
     fn join(&self, other: &Self) -> Self {
@@ -850,11 +1035,41 @@ impl Lattice for IState {
                 nullness.insert(k, j);
             }
         }
+        let mut array_lens = BTreeMap::new();
+        let akeys: std::collections::BTreeSet<_> =
+            self.array_lens.keys().chain(other.array_lens.keys()).copied().collect();
+        for k in akeys {
+            let j = self.get_array_len(k).join(other.get_array_len(k));
+            if j != Interval::top() {
+                array_lens.insert(k, j);
+            }
+        }
+        let mut fields = BTreeMap::new();
+        let fkeys2: std::collections::BTreeSet<_> =
+            self.fields.keys().chain(other.fields.keys()).cloned().collect();
+        for k in fkeys2 {
+            let j = self.get_field(&k).join(other.get_field(&k));
+            if j != Interval::top() {
+                fields.insert(k, j);
+            }
+        }
+        let mut field_null = BTreeMap::new();
+        let nfkeys: std::collections::BTreeSet<_> =
+            self.field_null.keys().chain(other.field_null.keys()).cloned().collect();
+        for k in nfkeys {
+            let j = self.get_field_null(&k).join(other.get_field_null(&k));
+            if j != Nullness::Unknown {
+                field_null.insert(k, j);
+            }
+        }
         IState {
             at: self.at.clone(),
             vars,
             float_vars,
             nullness,
+            array_lens,
+            fields,
+            field_null,
         }
     }
     fn is_bottom(&self) -> bool {
@@ -915,10 +1130,68 @@ fn find_defining_cmp(body: &ajave_ir::Body, block: BlockId, v: VarId) -> Option<
 
 /// Find the statement in `body`'s block that defines `v` as `Bin(op, a, b)`,
 /// searching backward from the end of the block. This is how branch edges
+/// Which field cells may be updated strongly, and what each call clobbers.
+///
+/// The flat field abstraction keeps one cell per `(class, name)`. Replacing a
+/// cell outright (a *strong* update) is only sound when the write cannot have
+/// been to a different instance that other reads still observe. Two cases
+/// qualify:
+///
+/// * **Static fields.** There is exactly one cell in the JVM, so a write always
+///   replaces it.
+/// * **Instance fields of a class with a single allocation site**, where that
+///   site is not inside a loop. Then at most one instance ever exists, and the
+///   flat cell describes it exactly.
+///
+/// Everything else takes a weak update (join), which is sound but only ever
+/// widens what we know.
+#[derive(Default, Clone)]
+pub struct FieldPrec {
+    /// Classes proven to have at most one live instance.
+    pub singleton_classes: std::collections::HashSet<String>,
+    /// Per-method set of field cells that method, or anything it calls, writes.
+    /// A call invalidates exactly these rather than the whole field map.
+    pub writes: std::collections::HashMap<ajave_ir::MethodKey, std::collections::HashSet<FieldKey>>,
+    /// Every field written anywhere — the fallback for an unresolved callee.
+    pub all_written: std::collections::HashSet<FieldKey>,
+    /// Empty set, returned for calls proven to write nothing.
+    pub nothing: std::collections::HashSet<FieldKey>,
+}
+
+impl FieldPrec {
+    fn may_update_strongly(&self, f: &FieldKey, is_static: bool) -> bool {
+        is_static || self.singleton_classes.contains(&f.class)
+    }
+
+    /// Fields a call to `target` may write.
+    ///
+    /// A callee we have a write-summary for clobbers exactly that set. One we
+    /// do not is assumed to write everything — unless its contract declares it
+    /// pure, in which case it writes nothing and field knowledge survives the
+    /// call.
+    fn clobbered_by(&self, target: &ajave_ir::MethodKey) -> &std::collections::HashSet<FieldKey> {
+        if let Some(w) = self.writes.get(target) {
+            return w;
+        }
+        if let Some(ct) = ajave_models::contract_of(&target.class, &target.name, &target.desc) {
+            if ct.effect == ajave_models::Effect::Pure {
+                return &self.nothing;
+            }
+        }
+        &self.all_written
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct IntervalCpa {
+    /// Field-abstraction precision. Empty by default, which disables field
+    /// tracking entirely (every cell reads as Top) — always sound.
+    pub field_prec: FieldPrec,
     /// Fields known to be non-null after constructor completes.
     /// When loading such a field from a NonNull object, the result is NonNull.
     pub nonnull_fields: std::collections::HashSet<ajave_ir::FieldKey>,
+    /// Methods known to always return non-null.
+    pub nonnull_returns: std::collections::HashSet<ajave_ir::MethodKey>,
 }
 
 impl Cpa for IntervalCpa {
@@ -948,6 +1221,9 @@ impl Cpa for IntervalCpa {
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
             nullness,
+            array_lens: BTreeMap::new(),
+            fields: BTreeMap::new(),
+            field_null: BTreeMap::new(),
         }
     }
 
@@ -969,23 +1245,73 @@ impl Cpa for IntervalCpa {
             Edge::Stmt(block, idx) => {
                 match &body.block(*block).stmts[*idx] {
                     Stmt::Assign(v, rv) => {
-                        let val = next.eval_rvalue(rv);
-                        next.set(*v, val);
+                        // Float/double destinations are tracked in the float
+                        // domain; everything else in the integer domain.
+                        let is_float_var = body
+                            .vars
+                            .get(v.0 as usize)
+                            .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+                            .unwrap_or(false);
+                        // Whichever domain the destination belongs to, the other
+                        // one must be invalidated. JVM locals are reused across
+                        // types, so a slot that held an int earlier can be
+                        // reassigned as a double; leaving the stale integer
+                        // interval behind would let it narrow a value it no
+                        // longer describes, and prove an assertion that does
+                        // not hold. Removing the entry restores Top.
+                        if is_float_var {
+                            let fval = next.eval_rvalue_float(rv);
+                            next.set_float(*v, fval);
+                            next.vars.remove(v);
+                        } else {
+                            let val = next.eval_rvalue_typed(rv, &body.vars);
+                            next.set(*v, val);
+                            next.float_vars.remove(v);
+                        }
                         // Track nullness for reference-producing rvalues.
                         let mut n = next.eval_nullness(rv);
                         // Field nullness: if loading from a NonNull object and
                         // the field is known-initialized in the constructor,
                         // the result is NonNull.
                         if n == Nullness::Unknown {
-                            if let Rvalue::GetField { obj: Operand::Var(ov), field } = rv {
-                                if next.get_nullness(*ov) == Nullness::NonNull
-                                    && self.nonnull_fields.contains(field)
-                                {
-                                    n = Nullness::NonNull;
+                            match rv {
+                                Rvalue::GetField { obj: Operand::Var(ov), field } => {
+                                    if next.get_nullness(*ov) == Nullness::NonNull
+                                        && self.nonnull_fields.contains(field)
+                                    {
+                                        n = Nullness::NonNull;
+                                    }
                                 }
+                                Rvalue::Call { target, .. } => {
+                                    if self.nonnull_returns.contains(target) {
+                                        n = Nullness::NonNull;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         next.set_nullness(*v, n);
+                        // Track the length of the array this var now refers to.
+                        // `NewArray` fixes it; a copy carries it along. Anything
+                        // else leaves it Top, which is sound.
+                        let len = match rv {
+                            Rvalue::NewArray { len, .. } => {
+                                // A negative length throws NegativeArraySizeException
+                                // rather than producing an array, so on the paths
+                                // that survive the length is non-negative.
+                                next.eval_operand(len).meet(Interval { lo: 0, hi: i32::MAX as i64 })
+                            }
+                            Rvalue::Use(Operand::Var(src)) => next.get_array_len(*src),
+                            _ => Interval::top(),
+                        };
+                        next.set_array_len(*v, len);
+
+                        // A call may write fields, so anything it can reach has
+                        // to drop back to Top before we continue.
+                        if let Rvalue::Call { target, .. } = rv {
+                            let clobbered = self.field_prec.clobbered_by(target).clone();
+                            next.invalidate_fields(&clobbered);
+                        }
                     }
                     Stmt::Assume(op) => {
                         let iv = next.eval_operand(op);
@@ -993,8 +1319,22 @@ impl Cpa for IntervalCpa {
                             return vec![]; // infeasible: assume(false) prunes the path.
                         }
                     }
-                    // PutStatic/PutField/ArrayStore: no locals affected, and we
-                    // don't model heap state in this domain -- nothing to do.
+                    Stmt::PutStatic(fk, val) => {
+                        // Exactly one cell exists per static field, so this
+                        // always replaces what was there.
+                        let iv = next.eval_operand(val);
+                        next.set_field(fk, iv, true);
+                        let n = next.operand_nullness(val);
+                        next.set_field_null(fk, n, true);
+                    }
+                    Stmt::PutField { field, val, .. } => {
+                        let strong = self.field_prec.may_update_strongly(field, false);
+                        let iv = next.eval_operand(val);
+                        next.set_field(field, iv, strong);
+                        let n = next.operand_nullness(val);
+                        next.set_field_null(field, n, strong);
+                    }
+                    // ArrayStore: element values are not modelled (only lengths).
                     _ => {}
                 }
                 vec![next]
@@ -1037,6 +1377,9 @@ impl Cpa for IntervalCpa {
                                 }
                             }
                         }
+                        // Float narrowing through the Cmp chain javac emits
+                        // for float comparisons.
+                        narrow_float_through_cmp(&mut next, body, *block, eff_op, a, b);
                     }
                 }
                 // Exceptional-edge narrowing: the handler is reachable only
@@ -1098,6 +1441,10 @@ impl Cpa for IntervalCpa {
 /// An interval CPA that joins at loop headers with widening, enabling fixpoint
 /// computation over unbounded float loops. Handles both int and float variables.
 pub struct WideningIntervalCpa {
+    /// Abstract transfer is identical to the non-widening CPA — including
+    /// nullness and array-length tracking. Only `merge` differs, so we
+    /// delegate rather than maintain a second copy that can drift.
+    pub base: IntervalCpa,
     /// Blocks that are targets of back-edges (loop headers).
     pub loop_headers: HashSet<BlockId>,
     /// Float constants from comparisons in the body — used as widening thresholds.
@@ -1115,6 +1462,11 @@ impl WideningIntervalCpa {
     /// Detect loop headers: any block targeted by a back-edge (target.0 <= source.0).
     /// Detect loop headers and extract widening thresholds from the body.
     pub fn from_body(body: &ajave_ir::Body) -> Self {
+        Self::from_body_with(body, IntervalCpa::default())
+    }
+
+    /// Same, but carrying the interprocedural nullness facts the plain CPA uses.
+    pub fn from_body_with(body: &ajave_ir::Body, base: IntervalCpa) -> Self {
         let mut headers = HashSet::new();
         for block in &body.blocks {
             let succs: Vec<BlockId> = match &block.term {
@@ -1198,6 +1550,7 @@ impl WideningIntervalCpa {
         int_thresholds.dedup();
 
         WideningIntervalCpa {
+            base,
             loop_headers: headers,
             float_thresholds,
             int_thresholds,
@@ -1245,11 +1598,46 @@ impl WideningIntervalCpa {
                 nullness.insert(k, j);
             }
         }
+        // Array lengths are widened like any other interval: an allocation
+        // inside a loop can have a length that grows each iteration, so join
+        // alone would not be guaranteed to stabilise.
+        let mut array_lens = BTreeMap::new();
+        let akeys: std::collections::BTreeSet<_> =
+            old.array_lens.keys().chain(new.array_lens.keys()).copied().collect();
+        for k in akeys {
+            let w = Interval::widen_thresholded(
+                old.get_array_len(k), new.get_array_len(k), int_thresh,
+            );
+            if w != Interval::top() {
+                array_lens.insert(k, w);
+            }
+        }
+        let mut fields = BTreeMap::new();
+        let ffk: std::collections::BTreeSet<_> =
+            old.fields.keys().chain(new.fields.keys()).cloned().collect();
+        for k in ffk {
+            let w = Interval::widen_thresholded(old.get_field(&k), new.get_field(&k), int_thresh);
+            if w != Interval::top() {
+                fields.insert(k, w);
+            }
+        }
+        let mut field_null = BTreeMap::new();
+        let fnk: std::collections::BTreeSet<_> =
+            old.field_null.keys().chain(new.field_null.keys()).cloned().collect();
+        for k in fnk {
+            let j = old.get_field_null(&k).join(new.get_field_null(&k));
+            if j != Nullness::Unknown {
+                field_null.insert(k, j);
+            }
+        }
         IState {
             at: old.at.clone(),
             vars,
             float_vars,
             nullness,
+            array_lens,
+            fields,
+            field_null,
         }
     }
 
@@ -1287,11 +1675,41 @@ impl WideningIntervalCpa {
                 nullness.insert(k, j);
             }
         }
+        let mut array_lens = BTreeMap::new();
+        let akeys: std::collections::BTreeSet<_> =
+            old.array_lens.keys().chain(new.array_lens.keys()).copied().collect();
+        for k in akeys {
+            let w = Interval::widen(old.get_array_len(k), new.get_array_len(k));
+            if w != Interval::top() {
+                array_lens.insert(k, w);
+            }
+        }
+        let mut fields = BTreeMap::new();
+        let ffk: std::collections::BTreeSet<_> =
+            old.fields.keys().chain(new.fields.keys()).cloned().collect();
+        for k in ffk {
+            let w = Interval::widen(old.get_field(&k), new.get_field(&k));
+            if w != Interval::top() {
+                fields.insert(k, w);
+            }
+        }
+        let mut field_null = BTreeMap::new();
+        let fnk: std::collections::BTreeSet<_> =
+            old.field_null.keys().chain(new.field_null.keys()).cloned().collect();
+        for k in fnk {
+            let j = old.get_field_null(&k).join(new.get_field_null(&k));
+            if j != Nullness::Unknown {
+                field_null.insert(k, j);
+            }
+        }
         IState {
             at: old.at.clone(),
             vars,
             float_vars,
             nullness,
+            array_lens,
+            fields,
+            field_null,
         }
     }
 }
@@ -1396,13 +1814,8 @@ impl Cpa for WideningIntervalCpa {
     type State = IState;
     type Prec = ();
 
-    fn initial(&self, _prog: &Program, at: &ProgramPoint) -> IState {
-        IState {
-            at: at.clone(),
-            vars: BTreeMap::new(),
-            float_vars: BTreeMap::new(),
-            nullness: BTreeMap::new(),
-        }
+    fn initial(&self, prog: &Program, at: &ProgramPoint) -> IState {
+        self.base.initial(prog, at)
     }
 
     fn transfer(
@@ -1411,80 +1824,57 @@ impl Cpa for WideningIntervalCpa {
         prog: &Program,
         edge: &Edge,
         to: &ProgramPoint,
-        _prec: &(),
+        prec: &(),
     ) -> Vec<IState> {
-        let Some(body) = prog.body(&to.method) else {
-            return vec![];
-        };
-        let mut next = state.clone();
-        next.at = to.clone();
-
-        match edge {
-            Edge::Stmt(block, idx) => {
-                match &body.block(*block).stmts[*idx] {
-                    Stmt::Assign(v, rv) => {
-                        // Determine if the target variable is float-typed.
-                        let is_float_var = body
-                            .vars
-                            .get(v.0 as usize)
-                            .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
-                            .unwrap_or(false);
-                        if is_float_var {
-                            let fval = next.eval_rvalue_float(rv);
-                            next.set_float(*v, fval);
-                        } else {
-                            let val = next.eval_rvalue_typed(rv, &body.vars);
-                            next.set(*v, val);
-                        }
-                    }
-                    Stmt::Assume(op) => {
-                        let iv = next.eval_operand(op);
-                        if iv.definitely_zero() {
-                            return vec![];
-                        }
-                    }
-                    _ => {}
-                }
-                vec![next]
-            }
-            Edge::Term(block, taken, _) => {
-                if let (
-                    Some(is_then),
-                    ajave_ir::Terminator::Branch {
-                        cond: Operand::Var(cv),
-                        ..
-                    },
-                ) = (taken, &body.block(*block).term)
-                {
-                    if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
-                        let eff_op = if *is_then { op } else { negate_binop(op) };
-                        // Integer narrowing.
-                        let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
-                        if let Some((na, nb)) = Interval::narrow(eff_op, ia, ib) {
-                            if let Operand::Var(av) = a {
-                                next.set(*av, na);
-                            }
-                            if let Operand::Var(bv) = b {
-                                next.set(*bv, nb);
-                            }
-                        }
-                        // Float narrowing through Cmp chain.
-                        narrow_float_through_cmp(&mut next, body, *block, eff_op, a, b);
-                    }
-                }
-                if next.is_bottom() {
-                    return vec![];
-                }
-                vec![next]
-            }
-            Edge::Exit(_) => vec![next],
-        }
+        self.base.transfer(state, prog, edge, to, prec)
     }
 
-    // Uses default merge_sep and stop_sep: path-sensitive, no widening.
-    // The float domain extends the standard interval analysis with f64 bounds.
-    // Convergence relies on the state cap (same as the original IntervalCpa for
-    // non-loop bodies). For float-loop bodies, the state count is bounded by
-    // the number of discrete float values that appear (typically small for
-    // these benchmarks: x grows by constant steps and is bounded by guards).
+    /// Join-then-widen at loop headers.
+    ///
+    /// Without this the CPA is purely path-sensitive and a loop whose trip
+    /// count is not statically known never converges — it just exhausts the
+    /// state cap and reports the analysis incomplete, which forfeits the
+    /// proof. Joining at the header collapses the per-iteration states into
+    /// one; widening after `widen_delay` joins forces that sequence to
+    /// stabilise in finite time.
+    ///
+    /// Widening is applied only after a delay so that loops which do converge
+    /// on their own keep their precise bounds; the delay costs iterations,
+    /// never soundness, because both join and widen are upper bounds on the
+    /// states they replace.
+    fn merge(
+        &self,
+        new: &IState,
+        reached: &IState,
+        _prec: &(),
+    ) -> MergeResult<IState> {
+        if new.at != reached.at || !self.loop_headers.contains(&new.at.block) {
+            return MergeResult::Sep;
+        }
+
+        let count = {
+            let mut counts = self.join_counts.borrow_mut();
+            let c = counts.entry(new.at.block).or_insert(0);
+            *c += 1;
+            *c
+        };
+
+        let combined = if count > self.widen_delay {
+            Self::widen_state_thresholded(
+                reached, new, &self.float_thresholds, &self.int_thresholds,
+            )
+        } else {
+            reached.join(new)
+        };
+
+        // Returning `Joined` unconditionally would re-enqueue the state
+        // forever, since the driver skips its `stop` check whenever a merge
+        // fires. Report `Sep` once the result adds nothing to what we already
+        // reached and let `stop` subsume it instead.
+        if combined.leq(reached) {
+            MergeResult::Sep
+        } else {
+            MergeResult::Joined(combined)
+        }
+    }
 }

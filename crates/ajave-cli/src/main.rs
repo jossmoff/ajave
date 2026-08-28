@@ -530,6 +530,34 @@ fn main() {
         verdict
     };
 
+    // The same reasoning for library calls whose exceptions we do not model.
+    // `Math.addExact` throws on overflow and `"abc".charAt(5)` throws on a bad
+    // index, but neither produces a `Check` in the IR — so the blackboard can
+    // hold *zero* obligations and the verdict becomes TRUE by vacuity, without
+    // any engine having reasoned about the program at all. Claiming "no
+    // runtime exception" then asserts something we never examined.
+    let verdict = if verdict == verdict::Verdict::True && !assertion_only {
+        let offender = prog.reachable_from_entry().into_iter().find_map(|k| {
+            prog.body(&k).and_then(|b| {
+                ajave_engines::first_unmodelled_throwing_call(&prog, b)
+                    .map(|t| (k.clone(), t.clone()))
+            })
+        });
+        match offender {
+            Some((k, call)) => {
+                eprintln!(
+                    "downgrading TRUE to UNKNOWN: {k} calls {}.{}{} whose exception \
+                     behaviour is not modelled",
+                    call.class, call.name, call.desc
+                );
+                verdict::Verdict::Unknown
+            }
+            None => verdict,
+        }
+    } else {
+        verdict
+    };
+
     // Emit witness file when the verdict is FALSE and --witness was given.
     if verdict == verdict::Verdict::False {
         if let Some(witness_path) = &cli.witness {

@@ -81,6 +81,32 @@ impl Engine for NraEngine {
 
             match solve_nra_with_timeout(prog, &oref.method, oref.id, Duration::from_secs(8)) {
                 NraResult::Sat(witness) => {
+                    // A violation is only a violation if it names inputs the
+                    // program actually reads. NRA was producing witnesses that
+                    // assign e.g. `nondetDouble` in methods containing no
+                    // nondet call at all — the JVM replay refutes those, but a
+                    // refuted violation still blocks the TRUE another engine
+                    // legitimately proved, turning a correct answer into
+                    // UNKNOWN. Publishing only substantiated witnesses keeps
+                    // this Under engine from vetoing sound results.
+                    // Count across every reachable method, not just this one:
+                    // the NRA encoding is interprocedural, so the inputs a
+                    // witness names may be read in a callee.
+                    let nondet_reads: usize = prog
+                        .reachable_from_entry()
+                        .iter()
+                        .filter_map(|k| prog.body(k))
+                        .map(count_nondet_reads)
+                        .sum();
+                    if nondet_reads == 0 && !witness.entries.is_empty() {
+                        debug!(
+                            "nra: discarding violation for {} — witness assigns {} input(s) \
+                             but the method reads none",
+                            oref,
+                            witness.entries.len()
+                        );
+                        continue;
+                    }
                     info!("nra: found violation for {}", oref);
                     debug!("nra: witness seq={:?} entries={:?}", witness.nondet_sequence, witness.entries);
                     let published = bb.publish(
@@ -828,4 +854,21 @@ fn real_to_witness(ty: Ty, value: f64) -> (NondetValue, &'static str, i64) {
             value as i64,
         ),
     }
+}
+
+/// How many nondeterministic inputs does this body read?
+///
+/// Used to reject a "violation" whose witness assigns values the program never
+/// consumes: such a witness cannot be replayed, and an unreplayable violation
+/// costs us the TRUE that another engine proved.
+fn count_nondet_reads(body: &ajave_ir::Body) -> usize {
+    let mut n = 0;
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::Nondet(..)) = stmt {
+                n += 1;
+            }
+        }
+    }
+    n
 }

@@ -171,8 +171,33 @@ TESTS = [
 
     # CEGAR wrong TRUE: predicate abstraction unsound with havoced heap ops.
     # These were wrongly TRUE when CEGAR's body_uses_havoced_ops guard was removed.
+    # They also guard the exceptional-edge fix in cpa.rs `successors()`: their
+    # assertion sits in a `catch` reachable only by an exception propagating out
+    # of a call. With no exceptional edge from call positions the check is never
+    # visited, and `discharge_obligations` reads a never-visited check as
+    # vacuously safe — which produced a wrong TRUE once AI widening made these
+    # methods report a complete analysis.
     ("canary", "sv-benchmarks/algorithms/BellmanFord-MemUnsat01.yml", "FALSE"),
     ("canary", "sv-benchmarks/algorithms/InsertionSort-MemUnsat01.yml", "FALSE"),
+
+    # JVM slot reuse across the int/float domains. A local that held an int can
+    # be reassigned as a double; if the interval domain writes only the float
+    # side and leaves the stale integer interval in place, it narrows a value it
+    # no longer describes and wrongly proves the assertion. These three were
+    # wrong TRUEs when IntervalCpa became float-aware without clearing the
+    # other domain.
+    ("canary", "sv-benchmarks/autostub/Byte_public_double_java_lang_Byte_doubleValue.yml", "FALSE"),
+    ("canary", "sv-benchmarks/autostub/Integer_public_double_java_lang_Integer_doubleValue.yml", "FALSE"),
+    ("canary", "sv-benchmarks/autostub/Short_public_double_java_lang_Short_doubleValue.yml", "FALSE"),
+
+    # AI array-length tracking + interval bitwise ops. javac lowers
+    # `idx >= 0 && idx < len` to a bitwise `&` of two 0/1 values, so both the
+    # array-length propagation and `eval_bitwise` are needed to discharge the
+    # constant-index ArrayBounds checks in a synthetic enum `$values()`.
+    # AI int-loop widening: MinePump's `randomSequenceOfActions` only converges
+    # under the widening retry, and the enum bounds checks only under the above.
+    ("ai-widen", "sv-benchmarks/MinePump/spec1-5_product14.yml", "TRUE", "no-runtime-exception"),
+    ("ai-widen", "sv-benchmarks/MinePump/spec1-5_product1.yml", "TRUE", "no-runtime-exception"),
 
     # Float taint + JVM slot reuse: bvmul on IEEE 754 doubles is garbage.
     # VarInfo type can be wrong when locals are reused (int→double).

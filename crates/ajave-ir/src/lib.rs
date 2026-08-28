@@ -174,7 +174,10 @@ impl fmt::Display for MethodKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// `Ord` is derived so field keys can index a `BTreeMap` — the interval
+/// domain keys its flat field cells by one, and needs the deterministic
+/// iteration order a sorted map gives for lattice comparison.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FieldKey {
     pub class: String,
     pub name: String,
