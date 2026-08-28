@@ -837,7 +837,73 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                         }
                     }
                 }
-                models::Precondition::NonEmpty | models::Precondition::Unexpressible => {}
+                models::Precondition::NoOverflow { a, b, op, width } => {
+                    // Overflow is only observable at a wider type: at the
+                    // original width the arithmetic silently wraps, which is
+                    // exactly what `Math.addExact` exists to detect. Widen to
+                    // long, compute there, and require the result to fit back
+                    // into 32 bits. (A 64-bit `addExact` has no wider type
+                    // available, so it stays unseeded and keeps blocking.)
+                    if *width == 32 {
+                        if let (Some(x), Some(y)) = (
+                            all.get(*a as usize).cloned(),
+                            all.get(*b as usize).cloned(),
+                        ) {
+                            let xw = self.assign(Ty::Long, Rvalue::Cast(Ty::Long, Ty::Int, x));
+                            let yw = self.assign(Ty::Long, Rvalue::Cast(Ty::Long, Ty::Int, y));
+                            let r = self.assign(Ty::Long, Rvalue::Bin(*op, xw, yw));
+                            let lo = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(
+                                    BinOp::Ge,
+                                    r.clone(),
+                                    Operand::Const(Const::Long(i32::MIN as i64)),
+                                ),
+                            );
+                            let hi = self.assign(
+                                Ty::Int,
+                                Rvalue::Bin(
+                                    BinOp::Le,
+                                    r,
+                                    Operand::Const(Const::Long(i32::MAX as i64)),
+                                ),
+                            );
+                            let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
+                            let id = self.lifter.obligation(
+                                ObligationKind::DivByZero, ok, self.insn.off as u16,
+                            );
+                            self.stmts.push(Stmt::Check(id));
+                        }
+                    }
+                }
+                models::Precondition::NonEmpty => {
+                    // The receiver is at index 0. Emptiness is expressible now
+                    // that element counts live in `$$coll_size`, so `next()` on
+                    // an exhausted iterator becomes a checkable obligation
+                    // rather than an unanalysable call.
+                    if let Some(recv) = all.first().cloned() {
+                        let n = self.assign(
+                            Ty::Int,
+                            Rvalue::GetField { obj: recv, field: Self::coll_size_field() },
+                        );
+                        let ok = self.assign(
+                            Ty::Int,
+                            Rvalue::Bin(BinOp::Gt, n, Operand::Const(Const::Int(0))),
+                        );
+                        // `ExplicitThrow` rather than `ArrayBounds`: an empty
+                        // receiver raises `NoSuchElementException` or
+                        // `EmptyStackException`, and replay accepts the whole
+                        // RuntimeException family for that kind. Using a
+                        // bounds kind here would make replay demand an index
+                        // exception the JVM never throws, refuting a witness
+                        // that is actually correct.
+                        let id = self.lifter.obligation(
+                            ObligationKind::ExplicitThrow, ok, self.insn.off as u16,
+                        );
+                        self.stmts.push(Stmt::Check(id));
+                    }
+                }
+                models::Precondition::Unexpressible => {}
             }
         }
     }

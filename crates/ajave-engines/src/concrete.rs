@@ -56,7 +56,7 @@ impl Value {
 }
 
 /// Outcome of running one concrete path to completion.
-enum Outcome {
+pub(crate) enum Outcome {
     /// Ran to a `Return` with nothing amiss.
     Clean,
     /// Ran to a `Return` carrying a value.
@@ -807,7 +807,7 @@ impl<'a> ConcreteState<'a> {
 
 /// Run the body once against a fully-predetermined sequence of nondet
 /// choices. Choices beyond what's provided fall back to `0`.
-fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
+pub(crate) fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut state = ConcreteState::new(prog, choices, step_budget);
     state.run_body(body, HashMap::new())
 }

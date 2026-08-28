@@ -509,7 +509,35 @@ fn main() {
         if cli.no_replay || confirmed_witness.is_some() {
             verdict::Verdict::False
         } else if !violations.is_empty() {
-            verdict::Verdict::Unknown
+            // Every violation was refuted on a real JVM. The claim is
+            // withdrawn — but that is a statement about the *witness*, not
+            // about the program, and the blackboard may still hold a proof
+            // from an over-approximating engine that never depended on it.
+            //
+            // Falling straight to UNKNOWN discards that proof. It is how the
+            // whole float-nonlinear-calculation category was being lost: NRA
+            // solves over the reals, so its counterexamples routinely fail to
+            // reproduce under IEEE-754, and each refuted candidate was vetoing
+            // a TRUE the AI had legitimately established.
+            //
+            // Recomputing the verdict with the refuted violations excluded
+            // asks the right question: with no surviving counterexample, is
+            // every obligation discharged?
+            let refuted: Vec<ajave_core::artifact::ObligationRef> =
+                violations.iter().map(|v| v.obligation_ref.clone()).collect();
+            match orchestrator.bb.verdict_excluding(&refuted) {
+                verdict::Verdict::True => {
+                    if cli.trace {
+                        eprintln!(
+                            "all {} violation(s) refuted by replay; \
+                             remaining obligations are discharged",
+                            violations.len()
+                        );
+                    }
+                    verdict::Verdict::True
+                }
+                _ => verdict::Verdict::Unknown,
+            }
         } else {
             verdict
         }

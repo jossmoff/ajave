@@ -107,6 +107,30 @@ impl Engine for NraEngine {
                         );
                         continue;
                     }
+
+                    // NRA solves over the reals; Java computes in IEEE-754.
+                    // A real-valued counterexample need not be a float
+                    // counterexample — rounding can leave the assertion
+                    // holding at the nearest representable double — so a SAT
+                    // model here is a *candidate*, not a violation.
+                    //
+                    // Publishing it anyway is not merely imprecise: replay
+                    // refutes it, and the refuted violation then blocks the
+                    // TRUE that another engine legitimately proved. That is
+                    // how every expected-TRUE benchmark in
+                    // float-nonlinear-calculation was being lost.
+                    //
+                    // Requiring the witness to survive the JVM keeps NRA's
+                    // genuine falsifications (it still finds real bugs) while
+                    // removing its ability to veto sound proofs.
+                    if !witness_survives_jvm(prog, &oref.method, &witness) {
+                        debug!(
+                            "nra: discarding violation for {} — real-valued model does \
+                             not reproduce under IEEE-754",
+                            oref
+                        );
+                        continue;
+                    }
                     info!("nra: found violation for {}", oref);
                     debug!("nra: witness seq={:?} entries={:?}", witness.nondet_sequence, witness.entries);
                     let published = bb.publish(
@@ -871,4 +895,27 @@ fn count_nondet_reads(body: &ajave_ir::Body) -> usize {
         }
     }
     n
+}
+
+/// Does this witness actually reproduce the violation under IEEE-754?
+///
+/// NRA models Java's doubles as mathematical reals. That is what lets cvc5
+/// reason about `sin`, `exp` and friends at all, but it means a SAT model is a
+/// counterexample *over the reals* — and rounding to the nearest double can
+/// leave the assertion holding. Publishing such a model as a violation loses
+/// the benchmark twice over: replay refutes it, and the refuted violation then
+/// blocks the TRUE another engine proved.
+///
+/// Re-running the witness concretely, where arithmetic is genuine `f64`,
+/// separates the two cases. An inconclusive run counts as "does not survive":
+/// the concrete interpreter does not model everything, and NRA is an Under
+/// engine, so declining to publish costs precision rather than soundness.
+fn witness_survives_jvm(prog: &Program, method: &MethodKey, witness: &Witness) -> bool {
+    let Some(body) = prog.body(method) else {
+        return false;
+    };
+    matches!(
+        crate::concrete::run_with_choices(prog, body, &witness.nondet_sequence, 200_000),
+        crate::concrete::Outcome::Violated { .. } | crate::concrete::Outcome::Threw(_)
+    )
 }

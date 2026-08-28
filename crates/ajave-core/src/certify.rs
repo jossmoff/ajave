@@ -209,11 +209,54 @@ impl Certifier for JvmReplay {
         };
 
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let expected = match ob.kind {
-            ObligationKind::Assertion => "AssertionError",
-            _ => ajave_models::exception_class(ob.kind)
-                .and_then(|c| c.rsplit('/').next())
-                .unwrap_or("Exception"),
+
+        // Which exception names count as confirming this obligation?
+        //
+        // Demanding the single class `exception_class` predicts is too strict,
+        // and refuses witnesses that crash the JVM exactly as intended:
+        //
+        //  * `String.charAt(i)` out of range throws
+        //    `StringIndexOutOfBoundsException`, not `ArrayIndexOutOfBounds` —
+        //    and the contract-seeded bounds checks use the `ArrayBounds` kind
+        //    for both.
+        //  * `ExplicitThrow` is seeded for any `athrow` of a known
+        //    RuntimeException subclass, so the program raises
+        //    `IllegalStateException` or `IllegalArgumentException` while we
+        //    predicted the literal name `RuntimeException`.
+        //
+        // For the runtime-exception property what matters is that *some*
+        // uncaught RuntimeException escaped `main`, which is precisely the
+        // property under test. Accepting the family rather than one member
+        // keeps that faithful while staying strict for assertions, where
+        // `AssertionError` is the only correct outcome.
+        let accepted: &[&str] = match ob.kind {
+            ObligationKind::Assertion => &["AssertionError"],
+            ObligationKind::ArrayBounds => &[
+                "ArrayIndexOutOfBoundsException",
+                "StringIndexOutOfBoundsException",
+                "IndexOutOfBoundsException",
+            ],
+            ObligationKind::NullDeref => &["NullPointerException"],
+            ObligationKind::DivByZero => &["ArithmeticException"],
+            ObligationKind::NegArraySize => &[
+                "NegativeArraySizeException",
+                // `new StringBuilder(-1)` reports this instead.
+                "IllegalArgumentException",
+            ],
+            ObligationKind::ClassCast => &["ClassCastException"],
+            // Any RuntimeException subclass the program chose to raise.
+            ObligationKind::ExplicitThrow => &[
+                "RuntimeException",
+                "IllegalStateException",
+                "IllegalArgumentException",
+                "UnsupportedOperationException",
+                "NoSuchElementException",
+                "ConcurrentModificationException",
+                "NumberFormatException",
+                "ArithmeticException",
+                "IndexOutOfBoundsException",
+                "NullPointerException",
+            ],
         };
 
         // A halted-via-assume run exits 1 with no exception text -- that is
@@ -221,7 +264,9 @@ impl Certifier for JvmReplay {
         // failing, and it means this witness didn't actually reach the bug
         // (a stale trace, or an interpreter/JVM divergence). Refuted, not
         // Inconclusive: we have a definite answer, and it disagrees with us.
-        let result = if !out.status.success() && stderr.contains(expected) {
+        let result = if !out.status.success()
+            && accepted.iter().any(|e| stderr.contains(e))
+        {
             CertResult::Confirmed
         } else {
             CertResult::Refuted

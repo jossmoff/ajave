@@ -112,8 +112,9 @@ def run_one(arg):
 
 
 def main():
-    prop = sys.argv[1] if len(sys.argv) > 1 else "assert"
+    arg = sys.argv[1] if len(sys.argv) > 1 else "both"
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+    props = ["assert", "no-runtime-exception"] if arg == "both" else [arg]
 
     by_cat = defaultdict(list)
     for t in find_all_tasks():
@@ -122,42 +123,60 @@ def main():
     for cat, ts in by_cat.items():
         sample.extend(ts[:limit])
 
-    print(f"property={prop}  sampling {len(sample)} tasks")
-    print("keeping only expected-FALSE tasks we downgraded to UNKNOWN\n")
+    print(f"sampling {len(sample)} tasks per property: {', '.join(props)}")
+    print("keeping only expected-FALSE tasks we downgraded to UNKNOWN")
+    print("(only those are recoverable — where the expected verdict is TRUE,")
+    print(" replay was correctly rejecting a spurious violation)\n")
 
-    buckets = Counter()
-    per_cat = defaultdict(Counter)
-    methods = Counter()
-    examples = defaultdict(list)
+    grand = Counter()
+    for prop in props:
+        buckets = Counter()
+        per_cat = defaultdict(Counter)
+        methods = Counter()
+        examples = defaultdict(list)
 
-    with ProcessPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(run_one, (t, prop, 60)) for t in sample]
-        for f in as_completed(futs):
-            res = f.result()
-            if res is None:
-                continue
-            yml, bucket, ms = res
-            buckets[bucket] += 1
-            per_cat[category_of(yml)][bucket] += 1
-            methods.update(ms)
-            if len(examples[bucket]) < 4:
-                examples[bucket].append(os.path.basename(yml))
+        with ProcessPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(run_one, (t, prop, 60)) for t in sample]
+            for f in as_completed(futs):
+                res = f.result()
+                if res is None:
+                    continue
+                yml, bucket, ms = res
+                buckets[bucket] += 1
+                per_cat[category_of(yml)][bucket] += 1
+                methods.update(ms)
+                if len(examples[bucket]) < 4:
+                    examples[bucket].append(os.path.basename(yml))
 
-    total = sum(buckets.values()) or 1
-    print(f"Downgraded FALSE->UNKNOWN: {sum(buckets.values())} tasks\n")
-    print("By witness shape:")
-    for b, n in buckets.most_common():
-        print(f"  {b:<12s} {n:4d}  ({100*n/total:4.1f}%)   e.g. {', '.join(examples[b][:3])}")
+        total = sum(buckets.values()) or 1
+        print("=" * 70)
+        print(f"  {prop}")
+        print("=" * 70)
+        print(f"Downgraded FALSE->UNKNOWN: {sum(buckets.values())} tasks\n")
+        print("By witness shape:")
+        for b, n in buckets.most_common():
+            print(f"  {b:<12s} {n:4d}  ({100*n/total:4.1f}%)   e.g. {', '.join(examples[b][:3])}")
+            grand[f"{prop}:{b}"] += n
 
-    print("\nBy category:")
-    for cat in sorted(per_cat):
-        top = ", ".join(f"{k}={v}" for k, v in per_cat[cat].most_common())
-        print(f"  {cat:<40s} {top}")
+        print("\nBy category:")
+        for cat in sorted(per_cat):
+            top = ", ".join(f"{k}={v}" for k, v in per_cat[cat].most_common())
+            print(f"  {cat:<40s} {top}")
 
-    if methods:
-        print("\nNondet methods appearing in failing witnesses:")
-        for m, n in methods.most_common(12):
-            print(f"  {m:<28s} {n:5d}")
+        if methods:
+            print("\nNondet methods appearing in failing witnesses:")
+            for m, n in methods.most_common(12):
+                print(f"  {m:<28s} {n:5d}")
+        print()
+
+    if len(props) > 1:
+        print("=" * 70)
+        print("  COMBINED — recoverable points by witness shape")
+        print("=" * 70)
+        # valid-assert FALSE scores +1, no-runtime-exception FALSE scores +1.
+        for k, n in grand.most_common():
+            print(f"  {k:<40s} {n:4d} tasks  (~{n} pts)")
+        print(f"\n  TOTAL recoverable: {sum(grand.values())} tasks")
 
 
 if __name__ == "__main__":

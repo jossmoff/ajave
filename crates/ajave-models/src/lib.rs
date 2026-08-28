@@ -61,6 +61,14 @@ pub enum Precondition {
     /// The receiver must be non-empty, else `NoSuchElementException` or
     /// `EmptyStackException`.
     NonEmpty,
+    /// `arg[a] OP arg[b]` must not overflow the given width, else
+    /// `ArithmeticException` — the `Math.*Exact` family.
+    ///
+    /// Expressible after all: the check is `(long)a OP (long)b` staying inside
+    /// the 32-bit range, which the BMC encodes directly. Leaving it
+    /// `Unexpressible` blocked the TRUE *and* prevented anything finding the
+    /// FALSE, so such tasks were unanswerable in both directions.
+    NoOverflow { a: u8, b: u8, op: ajave_ir::BinOp, width: u8 },
     /// The method can throw for a reason we cannot express as a condition over
     /// the call's arguments — a malformed format string, an overflow check, a
     /// comparator contract. Presence of this blocks a no-runtime-exception
@@ -83,6 +91,8 @@ impl Precondition {
                 | Precondition::NonZero(_)
                 | Precondition::IndexInRange { .. }
                 | Precondition::RangeInBounds { .. }
+                | Precondition::NoOverflow { .. }
+                | Precondition::NonEmpty
         )
     }
 }
@@ -240,11 +250,26 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
 
         // ── Math ────────────────────────────────────────────────────────
         ("java/lang/Math" | "java/lang/StrictMath", n) => {
-            if matches!(n,
-                "addExact" | "subtractExact" | "multiplyExact" | "incrementExact"
-                    | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
+            if matches!(n, "addExact" | "subtractExact" | "multiplyExact") {
+                // Overflow is expressible: widen both operands and check the
+                // result stays in range.
+                let width = if desc.starts_with("(JJ)") { 64 } else { 32 };
+                let op = match n {
+                    "addExact" => ajave_ir::BinOp::Add,
+                    "subtractExact" => ajave_ir::BinOp::Sub,
+                    _ => ajave_ir::BinOp::Mul,
+                };
+                return Some(Contract {
+                    requires: Box::leak(Box::new([Precondition::NoOverflow {
+                        a: 0, b: 1, op, width,
+                    }])),
+                    effect: Effect::Pure,
+                });
+            } else if matches!(n,
+                "incrementExact" | "decrementExact" | "negateExact" | "absExact"
+                    | "toIntExact"
             ) {
-                // Overflow is a property of the result, not of a tracked input.
+                // Single-operand overflow; not seeded yet.
                 Contract { requires: OPAQUE, effect: Effect::Pure }
             } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
                 Contract { requires: &[Precondition::NonZero(2)], effect: Effect::Pure }
@@ -268,6 +293,24 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // ── Enum ────────────────────────────────────────────────────────
         ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
             Contract::TOTAL
+        }
+
+        // `next()` on an exhausted iterator throws NoSuchElementException,
+        // and `hasNext()` is total. We model an iterator as its collection, so
+        // emptiness is `$$coll_size == 0`.
+        ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => {
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
+        }
+        ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") => {
+            Contract::TOTAL
+        }
+        // Stack/Deque removal on an empty receiver throws.
+        ("java/util/Stack", "pop" | "peek") => {
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
+        }
+        ("java/util/ArrayDeque" | "java/util/LinkedList",
+            "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast") => {
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
         }
 
         // ── Collections ─────────────────────────────────────────────────

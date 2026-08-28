@@ -392,7 +392,11 @@ impl Engine for SmtBmc {
         // no longer prevents discharging obligation B.
         if !ctx.exhausted && ctx.budget_left() {
             if ctx.completeness.all_paths_complete {
-                let open_list = bb.open();
+                // Include obligations whose only status is an unconfirmed
+                // violation: an exhaustive exploration that found nothing is
+                // real evidence, and it should not be discarded merely because
+                // an under-approximating engine published a candidate first.
+                let open_list = bb.open_or_unconfirmed();
                 log::trace!("smt-bmc: per-obligation discharge check: entry={entry:?}, inlined={:?}, open={:?}, skipped={:?}, violated={:?}",
                     ctx.inlined_methods, open_list, ctx.skipped_obligations, violated_oids);
                 let assertion_only = bb.is_assertion_only();

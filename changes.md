@@ -2,6 +2,120 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## Witness replay: accept the exception family, not one predicted name (2026-08-28)
+
+`JvmReplay` confirmed a violation only when the JVM's stderr contained the
+single exception class `exception_class()` predicts from the obligation kind.
+That is stricter than the property being checked, and it refused witnesses that
+crashed the JVM exactly as intended:
+
+- `String.charAt(i)` out of range throws `StringIndexOutOfBoundsException`, but
+  the contract-seeded bounds checks use the `ArrayBounds` kind — which demanded
+  `ArrayIndexOutOfBoundsException`.
+- `ExplicitThrow` is seeded for any `athrow` of a RuntimeException subclass, so
+  programs raise `IllegalStateException` or `NoSuchElementException` while the
+  check demanded the literal name `RuntimeException`.
+
+For the no-runtime-exception property, what matters is that *some* uncaught
+RuntimeException escaped `main` — that is the property. Replay now accepts the
+family per obligation kind, and stays strict for assertions where
+`AssertionError` is the only correct outcome.
+
+This also decides how a new precondition should pick its obligation kind: the
+kind determines what replay will accept, so `NonEmpty` is seeded as
+`ExplicitThrow` rather than `ArrayBounds`, because an exhausted iterator raises
+`NoSuchElementException` and a bounds kind would make replay demand an index
+exception the JVM never throws.
+
+## More expressible preconditions (2026-08-28)
+
+Two conditions previously marked `Unexpressible` turned out to be statable, and
+marking them so was costing answers in *both* directions — the guard blocked
+TRUE while nothing could construct the FALSE, leaving the task unanswerable.
+
+- **`NoOverflow { a, b, op, width }`** for `Math.addExact`/`subtractExact`/
+  `multiplyExact`. Overflow is only observable at a wider type: at the original
+  width the arithmetic silently wraps, which is precisely what these methods
+  exist to detect. The lifter widens both operands to `long`, computes there,
+  and requires the result to fit in 32 bits. (The 64-bit overloads have no wider
+  type available and stay unseeded.)
+- **`NonEmpty`** for `Iterator.next`, `Stack.pop/peek` and the Deque removal
+  methods, now that element counts are tracked in `$$coll_size`. Emptiness is
+  `$$coll_size == 0`, so an exhausted iterator becomes a checkable obligation
+  rather than an unanalysable call.
+
+Own benchmark suite: 65/81 -> 69/81 (85.2%), 0 wrong.
+
+## Verdict resolution: an unconfirmed violation must not veto a proof (2026-08-28)
+
+**Architectural change to the blackboard's status model.** Worth reading before
+touching `publish`, `open`, or the verdict computation.
+
+### The bug
+
+The blackboard held exactly one `Status` per obligation, and `is_final()` made
+the first one stick. Whichever engine published first therefore won outright.
+
+That is wrong for a portfolio containing engines in both directions. An
+under-approximating engine's `Violated` is a **candidate**: it carries a witness
+which JVM replay may refute. An over-approximating engine's `Discharged` is a
+**proof**. Letting an unrefuted candidate erase a proof — purely because it
+arrived earlier in the engine order — is an ordering artifact, not a soundness
+rule.
+
+Concretely, this cost the entire `float-nonlinear-calculation` valid-assert
+category. NRA solves over the reals so cvc5 can handle `sin`/`exp`; Java
+computes in IEEE-754. A real-valued counterexample routinely fails to reproduce
+once rounded to the nearest double, so NRA's violations were refuted at replay —
+but by then they had already:
+
+1. removed the obligation from `bb.open()`, so the BMC never considered it, even
+   though it had explored the same body exhaustively and found **zero**
+   violations with `all_paths_complete: true`; and
+2. forced the final verdict to UNKNOWN, since a refuted violation fell straight
+   through to UNKNOWN without asking what else was known.
+
+Symptom: 0 correct-TRUE and 66 unknown on valid-assert, against 83 correct on
+no-runtime-exception for the *same benchmarks*. That asymmetry is what exposed
+it — the engines could prove no exception escapes but not the assertions.
+
+### The change
+
+Three pieces, each independently sound:
+
+- **`Blackboard::proved_safe`** — a set recording every `Discharged`, kept even
+  when a `Violated` occupies `statuses` for the same obligation. The two are not
+  contradictory until the violation is confirmed.
+- **`Blackboard::open_or_unconfirmed()`** — obligations that are open *or* hold
+  only an unconfirmed violation. The BMC's per-obligation discharge loop uses
+  this, so an exhaustive exploration is not silently skipped because an Under
+  engine published first.
+- **`Blackboard::verdict_excluding(refuted)`** — recomputes the verdict with
+  replay-refuted violations withdrawn. Returns TRUE only when every *remaining*
+  obligation is discharged and every excluded one was independently proved safe,
+  so a refuted violation on an otherwise-unproven obligation still yields
+  UNKNOWN.
+
+The soundness argument is unchanged in the direction that matters: a violation
+that survives replay is still final, `Direction::Under` still cannot discharge,
+and `Direction::Over` still cannot violate. What is removed is the ability of an
+*unconfirmed* claim to suppress evidence.
+
+### Not the fixes that were tried first
+
+Two earlier attempts are worth recording as dead ends:
+
+- **Gating NRA on whether its witness survives concrete re-execution.** Sound in
+  principle, useless in practice: our concrete interpreter mismodels the same
+  transcendentals, so it agreed with NRA and the filter passed everything. A
+  filter that shares the bug it is filtering cannot work.
+- **Falling back to `verdict_excluding` alone.** Correct but insufficient — the
+  obligation had no independent discharge to fall back *to*, because the BMC had
+  already been excluded from considering it. The `open_or_unconfirmed` change is
+  what made the fallback have something to find.
+
+Own benchmark suite: 63/81 -> 65/81, 0 wrong.
+
 ## External-method contracts: one table, preconditions instead of vetoes (2026-08-28)
 
 Five separate places encoded "what does this JDK method do" —
