@@ -370,6 +370,23 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
             Contract::TOTAL
         }
 
+        // ── Threads ─────────────────────────────────────────────────────
+        // `start()` runs the thread body, which we do not yet explore, so it
+        // must not be treated as total: claiming no runtime exception while
+        // never looking inside `run()` is a wrong TRUE. `Unexpressible` is the
+        // honest classification until the concurrency engine lands — see
+        // docs/strategies/concurrency.md.
+        //
+        // Thread was previously in PURE_OWNERS, which made the lifter erase
+        // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
+        // shape as issue #49.
+        ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => {
+            Contract { requires: OPAQUE, effect: Effect::Unknown }
+        }
+        // Queries that touch no shared state.
+        ("java/lang/Thread", "currentThread" | "getName" | "getId" | "isAlive"
+            | "isDaemon" | "getPriority") => Contract::TOTAL,
+
         // ── The nondet source ───────────────────────────────────────────
         (VERIFIER, _) => Contract::TOTAL,
 
@@ -517,7 +534,6 @@ const PURE_OWNERS: &[&str] = &[
     "java/lang/System",
     "java/lang/Class",
     "java/lang/Runtime",
-    "java/lang/Thread",
     "java/lang/Comparable",
     "java/lang/Number",
     "java/lang/Iterable",
