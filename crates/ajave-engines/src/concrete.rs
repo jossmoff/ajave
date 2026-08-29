@@ -835,6 +835,8 @@ fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)
             Witness {
                 nondet_sequence: witness,
                 entries,
+                // Sequential engine: no interleaving to record.
+                schedule: Vec::new(),
             },
         )]
     } else {

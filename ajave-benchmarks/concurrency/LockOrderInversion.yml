@@ -1,0 +1,10 @@
+format_version: "2.0"
+input_files:
+  - ../common/
+  - LockOrderInversion/
+properties:
+  # No valid-assert or no-runtime-exception property: a deadlock
+  # hangs rather than failing either. Retained for no-deadlock.prp,
+  # which SV-COMP defines but no Java category uses.
+options:
+  language: Java

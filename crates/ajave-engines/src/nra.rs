@@ -819,6 +819,8 @@ fn build_witness_from_nondets(
     NraResult::Sat(Witness {
         nondet_sequence,
         entries,
+        // Sequential engine: no interleaving to record.
+        schedule: Vec::new(),
     })
 }
 
@@ -851,6 +853,8 @@ fn build_witness_direct(
     NraResult::Sat(Witness {
         nondet_sequence,
         entries,
+        // Sequential engine: no interleaving to record.
+        schedule: Vec::new(),
     })
 }
 

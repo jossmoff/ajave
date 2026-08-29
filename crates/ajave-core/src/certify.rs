@@ -154,6 +154,25 @@ impl Certifier for JvmReplay {
         };
         let ob = body.obligation(oref.id);
 
+        // A witness that names a thread schedule cannot be certified here. We
+        // can hand a stock JVM the nondet values via system properties, but we
+        // cannot make it take a particular interleaving — so a run that fails
+        // to reproduce tells us nothing about the witness, only that we got a
+        // different schedule.
+        //
+        // Refuting on that basis would be wrong (the violation may be real),
+        // and confirming would be worse (we would not have checked it). This
+        // is genuinely Inconclusive until a schedule-aware certifier exists;
+        // see docs/strategies/concurrency.md.
+        if witness.needs_schedule() {
+            debug!(
+                "jvm-replay: {oref:?} carries a {}-slice schedule; \
+                 cannot certify without schedule control",
+                witness.schedule.len()
+            );
+            return CertResult::Inconclusive;
+        }
+
         debug!("jvm-replay: certifying violation at {oref:?}");
 
         let shadow_dir = match self.build_shadow() {

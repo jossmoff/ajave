@@ -1,0 +1,11 @@
+format_version: "2.0"
+input_files:
+  - ../common/
+  - SynchronizedCounter/
+properties:
+  - property_file: ../../properties/valid-assert.prp
+    expected_verdict: true
+  - property_file: ../../properties/no-runtime-exception.prp
+    expected_verdict: true
+options:
+  language: Java

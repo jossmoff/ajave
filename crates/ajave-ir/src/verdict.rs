@@ -83,6 +83,47 @@ pub struct NondetEntry {
     pub line: Option<u16>,
 }
 
+/// Identifies a thread within one explored execution.
+///
+/// `ThreadId(0)` is always the main thread. Ids are assigned in the order
+/// threads are started, so a schedule replays identically as long as the
+/// program's thread-creation order is deterministic — which it is for the
+/// bounded fragment we explore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ThreadId(pub u32);
+
+/// One slice of a thread schedule: run `thread` for `steps` events, then yield.
+///
+/// A "step" is one concurrency-relevant event (a shared read or write, a
+/// monitor operation, a thread lifecycle call) rather than one bytecode
+/// instruction. Counting steps at instruction granularity would make a
+/// schedule brittle against unrelated changes to lifting, and would not
+/// correspond to anything a JVM-side harness could enforce.
+///
+/// # Relationship to the SV-COMP witness formats
+///
+/// Violation witness format **2.0** — the YAML format we emit — does not define
+/// concurrency witnesses at all; the format paper states they "have not yet
+/// been defined for concurrency safety". So there is no standard shape to
+/// follow here yet.
+///
+/// Format **1.0** (GraphML) did carry them: Beyer & Friedberger (2020)
+/// annotated each automaton transition with a `threadId` and marked thread
+/// creation with `createThread`. This type is a run-length encoding of exactly
+/// that per-transition sequence — `[(T0,3),(T1,2)]` expands to
+/// `T0 T0 T0 T1 T1` — so converting either way is mechanical, and we stay
+/// alignable with whatever 2.0 eventually specifies.
+///
+/// The practical consequence: until 2.0 gains concurrency support, external
+/// validators cannot check a witness carrying a schedule. That is a second
+/// reason certification has to be our own harness rather than a third party's.
+/// See `docs/strategies/concurrency.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduleSlice {
+    pub thread: ThreadId,
+    pub steps: u32,
+}
+
 /// A violation witness: records the nondeterministic choices an execution made
 /// so they can be (a) replayed on a real JVM, and (b) emitted as a
 /// SV-COMP witness file that external validators can check.
@@ -94,6 +135,32 @@ pub struct Witness {
     /// Typed entries for witness file emission. Parallel to `nondet_sequence`
     /// but carries the original type and source location.
     pub entries: Vec<NondetEntry>,
+    /// The thread interleaving this execution took, if concurrency was
+    /// involved. Empty for every sequential witness, which is all of them
+    /// today.
+    ///
+    /// Nondeterminism in a concurrent program has two independent sources —
+    /// the input values *and* the schedule — and reproducing a failure needs
+    /// both. `nondet_sequence` alone cannot express an interleaving, so a
+    /// concurrency counterexample recorded without this field is not
+    /// replayable even in principle.
+    ///
+    /// Note the certification asymmetry this creates, spelled out in
+    /// `docs/strategies/concurrency.md`: `JvmReplay` can feed input values to a
+    /// stock JVM, but it cannot force a schedule. A witness carrying a schedule
+    /// therefore needs a different certifier, and until one exists a
+    /// concurrency FALSE is weaker evidence than every other FALSE ajave emits.
+    pub schedule: Vec<ScheduleSlice>,
+}
+
+impl Witness {
+    /// Does reproducing this witness require controlling the thread schedule?
+    ///
+    /// Used to route a witness to the right certifier: a sequential witness can
+    /// go to `JvmReplay`, a scheduled one cannot.
+    pub fn needs_schedule(&self) -> bool {
+        !self.schedule.is_empty()
+    }
 }
 
 #[cfg(test)]

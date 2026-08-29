@@ -1041,6 +1041,8 @@ impl<'a> ExploreCtx<'a> {
         Witness {
             nondet_sequence: seq,
             entries,
+            // Sequential engine: no interleaving to record.
+            schedule: Vec::new(),
         }
     }
 }

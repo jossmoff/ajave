@@ -69,6 +69,36 @@ is a live blind spot and the natural first thing to fix.
 violating `G ! uncaught(RuntimeException)` is a separate question this document
 does not settle. Being blind to the body is a gap either way.)
 
+### A third certification problem: worker-thread exceptions exit 0
+
+Measured, not assumed:
+
+```
+$ java -ea -cp . Main
+Exception in thread "Thread-0" java.lang.NullPointerException: ...
+        at Main$Boom.run(Main.java:19)
+JVM exit code: 0
+```
+
+An exception escaping a non-main thread is printed by the default handler and
+terminates only that thread. **The process still exits successfully.**
+
+`JvmReplay` confirms a violation with
+`!out.status.success() && stderr.contains(expected)` — it requires a non-zero
+exit. So even with full schedule control, a concurrency witness whose exception
+occurs in a worker thread would never be confirmed. The certifier would have to
+also parse `Exception in thread "..."` from stderr and decide whether a
+worker-thread escape counts for the property.
+
+This bit the tooling immediately: `validate_concurrency_benchmarks.py` keyed on
+exit status and reported `ThreadBodyThrows` — a program that provably throws —
+as `OKx40`. Fixed to parse stderr regardless of exit code and to record which
+thread raised, since main vs. worker is exactly what decides whether it is a
+property violation.
+
+Worth noting the benchmarks earned their keep before the engine exists, which
+is the argument for writing them first.
+
 ## What blocks the work
 
 Five things. None is optional; nothing above them is buildable.
@@ -92,14 +122,44 @@ a second root; nothing in the pipeline expects more than one.
 
 ### 4. The witness cannot express a schedule
 
-`verdict::Witness` is `nondet_sequence: Vec<i64>` plus typed entries. A
-concurrency counterexample is a thread interleaving, which this cannot
+`verdict::Witness` was `nondet_sequence: Vec<i64>` plus typed entries. A
+concurrency counterexample is a thread interleaving, which that cannot
 represent — and a stock JVM will not deterministically replay one.
 
 This matters more here than anywhere else. Every FALSE ajave emits today is
 confirmed by `JvmReplay` actually running the program; that is what makes the
 zero-wrong record mean something. A concurrency FALSE would be the first
 verdict we assert on an engine's own word.
+
+**Status: addressed.** `Witness` now carries
+`schedule: Vec<ScheduleSlice>`, and `JvmReplay` returns `Inconclusive` rather
+than `Refuted` for any witness that needs schedule control — refuting would be
+wrong (the violation may be real) and confirming would be worse (we would not
+have checked it).
+
+#### On the witness file format
+
+We emit SV-COMP violation witness format **2.0** (YAML: `violation_sequence`,
+segments, assumption and target waypoints). Format 2.0 **does not define
+concurrency violation witnesses at all** — the format paper states they "have
+not yet been defined for concurrency safety".
+
+Format **1.0** (GraphML) did: Beyer & Friedberger (2020, "Violation Witnesses
+and Result Validation for Multi-Threaded Programs") annotated each automaton
+transition with a `threadId` and marked creation with `createThread`.
+
+`ScheduleSlice` is a run-length encoding of exactly that per-transition
+sequence, so conversion either way is mechanical and we stay alignable with
+whatever 2.0 eventually specifies.
+
+Two consequences worth being explicit about:
+
+- **We would be ahead of the standard.** Worth something for a paper, but it
+  means there is no agreed format to target yet.
+- **No external validator can check a concurrency witness we produce.** That is
+  a second, independent reason certification has to be our own harness, and it
+  removes the usual safety net where a third-party validator would catch us
+  being wrong.
 
 ### 5. No alias, points-to or escape analysis exists
 
