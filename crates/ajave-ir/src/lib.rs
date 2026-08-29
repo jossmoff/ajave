@@ -247,6 +247,19 @@ pub enum Stmt {
     /// Constrain the path. `Verifier.assume` lowers to this; so does the
     /// branch condition when an engine follows a specific edge.
     Assume(Operand),
+    /// `monitorenter` — acquire the intrinsic monitor of `obj`.
+    ///
+    /// Single-threaded analyses may ignore both monitor statements: with one
+    /// thread, acquiring an uncontended monitor is observationally a no-op.
+    /// They are in the IR because a concurrency analysis cannot reconstruct
+    /// them afterwards — the lifter previously discarded these opcodes
+    /// entirely, leaving no record that a critical section existed.
+    ///
+    /// The null check that `monitorenter` also performs is emitted separately
+    /// as a `Check`, so these carry no obligation of their own.
+    MonitorEnter(Operand),
+    /// `monitorexit` — release the intrinsic monitor of `obj`.
+    MonitorExit(Operand),
     /// Reaching this statement obliges the analysis to show the referenced
     /// obligation's safety condition holds.
     Check(ObligationId),
@@ -661,6 +674,8 @@ impl Body {
                         s.push_str(&format!("{arr}[{idx}] = {val}"))
                     }
                     Stmt::Assume(o) => s.push_str(&format!("assume {o}")),
+                    Stmt::MonitorEnter(o) => s.push_str(&format!("monitorenter {o}")),
+                    Stmt::MonitorExit(o) => s.push_str(&format!("monitorexit {o}")),
                     Stmt::Check(id) => {
                         let ob = self.obligation(*id);
                         s.push_str(&format!(

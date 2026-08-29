@@ -33,7 +33,10 @@ def load_tasks(root):
         name = os.path.splitext(os.path.basename(yml))[0]
         d = os.path.dirname(yml)
         inputs = [os.path.join(d, i) for i in data["input_files"]]
-        for p in data.get("properties", []):
+        # `properties:` with only comments under it parses as None, which is
+        # how the deadlock-only concurrency tasks are written — they assert
+        # neither valid-assert nor no-runtime-exception.
+        for p in (data.get("properties") or []):
             pf = p.get("property_file", "")
             key = "assert" if "valid-assert" in pf else "nre"
             tasks.append((yml, name, os.path.basename(d), key, inputs,

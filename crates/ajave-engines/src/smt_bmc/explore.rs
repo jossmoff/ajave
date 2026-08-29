@@ -574,6 +574,9 @@ impl<'a> ExploreCtx<'a> {
                 return false;
             }
             match stmt {
+                // Sequential exploration: monitor operations constrain nothing.
+                // A concurrency engine reads them; the BMC does not.
+                Stmt::MonitorEnter(_) | Stmt::MonitorExit(_) => {}
                 Stmt::Assign(v, rv) => {
                     if !self.handle_assign(*v, rv) {
                         // Inline succeeded — but if it threw an unhandled

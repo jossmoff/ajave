@@ -747,6 +747,10 @@ impl<'a> ConcreteState<'a> {
 
             let stmt = b.stmts[idx].clone();
             match &stmt {
+                // Single-threaded interpretation: an uncontended monitor
+                // acquire/release has no observable effect. The nullcheck the
+                // JVM performs is a separate `Check`.
+                Stmt::MonitorEnter(_) | Stmt::MonitorExit(_) => {}
                 Stmt::Assign(v, rv) => {
                     match self.eval_assign(rv, &mut store) {
                         Ok(val) => { store.insert(*v, val); }

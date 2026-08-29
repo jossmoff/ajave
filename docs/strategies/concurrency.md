@@ -2,8 +2,10 @@
 
 **Direction:** Under (falsification) initially; Over only for the bounded case
 **Tier:** 2 (falsify)
-**Status:** planned — not yet implemented
-**Source:** n/a
+**Status:** foundation built; explorer not yet implemented
+**Source:** `ajave-engines/src/threads.rs` (thread discovery),
+`concurrent_state.rs` (state model), `concurrency.rs` (engine skeleton and
+precondition checks)
 
 ## Why
 
@@ -208,7 +210,16 @@ guarantee than every other FALSE we emit and must not be glossed.
 **Exit criterion:** a hand-written racy program produces a FALSE whose schedule
 replays deterministically and reproduces the failure.
 
-### Phase 2 — IR and lifter
+### Phase 2 — IR and lifter  ✅ partially done
+
+Done: `Stmt::MonitorEnter`/`MonitorExit` are lifted rather than discarded
+(opcodes 0xc2/0xc3), and every engine declares them no-ops explicitly. Only
+four exhaustive matches existed, so the blast radius was small; only two scored
+benchmarks use `synchronized` and both were verified unchanged.
+
+Still to do: multi-root reachability, volatile distinction.
+
+### Phase 2 (original scope) — IR and lifter
 
 - `Stmt::MonitorEnter(Operand)` / `Stmt::MonitorExit(Operand)` replacing the
   no-op at 0xc2/0xc3.
@@ -242,7 +253,32 @@ than its current deterministic-run check.
 
 **Exit criterion:** ~15 benchmarks with justified expected verdicts.
 
-### Phase 4 — Bounded interleaving explorer (sequential consistency)
+### Phase 4 — Bounded interleaving explorer (sequential consistency)  🔨 in progress
+
+Built so far:
+
+- **`threads::discover`** resolves `new Thread(new Worker())` and
+  `new MyThread()` precisely, and returns `Unresolved(reason)` for anything
+  else. The direction of approximation is the important part and it is the
+  opposite of the usual instinct: an Under engine that *over*-approximates the
+  thread set can report a bug in a thread that never runs, so this
+  under-approximates and fails closed. A unit test asserts an unresolvable
+  `start()` is not reported as `Sequential`.
+- **`concurrent_state`** — `ThreadState` (reentrant monitor stack, status),
+  `GlobalState` (heap, monitor ownership, schedule), `Bounds`. `Blocked` and
+  `Waiting` are distinct statuses because collapsing them would let the
+  explorer resume a `wait()` nobody notified. Deadlock is "no thread runnable,
+  not all terminated", which covers both lock-order inversion and a missed
+  notify.
+- **`concurrency::check_preconditions`** — three refusals, each preventing a
+  specific wrong FALSE (unresolved threads, ambiguous monitor identity,
+  unmodelled `java.util.concurrent` primitives). Refusals log at INFO, since
+  "found no bug" and "did not look" are different claims.
+
+Remaining: the exploration loop, which needs a concrete step function shared
+with `concrete.rs`.
+
+### Phase 4 (original scope) — Bounded interleaving explorer
 
 A `Cpa` over `(thread states, heap, monitors)` with a bounded number of context
 switches. No reduction — this is the ground truth everything later is measured

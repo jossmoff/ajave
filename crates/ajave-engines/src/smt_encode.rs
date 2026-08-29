@@ -95,6 +95,8 @@ pub fn encode_body(
         // Process statements.
         for stmt in &block.stmts {
             match stmt {
+                // Sequential encoding: monitors impose no constraint.
+                Stmt::MonitorEnter(_) | Stmt::MonitorExit(_) => {}
                 Stmt::Assign(vid, rv) => {
                     let t = env.encode_rvalue(rv);
                     env.vars.insert(*vid, t);

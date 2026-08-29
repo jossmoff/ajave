@@ -1937,10 +1937,21 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 let result = self.assign(Ty::Int, Rvalue::InstanceOf { obj, class });
                 self.stack.push(result);
             }
-            // monitorenter / monitorexit — single-threaded: no-ops beyond the nullcheck.
+            // monitorenter / monitorexit.
+            //
+            // Observationally no-ops for a single thread, and every current
+            // engine ignores them — but they are recorded rather than
+            // discarded so a concurrency analysis can see that a critical
+            // section exists. Reconstructing one after the fact is not
+            // possible; the information is simply gone.
             0xc2 | 0xc3 => {
                 let obj = self.pop()?;
                 self.nullcheck(&obj);
+                self.stmts.push(if op == 0xc2 {
+                    Stmt::MonitorEnter(obj)
+                } else {
+                    Stmt::MonitorExit(obj)
+                });
             }
             _ => return Err(format!("unsupported alloc opcode 0x{op:02x}")),
         }
