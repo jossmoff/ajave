@@ -597,13 +597,49 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         })
         .collect();
 
-    Ok(Body {
+    let mut body = Body {
         key,
         entry: BlockId(0),
         blocks,
         vars: lifter.vars,
         obligations: lifter.obligations,
-    })
+    };
+
+    // `synchronized` on a method is the ACC_SYNCHRONIZED access flag, not
+    // monitorenter/monitorexit bytecode — the JVM acquires the monitor as part
+    // of invocation. A lifter that only watches for the opcodes therefore sees
+    // a synchronized method as completely unlocked.
+    //
+    // That is not merely imprecise: a concurrency explorer would interleave
+    // two calls to a synchronized method freely and report a data race that
+    // cannot happen, which is a wrong FALSE. (It did exactly that on
+    // `SynchronizedCounter`.)
+    //
+    // Make the implicit lock explicit: acquire on entry, release before every
+    // return. The monitor is `this` for an instance method; static
+    // synchronized methods lock the class object, which we do not model, so
+    // those are left alone rather than locked against the wrong thing.
+    const ACC_SYNCHRONIZED: u16 = 0x0020;
+    const ACC_STATIC: u16 = 0x0008;
+    if m.access & ACC_SYNCHRONIZED != 0 && m.access & ACC_STATIC == 0 {
+        if let Some(this) = body
+            .vars
+            .iter()
+            .position(|vi| matches!(vi.kind, VarKind::Local(0)))
+            .map(|i| Operand::Var(VarId(i as u32)))
+        {
+            body.blocks[0]
+                .stmts
+                .insert(0, Stmt::MonitorEnter(this.clone()));
+            for b in body.blocks.iter_mut() {
+                if matches!(b.term, Terminator::Return(_) | Terminator::Throw(_)) {
+                    b.stmts.push(Stmt::MonitorExit(this.clone()));
+                }
+            }
+        }
+    }
+
+    Ok(body)
 }
 
 fn diverging_block(id: BlockId, off: u16, reason: String) -> Block {

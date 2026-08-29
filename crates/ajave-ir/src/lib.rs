@@ -528,6 +528,34 @@ impl Program {
         };
         let mut seen: Vec<MethodKey> = Vec::new();
         let mut work = vec![entry.clone()];
+
+        // A thread body is reachable but not *called*: `t.start()` transfers
+        // control to `run()` with no call edge in the IR, so a pure call-graph
+        // walk misses it entirely and its obligations are never seeded — which
+        // is how a Runnable that dereferences null produced a TRUE verdict.
+        //
+        // Any `run()V` is added as a root when the program starts a thread.
+        // This deliberately over-approximates: a `run()` belonging to a
+        // Runnable that is never actually started still gets its obligations
+        // seeded. That direction is safe here — seeding more obligations means
+        // more to prove, so it can turn TRUE into UNKNOWN but never the
+        // reverse. (Over-approximating the thread set for *exploration* is a
+        // different matter and is not sound; see `threads::discover`.)
+        let starts_thread = self.bodies.values().any(|b| {
+            b.blocks.iter().any(|blk| {
+                blk.stmts.iter().any(|st| {
+                    matches!(st, Stmt::Assign(_, Rvalue::Call { target, .. })
+                        if target.class == "java/lang/Thread" && target.name == "start")
+                })
+            })
+        });
+        if starts_thread {
+            for k in self.bodies.keys() {
+                if k.name == "run" && k.desc == "()V" {
+                    work.push(k.clone());
+                }
+            }
+        }
         while let Some(k) = work.pop() {
             if seen.contains(&k) {
                 continue;

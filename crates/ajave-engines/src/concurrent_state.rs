@@ -41,6 +41,18 @@ pub enum ThreadStatus {
     Blocked { monitor: ObjId },
     /// Inside `Object.wait()` on the given monitor, pending a notify.
     Waiting { monitor: ObjId },
+    /// Created but `start()` has not been called. Not runnable, and not
+    /// deadlocked either — the program simply has not started it yet.
+    NotStarted,
+    /// Blocked in `join()` until the named thread terminates.
+    ///
+    /// This edge is not optional. `join()` establishes happens-before between
+    /// the joined thread's last action and the joiner's next one (JLS 17.4.5);
+    /// treating it as a no-op lets the explorer run past a join before the
+    /// thread has done anything, which invents interleavings the JVM cannot
+    /// produce. That is a wrong FALSE for an Under engine — and it is exactly
+    /// what happened before this was modelled.
+    Joining { on: ThreadId },
     Terminated,
 }
 
@@ -106,9 +118,13 @@ pub struct GlobalState {
     /// Which thread owns each monitor, if any.
     pub monitor_owner: BTreeMap<ObjId, ThreadId>,
     /// Instance fields, keyed by `(object, field)`.
-    pub heap: BTreeMap<(ObjId, String), i64>,
+    ///
+    /// Values carry their reference-ness: storing a plain `i64` loses the
+    /// distinction between an int and an object identity, so reading a field
+    /// that holds a reference and dereferencing it fails. `(is_ref, value)`.
+    pub heap: BTreeMap<(ObjId, String), (bool, i64)>,
     /// Static fields, keyed by `(class, field)`.
-    pub statics: BTreeMap<(String, String), i64>,
+    pub statics: BTreeMap<(String, String), (bool, i64)>,
     /// The interleaving taken to reach this state, for the witness.
     pub schedule: Vec<ScheduleSlice>,
     /// Context switches used so far, against `Bounds::max_switches`.
@@ -131,8 +147,16 @@ impl Default for Bounds {
         //
         // These are fitted-by-nothing starting values: see issue #50 on
         // deriving budgets from program shape rather than fixing them.
+        // Raised from 3 once DPOR landed. A bound that cannot cover a
+        // two-thread counter is too small to prove anything: SynchronizedCounter
+        // has more preemption points than the unsynchronised version (the
+        // monitor operations are themselves visible actions), and exhausted 3.
+        //
+        // This is affordable *because* of the reduction — the naive explorer
+        // could not have gone here. Still a completeness bound, never a
+        // soundness one, and still fitted rather than derived (#50).
         Bounds {
-            max_switches: 3,
+            max_switches: 10,
             max_steps: 100_000,
             max_threads: 4,
         }
@@ -151,7 +175,15 @@ impl GlobalState {
             .filter(|t| match t.status {
                 ThreadStatus::Runnable => true,
                 ThreadStatus::Blocked { monitor } => !self.monitor_owner.contains_key(&monitor),
-                ThreadStatus::Waiting { .. } | ThreadStatus::Terminated => false,
+                ThreadStatus::Joining { on } => self
+                    .threads
+                    .iter()
+                    .find(|x| x.id == on)
+                    .map(|x| x.status == ThreadStatus::Terminated)
+                    .unwrap_or(true),
+                ThreadStatus::Waiting { .. }
+                | ThreadStatus::NotStarted
+                | ThreadStatus::Terminated => false,
             })
             .map(|t| t.id)
             .collect()
@@ -159,9 +191,20 @@ impl GlobalState {
 
     /// Every thread is finished.
     pub fn all_terminated(&self) -> bool {
+        self.threads.iter().all(|t| {
+            matches!(
+                t.status,
+                ThreadStatus::Terminated | ThreadStatus::NotStarted
+            )
+        })
+    }
+
+    /// A thread that has not been started yet is not stuck — the program may
+    /// still start it — so it does not count as live for deadlock purposes.
+    fn has_unstarted(&self) -> bool {
         self.threads
             .iter()
-            .all(|t| t.status == ThreadStatus::Terminated)
+            .any(|t| t.status == ThreadStatus::NotStarted)
     }
 
     /// No thread can proceed, but not all have finished.
@@ -171,11 +214,21 @@ impl GlobalState {
     /// `Blocked`) and a missed notify (all `Waiting`), which is why the two
     /// statuses are tracked separately.
     pub fn is_deadlocked(&self) -> bool {
-        !self.all_terminated() && self.runnable().is_empty()
+        !self.all_terminated() && self.runnable().is_empty() && !self.has_unstarted()
     }
 
     /// Record that `thread` is about to run, extending the current slice or
-    /// starting a new one. Returns whether this counted as a context switch.
+    /// starting a new one. Returns whether this counted as a **preemption**.
+    ///
+    /// The bound is on preemptions, not on switches. A switch away from a
+    /// thread that has terminated or blocked is forced — the scheduler had no
+    /// choice — and counting it would exhaust the budget on programs that
+    /// simply run threads one after another. Qadeer & Rehof's result is about
+    /// preemptions specifically: the number of times the scheduler interrupts
+    /// a thread that *could* have continued.
+    ///
+    /// Counting switches instead made a two-thread counter unanalysable at
+    /// bound 3, because start/join alone consume several forced switches.
     pub fn schedule_step(&mut self, thread: ThreadId) -> bool {
         match self.schedule.last_mut() {
             Some(last) if last.thread == thread => {
@@ -183,14 +236,24 @@ impl GlobalState {
                 false
             }
             _ => {
+                // Was the outgoing thread still able to run? If so this is a
+                // genuine preemption; if it had blocked or finished, the
+                // switch was forced.
+                let preempted = match self.schedule.last() {
+                    Some(prev) => self
+                        .threads
+                        .iter()
+                        .find(|t| t.id == prev.thread)
+                        .map(|t| matches!(t.status, ThreadStatus::Runnable))
+                        .unwrap_or(false),
+                    // The first slice has nothing to preempt.
+                    None => false,
+                };
                 self.schedule.push(ScheduleSlice { thread, steps: 1 });
-                // The first slice is not a switch — there was nothing to
-                // switch from.
-                let switched = self.schedule.len() > 1;
-                if switched {
+                if preempted {
                     self.switches += 1;
                 }
-                switched
+                preempted
             }
         }
     }

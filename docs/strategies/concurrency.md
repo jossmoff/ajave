@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification) initially; Over only for the bounded case
 **Tier:** 2 (falsify)
-**Status:** foundation built; explorer not yet implemented
+**Status:** working — DPOR explorer solving 4/14 concurrency benchmarks
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrency.rs` (engine skeleton and
 precondition checks)
@@ -304,13 +304,60 @@ overloading `Status`.
 **Exit criterion:** a deadlock benchmark produces a candidate with its wait-for
 cycle.
 
-### Phase 6 — Partial-order reduction
+### Phase 6 — Partial-order reduction  ✅ done
 
-Only now, with Phase 4 as the measured baseline. Report schedules explored
-before and after; a reduction without a baseline is not a result.
+DPOR (Flanagan & Godefroid, POPL 2005) implemented in `concurrency.rs`.
 
-Conservative dependency first: `mayAlias ∧ conflicting ∧ ¬HB`. With no alias
-analysis, `mayAlias` degrades to "same field name" — coarse, but sound.
+The interpreter reports an `Access` per step — field read/write, monitor, or
+lifecycle event — and `Access::conflicts` decides dependency: same location
+with at least one write, same monitor, or a lifecycle event for that thread.
+Two reads commute, which is where most of the reduction comes from.
+
+`add_backtrack` scans **backwards** for the latest dependent transition by
+another thread and adds a backtrack point there. Only the latest matters;
+earlier reorderings are subsumed by it.
+
+`Strategy::Exhaustive` is retained as the baseline DPOR is validated against —
+a reduction without a baseline is not a result.
+
+**Deliberately weaker than the paper:** the persistent-set refinement (which
+threads can *reach* p) is not implemented, so a backtrack point adds every
+enabled thread rather than the minimal set. That over-explores and never
+under-explores: it costs time, not soundness. Source-DPOR, sleep sets and
+wakeup trees are the natural next steps and are measurable against this.
+
+The reduction is what made a higher preemption bound affordable (3 -> 10),
+which is what let `SynchronizedCounter` be covered at all.
+
+### Bugs this phase surfaced
+
+Worth recording, because each was a wrong FALSE waiting to happen:
+
+- **`synchronized` methods were invisible.** `synchronized void inc()` is the
+  `ACC_SYNCHRONIZED` access flag, not `monitorenter`/`monitorexit` bytecode —
+  the JVM takes the monitor as part of invocation. A lifter watching only for
+  the opcodes saw an unlocked method and the explorer reported a data race
+  that cannot happen. The lifter now makes the implicit lock explicit
+  (acquire on entry, release before every return). Static synchronized methods
+  lock the class object, which we do not model, so they are left alone rather
+  than locked against the wrong thing.
+- **The bound counted switches, not preemptions.** Qadeer & Rehof's result is
+  about preemptions — interrupting a thread that *could* have continued. A
+  switch away from a blocked or terminated thread is forced, and counting it
+  burned the whole budget on ordinary start/join sequences.
+- **Sequential engines poison threaded programs.** `concrete` reports
+  `JoinOrdersWrite`'s assertion as violated, because `t.start()` is a no-op to
+  it and the joined write never happens. Replay refutes the witness, but the
+  refuted candidate still vetoed the concurrency engine's proof. Fixed by
+  discharging over `open_or_unconfirmed()` — the same fix as the blackboard
+  ordering bug of 2026-08-28.
+- **`this` for a worker must be the object main allocated.** Fabricating a
+  fresh identity made the thread write to a different object than main read,
+  which looked exactly like a missing happens-before edge.
+- **Parameters bind by JVM slot, not argument index.** The lifter assigns
+  VarIds in its own order. Binding `VarId(i)` to the i'th argument silently
+  wired parameters to unrelated locals; the tell was violations appearing on
+  1-slice schedules, i.e. with no interleaving at all.
 
 ### Phase 7+ — deferred
 

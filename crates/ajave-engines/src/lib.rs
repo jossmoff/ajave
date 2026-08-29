@@ -12,6 +12,7 @@ pub mod body_analysis;
 pub use body_analysis::{body_has_unmodelled_throwing_call, first_unmodelled_throwing_call};
 pub mod body_shape;
 pub mod concurrency;
+pub mod concurrent_exec;
 pub mod concurrent_state;
 pub mod threads;
 pub mod ai;

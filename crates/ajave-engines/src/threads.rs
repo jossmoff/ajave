@@ -70,27 +70,34 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
     let mut saw_start = false;
 
     for (caller, body) in &prog.bodies {
-        // Which local holds which freshly-allocated class, within this body.
-        // Deliberately intra-procedural and flow-insensitive over a single
-        // body: enough for the idiomatic shape, and it fails closed elsewhere.
-        let mut alloc_class: HashMap<VarId, String> = HashMap::new();
-        // Thread object -> class whose `run()` it will execute.
-        let mut thread_runnable: HashMap<VarId, String> = HashMap::new();
+        // Track *allocation identity*, not variable identity.
+        //
+        // javac routes a `new` through several temporaries before it reaches
+        // the named local, so `v0`, `v2`, `v3` and `v5` all denote the same
+        // Thread. Keying the Runnable on the variable that happened to be the
+        // receiver of `<init>` therefore loses it by the time `start()` is
+        // called on a different alias — which is exactly how the first version
+        // of this failed on every benchmark.
+        //
+        // Each `new` gets an id; copies carry the id; the Runnable is recorded
+        // against the id.
+        let mut var_alloc: HashMap<VarId, u32> = HashMap::new();
+        let mut alloc_class: HashMap<u32, String> = HashMap::new();
+        let mut alloc_runnable: HashMap<u32, String> = HashMap::new();
+        let mut next_alloc: u32 = 0;
 
         for block in &body.blocks {
             for stmt in &block.stmts {
                 match stmt {
                     Stmt::Assign(v, Rvalue::New(class)) => {
-                        alloc_class.insert(*v, class.clone());
+                        next_alloc += 1;
+                        var_alloc.insert(*v, next_alloc);
+                        alloc_class.insert(next_alloc, class.clone());
                     }
-                    // Copy propagation: `v = w` carries the allocation through
-                    // the temporaries javac introduces around `new`.
+                    // Copy propagation: `v = w` denotes the same allocation.
                     Stmt::Assign(v, Rvalue::Use(Operand::Var(src))) => {
-                        if let Some(c) = alloc_class.get(src).cloned() {
-                            alloc_class.insert(*v, c);
-                        }
-                        if let Some(c) = thread_runnable.get(src).cloned() {
-                            thread_runnable.insert(*v, c);
+                        if let Some(a) = var_alloc.get(src).copied() {
+                            var_alloc.insert(*v, a);
                         }
                     }
                     Stmt::Assign(_, Rvalue::Call { target, args, .. }) => {
@@ -100,25 +107,38 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                 Some(Operand::Var(v)) => *v,
                                 _ => continue,
                             };
+                            let Some(recv_alloc) = var_alloc.get(&recv).copied() else {
+                                return ThreadDiscovery::Unresolved(format!(
+                                    "{caller}: Thread.<init> on a receiver not traced to \
+                                     an allocation"
+                                ));
+                            };
                             match args.get(1) {
                                 Some(Operand::Var(r)) => {
-                                    if let Some(c) = alloc_class.get(r).cloned() {
-                                        thread_runnable.insert(recv, c);
-                                    } else {
-                                        return ThreadDiscovery::Unresolved(format!(
-                                            "{caller}: Thread constructed from a Runnable \
-                                             this analysis cannot resolve to an allocation"
-                                        ));
+                                    let cls = var_alloc
+                                        .get(r)
+                                        .and_then(|a| alloc_class.get(a))
+                                        .cloned();
+                                    match cls {
+                                        Some(c) => {
+                                            alloc_runnable.insert(recv_alloc, c);
+                                        }
+                                        None => {
+                                            return ThreadDiscovery::Unresolved(format!(
+                                                "{caller}: Thread constructed from a Runnable \
+                                                 this analysis cannot resolve to an allocation"
+                                            ))
+                                        }
                                     }
                                 }
                                 Some(Operand::Const(Const::Null)) => {
                                     // `new Thread(null)` — run() does nothing.
                                 }
                                 None => {
-                                    // `new Thread()`: the body is the receiver's
-                                    // own `run()`, i.e. a Thread subclass.
-                                    if let Some(c) = alloc_class.get(&recv).cloned() {
-                                        thread_runnable.insert(recv, c);
+                                    // `new Thread()`: a Thread subclass, so the
+                                    // body is the receiver's own `run()`.
+                                    if let Some(c) = alloc_class.get(&recv_alloc).cloned() {
+                                        alloc_runnable.insert(recv_alloc, c);
                                     }
                                 }
                                 _ => {}
@@ -133,7 +153,11 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                     ))
                                 }
                             };
-                            let Some(class) = thread_runnable.get(&recv).cloned() else {
+                            let Some(class) = var_alloc
+                                .get(&recv)
+                                .and_then(|a| alloc_runnable.get(a))
+                                .cloned()
+                            else {
                                 return ThreadDiscovery::Unresolved(format!(
                                     "{caller}: start() on a Thread whose body could not be \
                                      traced to an allocation in this method"

@@ -172,6 +172,19 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
 fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     let mut engines: Vec<Box<dyn Engine>> = vec![
         Box::new(ajave_engines::presolve::Presolve::new()),
+        // Concurrency runs before the sequential engines.
+        //
+        // Every other engine analyses a threaded program as if `t.start()` did
+        // nothing, so `concrete` reports JoinOrdersWrite's assertion as
+        // violated and `smt-bmc` would prove a racy body safe. The blackboard
+        // keeps the *first* status per obligation, so whichever engine gets
+        // there first decides — the same first-writer-wins issue that voided
+        // the float-nonlinear category (see changes.md, 2026-08-28).
+        //
+        // Running the concurrency engine first makes it authoritative for the
+        // programs it can actually analyse, and it costs nothing elsewhere: it
+        // refuses a program with no threads immediately.
+        Box::new(ajave_engines::concurrency::ConcurrencyEngine::new()),
         Box::new(ajave_engines::concrete::Concrete::new()),
     ];
     // NRA before BMC: NRA handles transcendental math (sin, cos, exp, etc.)
@@ -265,6 +278,38 @@ fn confirm_violations(
     let mut confirmed = None;
 
     for violation in violations {
+        // A witness carrying a schedule cannot go to JvmReplay, which has no
+        // way to force an interleaving. Route it to the interpreter-based
+        // schedule replay instead, and say plainly which certifier ran — the
+        // two are not equally strong evidence.
+        if violation.witness.needs_schedule() {
+            let entries = ajave_engines::concurrency::check_preconditions(program)
+                .unwrap_or_default();
+            let ok = ajave_engines::concurrency::replay_schedule(
+                program,
+                &entries,
+                &violation.obligation_ref,
+                &violation.witness.schedule,
+                Default::default(),
+            );
+            if trace || ok {
+                eprintln!(
+                    "schedule-replay: {} {} (interpreter, not a real JVM)",
+                    if ok { "confirmed" } else { "could not reproduce" },
+                    violation.obligation_ref
+                );
+            }
+            if ok {
+                any_confirmed = true;
+                if confirmed.is_none() {
+                    confirmed = Some((
+                        violation.obligation_ref.clone(),
+                        violation.witness.clone(),
+                    ));
+                }
+            }
+            continue;
+        }
         match ajave_core::certify::Certifier::certify(&replay, &violation.tagged, program) {
             ajave_core::certify::CertResult::Confirmed => {
                 any_confirmed = true;
@@ -564,7 +609,22 @@ fn main() {
     // hold *zero* obligations and the verdict becomes TRUE by vacuity, without
     // any engine having reasoned about the program at all. Claiming "no
     // runtime exception" then asserts something we never examined.
-    let verdict = if verdict == verdict::Verdict::True && !assertion_only {
+    // Did the concurrency engine explore the program exhaustively? If so the
+    // Thread lifecycle calls are no longer "unmodelled" — that engine modelled
+    // them, over every interleaving within its bounds.
+    //
+    // The guard cannot simply be dropped for threaded programs: the interval AI
+    // analyses a `run()` body as an ordinary root, under a sequential
+    // assumption, so it would happily prove a racy body safe. The guard is what
+    // stops that becoming a TRUE. It may only stand down when an engine that
+    // actually reasons about interleavings has covered the program.
+    let concurrency_covered = orchestrator
+        .bb
+        .since(0)
+        .iter()
+        .any(|t| t.producer == ajave_core::artifact::EngineId("concurrency"));
+
+    let verdict = if verdict == verdict::Verdict::True && !assertion_only && !concurrency_covered {
         let offender = prog.reachable_from_entry().into_iter().find_map(|k| {
             prog.body(&k).and_then(|b| {
                 ajave_engines::first_unmodelled_throwing_call(&prog, b)
