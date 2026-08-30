@@ -414,6 +414,11 @@ def main():
                          "to compare against another run")
     ap.add_argument("--allow-busy", action="store_true",
                     help="suppress the busy-machine warning")
+    ap.add_argument("--repeat", type=int, metavar="N",
+                    help="run every task N times and fail if any task returns "
+                         "more than one distinct verdict. A verifier whose "
+                         "answer varies between identical runs makes every "
+                         "baseline and score delta meaningless (#66)")
     ap.add_argument("--sweep", action="store_true",
                     help="kill leftover ajave/solver/JVM processes and remove "
                          "stale temp dirs before starting")
@@ -456,6 +461,10 @@ def main():
     if not work:
         sys.exit("no runs to perform — check the set and --property")
 
+    if args.repeat and args.repeat > 1:
+        work = [w for w in work for _ in range(args.repeat)]
+        print(f"determinism check: {args.repeat} repeats per task")
+
     print(f"{len(work)} runs from set '{args.set}' ({args.jobs} workers)")
     t0 = time.time()
     results = []
@@ -470,6 +479,22 @@ def main():
 
     # Whatever happened above, leave nothing behind.
     sweep(verbose=False)
+
+    if args.repeat and args.repeat > 1:
+        seen = defaultdict(set)
+        for r in results:
+            seen[(rel(r["yml"]), r["property"])].add(r["verdict"])
+        varying = {k: v for k, v in seen.items() if len(v) > 1}
+        print(f"\ndeterminism: {len(seen)} task(s) x {args.repeat} runs")
+        if varying:
+            print(f"  {len(varying)} task(s) returned more than one verdict:")
+            for (task, prop), verdicts in sorted(varying.items()):
+                print(f"    {task} [{prop}]: {', '.join(sorted(verdicts))}")
+            print("\n  A verdict that varies between identical runs makes every"
+                  "\n  baseline unreliable and every score delta unreadable.")
+            return 1
+        print("  all verdicts stable")
+        return 0
 
     if args.update_baseline:
         p = write_baseline(args.set, results)
