@@ -292,7 +292,9 @@ impl<'a> ExploreCtx<'a> {
             desc: "()V".to_string(),
         };
         if let Some(clinit) = self.prog.body(&clinit_key) {
-            if self.call_depth >= MAX_CALL_DEPTH || !self.budget_left() {
+            if self.call_depth >= MAX_CALL_DEPTH || self.budget_exhausted() {
+                // Skipping a static initialiser leaves its writes unmodelled.
+                self.completeness.all_paths_complete = false;
                 return;
             }
             debug!("smt-bmc: running <clinit> for {class}");
@@ -332,7 +334,7 @@ impl<'a> ExploreCtx<'a> {
         dest_var: VarId,
         is_virtual: bool,
     ) -> bool {
-        if self.call_depth >= MAX_CALL_DEPTH || !self.budget_left() {
+        if self.call_depth >= MAX_CALL_DEPTH || self.budget_exhausted() {
             if self.call_depth >= MAX_CALL_DEPTH {
                 self.completeness.has_depth_limited_havoc = true;
             }
@@ -400,7 +402,7 @@ impl<'a> ExploreCtx<'a> {
 
         let mut ret_tainted = false;
         for resolved in &targets {
-            if !self.budget_left() { break; }
+            if self.budget_exhausted() { break; }
             let callee = self.prog.body(resolved).unwrap();
 
             let saved_body = self.body;
@@ -569,8 +571,7 @@ impl<'a> ExploreCtx<'a> {
     /// Process a slice of statements. Returns false if exploration should stop.
     fn handle_stmts(&mut self, stmts: &[Stmt]) -> bool {
         for stmt in stmts {
-            if !self.budget_left() {
-                self.completeness.all_paths_complete = false;
+            if self.budget_exhausted() {
                 return false;
             }
             match stmt {
@@ -1135,7 +1136,7 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return = ir_before;
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
-        if self.budget_left() {
+        if !self.budget_exhausted() {
             if cond_tainted { self.path_tainted = true; }
             if !cond_tainted {
                 self.path_constraints.push(cond_bool);
@@ -1246,7 +1247,7 @@ impl<'a> ExploreCtx<'a> {
 
         let mut case_saved: Vec<(Term, SavedState)> = Vec::new();
         for &(_, target, cond_eq) in &case_conds {
-            if !self.budget_left() { break; }
+            if self.budget_exhausted() { break; }
             let saved = self.save_state();
             if value_tainted { self.path_tainted = true; }
             self.path_constraints.push(cond_eq);
@@ -1255,7 +1256,7 @@ impl<'a> ExploreCtx<'a> {
             self.restore_state(saved);
         }
 
-        if !self.budget_left() { return; }
+        if self.budget_exhausted() { return; }
 
         let saved = self.save_state();
         if value_tainted { self.path_tainted = true; }
@@ -1293,7 +1294,7 @@ impl<'a> ExploreCtx<'a> {
         let mut case_saved: Vec<(Term, SavedState, Option<Term>, Option<Term>, bool)> = Vec::new();
 
         for &(case_val, target) in cases {
-            if !self.budget_left() { break; }
+            if self.budget_exhausted() { break; }
             self.fork_count += 1;
             self.inline_return = ir_before;
             self.inline_return_str = irs_before;
@@ -1314,7 +1315,7 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return = ir_before;
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
-        if self.budget_left() {
+        if !self.budget_exhausted() {
             if value_tainted { self.path_tainted = true; }
             for &(case_val, _) in cases {
                 let cv = self.solver.bv_const(case_val as i64, 32);
@@ -1370,7 +1371,8 @@ impl<'a> ExploreCtx<'a> {
             return;
         }
         self.block_visits += 1;
-        if self.depth > self.max_depth || !self.budget_left() {
+        if self.depth > self.max_depth || self.budget_exhausted() {
+            // Depth limit also truncates, so mark it either way.
             self.completeness.all_paths_complete = false;
             return;
         }
@@ -1390,7 +1392,7 @@ impl<'a> ExploreCtx<'a> {
             return;
         }
 
-        if !self.budget_left() {
+        if self.budget_exhausted() {
             return;
         }
 

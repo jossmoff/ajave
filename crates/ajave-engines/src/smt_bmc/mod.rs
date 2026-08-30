@@ -575,6 +575,32 @@ impl<'a> ExploreCtx<'a> {
             && self.fork_count < MAX_FORKS
     }
 
+    /// Budget check that **records** the resulting truncation.
+    ///
+    /// Returns true when the budget is spent, and marks the exploration
+    /// incomplete when it does. Every site that abandons part of the path space
+    /// must go through this rather than `budget_left()`.
+    ///
+    /// This exists because the invariant was maintained in one place and
+    /// violated in nine. `Completeness::can_discharge()` trusts
+    /// `all_paths_complete` to publish `proof: Exhaustive`, so a site that
+    /// stopped exploring while leaving the flag set let BMC claim a proof over
+    /// paths it never examined — an obligation on an unexplored branch is never
+    /// shown violated, so it looks safe. That is a wrong TRUE at -16, and
+    /// `Pan_exceptionprone` was one: a 61-obligation method that exhausts
+    /// MAX_FORKS, truncates, and then discharges an unconditional
+    /// ArrayIndexOutOfBounds it had not looked at.
+    ///
+    /// Prefer this over `!self.budget_left()` in new code. The two remaining
+    /// direct readers are checks that do not truncate.
+    fn budget_exhausted(&mut self) -> bool {
+        if self.budget_left() {
+            return false;
+        }
+        self.completeness.all_paths_complete = false;
+        true
+    }
+
     fn width_of_var(&self, vid: VarId) -> u32 {
         match self.body.var(vid).ty {
             Ty::Long | Ty::Double => 64,
