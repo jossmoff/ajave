@@ -1,0 +1,3 @@
+# The full official corpus, both properties. This is what the score is measured
+# on. Run it on an idle machine — timeout counts are contention-sensitive (#64).
+sv-comp/**/*.yml

@@ -1,0 +1,3 @@
+# ajave's own benchmark suite. Ground truth established by construction and
+# checked against a real JVM by tools/validate_own_benchmarks.py.
+ajave/**/*.yml

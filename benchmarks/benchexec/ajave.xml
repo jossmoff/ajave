@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+
+<!--
+  BenchExec benchmark definitions for ajave.
+
+  BenchExec is the competition-fidelity backend: it enforces CPU, memory and
+  time limits through Linux cgroups, which is what SV-COMP results are measured
+  under. It therefore only runs on Linux — on macOS the cgroup interface does
+  not exist and limits cannot be enforced, so local development uses
+  `tools/bench.py` instead. Both read the same task files and the same sets in
+  benchmarks/sets/, so the two agree on *what* is covered; only the resource
+  enforcement differs.
+
+  Usage:
+    pip install benchexec
+    benchexec benchmarks/benchexec/ajave.xml -r ReachSafety-Java
+
+  The tool-info module (ajave.py, alongside this file) must be importable:
+    PYTHONPATH=benchmarks/benchexec benchexec ...
+-->
+
+<benchmark tool="ajave" timelimit="60s" memlimit="4GB" cpuCores="1">
+
+  <!-- valid-assert over the full official corpus. -->
+  <rundefinition name="ReachSafety-Java">
+    <tasks name="ReachSafety-Java">
+      <includesfile>../sv-comp/ReachSafety-Java.set</includesfile>
+      <propertyfile>../sv-comp/properties/valid-assert.prp</propertyfile>
+    </tasks>
+  </rundefinition>
+
+  <!-- no-runtime-exception over the full official corpus. -->
+  <rundefinition name="NoRuntimeException-Java">
+    <tasks name="NoRuntimeException-Java">
+      <includesfile>../sv-comp/ReachSafety-Java.set</includesfile>
+      <propertyfile>../sv-comp/properties/no-runtime-exception.prp</propertyfile>
+    </tasks>
+  </rundefinition>
+
+  <!--
+    ajave's own suite. Not part of any SV-COMP category — these exist to cover
+    JVM and engine behaviour the official corpus exercises only incidentally,
+    and their ground truth is verified against a real JVM.
+  -->
+  <rundefinition name="ajave-own">
+    <tasks name="ajave-own">
+      <include>../ajave/**/*.yml</include>
+      <propertyfile>../sv-comp/properties/valid-assert.prp</propertyfile>
+    </tasks>
+  </rundefinition>
+
+</benchmark>

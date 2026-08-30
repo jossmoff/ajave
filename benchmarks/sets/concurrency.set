@@ -1,0 +1,4 @@
+# Concurrency litmus tests. Covers deadlock, data races, thread-body exceptions,
+# join ordering, volatile visibility and monitor mutual exclusion.
+# Some declare no-deadlock, which no SV-COMP Java category uses.
+ajave/concurrency/*.yml

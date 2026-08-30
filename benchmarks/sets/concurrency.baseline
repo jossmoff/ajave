@@ -1,0 +1,22 @@
+# Outcome ajave achieves on each task today.
+# Regenerate: tools/bench.py --set concurrency --update-baseline
+#
+# A task moving correct -> unproven fails --check. Improving one to
+# correct is expected to update this file in the same commit.
+# Format: <task>\t<property>\t<outcome>\t<verdict>
+ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	unproven	UNKNOWN
+ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE
+ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN
+ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE
+ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE
+ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE
+ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE
+ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE
+ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	unproven	UNKNOWN
+ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN
+ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE
+ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE
+ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE
+ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE
+ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE
+ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE

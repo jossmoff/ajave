@@ -1,2 +1,6 @@
 /target/
-sv-benchmarks/
+benchmarks/sv-comp/
+
+# Compatibility symlinks into benchmarks/ — remove once all tools migrate.
+/sv-benchmarks
+/ajave-benchmarks
