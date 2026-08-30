@@ -77,6 +77,41 @@ The same standard applies to `is_nonnull_static()` in `interval.rs`: only
 `static final` fields with non-null initialisers qualify. `System.out`/`err`/`in`
 do **not** — they are mutable via `System.setOut(null)`.
 
+## Measurement Discipline — MANDATORY before quoting any score
+
+Three separate wrong conclusions were reached in one day by measuring badly.
+A number produced without these conditions is not evidence.
+
+### Runs must be reproducible
+Verdicts once depended on `HashMap` iteration order (Rust seeds hashers per
+process) and on stale `/tmp` directories left by earlier runs. That produced
+±15-30 points of run-to-run noise on the full corpus, which was mistaken for
+timeout variance for a long time.
+
+- Iterating a `HashMap`/`HashSet` to build **anything a solver sees**, or to
+  choose **what to explore**, is a bug. Sort it, or use a `BTree*` collection.
+- `tools/bench.py --repeat N` must pass before a score is quoted.
+- Temp directories come from `ajave_core::scratch::ScratchDir`. Never name one
+  after the pid: pids are reused, and `create_dir_all` happily adopts another
+  run's leftovers.
+
+### Runs must be on an idle machine
+Timeout counts are the largest term in the score and are contention-sensitive.
+The same build measured **89 timeouts under load and 43 idle** — about 20
+points, which looked exactly like a code regression and was investigated as one.
+
+- `bench.py` prints load and free memory with every result, and `--require-idle`
+  refuses to start when the machine is busy. Use it for anything you intend to
+  compare.
+- Check for strays first: `tools/cleanup.sh`. A leaked solver or JVM holds
+  hundreds of megabytes and never exits on its own.
+
+### A regression must be reproduced before it is explained
+**A score drop measured on a busy machine, or without a determinism check, is
+not a regression.** Reproduce it under the conditions above before looking for a
+cause. `CLAUDE.md` already warns that a score improvement without a soundness
+argument is a red flag; the converse needs stating too.
+
 ## Guarding Against Benchmark Overfitting
 
 Every entry above was added while looking at `sv-benchmarks/`, which is also

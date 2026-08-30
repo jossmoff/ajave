@@ -2,6 +2,77 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-08-30 — verdicts were not reproducible, and it was being read as timeout noise
+
+### What was wrong
+
+Rust seeds `HashMap`/`HashSet` hashers randomly **per process**, so iterating one
+gives a different order on every run. Three such iterations fed the solver:
+
+- `Program::devirtualise` returned virtual-dispatch targets in hash order. BMC
+  explores them in that order and stops when its budget runs out, so the order
+  decides which targets are examined at all.
+- `apply_ai_hints` asserted AI interval bounds in hash order. The formula stays
+  logically identical but changes shape, so the solver returns a different
+  (still valid) model — and only some witnesses reproduce on a real JVM.
+- `merge.rs` built merged constraints from `HashSet` unions at join points.
+
+Separately, `ajave-build-{pid}` and `ajave-shadow-{pid}` were created with
+`create_dir_all` and never deleted. Pids are reused, so a run could inherit an
+earlier run's directory; `collect_classes` returns everything in it, so the
+verifier analysed another task's classes alongside its own.
+
+### Why it hid for so long
+
+It presented as score variance and was attributed to timeouts. The recorded
+range "valid-assert ~804-818, varies with timeouts" is a ~14 point band, and
+this session measured 798/800/802/814/820 and blamed CPU contention. Contention
+was real and explained part of it (89 timeouts on a loaded machine, 43 on an
+idle one). The residue was this.
+
+The arithmetic matches. Two of 134 smoke tasks were nondeterministic — about
+1.5%. Across 1033 valid-assert tasks that is roughly 15 tasks at 1-2 points
+each, so **±15-30 points of run-to-run noise**, against an observed band of ~16.
+
+It was also easy to dismiss: on a 134-task set two flaky tasks move the score by
+1-3 points, which is exactly the magnitude that gets called noise. And it only
+reproduces inside a parallel batch, so serial loops of a dozen runs kept showing
+a stable answer.
+
+### Fixes
+
+All three iterations now run in sorted order (`FK` gains `Ord`), and z3 is given
+fixed seeds so its model choice cannot drift either. `ScratchDir` replaces both
+temp directories: unique by construction, created with `create_dir` so a
+collision retries rather than silently reuses, and self-deleting on drop.
+
+`tools/bench.py --repeat N` runs every task N times and fails if any returns
+more than one verdict. It found the second cause immediately after the first was
+fixed, which the manual checks had missed.
+
+### Instrument bug found on the way
+
+The orchestrator's per-engine `discharged=` counter observed *stored* statuses.
+A discharge published after a violation is recorded in `proved_safe` but
+discarded from `statuses` (first final status wins) — and that discarded
+discharge still steers the verdict through `verdict_excluding`. So the counter
+reported "no discharges" for the very publication that decided the answer. It
+now counts published discharges.
+
+### Effect on score: about zero, and that is the point
+
+`VirtualDispatchPicksOverride` settles on TRUE (correct, a real gain);
+`objects14` settles on UNKNOWN, so that point is now lost every run rather than
+70% of them. Net ~0.
+
+What changed is that a score delta now means something. Before this, no
+comparison below roughly ±20 points on the full corpus was readable, which
+retroactively weakens several conclusions drawn the same day — including
+"820 versus a 814 baseline".
+
+Verified: smoke 134x3, ajave 97x5, concurrency 16x5 — all verdicts stable, 0
+wrong.
+
 ## 2026-08-30 — unified benchmark layout, one runner, and process-group cleanup
 
 ### Layout
