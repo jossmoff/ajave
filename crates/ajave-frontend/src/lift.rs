@@ -407,6 +407,26 @@ fn is_wide_operand(op: &Operand, lifter: &Lifter) -> bool {
 // Pass 2/3: leaders and lifting
 // ---------------------------------------------------------------------------
 
+/// Whether to emit obligations for library-call preconditions.
+///
+/// These obligations are all runtime-exception kinds (NullDeref, ArrayBounds,
+/// DivByZero, ExplicitThrow), so `--property assert` seeds none of them — but
+/// the lifter still emits the statements that compute them: a materialised
+/// `length()` call, its comparisons, and the `Check` itself, for every indexed
+/// or null-sensitive library call in the program.
+///
+/// That is pure overhead for valid-assert, and it is not small. Enabling this
+/// unconditionally cost 30 additional timeouts on a full valid-assert run,
+/// concentrated exactly where you would expect: `autostub` (+11), which is
+/// nothing but JDK calls, and `alarm` (+9), whose methods are enormous.
+///
+/// A static switch rather than a parameter because it is set once per process,
+/// before any lifting, and threading it through `lift_class` -> `lift_method`
+/// -> `Lifter` -> `BlockLifter` would touch every call site to express a
+/// single global fact.
+pub static SEED_CALL_PRECONDITIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, String> {
     let m = cf
         .method(name, desc)
@@ -773,6 +793,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         receiver: Option<&Operand>,
         args: &[Operand],
     ) {
+        if !SEED_CALL_PRECONDITIONS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let Some(contract) =
             models::contract_of(&target.class, &target.name, &target.desc)
         else {

@@ -535,7 +535,21 @@ fn main() {
     // synthetic obligation against the entry method that no engine but this one
     // could ever discharge, which buys nothing and obscures what is being
     // claimed.
-    if cli.property == "no-deadlock" {
+    // Parse the property once, here, rather than comparing the raw string at
+    // each use. Two separate string comparisons decided behaviour below, and a
+    // third place inferring the property differently is exactly how the corpus
+    // tests came to check one property while asserting another (#54).
+    let plan = ajave_core::plan::Property::parse(&cli.property)
+        .map(ajave_core::plan::Plan::for_property)
+        .unwrap_or_else(|| {
+            eprintln!("unknown property: {}", cli.property);
+            std::process::exit(2);
+        });
+    if cli.trace {
+        eprint!("{}", plan.explain());
+    }
+
+    if plan.property == ajave_core::plan::Property::NoDeadlock {
         let verdict = match ajave_engines::concurrency::check_preconditions(&prog) {
             Err(why) => {
                 info!("no-deadlock: {why}");
@@ -587,7 +601,10 @@ fn main() {
         return;
     }
 
-    let assertion_only = cli.property != "no-runtime-exception";
+    // The blackboard still takes a bool; the plan is the thing that decides it,
+    // so there is one place that knows which obligation kinds a property
+    // consumes. Widening this to the full Plan is tracked in #65.
+    let assertion_only = plan.property != ajave_core::plan::Property::NoRuntimeException;
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
     orchestrator.assertion_only = assertion_only;
