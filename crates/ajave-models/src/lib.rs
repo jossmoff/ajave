@@ -1050,5 +1050,9 @@ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
         NegArraySize => Some("java/lang/NegativeArraySizeException"),
         ClassCast => Some("java/lang/ClassCastException"),
         ExplicitThrow => Some("java/lang/RuntimeException"),
+        // A deadlock throws nothing — the program hangs. There is no
+        // exception class to look for on replay, which is one reason the
+        // no-deadlock property is answered outside the obligation system.
+        Deadlock => None,
     }
 }

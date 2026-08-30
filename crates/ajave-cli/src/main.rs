@@ -65,6 +65,10 @@ struct Cli {
     /// SV-COMP property to check. Defaults to `assert`.
     ///   assert              — valid-assert (assertion violations)
     ///   no-runtime-exception — uncaught RuntimeException
+    /// SV-COMP property to check. Defaults to `assert`.
+    ///   assert               — valid-assert (assertion violations)
+    ///   no-runtime-exception — uncaught RuntimeException
+    ///   no-deadlock          — CHECK( init(Main.main()), LTL(G !deadlock) )
     #[arg(long = "property", default_value = "assert")]
     property: String,
 }
@@ -521,6 +525,68 @@ fn main() {
     );
 
     // Run the engine portfolio.
+    // The no-deadlock property is answered directly by the concurrency engine
+    // rather than through the obligation system.
+    //
+    // Every other property is a condition at a program point, which is what an
+    // `Obligation` is. A deadlock is a property of the *execution* — no thread
+    // can proceed and not all have terminated — so there is no statement to
+    // attach it to. Forcing it into the obligation model would mean seeding a
+    // synthetic obligation against the entry method that no engine but this one
+    // could ever discharge, which buys nothing and obscures what is being
+    // claimed.
+    if cli.property == "no-deadlock" {
+        let verdict = match ajave_engines::concurrency::check_preconditions(&prog) {
+            Err(why) => {
+                info!("no-deadlock: {why}");
+                verdict::Verdict::Unknown
+            }
+            // Exhaustive, not DPOR, for deadlock.
+            //
+            // DPOR's reduction is justified by reasoning over *enabled*
+            // transitions: two independent enabled transitions commute, so one
+            // order represents both. A deadlock is a state where nothing is
+            // enabled, reached by threads blocking on each other — and the
+            // interleaving that produces it can be exactly the one the
+            // reduction discards, because the blocking transitions never
+            // appeared in an enabled set to be compared.
+            //
+            // Measured here: DPOR explored 236 states of LockOrderInversion and
+            // reported no deadlock, which is a wrong TRUE for this property.
+            // Making DPOR deadlock-aware (tracking blocked transitions in the
+            // backtrack computation) is the real fix; until then the property
+            // uses the unreduced baseline, which is why that baseline is kept.
+            Ok(entries) => match ajave_engines::concurrency::explore(
+                &prog,
+                &entries,
+                Default::default(),
+                ajave_engines::concurrency::Strategy::Exhaustive,
+            ) {
+                ajave_engines::concurrency::Exploration::Deadlock { schedule } => {
+                    if cli.trace {
+                        eprintln!("no-deadlock: reachable under a {}-slice schedule", schedule.len());
+                    }
+                    verdict::Verdict::False
+                }
+                // Exhaustive *and* no bound was hit, so the whole interleaving
+                // space within the modelled fragment was covered.
+                ajave_engines::concurrency::Exploration::ExhaustiveNoViolation => {
+                    verdict::Verdict::True
+                }
+                // A violation of some other property is not a deadlock.
+                ajave_engines::concurrency::Exploration::Violation { .. } => {
+                    verdict::Verdict::True
+                }
+                ajave_engines::concurrency::Exploration::Incomplete(why) => {
+                    info!("no-deadlock: exploration incomplete — {why}");
+                    verdict::Verdict::Unknown
+                }
+            },
+        };
+        println!("{verdict}");
+        return;
+    }
+
     let assertion_only = cli.property != "no-runtime-exception";
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);

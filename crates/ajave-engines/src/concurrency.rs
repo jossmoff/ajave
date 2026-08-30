@@ -123,10 +123,27 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
     // class no one locks.
     let mut monitored: HashSet<String> = HashSet::new();
     let mut unresolved_monitor = false;
+    // Fields whose value is used as a monitor, e.g. `synchronized (l.a)`.
+    //
+    // Class identity is too coarse for these. `Locks.a` and `Locks.b` are both
+    // `java.lang.Object`, so an allocation-site-per-class test calls them
+    // ambiguous and refuses — yet they are plainly different monitors, which is
+    // the entire point of a lock-order-inversion benchmark.
+    //
+    // A field is a sound monitor identity when it is written exactly once
+    // across the whole program: then every read of it yields the same object,
+    // so two threads locking `l.a` really are contending, and `l.a` and `l.b`
+    // really are distinct.
+    let mut monitored_fields: HashSet<ajave_ir::FieldKey> = HashSet::new();
+    let mut field_writes: std::collections::HashMap<ajave_ir::FieldKey, usize> =
+        std::collections::HashMap::new();
 
     for body in prog.bodies.values() {
         // Per-body allocation tracking, as in `threads::discover`.
         let mut var_class: std::collections::HashMap<ajave_ir::VarId, String> =
+            std::collections::HashMap::new();
+        // Which field a local was loaded from, for monitor identity.
+        let mut var_field: std::collections::HashMap<ajave_ir::VarId, ajave_ir::FieldKey> =
             std::collections::HashMap::new();
         for block in &body.blocks {
             for stmt in &block.stmts {
@@ -142,6 +159,15 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
                         if let Some(c) = var_class.get(src).cloned() {
                             var_class.insert(*v, c);
                         }
+                        if let Some(f) = var_field.get(src).cloned() {
+                            var_field.insert(*v, f);
+                        }
+                    }
+                    Stmt::Assign(v, Rvalue::GetField { field, .. }) => {
+                        var_field.insert(*v, field.clone());
+                    }
+                    Stmt::PutField { field, .. } => {
+                        *field_writes.entry(field.clone()).or_insert(0) += 1;
                     }
                     Stmt::Assign(_, Rvalue::Call { target, .. }) => {
                         if UNMODELLED_PRIMITIVES.contains(&target.class.as_str()) {
@@ -149,6 +175,12 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
                         }
                     }
                     Stmt::MonitorEnter(Operand::Var(v)) => {
+                        // Prefer field identity when the monitor came from a
+                        // field load: it distinguishes two same-class objects.
+                        if let Some(f) = var_field.get(v).cloned() {
+                            monitored_fields.insert(f);
+                            continue;
+                        }
                         match var_class.get(v) {
                             Some(c) => {
                                 monitored.insert(c.clone());
@@ -193,6 +225,27 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
             }
         }
     }
+    // A field-identified monitor is unambiguous only if the field is written
+    // exactly once program-wide — otherwise different objects could flow
+    // through it at different times.
+    for f in &monitored_fields {
+        match field_writes.get(f) {
+            Some(&1) => {}
+            Some(&n) => {
+                return Err(Refusal::AmbiguousMonitor(format!(
+                    "{}.{} is written {n} times, so it does not name one object",
+                    f.class, f.name
+                )))
+            }
+            None => {
+                return Err(Refusal::AmbiguousMonitor(format!(
+                    "{}.{} is never written in analysed code",
+                    f.class, f.name
+                )))
+            }
+        }
+    }
+
     if unresolved_monitor {
         return Err(Refusal::AmbiguousMonitor(
             "a monitor whose object could not be traced to an allocation".into(),

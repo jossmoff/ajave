@@ -329,6 +329,54 @@ wakeup trees are the natural next steps and are measurable against this.
 The reduction is what made a higher preemption bound affordable (3 -> 10),
 which is what let `SynchronizedCounter` be covered at all.
 
+### DPOR is not sound for deadlock detection
+
+Worth stating plainly, because it is easy to assume one explorer serves every
+property.
+
+DPOR's reduction is justified by reasoning over **enabled** transitions: two
+independent enabled transitions commute, so exploring one order represents
+both. A deadlock is a state in which *nothing* is enabled, reached by threads
+blocking on one another — and the interleaving that produces it can be exactly
+the one the reduction discards, because the blocking transitions never entered
+an enabled set to be compared.
+
+Measured, not assumed: DPOR explored 236 states of `LockOrderInversion` and
+reported **no deadlock**, which is a wrong TRUE for `no-deadlock.prp`. The same
+program under `Strategy::Exhaustive` reports FALSE correctly.
+
+So the no-deadlock property uses the unreduced explorer. This is the concrete
+reason the exhaustive baseline is kept rather than deleted once DPOR worked —
+it is not only a validation aid, it is load-bearing for one property.
+
+Making DPOR deadlock-aware (including blocked transitions in the backtrack
+computation) is the real fix and is the natural next piece of work.
+
+### The no-deadlock property
+
+SV-COMP already defines it — `CHECK( init(Main.main()), LTL(G !deadlock) )` in
+`sv-benchmarks/properties/no-deadlock.prp` — and the Java track simply has no
+category using it. We support that file verbatim rather than inventing our own.
+
+It is answered **outside the obligation system**. Every other property is a
+condition at a program point, which is what an `Obligation` is; a deadlock is a
+property of the *execution*. Forcing it into the obligation model would mean
+seeding a synthetic obligation against the entry method that no engine but this
+one could discharge, which buys nothing and obscures the claim. `--property
+no-deadlock` therefore calls the explorer directly:
+
+| Exploration result | Verdict |
+|---|---|
+| `Deadlock` | FALSE |
+| `ExhaustiveNoViolation` (no bound hit) | TRUE |
+| `Incomplete` or a refusal | UNKNOWN |
+
+Monitor identity also needed refining for this: `l.a` and `l.b` are both
+`java.lang.Object`, so allocation-site-per-class identity called them ambiguous
+and refused. A monitor loaded from a field now uses the **field** as identity,
+which is sound when that field is written exactly once program-wide — precisely
+the `final Object a = new Object()` idiom these benchmarks use.
+
 ### Bugs this phase surfaced
 
 Worth recording, because each was a wrong FALSE waiting to happen:

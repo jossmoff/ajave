@@ -34,9 +34,9 @@ V = "org.sosy_lab.sv_benchmarks.Verifier"
 CASES = []
 
 
-def case(name, assert_v, nre_v, justification, body, members=""):
-    """assert_v / nre_v: True (holds), False (violated), None (omit)."""
-    CASES.append((name, assert_v, nre_v, justification, body, members))
+def case(name, assert_v, nre_v, justification, body, members="", deadlock_v=None):
+    """assert_v / nre_v / deadlock_v: True (holds), False (violated), None (omit)."""
+    CASES.append((name, assert_v, nre_v, justification, body, members, deadlock_v))
 
 
 # ── Thread lifecycle ────────────────────────────────────────────────────────
@@ -393,6 +393,14 @@ case("ScheduleAndInputBoth", False, None,
 """)
 
 
+# Deadlock verdicts, attached by name so the positional `case()` signature stays
+# readable. LockOrderInversion has a reachable AB/BA cycle; ConsistentLockOrder
+# takes both locks in the same order, so no cycle is possible.
+DEADLOCK_VERDICTS = {
+    "LockOrderInversion": False,
+    "ConsistentLockOrder": True,
+}
+
 MAIN_TEMPLATE = """// Part of ajave's own concurrency benchmark suite.
 //
 // SPDX-License-Identifier: Apache-2.0
@@ -439,7 +447,8 @@ def main():
     cat_dir = os.path.join(args.out, "concurrency")
     os.makedirs(cat_dir, exist_ok=True)
 
-    for name, av, nv, just, body, members in CASES:
+    for name, av, nv, just, body, members, _dv in CASES:
+        dv = DEADLOCK_VERDICTS.get(name)
         src_dir = os.path.join(cat_dir, name)
         os.makedirs(src_dir, exist_ok=True)
         with open(os.path.join(src_dir, "Main.java"), "w") as f:
@@ -458,14 +467,16 @@ def main():
         if nv is not None:
             props += ("  - property_file: ../../properties/no-runtime-exception.prp\n"
                       f"    expected_verdict: {str(nv).lower()}\n")
+        if dv is not None:
+            props += ("  - property_file: ../../properties/no-deadlock.prp\n"
+                      f"    expected_verdict: {str(dv).lower()}\n")
         if not props:
-            # Deadlock-only task: no property we currently score.
-            props = ("  # No valid-assert or no-runtime-exception property: a deadlock\n"
-                     "  # hangs rather than failing either. Retained for no-deadlock.prp,\n"
-                     "  # which SV-COMP defines but no Java category uses.\n")
+            props = ("  # No property applies to this task.\n")
         with open(os.path.join(cat_dir, name + ".yml"), "w") as f:
             f.write(YML_TEMPLATE.format(name=name, props=props))
 
+    d_t = sum(1 for v in DEADLOCK_VERDICTS.values() if v is True)
+    d_f = sum(1 for v in DEADLOCK_VERDICTS.values() if v is False)
     a_t = sum(1 for _, a, *_ in CASES if a is True)
     a_f = sum(1 for _, a, *_ in CASES if a is False)
     n_t = sum(1 for _, _, n, *_ in CASES if n is True)
@@ -473,6 +484,7 @@ def main():
     print(f"wrote {len(CASES)} concurrency benchmarks -> {cat_dir}/")
     print(f"  valid-assert:          TRUE={a_t}  FALSE={a_f}")
     print(f"  no-runtime-exception:  TRUE={n_t}  FALSE={n_f}")
+    print(f"  no-deadlock:           TRUE={d_t}  FALSE={d_f}")
     print("\nGround truth is by construction; see the justification comment in each")
     print("Main.java. Observation can refute an expected-TRUE but never confirm one.")
 

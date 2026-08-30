@@ -22,7 +22,11 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 AJAVE = "./target/release/ajave"
-PROP_FLAG = {"assert": "assert", "nre": "no-runtime-exception"}
+PROP_FLAG = {
+    "assert": "assert",
+    "nre": "no-runtime-exception",
+    "deadlock": "no-deadlock",
+}
 
 
 def load_tasks(root):
@@ -38,7 +42,18 @@ def load_tasks(root):
         # neither valid-assert nor no-runtime-exception.
         for p in (data.get("properties") or []):
             pf = p.get("property_file", "")
-            key = "assert" if "valid-assert" in pf else "nre"
+            # Map each property file explicitly. An `else` fallback silently
+            # scored no-deadlock.prp as no-runtime-exception, which reported a
+            # deadlock-only benchmark as a wrong answer for a property it does
+            # not even declare.
+            if "valid-assert" in pf:
+                key = "assert"
+            elif "no-runtime-exception" in pf:
+                key = "nre"
+            elif "no-deadlock" in pf:
+                key = "deadlock"
+            else:
+                continue
             tasks.append((yml, name, os.path.basename(d), key, inputs,
                           p.get("expected_verdict")))
     return tasks

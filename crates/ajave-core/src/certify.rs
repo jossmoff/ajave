@@ -263,6 +263,11 @@ impl Certifier for JvmReplay {
                 "IllegalArgumentException",
             ],
             ObligationKind::ClassCast => &["ClassCastException"],
+            // A deadlock produces no exception — the program hangs — so no
+            // stderr text can confirm it. `JvmReplay` cannot certify one at
+            // all; the no-deadlock property is answered by the concurrency
+            // engine directly.
+            ObligationKind::Deadlock => &[],
             // Any RuntimeException subclass the program chose to raise.
             ObligationKind::ExplicitThrow => &[
                 "RuntimeException",

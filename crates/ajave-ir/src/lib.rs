@@ -302,6 +302,16 @@ pub enum ObligationKind {
     ClassCast,
     /// An explicit `throw` of a `RuntimeException` subclass is reachable.
     ExplicitThrow,
+    /// A state is reachable in which no thread can proceed and not all have
+    /// terminated — the `no-deadlock.prp` property,
+    /// `CHECK( init(Main.main()), LTL(G !deadlock) )`.
+    ///
+    /// Unlike every other kind, this is not a condition at a program point: a
+    /// deadlock is a property of the *execution*, not of one statement. It is
+    /// therefore seeded once per program against the entry method, with a
+    /// condition of `false` (any reachable deadlock violates it), and only an
+    /// engine that reasons about interleavings can discharge or violate it.
+    Deadlock,
 }
 
 impl ObligationKind {
@@ -309,6 +319,11 @@ impl ObligationKind {
     /// not care; the reporter filters on it.
     pub fn is_assertion(self) -> bool {
         matches!(self, ObligationKind::Assertion)
+    }
+
+    /// Does this obligation belong to the no-deadlock property?
+    pub fn is_deadlock(self) -> bool {
+        matches!(self, ObligationKind::Deadlock)
     }
 }
 
@@ -541,14 +556,31 @@ impl Program {
         // more to prove, so it can turn TRUE into UNKNOWN but never the
         // reverse. (Over-approximating the thread set for *exploration* is a
         // different matter and is not sound; see `threads::discover`.)
-        let starts_thread = self.bodies.values().any(|b| {
-            b.blocks.iter().any(|blk| {
-                blk.stmts.iter().any(|st| {
-                    matches!(st, Stmt::Assign(_, Rvalue::Call { target, .. })
-                        if target.class == "java/lang/Thread" && target.name == "start")
+        // Cheap guard first. Scanning every statement for `Thread.start` costs
+        // O(program) and *never* short-circuits on a program with no threads —
+        // which is every benchmark in the SV-COMP Java set. Since this function
+        // has seven call sites and is itself O(program), that scan measurably
+        // slowed the whole corpus: a full valid-assert run went from 57
+        // timeouts to 87, concentrated in categories where a slow solver had
+        // already consumed most of the budget (NRA gives each obligation 8s,
+        // so float-nonlinear had little slack to lose).
+        //
+        // A program can only start a thread if it has a `run()V` to run, and
+        // checking that is O(#methods) over the key set rather than O(#stmts).
+        // For the common case it exits immediately.
+        let has_run_body = self
+            .bodies
+            .keys()
+            .any(|k| k.name == "run" && k.desc == "()V");
+        let starts_thread = has_run_body
+            && self.bodies.values().any(|b| {
+                b.blocks.iter().any(|blk| {
+                    blk.stmts.iter().any(|st| {
+                        matches!(st, Stmt::Assign(_, Rvalue::Call { target, .. })
+                            if target.class == "java/lang/Thread" && target.name == "start")
+                    })
                 })
-            })
-        });
+            });
         if starts_thread {
             for k in self.bodies.keys() {
                 if k.name == "run" && k.desc == "()V" {

@@ -66,6 +66,17 @@ pub enum ThreadDiscovery {
 /// Anything else (a `Runnable` from a field, a factory, an array, a lambda that
 /// did not lift to a concrete class) yields `Unresolved`.
 pub fn discover(prog: &Program) -> ThreadDiscovery {
+    // Same cheap guard as `reachable_from_entry`: no `run()V` body means no
+    // thread can be started, and checking the key set is far cheaper than
+    // walking every statement of every method.
+    if !prog
+        .bodies
+        .keys()
+        .any(|k| k.name == "run" && k.desc == "()V")
+    {
+        return ThreadDiscovery::Sequential;
+    }
+
     let mut entries = Vec::new();
     let mut saw_start = false;
 
