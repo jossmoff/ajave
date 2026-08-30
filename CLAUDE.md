@@ -106,6 +106,19 @@ points, which looked exactly like a code regression and was investigated as one.
 - Check for strays first: `tools/cleanup.sh`. A leaked solver or JVM holds
   hundreds of megabytes and never exits on its own.
 
+### The build under test must not change mid-run
+A scoring run invokes the binary once per task over many minutes. Rebuilding
+during that window swaps it underneath the run, so early tasks measure one build
+and later tasks another, and the score describes **no build that ever existed**.
+
+This is invisible — nothing errors, the number just quietly means nothing — and
+it cost three measurements in one day, including a full valid-assert run.
+
+`bench.py` now snapshots the binary at start and runs from the copy, so a
+rebuild cannot affect a run in flight. The snapshot path travels in each work
+item rather than a module global, because worker processes are spawned and
+re-import the module. Do not reintroduce a global here.
+
 ### A regression must be reproduced before it is explained
 **A score drop measured on a busy machine, or without a determinism check, is
 not a regression.** Reproduce it under the conditions above before looking for a

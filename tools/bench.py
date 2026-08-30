@@ -24,6 +24,9 @@ what a task *should* answer, which is the invariant that keeps a gate honest.
 """
 
 import argparse
+import atexit
+import shutil
+import tempfile
 import glob
 import os
 import re
@@ -140,8 +143,12 @@ def load_set(name):
 # --------------------------------------------------------------------------
 
 def run_one(args):
-    task, prop, timeout, collect_timing = args
-    cmd = [BINARY, "--property", CLI_PROPERTY[prop]] + task["inputs"]
+    # The binary path travels in the work item, not as a module global: worker
+    # processes are spawned and re-import this module, so a global assigned in
+    # main() never reaches them — they would silently use the live build and
+    # defeat the snapshot.
+    task, prop, timeout, collect_timing, binary = args
+    cmd = [binary, "--property", CLI_PROPERTY[prop]] + task["inputs"]
     env = dict(os.environ, RUST_LOG="info") if collect_timing else dict(os.environ)
 
     # run_guarded, not subprocess.run: ajave spawns a solver and a JVM, and
@@ -427,8 +434,26 @@ def main():
     if not args.allow_busy:
         check_machine_idle(args.jobs, args.require_idle)
 
+    global BINARY
     if not os.path.exists(BINARY):
         sys.exit(f"binary not found: {BINARY}\nBuild first: cargo build --release")
+
+    # Snapshot the binary before doing anything else.
+    #
+    # A run invokes the binary once per task over many minutes. Rebuilding
+    # during that window silently swaps it mid-run, so early tasks measure one
+    # build and later tasks another — and the resulting score describes no
+    # build that ever existed. That happened three times in one day, most
+    # expensively to a full valid-assert run, because it is invisible: nothing
+    # errors, the number just quietly means nothing.
+    #
+    # Copying costs a few milliseconds and makes the run immune to it.
+    snap_dir = tempfile.mkdtemp(prefix="ajave-run-")
+    snapshot = os.path.join(snap_dir, "ajave")
+    shutil.copy2(BINARY, snapshot)
+    os.chmod(snapshot, 0o755)
+    BINARY = snapshot
+    atexit.register(shutil.rmtree, snap_dir, True)
 
     # Ctrl-C must not leave solvers and JVMs behind.
     install_signal_handlers()
@@ -456,7 +481,7 @@ def main():
             props = list(task["expected"])
         for p in props:
             work.append((task, p, args.timeout,
-                         args.timing or args.update_baseline))
+                         args.timing or args.update_baseline, BINARY))
 
     if not work:
         sys.exit("no runs to perform — check the set and --property")
