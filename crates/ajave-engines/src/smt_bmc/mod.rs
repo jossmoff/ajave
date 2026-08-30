@@ -142,12 +142,26 @@ impl Completeness {
 /// Java has no bitwise or shift operators on floats, so the arithmetic and
 /// comparison operators below are the complete set that can appear.
 fn fp_binop_modelled(op: BinOp) -> bool {
-    // Comparisons only: float arithmetic stays on the bitvector path for
-    // speed, so it must keep tainting its result.
+    // Which float operators the SMT encoding models precisely. An operator that
+    // is *not* modelled taints its result, and a tainted branch condition is
+    // never added to the path constraints — the guard simply is not imposed, so
+    // every path looks reachable and the witness values are arbitrary.
+    //
+    // This must track `encode_binop`'s dispatch exactly. When arithmetic ran on
+    // the bitvector path but this had been widened to include it, the engine
+    // would trust a meaningless result; when arithmetic runs in FPA but this
+    // still excludes it, the engine discards a guard it could have imposed and
+    // emits a witness that cannot replay. The second is what happened: enabling
+    // FPA arithmetic without updating this measured as "no better", because the
+    // constraint was still being thrown away.
+    let arith = matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+    );
     matches!(
         op,
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-    )
+    ) || (arith && encode::fp_arith())
 }
 
 pub struct SmtBmc {

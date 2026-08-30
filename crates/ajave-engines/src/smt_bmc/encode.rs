@@ -38,7 +38,7 @@ use super::ExploreCtx;
 /// Kept behind `AJAVE_FP_ARITH=1` because the encoding is correct and worth
 /// re-testing if the witness-replay problem (#56) is solved by other means, or
 /// if a faster FP solver is adopted.
-fn fp_arith() -> bool {
+pub(super) fn fp_arith() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
         std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
