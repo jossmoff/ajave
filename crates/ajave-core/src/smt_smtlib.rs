@@ -434,16 +434,32 @@ impl Solver for SmtLib {
 
     fn fp_to_bits(&mut self, f: Term, width: u32) -> Term {
         // SMT-LIB has no direct float-to-bits, so introduce a fresh bitvector
-        // and tie it to the float by the inverse conversion. Sound: the
-        // constraint pins it to exactly one value, except for NaN where any
-        // NaN payload satisfies it — which matches `doubleToRawLongBits`
-        // being unspecified across NaN payloads.
+        // and tie it to the float by the inverse conversion.
+        //
+        // The NaN case needs care. `doubleToRawLongBits` is unspecified across
+        // NaN payloads, so any NaN pattern is acceptable — but "any NaN" is not
+        // the same as "anything". Writing this as
+        //
+        //     (or (fp.isNaN f) (= (to_fp bv) f))
+        //
+        // is satisfied outright by the first disjunct whenever `f` is NaN,
+        // which leaves `bv` completely unconstrained: the solver may report a
+        // bit pattern that is not NaN and bears no relation to the value it
+        // reasoned about. Witnesses are read out of exactly these bitvectors,
+        // so the model and the reported witness silently diverge, and the
+        // witness then fails JVM replay. That was losing most of
+        // float-nonlinear-calculation (#56).
+        //
+        // The conditional form keeps the payload freedom while still requiring
+        // `bv` to decode to *a* NaN.
         let (e, m) = if width == 32 { (8, 24) } else { (11, 53) };
         let bv = self.fresh_bv("fpbits", width);
         let bvn = self.name(bv);
         let fname = self.name(f);
         self.send(&format!(
-            "(assert (or (fp.isNaN {fname}) (= ((_ to_fp {e} {m}) {bvn}) {fname})))"
+            "(assert (ite (fp.isNaN {fname}) \
+                          (fp.isNaN ((_ to_fp {e} {m}) {bvn})) \
+                          (= ((_ to_fp {e} {m}) {bvn}) {fname})))"
         ));
         bv
     }

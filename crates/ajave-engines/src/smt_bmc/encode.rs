@@ -10,6 +10,41 @@ use ajave_ir::*;
 
 use super::ExploreCtx;
 
+/// Encode float/double **arithmetic** in the FloatingPoint theory, not just
+/// comparisons.
+///
+/// Off, arithmetic runs on the bitvector path: faster, but a model satisfying
+/// it need not satisfy the real float semantics, so witnesses fail JVM replay
+/// and the point is lost. On, models are genuine float models and the witness
+/// replays.
+///
+/// **Off by default. Measured, not assumed.**
+///
+/// The trade-off was previously recorded as "~2.5x slower end-to-end", measured
+/// before timeout counts were trustworthy, so it was re-measured on an idle
+/// machine with reproducible verdicts over the whole
+/// `float-nonlinear-calculation` category (87 tasks, valid-assert):
+///
+/// | arithmetic | wall clock | score |
+/// |---|---|---|
+/// | bitvector (off) |  52s | 18 |
+/// | FPA (on)        | 375s | 17 |
+///
+/// **7.2x slower and a point worse** — worse than the figure on record, and no
+/// precision gained where it matters. Enabling it does make the solver's models
+/// genuine float models, but that alone does not make witnesses replay, so the
+/// category's losses are not caused by bitvector arithmetic.
+///
+/// Kept behind `AJAVE_FP_ARITH=1` because the encoding is correct and worth
+/// re-testing if the witness-replay problem (#56) is solved by other means, or
+/// if a faster FP solver is adopted.
+fn fp_arith() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
+    })
+}
+
 impl<'a> ExploreCtx<'a> {
     pub(super) fn can_inline(&self, target: &MethodKey, is_virtual: bool) -> bool {
         if self.call_depth >= super::MAX_CALL_DEPTH {
@@ -396,7 +431,23 @@ impl<'a> ExploreCtx<'a> {
         // differs from 0.0) and they cost almost nothing to encode, so that is
         // where the theory earns its keep. Arithmetic remains float-tainted,
         // which keeps it from being claimed as precise.
-        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+        // Arithmetic goes through FPA when `fp_arith()` is on.
+        //
+        // With it off, `1.5 - d1 * (1.0 - d2)` is computed with *integer*
+        // operations on raw bit patterns, so a satisfying model is not a
+        // satisfying float model. BMC still publishes the violation and lets
+        // JVM replay arbitrate — which is sound, but for
+        // float-nonlinear-calculation the bitvector model is essentially never
+        // a real one, so 18 of 25 sampled tasks found the violation and then
+        // withdrew it. Those are points computed correctly and discarded.
+        let fp_op = if fp_arith() {
+            matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt
+                     | BinOp::Ge | BinOp::Add | BinOp::Sub | BinOp::Mul
+                     | BinOp::Div | BinOp::Rem)
+        } else {
+            matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        };
+        if fp_op {
             if let (Some(wa), Some(wb)) =
                 (self.fp_width_of_operand(a), self.fp_width_of_operand(b))
             {
