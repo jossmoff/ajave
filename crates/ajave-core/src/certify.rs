@@ -113,8 +113,16 @@ public interface ObjectFactory<T> { T createObject(); }
     /// Compile the shadow class into a temp directory, returning its path for
     /// use as the front of the classpath. Cached per-process would be nicer;
     /// kept simple since replay runs are few and this is a one-off tool.
-    fn build_shadow(&self) -> Result<std::path::PathBuf, String> {
-        let dir = std::env::temp_dir().join(format!("ajave-shadow-{}", std::process::id()));
+    fn build_shadow(
+        &self,
+    ) -> Result<(std::path::PathBuf, crate::scratch::ScratchDir), String> {
+        // Unique per call and self-deleting. Naming it after the pid alone
+        // meant a run could inherit a previous run's directory, and this one
+        // goes at the front of the replay classpath — stale classes here flip a
+        // witness between confirmed and refuted (#66).
+        let scratch = crate::scratch::ScratchDir::new("ajave-shadow")
+            .map_err(|e| format!("could not create shadow dir: {e}"))?;
+        let dir = scratch.path().to_path_buf();
         debug!("jvm-replay: building shadow Verifier in {}", dir.display());
         let pkg_dir = dir.join("org/sosy_lab/sv_benchmarks");
         std::fs::create_dir_all(&pkg_dir).map_err(|e| e.to_string())?;
@@ -136,7 +144,9 @@ public interface ObjectFactory<T> { T createObject(); }
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
-        Ok(dir)
+        // The caller uses this as a classpath entry, so the guard has to
+        // outlive the function; leaking it here would reinstate the bug.
+        Ok((dir, scratch))
     }
 }
 
@@ -175,7 +185,10 @@ impl Certifier for JvmReplay {
 
         debug!("jvm-replay: certifying violation at {oref:?}");
 
-        let shadow_dir = match self.build_shadow() {
+        // `_shadow_guard` deletes the directory when this function returns.
+        // Binding it to `_` instead would drop it immediately and remove the
+        // classpath entry out from under the JVM.
+        let (shadow_dir, _shadow_guard) = match self.build_shadow() {
             Ok(d) => d,
             Err(e) => {
                 warn!("jvm-replay: {e}");

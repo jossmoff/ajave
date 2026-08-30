@@ -115,7 +115,12 @@ fn collect_classes(root: &Path) -> Vec<PathBuf> {
 /// would open a gap between what's proven and what's certified. Returning the
 /// classpath directory alongside the class files is what keeps that promise
 /// -- replay needs to run against the exact same bytecode that was lifted.
-fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), String> {
+/// Returns the classes, the classpath, and — when sources had to be compiled —
+/// the scratch directory holding them. The caller must keep that alive for the
+/// whole run: dropping it deletes the classpath out from under the analysis.
+fn compile_if_needed(
+    inputs: &[PathBuf],
+) -> Result<(Vec<PathBuf>, String, Option<ajave_core::scratch::ScratchDir>), String> {
     let java_files: Vec<PathBuf> = inputs
         .iter()
         .flat_map(|p| collect_by_ext(p, "java"))
@@ -138,16 +143,22 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
             })
             .collect::<Vec<_>>()
             .join(if cfg!(windows) { ";" } else { ":" });
-        return Ok((classes, cp));
+        // Pre-compiled .class inputs: nothing temporary to own.
+        return Ok((classes, cp, None));
     }
 
-    let out_dir = std::env::temp_dir().join(format!("ajave-build-{}", std::process::id()));
+    // Unique per run and self-deleting. Named after the pid alone, this could
+    // be a directory a previous run left behind — and `collect_classes` below
+    // takes everything in it, so the verifier would analyse that run's classes
+    // alongside these. See ajave_core::scratch (#66).
+    let scratch = ajave_core::scratch::ScratchDir::new("ajave-build")
+        .map_err(|e| format!("could not create build dir: {e}"))?;
+    let out_dir = scratch.path().to_path_buf();
     info!(
         "compiling {} .java file(s) to {}",
         java_files.len(),
         out_dir.display()
     );
-    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
     let result = std::process::Command::new("javac")
         .arg("-nowarn")
@@ -166,7 +177,10 @@ fn compile_if_needed(inputs: &[PathBuf]) -> Result<(Vec<PathBuf>, String), Strin
 
     debug!("javac succeeded");
     let classes = collect_classes(&out_dir);
-    Ok((classes, out_dir.display().to_string()))
+    // The classpath must remain valid for the whole run, so the directory
+    // cannot be deleted when this function returns. Ownership goes to the
+    // caller, which holds it until the process exits.
+    Ok((classes, out_dir.display().to_string(), Some(scratch)))
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +476,9 @@ fn main() {
 
     info!("ajave starting, inputs={:?}", cli.inputs);
 
-    let (class_files, classpath) = match compile_if_needed(&cli.inputs) {
+    // `_scratch` must stay bound for the rest of main: it owns the compiled
+    // classes, and dropping it early would delete the classpath mid-run.
+    let (class_files, classpath, _scratch) = match compile_if_needed(&cli.inputs) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
