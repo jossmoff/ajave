@@ -30,7 +30,11 @@ use ajave_ir::*;
 use ajave_models;
 
 /// Field identification key with named fields for type safety.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Ord` is required, not cosmetic: merge points iterate the union of two
+/// states' field maps to build the merged constraints, and iterating a
+/// `HashSet` there gave a different term order on every process. See `merge.rs`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct FK {
     class: String,
     name: String,
@@ -948,14 +952,22 @@ impl<'a> ExploreCtx<'a> {
         if self.ai_hints.is_empty() || self.call_depth > 0 {
             return;
         }
-        // Collect applicable hints for this block
-        let hints: Vec<(VarId, i64, i64)> = self
+        // Collect applicable hints for this block.
+        let mut hints: Vec<(VarId, i64, i64)> = self
             .ai_hints
             .iter()
             .filter(|((bid, _), _)| *bid == block_id)
             .filter(|(key, _)| !self.ai_hints_applied.contains(key))
             .map(|((_, vid), (lo, hi))| (*vid, *lo, *hi))
             .collect();
+        // `ai_hints` is a HashMap, and Rust seeds its hasher randomly per
+        // process — so without this the bound constraints are asserted in a
+        // different order on every run. The formula stays logically the same,
+        // but its shape changes, the solver returns a different (still valid)
+        // model, and the resulting witness may or may not reproduce on a real
+        // JVM. That is a verdict flipping between FALSE and UNKNOWN across
+        // identical runs (#66).
+        hints.sort();
 
         for (vid, lo, hi) in hints {
             // Only constrain variables we already have a term for

@@ -89,11 +89,13 @@ impl Orchestrator {
                 // them by discharges alone reads as "contributes nothing" when
                 // they may be earning FALSEs. Same mistake, opposite sign, as
                 // judging an Over engine by violations.
-                let before = self
-                    .bb
-                    .statuses()
-                    .filter(|(_, s)| matches!(s, Status::Discharged { .. }))
-                    .count();
+                // Count *published* discharges, not stored ones. A discharge
+                // published after a violation is discarded from `statuses`
+                // (first final status wins) yet still steers the verdict
+                // through `verdict_excluding` — so counting stored statuses
+                // reported "no discharges" for the very publication that
+                // decided the answer (#66).
+                let before = self.bb.proved_safe_count();
                 let before_v = self
                     .bb
                     .statuses()
@@ -103,11 +105,7 @@ impl Orchestrator {
                 let progress = e.step(prog, &mut self.bb, self.budget);
                 *step_ms.entry(e.id().0.to_string()).or_default() +=
                     t0.elapsed().as_millis();
-                let after = self
-                    .bb
-                    .statuses()
-                    .filter(|(_, s)| matches!(s, Status::Discharged { .. }))
-                    .count();
+                let after = self.bb.proved_safe_count();
                 let after_v = self
                     .bb
                     .statuses()

@@ -312,6 +312,18 @@ impl Blackboard {
     }
 
     /// Whether we are checking the assert property (vs no-runtime-exception).
+    /// How many distinct obligations any engine has ever *published* a
+    /// discharge for.
+    ///
+    /// Not the same as counting `Status::Discharged` in `statuses`: a discharge
+    /// published after a violation is recorded here but discarded there, because
+    /// the first final status wins. That discarded discharge still steers the
+    /// verdict via `verdict_excluding`, so measuring only stored statuses hides
+    /// the thing that decided the answer (#66).
+    pub fn proved_safe_count(&self) -> usize {
+        self.proved_safe.len()
+    }
+
     pub fn is_assertion_only(&self) -> bool {
         self.assertion_only
     }

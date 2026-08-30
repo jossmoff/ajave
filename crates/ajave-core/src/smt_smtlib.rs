@@ -855,7 +855,18 @@ fn default_args(binary: &str) -> Vec<String> {
     // Strip path to get just the binary name for matching.
     let name = binary.rsplit('/').next().unwrap_or(binary);
     match name {
-        "z3" => vec!["-in".into(), "-smt2".into()],
+        // Fixed seeds. z3's model choice is affected by internal randomness,
+        // and a different (still valid) model means a different witness — only
+        // some of which reproduce on a real JVM, so the verdict flips between
+        // FALSE and UNKNOWN across identical runs (#66). A verifier must not
+        // depend on a solver's random seed.
+        "z3" => vec![
+            "-in".into(),
+            "-smt2".into(),
+            "sat.random_seed=0".into(),
+            "smt.random_seed=0".into(),
+            "nlsat.seed=0".into(),
+        ],
         "bitwuzla" => vec!["--smt2".into()],
         "cvc5" => vec!["--lang".into(), "smt2".into(), "--incremental".into()],
         _ => vec![],

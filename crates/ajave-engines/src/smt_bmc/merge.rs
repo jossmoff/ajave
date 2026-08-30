@@ -1,5 +1,6 @@
 //! State save/restore and ITE-merge logic for branch exploration.
 
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 
 use ajave_core::smt::Term;
@@ -61,7 +62,13 @@ impl<'a> ExploreCtx<'a> {
     /// unconstrained.
     pub(super) fn merge_states_ite(&mut self, cond: Term, a: &SavedState, b: &SavedState) {
         // Variables
-        let all_vids: HashSet<VarId> = a.vars.keys().chain(b.vars.keys()).copied().collect();
+        // BTreeSet, not HashSet: this order becomes the order of the merged
+        // constraints handed to the solver. A hash-seeded order changes the
+        // formula's shape on every process, so the solver returns a different
+        // (still valid) model, producing a different witness — and only some
+        // witnesses reproduce on a real JVM. That is a verdict flipping between
+        // FALSE and UNKNOWN across identical runs (#66).
+        let all_vids: BTreeSet<VarId> = a.vars.keys().chain(b.vars.keys()).copied().collect();
         let mut width_mismatch_vars: Vec<VarId> = Vec::new();
         for vid in all_vids {
             let av = a.vars.get(&vid).copied();
@@ -107,13 +114,13 @@ impl<'a> ExploreCtx<'a> {
         }
 
         // Var widths — pick whichever was assigned
-        for vid in a.var_widths.keys().chain(b.var_widths.keys()).copied().collect::<HashSet<_>>() {
+        for vid in a.var_widths.keys().chain(b.var_widths.keys()).copied().collect::<BTreeSet<_>>() {
             let w = a.var_widths.get(&vid).or_else(|| b.var_widths.get(&vid)).copied().unwrap_or(32);
             self.var_widths.insert(vid, w);
         }
 
         // Static fields
-        let all_sk: HashSet<_> = a.statics.keys().chain(b.statics.keys()).cloned().collect();
+        let all_sk: BTreeSet<_> = a.statics.keys().chain(b.statics.keys()).cloned().collect();
         for k in all_sk {
             match (a.statics.get(&k).copied(), b.statics.get(&k).copied()) {
                 (Some(t), Some(e)) if t == e => { self.statics.insert(k, t); }
@@ -128,7 +135,8 @@ impl<'a> ExploreCtx<'a> {
         }
 
         // Instance field arrays
-        let all_fk: HashSet<_> = a.field_arrays.keys().chain(b.field_arrays.keys()).cloned().collect();
+        let all_fk: BTreeSet<_> =
+            a.field_arrays.keys().chain(b.field_arrays.keys()).cloned().collect();
         for k in all_fk {
             match (a.field_arrays.get(&k).copied(), b.field_arrays.get(&k).copied()) {
                 (Some(t), Some(e)) if t == e => { self.field_arrays.insert(k, t); }
@@ -174,7 +182,7 @@ impl<'a> ExploreCtx<'a> {
         self.path_tainted = a.path_tainted || b.path_tainted;
 
         // String vars
-        let all_sv: HashSet<VarId> = a.str_vars.keys().chain(b.str_vars.keys()).copied().collect();
+        let all_sv: BTreeSet<VarId> = a.str_vars.keys().chain(b.str_vars.keys()).copied().collect();
         self.str_vars.clear();
         for vid in all_sv {
             match (a.str_vars.get(&vid).copied(), b.str_vars.get(&vid).copied()) {

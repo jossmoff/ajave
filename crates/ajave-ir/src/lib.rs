@@ -561,6 +561,18 @@ impl Program {
                 out.push(k.clone());
             }
         }
+        // `bodies` is a HashMap with Rust's default hasher, which is seeded
+        // randomly *per process* — so this order differs on every run.
+        //
+        // BMC explores dispatch targets in this order and stops when its budget
+        // runs out, so the order decides which targets are examined and can
+        // decide the verdict. Measured: VirtualDispatchPicksOverride returned
+        // TRUE on 6 of 16 identical runs and UNKNOWN on the rest, with BMC
+        // publishing a discharge in exactly the TRUE runs (#66).
+        //
+        // A verifier must not depend on hash seeding. Sorting costs nothing at
+        // these sizes and makes the answer reproducible.
+        out.sort();
         out
     }
 
@@ -570,7 +582,11 @@ impl Program {
     /// - Virtual dispatch across unloaded parent classes
     pub fn reachable_from_entry(&self) -> Vec<MethodKey> {
         let Some(entry) = &self.entry else {
-            return self.bodies.keys().cloned().collect();
+            // Sorted for the same reason as `devirtualise`: engines iterate
+            // this and must not see a hash-seeded order.
+            let mut all: Vec<MethodKey> = self.bodies.keys().cloned().collect();
+            all.sort();
+            return all;
         };
         let mut seen: Vec<MethodKey> = Vec::new();
         let mut work = vec![entry.clone()];
@@ -602,11 +618,14 @@ impl Program {
         // checking that is O(#methods) over the key set rather than O(#stmts).
         // For the common case it exits immediately.
         if starts_thread {
-            for k in self.bodies.keys() {
-                if k.name == "run" && k.desc == "()V" {
-                    work.push(k.clone());
-                }
-            }
+            let mut runs: Vec<MethodKey> = self
+                .bodies
+                .keys()
+                .filter(|k| k.name == "run" && k.desc == "()V")
+                .cloned()
+                .collect();
+            runs.sort();
+            work.extend(runs);
         }
         while let Some(k) = work.pop() {
             if seen.contains(&k) {
