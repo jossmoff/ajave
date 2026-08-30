@@ -209,6 +209,15 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     // via cvc5's native support. BMC havoces these calls and produces garbage
     // witnesses, so NRA must claim them first.
     engines.push(Box::new(ajave_engines::nra::NraEngine::new()));
+    // Search-based float falsification, after NRA and before AI/BMC.
+    //
+    // SMT-LIB's FloatingPoint theory has no transcendentals, and this corpus is
+    // full of them (173 uses of Math.sin alone), so no encoding can decide
+    // those obligations. Java's Math.sin is also only specified to 1 ulp, so
+    // there is no unique symbolic answer — concrete execution is the ground
+    // truth. This engine searches for inputs and publishes only violations it
+    // actually executed.
+    engines.push(Box::new(ajave_engines::float_search::FloatSearch::new()));
     // AI before BMC: for float-loop bodies, the AI's widening analysis can
     // prove safety via interval fixpoint. BMC finds spurious violations on
     // bounded unrollings that fail JVM replay; AI discharges first to prevent

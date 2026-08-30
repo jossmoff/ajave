@@ -56,7 +56,8 @@ impl Value {
 }
 
 /// Outcome of running one concrete path to completion.
-pub(crate) enum Outcome {
+#[derive(Debug)]
+pub enum Outcome {
     /// Ran to a `Return` with nothing amiss.
     Clean,
     /// Ran to a `Return` carrying a value.
@@ -101,9 +102,49 @@ enum CheckResult {
 /// which `run_with_choices` intercepts before they ever reach here.
 struct Run {
     store: HashMap<VarId, Value>,
+    /// Smallest relative distance to equality seen at any float comparison.
+    ///
+    /// The fitness signal for `float_search`. Guards in the float corpus are
+    /// overwhelmingly `if (expr == 0.0) { assert false; }`, so the distance
+    /// from `expr` to `0.0` is exactly what a search must minimise: zero
+    /// precisely when the violating branch is taken. Without it a search is
+    /// blind, and blind search never lands an exact double equality.
+    min_cmp_distance: f64,
+    /// Signed `a - b` at the comparison that came closest to equality.
+    ///
+    /// The sign is what makes exact equality reachable: two candidates whose
+    /// signs differ bracket a root, and the bit patterns between them can be
+    /// bisected to land on it exactly. Magnitude alone cannot do this — near
+    /// the solution one ULP of an input moves the compared expression by far
+    /// more than the remaining gap, so any step overshoots.
+    min_cmp_signed: f64,
 }
 
 impl Run {
+    fn new(store: HashMap<VarId, Value>, min_cmp_distance: f64) -> Run {
+        Run { store, min_cmp_distance, min_cmp_signed: f64::INFINITY }
+    }
+
+    /// `|a-b| / (1 + |a-b|)`: the standard bounded branch distance from
+    /// search-based testing. Monotone in `|a-b|` and confined to `[0, 1)`, so
+    /// runs stay comparable without any run being able to dominate the scale.
+    ///
+    /// Scaling by the operand magnitude instead — `|a-b| / max(|a|,|b|,1)` —
+    /// looks more principled and is useless here: comparing `expr` against
+    /// `0.0` then yields `|expr|/|expr| = 1` for every `|expr| >= 1`, so every
+    /// candidate scores identically and the search has nothing to descend.
+    fn note_cmp_distance(&mut self, a: f64, b: f64) {
+        if !a.is_finite() || !b.is_finite() {
+            return;
+        }
+        let raw = (a - b).abs();
+        let d = raw / (1.0 + raw);
+        if d < self.min_cmp_distance {
+            self.min_cmp_distance = d;
+            self.min_cmp_signed = a - b;
+        }
+    }
+
     fn eval(&self, op: &Operand) -> Value {
         match op {
             Operand::Var(v) => self.store.get(v).copied().unwrap_or(Value::Unknown),
@@ -176,10 +217,12 @@ impl Run {
                         if is_double {
                             let fa = f64::from_bits(x as u64);
                             let fb = f64::from_bits(y as u64);
+                            self.note_cmp_distance(fa, fb);
                             Value::I32(fa.partial_cmp(&fb).map_or(nan_result, |o| o as i32))
                         } else {
                             let fa = f32::from_bits(x as u32);
                             let fb = f32::from_bits(y as u32);
+                            self.note_cmp_distance(fa as f64, fb as f64);
                             Value::I32(fa.partial_cmp(&fb).map_or(nan_result, |o| o as i32))
                         }
                     }
@@ -293,6 +336,10 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
 /// inlining so field reads/writes and allocations are visible across frames.
 struct ConcreteState<'a> {
     prog: &'a Program,
+    /// See `Run::min_cmp_distance`.
+    min_cmp_distance: f64,
+    /// See `Run::min_cmp_signed`.
+    min_cmp_signed: f64,
     choices: &'a [i64],
     choice_idx: usize,
     trace: Vec<i64>,
@@ -320,6 +367,8 @@ impl<'a> ConcreteState<'a> {
     fn new(prog: &'a Program, choices: &'a [i64], step_budget: u64) -> Self {
         ConcreteState {
             prog,
+            min_cmp_distance: f64::INFINITY,
+            min_cmp_signed: f64::INFINITY,
             choices,
             choice_idx: 0,
             trace: Vec::new(),
@@ -500,9 +549,12 @@ impl<'a> ConcreteState<'a> {
                     }
                     Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
                     None => {
-                        let mut r = Run { store: std::mem::take(store) };
+                        let mut r = Run::new(std::mem::take(store), self.min_cmp_distance);
                         let val = r.eval_rvalue(rv);
                         *store = r.store;
+                        self.min_cmp_distance = r.min_cmp_distance;
+                self.min_cmp_signed = r.min_cmp_signed;
+                        self.min_cmp_signed = r.min_cmp_signed;
                         Ok(val)
                     }
                 }
@@ -539,9 +591,10 @@ impl<'a> ConcreteState<'a> {
                     }))
             }
             other => {
-                let mut r = Run { store: std::mem::take(store) };
+                let mut r = Run::new(std::mem::take(store), self.min_cmp_distance);
                 let val = r.eval_rvalue(other);
                 *store = r.store;
+                self.min_cmp_distance = r.min_cmp_distance;
                 Ok(val)
             }
         }
@@ -814,6 +867,21 @@ impl<'a> ConcreteState<'a> {
 pub(crate) fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
     let mut state = ConcreteState::new(prog, choices, step_budget);
     state.run_body(body, HashMap::new())
+}
+
+/// Run, and report how close the run came to taking a violating branch.
+///
+/// `f64::INFINITY` means no float comparison was reached. Zero means one held
+/// exactly, which for this corpus's `== 0.0` guards is the violating branch.
+pub fn run_with_fitness(
+    prog: &Program,
+    body: &Body,
+    choices: &[i64],
+    step_budget: u64,
+) -> (Outcome, f64, f64) {
+    let mut state = ConcreteState::new(prog, choices, step_budget);
+    let out = state.run_body(body, HashMap::new());
+    (out, state.min_cmp_distance, state.min_cmp_signed)
 }
 
 /// Run a single all-zero probe. The concrete engine is a cheap first pass

@@ -19,6 +19,7 @@ pub mod ai;
 pub mod cegar;
 pub mod chc;
 pub mod concrete;
+pub mod float_search;
 mod math_eval;
 mod str_eval;
 pub mod imc;
