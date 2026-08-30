@@ -191,14 +191,21 @@ def sweep(verbose=True):
     import glob
     import shutil
     import tempfile
+
+    # Only the directories ajave actually creates for a run. A blanket
+    # `ajave-*` glob is too wide: it also matched `/tmp/ajave-runs`, the
+    # directory holding this harness's own logs, so a completed run deleted its
+    # own results on the way out and took the chained run with it.
+    prefixes = ("ajave-build-", "ajave-shadow-")
     roots = {tempfile.gettempdir(), "/tmp"}
     for root in roots:
-        for d in glob.glob(os.path.join(root, "ajave-*")):
-            try:
-                shutil.rmtree(d, ignore_errors=True)
-                removed += 1
-            except OSError:
-                pass
+        for prefix in prefixes:
+            for d in glob.glob(os.path.join(root, prefix + "*")):
+                try:
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed += 1
+                except OSError:
+                    pass
     if verbose and (killed or removed):
         print(f"  swept {killed} process(es), {removed} temp dir(s)",
               file=sys.stderr)

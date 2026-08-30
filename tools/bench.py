@@ -468,14 +468,27 @@ def main():
     print(f"{len(work)} runs from set '{args.set}' ({args.jobs} workers)")
     t0 = time.time()
     results = []
+    # Progress every PROGRESS_EVERY completions, with the running score.
+    # A long run previously printed nothing until it finished, so there was no
+    # way to answer "how is it going" without waiting for the whole thing.
+    PROGRESS_EVERY = 100
+    running_score = 0
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
         for r in ex.map(run_one, work):
             results.append(r)
+            running_score += POINTS.get((r["verdict"], r["expected"]), 0)
             if not args.quiet:
                 o = outcome_of(r)
                 sym = {"correct": "+", "unproven": ".", "WRONG": "X"}[o]
                 print(f"  {sym} {rel(r['yml']):<52} {r['property']:<21} "
                       f"{r['verdict']}", flush=True)
+            elif len(results) % PROGRESS_EVERY == 0:
+                done = len(results)
+                wrong = sum(1 for x in results if outcome_of(x) == "WRONG")
+                ok = sum(1 for x in results if outcome_of(x) == "correct")
+                pct = 100 * done / len(work)
+                print(f"  {done}/{len(work)} ({pct:.0f}%)  score {running_score}"
+                      f"  correct {ok}  wrong {wrong}", flush=True)
 
     # Whatever happened above, leave nothing behind.
     sweep(verbose=False)

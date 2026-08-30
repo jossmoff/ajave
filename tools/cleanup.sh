@@ -32,7 +32,10 @@ report_and_kill "ajave JVM replays" "ajave-shadow|ajave-build"
 report_and_kill "ajave processes"   "target/release/ajave"
 report_and_kill "benchmark runners" "tools/bench.py|smoke_test.py|score_full.py"
 
-dirs=$( { ls -d "${TMPDIR:-/tmp}"/ajave-* /tmp/ajave-* ; } 2>/dev/null | sort -u )
+# Only the directories a run actually creates. A blanket ajave-* glob also
+# matched /tmp/ajave-runs, this harness's own log directory, and deleted it.
+dirs=$( { ls -d "${TMPDIR:-/tmp}"/ajave-build-* "${TMPDIR:-/tmp}"/ajave-shadow-* \
+                /tmp/ajave-build-* /tmp/ajave-shadow-* ; } 2>/dev/null | sort -u )
 if [ -n "$dirs" ]; then
   n=$(echo "$dirs" | wc -l | tr -d ' ')
   echo "  temp dirs: $n"
