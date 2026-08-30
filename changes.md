@@ -2,6 +2,138 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-08-30 — unified benchmark layout, one runner, and process-group cleanup
+
+### Layout
+
+Three overlapping corpora and four harnesses became one tree and one runner.
+
+```
+benchmarks/
+  sv-comp/   official corpus (1033 tasks, gitignored)
+  ajave/     our own suite (71 tasks, JVM-verified per-property ground truth)
+  sets/      named subsets both runners read
+  benchexec/ tool-info + benchmark definitions
+```
+
+Compatibility symlinks (`sv-benchmarks`, `ajave-benchmarks`) keep the twelve
+existing tools resolving during migration.
+
+### One runner
+
+`tools/bench.py` replaces the overlapping logic in `smoke_test.py`,
+`score_full.py`, `score_own.py` and the Rust corpus test, each of which had
+re-implemented task discovery, property selection and verdict comparison — and
+disagreed on all three. The property mismatch in #54 was possible only because
+one of them *inferred* the property rather than reading it; the new runner takes
+ground truth from the task's own yml and never decides what a task should
+answer.
+
+Outcomes are `correct` / `unproven` / `WRONG`. Only WRONG and
+correct->unproven regressions fail `--check`; an UNKNOWN that was already
+UNKNOWN is not a regression, which is what made the previous suite noisy enough
+to ignore.
+
+### Process-group cleanup — the bug that froze the machine
+
+`subprocess.run(timeout=…)` and Rust's `Child::kill` both signal only the direct
+child. ajave spawns a solver (z3/cvc5) and a real JVM for witness replay, so
+**every timed-out task orphaned a solver and a JVM**, each holding hundreds of
+megabytes and running indefinitely.
+
+Across a corpus run with dozens of timeouts this compounded until the machine
+ran out of memory and froze. It also silently corrupted measurement: load
+average reached 61 on a 10-core box, and the smoke set that takes **29s** on an
+idle machine took **152s** under that load. Several performance conclusions
+drawn earlier the same day were artifacts of it.
+
+Both runners now spawn each task into its own process group (`start_new_session`
+in Python, `process_group(0)` in Rust) and kill the *group*, so no descendant
+outlives the run. `tools/procguard.py` carries a test that demonstrates
+`subprocess.run` leaking a grandchild where `run_guarded` leaks none.
+
+Supporting measures:
+- `tools/cleanup.sh` sweeps strays and temp dirs; matches only project-specific
+  patterns, never a bare `java` or `z3`.
+- `bench.py` sweeps on exit and refuses more workers than the machine has memory
+  for (~1.5GB each: ajave + solver + JVM).
+- Load and free memory are printed with every result, so two numbers are
+  comparable or visibly not.
+
+### BenchExec
+
+Kept as the competition-fidelity backend and moved to `benchmarks/benchexec/`.
+It enforces limits through Linux cgroups, so it cannot run on macOS — local
+development uses `bench.py`. Both read the same sets, so they agree on what is
+covered and differ only in resource enforcement.
+
+Baselines recorded on an idle machine: smoke 134 runs, ajave 97, concurrency 16;
+0 wrong across all three.
+
+## 2026-08-30 — corpus regression gate rebuilt around declared ground truth (#54)
+
+`crates/ajave-cli/tests/corpus.rs` was 114 hand-written tests that invoked the
+binary with **no `--property` flag** and asserted a literal verdict. 24 failed on
+a clean `main`, and because they always failed the suite no longer distinguished
+a regression from standing noise — the one job it existed to do.
+
+Two independent defects were tangled together:
+
+1. **Implicit property.** With no flag the binary runs `--property assert`, but
+   many expected verdicts describe runtime-exception behaviour.
+   `tasks/stage04_divzero` is `int y = 100 / nondetInt(); assert y != 12345;`,
+   declared FALSE. Under valid-assert TRUE is *correct* — `100/x == 12345` has
+   no integer solution and `x == 0` throws before the assertion is reached.
+   Under no-runtime-exception it is FALSE. Both answers are right; the test
+   asserted the one belonging to the other property.
+
+2. **Expectations pinned to output, not truth.** The old header stated each test
+   asserts "the verdict ajave *currently* produces", so every genuine
+   improvement registered as a failure. `jbmc-regression/array1` moved
+   UNKNOWN -> TRUE — correct per SV-COMP — and counted as a regression.
+
+### What the task files actually say
+
+All 114 task ymls declare exactly one property, `assert.prp`, yet their expected
+verdicts plainly span uncaught exceptions too: `ModuloZero1` has no reachable
+assertion failure and is declared FALSE. This corpus uses "assert" to mean *the
+program misbehaves*, which covers both SV-COMP properties.
+
+Rather than re-adjudicate 114 ground truths — an invitation to fit expectations
+to current output, exactly what produced the drift — each task now runs under
+**both** properties and the results are combined:
+
+* `expected: false` — at least one property must be violated.
+* `expected: true` — neither may be violated, and both must be proved.
+
+The second is deliberately conservative. With NRE UNKNOWN we do not know whether
+an exception escapes, so the task scores "unproven" rather than passing: a
+regression gate must never produce a false pass. Validated on an 18-task sample
+before adopting: 14 correct, 4 unproven, 0 wrong.
+
+### Failure conditions
+
+* **Wrong verdict** — combined answer opposite the declared one. Always fails;
+  this is the -16/-32 case at competition.
+* **Regression** — a task previously `correct` no longer is, against the
+  baseline in `tasks/corpus-expectations.txt`
+  (`UPDATE_CORPUS=1 cargo test --release -p ajave --test corpus`).
+
+An UNKNOWN that was already UNKNOWN does not fail. Precision we never had is not
+a regression, and treating it as one is what made the old suite ignorable.
+
+Baseline at time of writing: **114 tasks, 70 correct, 44 unproven, 0 wrong.**
+
+Tasks are keyed by path relative to `tasks/`, not directory name —
+`ArithmeticException1` exists both at the top level and under
+`jbmc-regression/`, and the bare name silently collapsed them into one entry.
+
+### Why data-driven
+
+1188 lines became ~350, and the defect class is gone rather than patched: a test
+can no longer disagree with its own task file about which property it checks,
+because it no longer restates the expectation at all.
+
 ## Witness replay: accept the exception family, not one predicted name (2026-08-28)
 
 `JvmReplay` confirmed a violation only when the JVM's stderr contained the

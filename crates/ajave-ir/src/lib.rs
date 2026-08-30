@@ -439,9 +439,40 @@ pub struct Program {
     /// Used to resolve field references to the declaring class.
     pub declared_fields: HashSet<(String, String, String)>,
     pub entry: Option<MethodKey>,
+    /// Does this program start a thread anywhere?
+    ///
+    /// Computed lazily on first read and cached, because answering it requires
+    /// walking every statement of every method and it is asked from several
+    /// places — `reachable_from_entry` alone has multiple call sites and is
+    /// itself O(program).
+    ///
+    /// Deliberately a `OnceLock` rather than a `bool` set by an init call: as a
+    /// plain field it derives `Default` to `false`, so forgetting the init call
+    /// silently claims "no threads" for every program instead of failing. That
+    /// exact mistake was made here once already and the build stayed green.
+    ///
+    /// A cheaper predicate is also unsound: "no `run()V` body implies no
+    /// threads" reports a program whose Runnable class was not loaded as
+    /// sequential. Two unit tests in `threads.rs` pin that.
+    uses_concurrency: std::sync::OnceLock<bool>,
 }
 
 impl Program {
+    /// Does this program create a thread? Scans once, then caches.
+    pub fn uses_concurrency(&self) -> bool {
+        *self.uses_concurrency.get_or_init(|| {
+            self.bodies.values().any(|b| {
+                b.blocks.iter().any(|blk| {
+                    blk.stmts.iter().any(|st| {
+                        matches!(st, Stmt::Assign(_, Rvalue::Call { target, .. })
+                            if target.class == "java/lang/Thread"
+                                && (target.name == "start" || target.name == "<init>"))
+                    })
+                })
+            })
+        })
+    }
+
     pub fn body(&self, k: &MethodKey) -> Option<&Body> {
         self.bodies.get(k)
     }
@@ -556,7 +587,9 @@ impl Program {
         // more to prove, so it can turn TRUE into UNKNOWN but never the
         // reverse. (Over-approximating the thread set for *exploration* is a
         // different matter and is not sound; see `threads::discover`.)
-        // Cheap guard first. Scanning every statement for `Thread.start` costs
+        // Uses the cached flag rather than rescanning. See `Program::uses_concurrency`.
+        let starts_thread = self.uses_concurrency();
+        // Scanning every statement for `Thread.start` costs
         // O(program) and *never* short-circuits on a program with no threads —
         // which is every benchmark in the SV-COMP Java set. Since this function
         // has seven call sites and is itself O(program), that scan measurably
@@ -568,19 +601,6 @@ impl Program {
         // A program can only start a thread if it has a `run()V` to run, and
         // checking that is O(#methods) over the key set rather than O(#stmts).
         // For the common case it exits immediately.
-        let has_run_body = self
-            .bodies
-            .keys()
-            .any(|k| k.name == "run" && k.desc == "()V");
-        let starts_thread = has_run_body
-            && self.bodies.values().any(|b| {
-                b.blocks.iter().any(|blk| {
-                    blk.stmts.iter().any(|st| {
-                        matches!(st, Stmt::Assign(_, Rvalue::Call { target, .. })
-                            if target.class == "java/lang/Thread" && target.name == "start")
-                    })
-                })
-            });
         if starts_thread {
             for k in self.bodies.keys() {
                 if k.name == "run" && k.desc == "()V" {

@@ -21,11 +21,15 @@ Exit code 0 = all pass, 1 = regressions detected.
 
 import os
 import subprocess
+from concurrent.futures import ProcessPoolExecutor
 import sys
 import time
 
 ROAST = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--binary" else "./target/release/ajave"
 TIMEOUT = 60
+# Workers for the parallel run. Kept below core count on purpose — see the
+# comment in main(). Override with SMOKE_JOBS.
+JOBS = int(os.environ.get("SMOKE_JOBS", "6"))
 
 # Each entry: (category, benchmark_yml_path, expected_verdict)
 # These are chosen to cover sensitive engine behaviors.
@@ -333,7 +337,8 @@ def main():
         else:
             print(f"  SKIP {yml} (not found)")
 
-    print(f"Running {len(valid_tests)} smoke tests...")
+    jobs = JOBS
+    print(f"Running {len(valid_tests)} smoke tests ({jobs} workers)...")
     start = time.time()
 
     passed = 0
@@ -341,9 +346,25 @@ def main():
     unknown = 0
     failures = []
 
-    for cat, yml, expected, prop in valid_tests:
+    # Each test is an independent subprocess, so this is embarrassingly
+    # parallel; serially it took ~40 minutes on a 10-core machine.
+    #
+    # Deliberately leaves cores idle rather than saturating them. Parallelism
+    # cannot turn a correct verdict into a WRONG one, but it can turn a WRONG
+    # one into a TIMEOUT, which this script scores as "??" rather than "FAIL" —
+    # so oversubscribing would quietly weaken the very gate this is. Each ajave
+    # also spawns a solver child, so the real load is above one process per job.
+    with ProcessPoolExecutor(max_workers=jobs) as ex:
+        futures = [ex.submit(run_one, yml, prop) for _, yml, _, prop in valid_tests]
+        verdicts = []
+        for f in futures:
+            try:
+                verdicts.append(f.result())
+            except Exception:
+                verdicts.append("ERROR")
+
+    for (cat, yml, expected, prop), verdict in zip(valid_tests, verdicts):
         name = os.path.basename(yml).replace(".yml", "")
-        verdict = run_one(yml, prop)
 
         if verdict == expected:
             passed += 1

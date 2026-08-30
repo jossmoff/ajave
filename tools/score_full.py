@@ -10,6 +10,7 @@ Usage:
 """
 
 import glob
+import re
 import os
 import subprocess
 import sys
@@ -54,26 +55,46 @@ def find_all_tasks():
                 tasks.append(yml)
     return tasks
 
+TIMING_RE = re.compile(r"orchestrator: timing (?:init|step) (\S+) (\d+)ms(?: discharged=(\d+))?(?: violated=(\d+))?")
+
+def parse_timing(log):
+    """Per-engine (milliseconds, obligations discharged) for one task."""
+    out = {}
+    for eng, ms, disch, viol in TIMING_RE.findall(log):
+        cur = out.get(eng, (0, 0, 0))
+        out[eng] = (
+            cur[0] + int(ms),
+            cur[1] + (int(disch) if disch else 0),
+            cur[2] + (int(viol) if viol else 0),
+        )
+    return out
+
 def run_one(args):
     yml_path, prop, timeout = args
     inputs, verdicts, _ = resolve_inputs(yml_path)
     if inputs is None:
-        return yml_path, prop, None, "SKIP", 0
+        return yml_path, prop, None, "SKIP", 0, {}
     expected = verdicts.get(prop)
     if expected is None:
-        return yml_path, prop, None, "SKIP", 0
+        return yml_path, prop, None, "SKIP", 0, {}
     expected_str = "TRUE" if expected else "FALSE"
     try:
         cmd = [ROAST, "--property", prop] + inputs
         t0 = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # INFO carries the orchestrator's per-engine timing lines. Without them
+        # a timeout says only "something was slow", which is how three separate
+        # performance diagnoses got made by guesswork and two were wrong.
+        env = dict(os.environ, RUST_LOG="info")
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, env=env)
         elapsed = time.time() - t0
         verdict = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else "ERROR"
-        return yml_path, prop, expected_str, verdict, elapsed
+        return yml_path, prop, expected_str, verdict, elapsed, \
+            parse_timing(result.stdout + result.stderr)
     except subprocess.TimeoutExpired:
-        return yml_path, prop, expected_str, "TIMEOUT", timeout
+        return yml_path, prop, expected_str, "TIMEOUT", timeout, {}
     except Exception:
-        return yml_path, prop, expected_str, "ERROR", 0
+        return yml_path, prop, expected_str, "ERROR", 0, {}
 
 def category_of(yml_path):
     # Extract category from path: sv-benchmarks/CATEGORY/...
@@ -92,6 +113,7 @@ def main():
     parser.add_argument("--property", choices=["valid-assert", "no-runtime-exception"])
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--parallel", type=int, default=4)
+    parser.add_argument("--limit", type=int, help="sample N tasks spread across categories")
     args = parser.parse_args()
 
     props = [args.property] if args.property else ["valid-assert", "no-runtime-exception"]
@@ -101,6 +123,11 @@ def main():
         sys.exit(1)
 
     tasks = find_all_tasks()
+    if args.limit:
+        # Evenly spread across the corpus rather than the first N, so a slice
+        # covers many categories instead of just whichever sorts first.
+        step = max(1, len(tasks) // args.limit)
+        tasks = tasks[::step][: args.limit]
     print(f"Found {len(tasks)} benchmark files")
 
     for prop in props:
@@ -112,17 +139,23 @@ def main():
         work = [(yml, prop, args.timeout) for yml in tasks]
 
         results = []
+        engine_ms = {}
         t0 = time.time()
 
         with ProcessPoolExecutor(max_workers=args.parallel) as pool:
             futures = {pool.submit(run_one, w): w for w in work}
             done_count = 0
             for fut in as_completed(futures):
-                yml, p, expected, verdict, elapsed = fut.result()
+                yml, p, expected, verdict, elapsed, timing = fut.result()
                 if expected is None:
                     continue
                 done_count += 1
                 results.append((yml, expected, verdict, elapsed))
+                for eng, (ms, disch, viol) in timing.items():
+                    e = engine_ms.setdefault(eng, [0, 0, 0])
+                    e[0] += ms
+                    e[1] += disch
+                    e[2] += viol
                 name = os.path.basename(yml).replace(".yml", "")
                 if verdict == expected:
                     sym = "✓"
@@ -175,6 +208,29 @@ def main():
                 wrong_list.append((name, "FALSE", "TRUE"))
 
         score = correct_true * 2 + correct_false - wrong_true * 16 - wrong_false * 32
+
+        # --- observability -------------------------------------------------
+        slow = sorted(results, key=lambda r: -r[3])[:15]
+        print("\n  Slowest tasks:")
+        for yml, exp, verd, el in slow:
+            print(f"    {el:6.1f}s  {verd:<8} {os.path.relpath(yml, SV_BENCHMARKS)}")
+
+        to_list = [r for r in results if r[2] == "TIMEOUT"]
+        if to_list:
+            print(f"\n  Timeouts ({len(to_list)}), by category:")
+            by_cat = defaultdict(int)
+            for yml, _, _, _ in to_list:
+                by_cat[category_of(yml)] += 1
+            for c, n in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+                print(f"    {n:4d}  {c}")
+
+        if engine_ms:
+            tot = sum(v[0] for v in engine_ms.values()) or 1
+            print("\n  Engine attribution (completed tasks only —")
+            print("  a timed-out task reports nothing, so the engine that hung is under-counted):")
+            print(f"    {'engine':<16}{'sec':>10}{'%':>7}{'discharged':>12}{'violated':>10}")
+            for eng, (ms, disch, viol) in sorted(engine_ms.items(), key=lambda kv: -kv[1][0]):
+                print(f"    {eng:<16}{ms/1000:>10.1f}{100*ms/tot:>6.1f}%{disch:>12}{viol:>10}")
 
         print(f"\nResults ({total_time:.0f}s):")
         print(f"  Correct TRUE:  {correct_true:4d}  (+{correct_true*2})")

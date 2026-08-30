@@ -4,7 +4,7 @@
 //! ends the task immediately. Proofs are expensive and only worth starting once
 //! the cheap exit is closed off.
 
-use crate::artifact::Status;
+use crate::artifact::{EngineId, Status};
 use crate::blackboard::Blackboard;
 use crate::engine::{Budget, Engine, Progress};
 use log::{debug, info};
@@ -48,9 +48,22 @@ impl Orchestrator {
             max_rounds
         );
         self.bb.seed(prog, self.assertion_only);
+        // Per-engine wall clock. Timeouts dominate the score far more than
+        // precision does, and twice now a performance regression has been
+        // misattributed by reasoning about the code instead of measuring it.
+        // This makes the attribution a fact rather than a hypothesis.
+        let mut init_ms: Vec<(EngineId, u128)> = Vec::new();
+        let mut step_ms: std::collections::HashMap<String, u128> =
+            std::collections::HashMap::new();
+        let mut discharged_by: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut violated_by: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for e in self.engines.iter_mut() {
             debug!("orchestrator: initialising engine {}", e.id());
+            let t0 = std::time::Instant::now();
             e.init(prog, &mut self.bb);
+            init_ms.push((e.id(), t0.elapsed().as_millis()));
         }
 
         let mut retired = vec![false; self.engines.len()];
@@ -71,7 +84,44 @@ impl Orchestrator {
                 // spurious violations on tainted paths; the CHC engine can
                 // prove those obligations safe by looking at open obligations
                 // (which exclude already-Violated finals).
-                match e.step(prog, &mut self.bb, self.budget) {
+                // Count both directions. Under-approximating engines (NRA,
+                // concrete) publish *violations*, never discharges, so scoring
+                // them by discharges alone reads as "contributes nothing" when
+                // they may be earning FALSEs. Same mistake, opposite sign, as
+                // judging an Over engine by violations.
+                let before = self
+                    .bb
+                    .statuses()
+                    .filter(|(_, s)| matches!(s, Status::Discharged { .. }))
+                    .count();
+                let before_v = self
+                    .bb
+                    .statuses()
+                    .filter(|(_, s)| matches!(s, Status::Violated { .. }))
+                    .count();
+                let t0 = std::time::Instant::now();
+                let progress = e.step(prog, &mut self.bb, self.budget);
+                *step_ms.entry(e.id().0.to_string()).or_default() +=
+                    t0.elapsed().as_millis();
+                let after = self
+                    .bb
+                    .statuses()
+                    .filter(|(_, s)| matches!(s, Status::Discharged { .. }))
+                    .count();
+                let after_v = self
+                    .bb
+                    .statuses()
+                    .filter(|(_, s)| matches!(s, Status::Violated { .. }))
+                    .count();
+                if after > before {
+                    *discharged_by.entry(e.id().0.to_string()).or_default() +=
+                        after - before;
+                }
+                if after_v > before_v {
+                    *violated_by.entry(e.id().0.to_string()).or_default() +=
+                        after_v - before_v;
+                }
+                match progress {
                     Progress::Advanced => advanced = true,
                     Progress::Stalled => {}
                     Progress::Exhausted => {
@@ -95,6 +145,25 @@ impl Orchestrator {
             self.trace.push(msg);
 
             self.phase = self.next_phase(open, violated, advanced, retired.iter().all(|r| *r));
+        }
+
+        for (id, ms) in &init_ms {
+            if *ms > 0 {
+                info!("orchestrator: timing init {} {}ms", id, ms);
+            }
+        }
+        let mut steps: Vec<_> = step_ms.iter().collect();
+        steps.sort_by_key(|(_, ms)| std::cmp::Reverse(**ms));
+        for (id, ms) in steps {
+            if *ms > 0 {
+                info!(
+                    "orchestrator: timing step {} {}ms discharged={} violated={}",
+                    id,
+                    ms,
+                    discharged_by.get(id).copied().unwrap_or(0),
+                    violated_by.get(id).copied().unwrap_or(0)
+                );
+            }
         }
 
         let verdict = self.bb.verdict();
