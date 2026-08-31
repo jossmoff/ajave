@@ -254,6 +254,14 @@ pub struct Interp<'a> {
     pub last_access: HashMap<(u32, String), (Option<(u32, crate::vclock::VClock)>, Vec<(u32, crate::vclock::VClock)>)>,
     /// The first data race found, if any.
     pub race: Option<Race>,
+    /// The value each location held before its most recent write.
+    ///
+    /// A read that races with a write may, under the JMM, observe either the
+    /// new value or one it was not ordered after. Offering the immediately
+    /// preceding value is a *subset* of what the model permits, so any
+    /// behaviour reached this way is genuinely allowed -- which is what makes
+    /// a FALSE found here real rather than an artefact.
+    pub stale: HashMap<(u32, String), (bool, i64)>,
     /// Decisions taken on this path, in the order they were needed.
     ///
     /// A tape rather than a callback because the interpreter cannot ask the
@@ -301,6 +309,7 @@ impl<'a> Interp<'a> {
             hb: Default::default(),
             last_access: HashMap::new(),
             race: None,
+            stale: HashMap::new(),
             choices: Vec::new(),
             choice_at: 0,
             pending_choice: None,
@@ -644,6 +653,49 @@ impl<'a> Interp<'a> {
         false
     }
 
+
+    /// Does a read of this location race with a write by another thread?
+    ///
+    /// The same test the race detector uses: a conflicting write by a different
+    /// thread that this read is not ordered after.
+    fn read_races(&self, tid: ThreadId, obj: u32, name: &str) -> bool {
+        let clock = self.hb.clock(tid.0);
+        self.last_access
+            .get(&(obj, name.to_string()))
+            .and_then(|(w, _)| w.as_ref())
+            .map(|(wt, wc)| *wt != tid.0 && !wc.happens_before(&clock))
+            .unwrap_or(false)
+    }
+
+    /// Offer the value this location held before its last write, when a read of
+    /// it races.
+    ///
+    /// This is the whole of weak-memory support, and it is deliberately a
+    /// *subset* of what the JMM allows: a racing read may observe any write it
+    /// is not ordered after, and the immediately preceding one is such a write.
+    /// So a violation found this way is genuinely permitted -- but the space is
+    /// not covered, which is why a program with a race is never discharged.
+    ///
+    /// Without it, unsafe publication is invisible: seeing the flag set implies
+    /// the data write already happened *under sequential consistency*, so no
+    /// amount of interleaving search reaches the bug.
+    fn stale_read(&mut self, tid: ThreadId, obj: u32, name: &str, cur: (bool, i64))
+        -> Option<Result<(bool, i64), String>>
+    {
+        if !self.read_races(tid, obj, name) {
+            return None;
+        }
+        let old = *self.stale.get(&(obj, name.to_string()))?;
+        if old == cur {
+            return None;
+        }
+        match self.choose(2) {
+            None => Some(Err("$choice".into())),
+            Some(0) => Some(Ok(old)),
+            _ => None,
+        }
+    }
+
     /// Take the next decision from the tape, or ask for one.
     ///
     /// `None` means "the explorer has not decided yet": the caller must leave
@@ -908,6 +960,11 @@ impl<'a> Interp<'a> {
                 let Val::Ref(r) = o else {
                     return Err("putfield on a non-reference".into());
                 };
+                // Remember what this location held, so a racing read can still
+                // observe it.
+                if let Some(&old) = g.heap.get(&(ObjId(r), field.name.clone())) {
+                    self.stale.insert((r, field.name.clone()), old);
+                }
                 g.heap.insert(
                     (ObjId(r), field.name.clone()),
                     (matches!(v, Val::Ref(_)), v.as_int()),
@@ -918,6 +975,10 @@ impl<'a> Interp<'a> {
                 let v = self
                     .eval(frame, val)
                     .ok_or_else(|| "unknown value in putstatic".to_string())?;
+                // Statics use object id 0, matching `note_access`.
+                if let Some(&old) = g.statics.get(&(fk.class.clone(), fk.name.clone())) {
+                    self.stale.insert((0, fk.name.clone()), old);
+                }
                 g.statics.insert(
                     (fk.class.clone(), fk.name.clone()),
                     (matches!(v, Val::Ref(_)), v.as_int()),
@@ -1143,6 +1204,12 @@ impl<'a> Interp<'a> {
                 let Some(Val::Ref(r)) = self.eval(frame, obj) else {
                     return Err("getfield on a non-reference".into());
                 };
+                if let Some(&cur) = g.heap.get(&(ObjId(r), field.name.clone())) {
+                    if let Some(res) = self.stale_read(tid, r, &field.name, cur) {
+                        let (is_ref, v) = res?;
+                        return Ok(Some(if is_ref { Val::Ref(v as u32) } else { Val::Int(v) }));
+                    }
+                }
                 // Unset fields read as their Java default: 0 for a primitive,
                 // null for a reference. A reference-typed default must come
                 // back as `Ref(0)` so a null check on it behaves correctly.
@@ -1159,6 +1226,12 @@ impl<'a> Interp<'a> {
                 }
             }
             Rvalue::GetStatic(fk) => {
+                if let Some(&cur) = g.statics.get(&(fk.class.clone(), fk.name.clone())) {
+                    if let Some(res) = self.stale_read(tid, 0, &fk.name, cur) {
+                        let (is_ref, v) = res?;
+                        return Ok(Some(if is_ref { Val::Ref(v as u32) } else { Val::Int(v) }));
+                    }
+                }
                 match g.statics.get(&(fk.class.clone(), fk.name.clone())) {
                     Some(&(true, v)) => Val::Ref(v as u32),
                     Some(&(false, v)) => Val::Int(v),

@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — 84/88 of the concurrency suite, 0 wrong
+**Status:** working — 85/89 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
 library models), `concurrency.rs` (engine, precondition checks, DPOR)
@@ -580,12 +580,34 @@ by the synchronisation primitives, never from the schedule order — see
 every pair of accesses is comparable) and what keeps the relation valid if
 executions later stop being sequentially consistent.
 
+### Weak memory: a racing read may observe a stale value
+
+A read that races with a write may, under the JMM, observe any write it is not
+ordered after. The explorer offers one such alternative — the value the location
+held immediately before the racing write — as a choice point.
+
+That is deliberately a *subset* of what the model permits, which is what makes
+it usable in one direction only: any behaviour reached this way is genuinely
+allowed, so a FALSE found here is real, while the space is not covered, so no
+TRUE may rest on it. The DRF-SC gate already ensures that, since a program with
+a race is never discharged.
+
+Without it, unsafe publication is invisible. `UnsafePublicationSeesStaleData` is
+**correct under sequential consistency** — seeing the flag set implies the data
+write already happened — so no amount of interleaving search reaches the bug. It
+is found only by letting the read see the stale value.
+
 ### What is still out of reach
 
-Bugs that *require* reordering to manifest. Broken double-checked locking and
-publication through a non-volatile field are racy, so we now correctly decline
-to verify them rather than wrongly proving them safe — but detecting them needs
-a weak-memory explorer, where a read branches over the writes it may observe.
+Reorderings that need more than one stale value, or that reorder a thread's own
+writes as observed by itself. Broken double-checked locking needs a partially
+constructed object to be published, which is a stale read of a *field of an
+object whose reference is already visible* — the mechanism extends there but the
+benchmark does not exist yet.
+
+Certification is also weaker here by construction: a JMM-permitted but rare
+behaviour cannot be reproduced by running on a JVM, so the replay net that backs
+every other FALSE is silent exactly where weak memory matters.
 
 The certification asymmetry is worth stating too: a JMM-permitted but rare
 behaviour cannot be reproduced by running on a JVM, so the replay net that backs
