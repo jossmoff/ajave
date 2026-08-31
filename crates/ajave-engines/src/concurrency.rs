@@ -95,7 +95,6 @@ const UNMODELLED_PRIMITIVES: &[&str] = &[
     // still declines rather than being silently ignored.
     "java/util/concurrent/locks/ReentrantReadWriteLock",
     "java/util/concurrent/Phaser",
-    "java/util/concurrent/ExecutorService",
     "java/util/concurrent/CompletableFuture",
     "java/util/concurrent/ForkJoinPool",
     "java/util/concurrent/atomic/AtomicReference",
@@ -469,9 +468,24 @@ impl<'a> Explorer<'a> {
             self.done[depth].insert(tid);
 
             let mut g2 = g.clone();
+            // Everything the interpreter accumulates has to be restored, not
+            // just the frames. Sibling branches are alternative universes that
+            // re-execute the same statements, so an allocator carried across
+            // them hands the *same* `new` a different identity in each.
+            //
+            // `next_tid` made that fatal rather than merely untidy: a submit
+            // re-executed in a sibling branch minted a thread identity beyond
+            // the states that exist, and the task failed with "no thread
+            // state". Thread constructions escaped it only by happening at
+            // depth 0, before any branching.
             let saved_frames = interp.frames.clone();
             let saved_objs = interp.thread_objs.clone();
             let saved_runnables = interp.runnable_objs.clone();
+            let saved_next_obj = interp.next_obj;
+            let saved_next_tid = interp.next_tid;
+            let saved_obj_class = interp.obj_class.clone();
+            let saved_interrupted = interp.interrupted.clone();
+            let saved_exec_tasks = interp.executor_tasks.clone();
             g2.schedule_step(tid);
 
             let step = interp.advance(&mut g2, tid);
@@ -517,6 +531,11 @@ impl<'a> Explorer<'a> {
                     interp.frames = saved_frames;
                     interp.thread_objs = saved_objs;
                     interp.runnable_objs = saved_runnables;
+                    interp.next_obj = saved_next_obj;
+                    interp.next_tid = saved_next_tid;
+                    interp.obj_class = saved_obj_class;
+                    interp.interrupted = saved_interrupted;
+                    interp.executor_tasks = saved_exec_tasks;
                     continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
@@ -538,6 +557,11 @@ impl<'a> Explorer<'a> {
             interp.frames = saved_frames;
             interp.thread_objs = saved_objs;
             interp.runnable_objs = saved_runnables;
+            interp.next_obj = saved_next_obj;
+            interp.next_tid = saved_next_tid;
+            interp.obj_class = saved_obj_class;
+            interp.interrupted = saved_interrupted;
+            interp.executor_tasks = saved_exec_tasks;
         }
 
         self.backtrack.truncate(depth);

@@ -65,6 +65,18 @@ pub enum ThreadDiscovery {
 ///
 /// Anything else (a `Runnable` from a field, a factory, an array, a lambda that
 /// did not lift to a concrete class) yields `Unresolved`.
+/// Classes whose `execute`/`submit` starts a task on a pooled thread.
+pub fn is_executor(class: &str) -> bool {
+    matches!(
+        class,
+        "java/util/concurrent/ExecutorService"
+            | "java/util/concurrent/Executor"
+            | "java/util/concurrent/ScheduledExecutorService"
+            | "java/util/concurrent/ThreadPoolExecutor"
+            | "java/util/concurrent/AbstractExecutorService"
+    )
+}
+
 pub fn discover(prog: &Program) -> ThreadDiscovery {
     // (declaring method, position within it, entry). Threads are identified at
     // run time in construction order, so entries must preserve multiplicity;
@@ -176,6 +188,52 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                 }));
                                 ordinal += 1;
                             }
+                        } else if is_executor(&target.class)
+                            && (target.name == "execute" || target.name == "submit")
+                        {
+                            // A task submitted to a pool is a thread whose
+                            // start() is hidden inside the library. Without
+                            // this the program has no visible start() at all
+                            // and is classified sequential -- told there is no
+                            // concurrency in a program that is entirely about
+                            // concurrency.
+                            saw_start = true;
+                            if !target.desc.starts_with("(Ljava/lang/Runnable;)") {
+                                // `submit(Callable)` returns a value the task
+                                // computes, which needs the Future to carry a
+                                // result rather than just an ordering.
+                                return ThreadDiscovery::Unresolved(format!(
+                                    "{caller}: only submit/execute of a Runnable is modelled"
+                                ));
+                            }
+                            let Some(Operand::Var(r)) = args.get(1) else {
+                                return ThreadDiscovery::Unresolved(format!(
+                                    "{caller}: task argument is not a local"
+                                ));
+                            };
+                            let Some(cls) =
+                                var_alloc.get(r).and_then(|a| alloc_class.get(a)).cloned()
+                            else {
+                                return ThreadDiscovery::Unresolved(format!(
+                                    "{caller}: submitted task could not be traced to an allocation"
+                                ));
+                            };
+                            let run = MethodKey {
+                                class: cls,
+                                name: "run".to_string(),
+                                desc: "()V".to_string(),
+                            };
+                            if prog.body(&run).is_none() {
+                                return ThreadDiscovery::Unresolved(format!(
+                                    "{caller}: submitted task body {run} has no lifted body"
+                                ));
+                            }
+                            pending.push((
+                                caller.to_string(),
+                                ordinal,
+                                ThreadEntry { run, started_from: caller.clone() },
+                            ));
+                            ordinal += 1;
                         } else if target.class == "java/lang/Thread" && target.name == "start" {
                             saw_start = true;
                             let recv = match args.first() {

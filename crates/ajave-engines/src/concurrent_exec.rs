@@ -216,6 +216,8 @@ pub struct Interp<'a> {
     pub obj_class: HashMap<u32, String>,
     /// Threads whose interrupt flag has been set.
     pub interrupted: std::collections::HashSet<ThreadId>,
+    /// Tasks submitted to each executor, for `awaitTermination`.
+    pub executor_tasks: HashMap<u32, Vec<ThreadId>>,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -241,6 +243,7 @@ impl<'a> Interp<'a> {
             thread_objs: HashMap::new(),
             obj_class: HashMap::new(),
             interrupted: std::collections::HashSet::new(),
+            executor_tasks: HashMap::new(),
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -332,9 +335,13 @@ impl<'a> Interp<'a> {
                     return Step::Blocked(None);
                 }
                 g.threads[ti].status = ThreadStatus::Runnable;
-                if let Some(f) = self.frames[tid.0 as usize].last_mut() {
-                    f.at.index += 1;
-                }
+                // Deliberately not advancing: the thread re-executes the call
+                // it was parked on, exactly as a released `lock()` or `await()`
+                // does. Advancing here instead skipped the call, which is
+                // harmless for a void `join()` but silently dropped the result
+                // of `Future.get()` -- the very value the joiner was waiting
+                // for. Re-executing is idempotent: each of these calls tests
+                // "is the target finished" and simply proceeds when it is.
             }
 
             let Some(frame) = self.frames[tid.0 as usize].last().cloned() else {
@@ -379,6 +386,13 @@ impl<'a> Interp<'a> {
                     ThreadStatus::Blocked { monitor } | ThreadStatus::Waiting { monitor } => {
                         return Step::Blocked(Some(monitor));
                     }
+                    // `join` parks the same way, and is covered here for the
+                    // same reason: it sets `Joining` and leaves the counter
+                    // alone, expecting the prologue above to step past the call
+                    // once the target finishes. Advancing here as well made
+                    // that two advances for one statement, silently skipping
+                    // whatever followed the join.
+                    ThreadStatus::Joining { .. } => return Step::Blocked(None),
                     _ => {}
                 }
             }
@@ -1454,6 +1468,198 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 other => return Err(format!("unmodelled Condition.{other}")),
+            }
+        }
+
+        // Executors, thread pools and Futures.
+        //
+        // A submitted task is a thread whose `start()` happens inside the
+        // library, so it reuses the thread machinery: an identity from the same
+        // counter, a body resolved from the class of the Runnable actually
+        // passed, and `Future.get`/`awaitTermination` as join edges.
+        //
+        // Pool size is a soundness condition, not a detail. A pool with fewer
+        // workers than tasks runs some of them one after another, and treating
+        // every task as concurrently runnable would invent interleavings the
+        // JVM cannot produce -- a wrong FALSE. Rather than model the work
+        // queue, a pool that could not run all its tasks at once is refused.
+        if target.class == "java/util/concurrent/Executors" {
+            let n = match target.name.as_str() {
+                "newFixedThreadPool" | "newWorkStealingPool" => {
+                    match args.first().and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Int(n)) if n > 0 => n,
+                        _ => return Err("thread pool size is not a known positive int".into()),
+                    }
+                }
+                "newSingleThreadExecutor" | "newSingleThreadScheduledExecutor" => 1,
+                "newCachedThreadPool" => i64::MAX,
+                other => return Err(format!("unmodelled Executors.{other}")),
+            };
+            let id = self.next_obj;
+            self.next_obj += 1;
+            self.obj_class
+                .insert(id, "java/util/concurrent/ExecutorService".to_string());
+            g.heap.insert((ObjId(id), "$workers".to_string()), (false, n));
+            g.heap.insert((ObjId(id), "$submitted".to_string()), (false, 0));
+            return Ok(Some(Val::Ref(id)));
+        }
+
+        if crate::threads::is_executor(&target.class) {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved executor receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            match target.name.as_str() {
+                "execute" | "submit" => {
+                    let workers = g
+                        .heap
+                        .get(&(recv, "$workers".to_string()))
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0);
+                    let submitted = g
+                        .heap
+                        .get(&(recv, "$submitted".to_string()))
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0)
+                        + 1;
+                    if submitted > workers {
+                        return Err(format!(
+                            "pool has {workers} worker(s) but {submitted} task(s): the queued \
+                             ones cannot all run concurrently and the queue is not modelled"
+                        ));
+                    }
+                    g.heap
+                        .insert((recv, "$submitted".to_string()), (false, submitted));
+
+                    let Some(Val::Ref(task)) = args.get(1).and_then(|a| self.eval(frame, a))
+                    else {
+                        return Err("submitted task is not a reference".into());
+                    };
+                    let t = ThreadId(self.next_tid);
+                    self.next_tid += 1;
+                    if !g.threads.iter().any(|x| x.id == t) {
+                        return Err(format!("submitted task {} has no thread state", t.0));
+                    }
+                    let Some(cls) = self.obj_class.get(&task).cloned() else {
+                        return Err("submitted task has no known class".into());
+                    };
+                    let run = MethodKey {
+                        class: cls,
+                        name: "run".to_string(),
+                        desc: "()V".to_string(),
+                    };
+                    let Some(rbody) = self.prog.body(&run) else {
+                        return Err(format!("no body for submitted task {run}"));
+                    };
+                    let entry_block = rbody.entry;
+                    match self.initial_frame(&run, Some(Val::Ref(task))) {
+                        Some(f) => self.frames[t.0 as usize] = vec![f],
+                        None => return Err(format!("no frame for {run}")),
+                    }
+                    if let Some(st) = g.threads.iter_mut().find(|x| x.id == t) {
+                        st.at = ProgramPoint { method: run, block: entry_block, index: 0 };
+                        st.status = ThreadStatus::Runnable;
+                    }
+                    self.executor_tasks.entry(recv.0).or_default().push(t);
+
+                    // `submit` hands back a Future; `execute` returns nothing.
+                    if target.name == "submit" {
+                        let fid = self.next_obj;
+                        self.next_obj += 1;
+                        g.heap
+                            .insert((ObjId(fid), "$thread".to_string()), (false, t.0 as i64));
+                        return Ok(Some(Val::Ref(fid)));
+                    }
+                    return Ok(None);
+                }
+                // Shutting down only refuses new work; it orders nothing.
+                "shutdown" | "shutdownNow" => return Ok(None),
+                "isShutdown" | "isTerminated" => {
+                    let all_done = self
+                        .executor_tasks
+                        .get(&recv.0)
+                        .map(|ts| {
+                            ts.iter().all(|t| {
+                                g.threads
+                                    .iter()
+                                    .find(|x| x.id == *t)
+                                    .map(|x| x.status == ThreadStatus::Terminated)
+                                    .unwrap_or(true)
+                            })
+                        })
+                        .unwrap_or(true);
+                    return Ok(Some(Val::Int(all_done as i64)));
+                }
+                "awaitTermination" => {
+                    // Join every task in turn. Parking does not advance, so the
+                    // call is re-entered until none is left running, which is
+                    // how one `Joining { on }` slot covers a set of tasks.
+                    //
+                    // Modelled as the untimed wait it usually is in practice.
+                    // A timeout that *expires* would let the program continue
+                    // with tasks still running; treating that as impossible is
+                    // the same assumption the surrounding code is making when
+                    // it ignores the returned boolean.
+                    let pending = self.executor_tasks.get(&recv.0).and_then(|ts| {
+                        ts.iter()
+                            .find(|t| {
+                                g.threads
+                                    .iter()
+                                    .find(|x| x.id == **t)
+                                    .map(|x| x.status != ThreadStatus::Terminated)
+                                    .unwrap_or(false)
+                            })
+                            .copied()
+                    });
+                    if let Some(t) = pending {
+                        g.threads[ti].status = ThreadStatus::Joining { on: t };
+                        return Ok(None);
+                    }
+                    return Ok(Some(Val::Int(1)));
+                }
+                other => return Err(format!("unmodelled ExecutorService.{other}")),
+            }
+        }
+
+        if target.class == "java/util/concurrent/Future" {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved Future receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let t = match g.heap.get(&(recv, "$thread".to_string())) {
+                Some(&(_, v)) => ThreadId(v as u32),
+                None => return Err("Future not bound to a task".into()),
+            };
+            match target.name.as_str() {
+                "get" => {
+                    // The join edge: get() returns only once the task is done,
+                    // and everything the task did is visible afterwards.
+                    let done = g
+                        .threads
+                        .iter()
+                        .find(|x| x.id == t)
+                        .map(|x| x.status == ThreadStatus::Terminated)
+                        .unwrap_or(true);
+                    if !done {
+                        g.threads[ti].status = ThreadStatus::Joining { on: t };
+                        return Ok(None);
+                    }
+                    // A Runnable task computes no value, so `get()` is null.
+                    return Ok(Some(Val::Ref(0)));
+                }
+                "isDone" => {
+                    let done = g
+                        .threads
+                        .iter()
+                        .find(|x| x.id == t)
+                        .map(|x| x.status == ThreadStatus::Terminated)
+                        .unwrap_or(true);
+                    return Ok(Some(Val::Int(done as i64)));
+                }
+                "cancel" => return Err("Future.cancel is not modelled".into()),
+                other => return Err(format!("unmodelled Future.{other}")),
             }
         }
 
