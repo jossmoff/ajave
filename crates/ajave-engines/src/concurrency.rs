@@ -356,9 +356,19 @@ struct Explorer<'a> {
     /// Transitions executed on the current path.
     stack: Vec<Transition>,
     /// Backtrack set per depth, indexed alongside `stack`.
-    backtrack: Vec<HashSet<ThreadId>>,
+    /// Threads still to explore at each depth.
+    ///
+    /// `BTreeSet`, not `HashSet`: this set is *iterated to choose what to
+    /// explore next*, and Rust seeds hashers per process, so a hash set made
+    /// the search order differ between identical runs. Mostly the verdict
+    /// survived that, but `SleepIsNotSynchronization` returned FALSE or UNKNOWN
+    /// depending on whether the racing path was reached before a bound.
+    ///
+    /// CLAUDE.md states the rule this broke: iterating a hash collection to
+    /// decide what to explore is a bug.
+    backtrack: Vec<std::collections::BTreeSet<ThreadId>>,
     /// Threads already explored at each depth.
-    done: Vec<HashSet<ThreadId>>,
+    done: Vec<std::collections::BTreeSet<ThreadId>>,
     explored: u64,
 }
 
@@ -429,8 +439,8 @@ impl<'a> Explorer<'a> {
         }
 
         let depth = self.stack.len();
-        self.backtrack.push(HashSet::new());
-        self.done.push(HashSet::new());
+        self.backtrack.push(Default::default());
+        self.done.push(Default::default());
 
         // Seed the backtrack set. Exhaustive mode takes every enabled thread;
         // DPOR starts with one and grows the set only where a dependency
