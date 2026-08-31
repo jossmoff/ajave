@@ -215,7 +215,8 @@ def read_baseline(set_name):
             continue
         f = line.split("\t")
         if len(f) >= 3:
-            out[(f[0], f[1])] = f[2]
+            secs = float(f[4]) if len(f) >= 5 else None
+            out[(f[0], f[1])] = (f[2], secs)
     return out
 
 
@@ -228,11 +229,22 @@ def write_baseline(set_name, results):
             "#\n"
             "# A task moving correct -> unproven fails --check. Improving one to\n"
             "# correct is expected to update this file in the same commit.\n"
-            "# Format: <task>\\t<property>\\t<outcome>\\t<verdict>\n"
+            "#\n"
+            "# `seconds` is wall clock on the machine that recorded it, and it is\n"
+            "# there to catch performance regressions -- a task going from 2s to\n"
+            "# 40s is invisible today until it crosses the timeout and shows up as\n"
+            "# a verdict change. Timings are noisy (Optimization1 measured 97s and\n"
+            "# 253s on consecutive runs), so --check only flags large multiples.\n"
+            "#\n"
+            "# It is NOT a per-task timeout. Every task in a scoring run gets the\n"
+            "# same budget, because SV-COMP gives every task the same budget;\n"
+            "# handing the slow ones extra time would make our score stop\n"
+            "# predicting competition performance.\n"
+            "# Format: <task>\\t<property>\\t<outcome>\\t<verdict>\\t<seconds>\n"
         )
         for r in sorted(results, key=lambda r: (r["yml"], r["property"])):
             fh.write(f"{rel(r['yml'])}\t{r['property']}\t"
-                     f"{outcome_of(r)}\t{r['verdict']}\n")
+                     f"{outcome_of(r)}\t{r['verdict']}\t{r['elapsed']:.1f}\n")
     return p
 
 
@@ -426,6 +438,10 @@ def main():
                          "more than one distinct verdict. A verifier whose "
                          "answer varies between identical runs makes every "
                          "baseline and score delta meaningless (#66)")
+    ap.add_argument("--slow-factor", type=float, default=4.0, metavar="N",
+                    help="flag a task as a performance regression when it takes "
+                         "more than N times its baseline (default 4). Timings "
+                         "are noisy, so this is deliberately generous")
     ap.add_argument("--sweep", action="store_true",
                     help="kill leftover ajave/solver/JVM processes and remove "
                          "stale temp dirs before starting")
@@ -535,6 +551,23 @@ def main():
         return 0
 
     if args.update_baseline:
+        # Tasks recorded close to the budget are coin-flips, not results: they
+        # land inside it on a lucky run and outside on the next, so recording
+        # one as `correct` puts a coin-flip in the gate. Optimization1 did
+        # exactly that -- it measured 97s and 253s on repeat runs against a 60s
+        # budget, and a single lucky parallel batch got it baselined as correct.
+        cliff = [r for r in results
+                 if r["elapsed"] > args.timeout * 0.6 and r["verdict"] != "TIMEOUT"]
+        if cliff:
+            print(f"\n  WARNING: {len(cliff)} task(s) finished within 40% of the "
+                  f"{args.timeout}s budget:", file=sys.stderr)
+            for r in sorted(cliff, key=lambda r: -r["elapsed"])[:10]:
+                print(f"    {r['elapsed']:6.1f}s  {rel(r['yml'])} [{r['property']}]",
+                      file=sys.stderr)
+            print("  Their recorded outcome may not reproduce. Consider a longer "
+                  "--timeout\n  for the baseline run, or treat them as unproven.",
+                  file=sys.stderr)
+
         p = write_baseline(args.set, results)
         print(f"\nbaseline written: {os.path.relpath(p, ROOT)} "
               f"({len(results)} runs)")
@@ -548,12 +581,32 @@ def main():
     baseline = read_baseline(args.set)
     regressed = [r for r in results
                  if outcome_of(r) != "correct"
-                 and baseline.get((rel(r["yml"]), r["property"])) == "correct"]
+                 and (baseline.get((rel(r["yml"]), r["property"])) or (None,))[0] == "correct"]
+
+    # Performance regressions. Deliberately generous: repeated runs of the same
+    # task have measured 97s and 253s, so anything short of a large multiple is
+    # noise. The floor stops sub-second tasks tripping it on scheduling jitter.
+    slower = []
+    for r in results:
+        was = baseline.get((rel(r["yml"]), r["property"]))
+        if not was or was[1] is None:
+            continue
+        before, now = was[1], r["elapsed"]
+        if now > max(before * args.slow_factor, before + 5.0) and now > 2.0:
+            slower.append((r, before, now))
     if regressed:
         print(f"\n{len(regressed)} regressed from correct:")
         for r in regressed:
             print(f"  {rel(r['yml'])} [{r['property']}]: "
                   f"now {outcome_of(r)} ({r['verdict']})")
+    if slower:
+        print(f"\n{len(slower)} task(s) got materially slower:")
+        for r, before, now in sorted(slower, key=lambda t: -(t[2] / max(t[1], 0.1)))[:15]:
+            print(f"  {rel(r['yml'])} [{r['property']}]: "
+                  f"{before:.1f}s -> {now:.1f}s  ({now / max(before, 0.1):.1f}x)")
+        print("  Slower is not automatically wrong, but it is how tasks fall off")
+        print("  the timeout cliff. Re-baseline if the cost is understood and wanted.")
+
     if wrong or regressed:
         print("\nFAIL")
         return 1

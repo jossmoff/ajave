@@ -106,6 +106,28 @@ points, which looked exactly like a code regression and was investigated as one.
 - Check for strays first: `tools/cleanup.sh`. A leaked solver or JVM holds
   hundreds of megabytes and never exits on its own.
 
+### Per-task timings are recorded; per-task timeouts are not
+Baselines carry a wall-clock column, and `--check` flags a task that has become
+much slower (default 4x, `--slow-factor`). This catches the regression class
+that is otherwise invisible: a task going from 2s to 40s changes nothing
+observable until it crosses the timeout, at which point it looks like a verdict
+regression with no obvious cause.
+
+`--update-baseline` also warns about tasks that finished within 40% of the
+budget. Those are coin-flips, not results — `Optimization1` measured 97s and
+253s on consecutive runs against a 60s budget, and one lucky parallel batch got
+it baselined as `correct`.
+
+**Do not turn recorded timings into per-task timeouts for a scoring run.**
+SV-COMP gives every task the same budget. Granting the slow ones extra time
+because we know they need it makes the score stop predicting competition
+performance — it is the overfitting this file warns about, moved from the engine
+into the harness. Raise the budget uniformly (`--timeout`) if a run needs more.
+
+Timings are noisy, and a baseline recorded on a loaded machine is inflated,
+which *masks* future slowdowns. Record baselines on an idle machine for the same
+reason scores are.
+
 ### The build under test must not change mid-run
 A scoring run invokes the binary once per task over many minutes. Rebuilding
 during that window swaps it underneath the run, so early tasks measure one build

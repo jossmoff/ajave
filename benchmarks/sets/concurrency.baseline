@@ -3,20 +3,31 @@
 #
 # A task moving correct -> unproven fails --check. Improving one to
 # correct is expected to update this file in the same commit.
-# Format: <task>\t<property>\t<outcome>\t<verdict>
-ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	unproven	UNKNOWN
-ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE
-ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN
-ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE
-ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE
-ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE
-ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE
-ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE
-ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	unproven	UNKNOWN
-ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN
-ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE
-ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE
-ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE
-ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE
-ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE
-ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE
+#
+# `seconds` is wall clock on the machine that recorded it, and it is
+# there to catch performance regressions -- a task going from 2s to
+# 40s is invisible today until it crosses the timeout and shows up as
+# a verdict change. Timings are noisy (Optimization1 measured 97s and
+# 253s on consecutive runs), so --check only flags large multiples.
+#
+# It is NOT a per-task timeout. Every task in a scoring run gets the
+# same budget, because SV-COMP gives every task the same budget;
+# handing the slow ones extra time would make our score stop
+# predicting competition performance.
+# Format: <task>\t<property>\t<outcome>\t<verdict>\t<seconds>
+ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	unproven	UNKNOWN	1.3
+ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	1.3
+ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	1.3
+ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	1.3
+ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	1.2
+ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	1.3
+ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	0.9
+ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	0.9
+ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	1.0
+ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN	0.9
+ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	1.0
+ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	1.0
+ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.7
+ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.8
+ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.8
+ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.8
