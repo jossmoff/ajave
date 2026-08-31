@@ -32,6 +32,21 @@ report_and_kill "ajave JVM replays" "ajave-shadow|ajave-build"
 report_and_kill "ajave processes"   "target/release/ajave"
 report_and_kill "benchmark runners" "tools/bench.py|smoke_test.py|score_full.py"
 
+# Orphaned solvers and JVMs: parent gone (ppid 1), so nothing owns them.
+#
+# A bare "z3"/"java" pattern is too wide -- it would match your own work -- but
+# an *orphaned* one is ours by construction: a live run still owns its children,
+# and nothing else here spawns them. Killing the harness from outside (pkill on
+# the wrapper) bypasses procguard's signal handlers, which is exactly how five
+# z3 processes ended up spinning at 99% CPU each with no parent.
+orphans=$(ps -A -o pid=,ppid=,command= | awk '$2==1 && ($3~/z3$/ || $3~/cvc5$/ || $0~/ajave-shadow|ajave-build/){print $1}')
+if [ -n "$orphans" ]; then
+  n=$(echo "$orphans" | wc -w | tr -d ' ')
+  echo "  orphaned solvers/JVMs: $n"
+  found=$((found + n))
+  [ "$DRY" = "0" ] && echo "$orphans" | xargs kill -9 2>/dev/null
+fi
+
 # Only the directories a run actually creates. A blanket ajave-* glob also
 # matched /tmp/ajave-runs, this harness's own log directory, and deleted it.
 dirs=$( { ls -d "${TMPDIR:-/tmp}"/ajave-build-* "${TMPDIR:-/tmp}"/ajave-shadow-* \

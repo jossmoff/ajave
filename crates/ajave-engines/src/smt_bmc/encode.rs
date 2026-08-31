@@ -50,10 +50,20 @@ use super::ExploreCtx;
 /// `AJAVE_FP_ARITH=1` enables it, and it is worth revisiting if the solver gets
 /// better at FP (see #27, Bitwuzla) or if it can be scoped to falsification.
 pub(super) fn fp_arith() -> bool {
-    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
-        std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
-    })
+    FP_ARITH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Settable rather than a `OnceLock`, so a second exploration pass can turn FPA
+/// on for the methods that actually need it. See `escalate_to_fpa`.
+static FP_ARITH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn set_fp_arith(on: bool) {
+    FP_ARITH.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The default, from the environment. Read once at engine start.
+pub(super) fn fp_arith_default() -> bool {
+    std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
 }
 
 impl<'a> ExploreCtx<'a> {

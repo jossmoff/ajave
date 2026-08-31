@@ -165,6 +165,20 @@ fn fp_binop_modelled(op: BinOp) -> bool {
 }
 
 pub struct SmtBmc {
+    /// Encode float arithmetic in the FloatingPoint theory for this instance.
+    ///
+    /// FPA makes float arithmetic exact, which is what lets a float-guarded
+    /// obligation be decided at all — but it also makes the formulas hard
+    /// enough that the solver answers `unknown` where it previously answered
+    /// `unsat`, so applying it everywhere loses far more proofs than it wins
+    /// (measured: -62 across the corpus).
+    ///
+    /// The cost falls on obligations that never depended on float precision —
+    /// a NullDeref does not care about rounding. So the portfolio runs the
+    /// cheap encoding first and a second instance with this set afterwards,
+    /// which can only affect obligations the first pass left open. Escalation
+    /// is paid for only where it can help.
+    pub fp_arith: bool,
     factory: Box<dyn SolverFactory>,
     max_depth: u32,
     done: bool,
@@ -177,6 +191,7 @@ pub struct SmtBmc {
 impl SmtBmc {
     pub fn new(factory: Box<dyn SolverFactory>, max_depth: u32) -> Self {
         SmtBmc {
+            fp_arith: encode::fp_arith_default(),
             factory,
             max_depth,
             done: false,
@@ -197,7 +212,12 @@ impl SmtBmc {
 
 impl Engine for SmtBmc {
     fn id(&self) -> EngineId {
-        EngineId("smt-bmc")
+        // Distinct ids so engine attribution shows which pass decided what.
+        if self.fp_arith {
+            EngineId("smt-bmc-fpa")
+        } else {
+            EngineId("smt-bmc")
+        }
     }
 
     fn direction(&self) -> Direction {
@@ -210,12 +230,36 @@ impl Engine for SmtBmc {
         }
         self.done = true;
 
+        // The FPA pass exists to decide what the cheap pass could not, so if
+        // nothing is open there is nothing for it to decide. Without this it
+        // re-explores every method with the expensive encoding and merely
+        // re-publishes discharges the first pass already made — which cost the
+        // whole float category on no-runtime-exception (166 -> 114) while
+        // changing no verdict.
+        if self.fp_arith && bb.open().is_empty() {
+            debug!("smt-bmc-fpa: nothing open, skipping the escalation pass");
+            return Progress::Exhausted;
+        }
+
         let Some(entry) = &prog.entry else {
             return Progress::Exhausted;
         };
         let Some(body) = prog.body(entry) else {
             return Progress::Exhausted;
         };
+
+        // This instance's float encoding, for the duration of its step. The
+        // portfolio runs a cheap bitvector pass first and an FPA pass after, so
+        // the setting has to be per-instance rather than process-global.
+        encode::set_fp_arith(self.fp_arith);
+        // Restored on the way out of every path below.
+        struct RestoreFpArith;
+        impl Drop for RestoreFpArith {
+            fn drop(&mut self) {
+                encode::set_fp_arith(encode::fp_arith_default());
+            }
+        }
+        let _restore = RestoreFpArith;
 
         let mut solver = match self.factory.create() {
             Ok(s) => s,

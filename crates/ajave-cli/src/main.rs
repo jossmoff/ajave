@@ -229,6 +229,27 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
         bmc.ascii_only = ascii_only;
         engines.push(Box::new(bmc));
+        // A second BMC pass with FloatingPoint arithmetic, after the cheap one.
+        //
+        // FPA decides float-guarded obligations that the bitvector encoding
+        // cannot — `(a+b)+c != a+(b+c)` needs exact rounding — but it makes the
+        // formulas hard enough that the solver returns `unknown` where it used
+        // to return `unsat`, so running it on everything loses far more proofs
+        // than it wins (-62 across the corpus, concentrated in
+        // no-runtime-exception, which is overwhelmingly a proving problem).
+        //
+        // Running it second means it can only affect obligations the cheap pass
+        // left open, so the cost is paid where it might help and nowhere else.
+        if let Some(f3) = ajave_core::smt_smtlib::SmtLibFactory::from_env() {
+            // Bounded per query: this pass is a bonus and must not be able to
+            // spend the whole task budget. FPA formulas are the hard ones, so
+            // an unbounded solver here starves the run rather than adding to it.
+            let f3 = f3.with_query_timeout(5_000);
+            let mut fpa = ajave_engines::smt_bmc::SmtBmc::new(Box::new(f3), 200);
+            fpa.ascii_only = ascii_only;
+            fpa.fp_arith = true;
+            engines.push(Box::new(fpa));
+        }
         if let Some(f2) = factory2 {
             engines.push(Box::new(ajave_engines::kinduction::KInduction::new(
                 Box::new(f2),

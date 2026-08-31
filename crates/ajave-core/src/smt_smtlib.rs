@@ -839,6 +839,24 @@ pub struct SmtLibFactory {
 }
 
 impl SmtLibFactory {
+    /// Bound each solver query to `ms` milliseconds.
+    ///
+    /// For a pass that is a *bonus* — one that runs after a cheaper pass and can
+    /// only decide what the cheap pass left open — an unbounded solver is a
+    /// hazard: it can spend the whole task budget failing to decide something
+    /// and take the tasks the cheap pass had already answered down with it.
+    /// `argv-tasks/MathHelper_true` went from 7.6s to 60.1s and timed out that
+    /// way, on an idle machine.
+    ///
+    /// z3 treats `-t:` as a per-query soft timeout, answering `unknown` rather
+    /// than hanging, which is exactly the yield-and-move-on behaviour wanted.
+    pub fn with_query_timeout(mut self, ms: u32) -> Self {
+        if self.solver_binary.rsplit('/').next().unwrap_or("") == "z3" {
+            self.extra_args.push(format!("-t:{ms}"));
+        }
+        self
+    }
+
     /// Read solver config from environment. Returns `None` if the solver binary
     /// is not found on PATH.
     pub fn from_env() -> Option<Self> {
