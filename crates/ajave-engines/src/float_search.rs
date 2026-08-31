@@ -82,27 +82,51 @@ impl FloatSearch {
     }
 }
 
-/// Which nondet slots this body draws, and whether each is float-typed.
+/// What each nondet slot this body draws is: 64-bit double, 32-bit float, or
+/// not a float at all.
+///
+/// The width matters and getting it wrong is a soundness hazard, not a
+/// precision one. The replay harness decodes a `nondetFloat` as
+/// `Float.intBitsToFloat((int) next())` — the *low 32 bits* — so writing a
+/// 64-bit double pattern into the sequence means the engine and the JVM run the
+/// program on different values. That produced a confirmed-but-bogus violation
+/// on `argv-tasks/ReverseInterpolator_true`: the search used -3.88e9 while the
+/// JVM replayed 18.145, and the resulting wrong FALSE cost -32.
 ///
 /// Only float slots are searched; integer slots stay at whatever the seed gave
-/// them, because the SMT engine already handles integer path conditions well
-/// and searching them here would duplicate it badly.
-fn nondet_slots(body: &Body) -> Vec<bool> {
+/// them, because the SMT engine already handles integer path conditions well.
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    Double,
+    Float,
+    NotFloat,
+}
+
+fn nondet_slots(body: &Body) -> Vec<Slot> {
     let mut slots = Vec::new();
     for block in &body.blocks {
         for st in &block.stmts {
             if let ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::Nondet(ty, _)) = st {
-                slots.push(matches!(ty, Ty::Float | Ty::Double));
+                slots.push(match ty {
+                    Ty::Double => Slot::Double,
+                    Ty::Float => Slot::Float,
+                    _ => Slot::NotFloat,
+                });
             }
         }
     }
     slots
 }
 
-fn encode(vals: &[f64], is_float: &[bool]) -> Vec<i64> {
+fn encode(vals: &[f64], slots: &[Slot]) -> Vec<i64> {
     vals.iter()
-        .zip(is_float)
-        .map(|(v, f)| if *f { v.to_bits() as i64 } else { *v as i64 })
+        .zip(slots)
+        .map(|(v, s)| match s {
+            Slot::Double => v.to_bits() as i64,
+            // 32 bits, because that is what the JVM will read back.
+            Slot::Float => (*v as f32).to_bits() as i32 as i64,
+            Slot::NotFloat => *v as i64,
+        })
         .collect()
 }
 
@@ -131,8 +155,8 @@ struct Candidate {
     hit: Option<(MethodKey, ObligationId, Vec<i64>, Vec<NondetEntry>)>,
 }
 
-fn evaluate(prog: &Program, body: &Body, vals: &[f64], is_float: &[bool]) -> Candidate {
-    let choices = encode(vals, is_float);
+fn evaluate(prog: &Program, body: &Body, vals: &[f64], slots: &[Slot]) -> Candidate {
+    let choices = encode(vals, slots);
     let (out, fitness, signed) = run_with_fitness(prog, body, &choices, STEP_BUDGET);
     let hit = match out {
         Outcome::Violated { method, oid, witness, entries } => {
@@ -148,7 +172,7 @@ fn evaluate(prog: &Program, body: &Body, vals: &[f64], is_float: &[bool]) -> Can
 fn bisect(
     prog: &Program,
     body: &Body,
-    is_float: &[bool],
+    slots: &[Slot],
     cur: &[f64],
     i: usize,
     best: &Candidate,
@@ -169,7 +193,7 @@ fn bisect(
             if !trial[i].is_finite() {
                 continue;
             }
-            let c = evaluate(prog, body, &trial, is_float);
+            let c = evaluate(prog, body, &trial, slots);
             *evals += 1;
             if c.hit.is_some() {
                 return Some(c);
@@ -203,7 +227,7 @@ fn bisect(
         if !trial[i].is_finite() {
             break;
         }
-        let c = evaluate(prog, body, &trial, is_float);
+        let c = evaluate(prog, body, &trial, slots);
         *evals += 1;
         if c.hit.is_some() {
             return Some(c);
@@ -231,7 +255,7 @@ fn bisect(
         if !trial[i].is_finite() {
             continue;
         }
-        let c = evaluate(prog, body, &trial, is_float);
+        let c = evaluate(prog, body, &trial, slots);
         *evals += 1;
         if c.hit.is_some() {
             return Some(c);
@@ -261,9 +285,9 @@ fn from_ordered_bits(o: i64) -> f64 {
 /// Each variable is probed in both directions; an improvement is followed with
 /// a geometrically growing step until it stops paying, which is what lets the
 /// search cross many orders of magnitude without knowing the scale in advance.
-fn search(prog: &Program, body: &Body, is_float: &[bool], evals: &mut usize, best_out: &mut f64) -> Option<Candidate> {
-    let n = is_float.len();
-    let float_idx: Vec<usize> = (0..n).filter(|i| is_float[*i]).collect();
+fn search(prog: &Program, body: &Body, slots: &[Slot], evals: &mut usize, best_out: &mut f64) -> Option<Candidate> {
+    let n = slots.len();
+    let float_idx: Vec<usize> = (0..n).filter(|i| slots[*i] != Slot::NotFloat).collect();
     if float_idx.is_empty() {
         return None;
     }
@@ -302,7 +326,7 @@ fn search(prog: &Program, body: &Body, is_float: &[bool], evals: &mut usize, bes
             })
             .collect();
 
-        let mut best = evaluate(prog, body, &cur, is_float);
+        let mut best = evaluate(prog, body, &cur, slots);
         *evals += 1;
         if best.hit.is_some() {
             return Some(best);
@@ -343,7 +367,7 @@ fn search(prog: &Program, body: &Body, is_float: &[bool], evals: &mut usize, bes
                             if !trial[i].is_finite() || trial[i] == cur[i] {
                                 break;
                             }
-                            let c = evaluate(prog, body, &trial, is_float);
+                            let c = evaluate(prog, body, &trial, slots);
                             *evals += 1;
                             if c.hit.is_some() {
                                 return Some(c);
@@ -373,7 +397,7 @@ fn search(prog: &Program, body: &Body, is_float: &[bool], evals: &mut usize, bes
                 // on the representable values does close it, in at most 64
                 // steps, because adjacent doubles have nothing between them.
                 if !moved && best.signed.is_finite() && best.fitness < 0.9 {
-                    if let Some(c) = bisect(prog, body, is_float, &cur, i, &best, evals) {
+                    if let Some(c) = bisect(prog, body, slots, &cur, i, &best, evals) {
                         return Some(c);
                     }
                 }
@@ -416,8 +440,8 @@ impl Engine for FloatSearch {
             return Progress::Exhausted;
         }
 
-        let is_float = nondet_slots(body);
-        if !is_float.iter().any(|f| *f) {
+        let slots = nondet_slots(body);
+        if !slots.iter().any(|s| *s != Slot::NotFloat) {
             debug!("float-search: no float nondets, skipping");
             return Progress::Exhausted;
         }
@@ -451,7 +475,7 @@ impl Engine for FloatSearch {
 
         let mut evals = 0usize;
         let mut best_fitness = f64::INFINITY;
-        let found = search(prog, body, &is_float, &mut evals, &mut best_fitness);
+        let found = search(prog, body, &slots, &mut evals, &mut best_fitness);
         let Some(c) = found else {
             info!("float-search: no violation after {evals} candidate runs (best fitness {best_fitness:e})");
             return Progress::Exhausted;
