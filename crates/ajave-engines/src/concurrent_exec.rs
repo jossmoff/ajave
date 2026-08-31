@@ -465,6 +465,121 @@ impl<'a> Interp<'a> {
     }
 
     /// Note what this statement touches, before executing it.
+
+    /// Does a `catch` of `caught` catch a thrown `thrown`?
+    ///
+    /// `None` is the catch-all the compiler emits for `finally`. Otherwise the
+    /// thrown class must be the caught one or a subclass, walked through the
+    /// hierarchy the lifter recorded.
+    ///
+    /// Returns `None` when the relation cannot be decided -- a class outside
+    /// the analysed program, whose superclass chain we do not have. Neither
+    /// answer is safe there: catching when we should not continues an execution
+    /// that cannot happen, and failing to catch kills a thread that would have
+    /// recovered. So the caller stops instead of guessing.
+    fn handler_catches(&self, caught: &Option<String>, thrown: &str) -> Option<bool> {
+        let Some(caught) = caught else { return Some(true) };
+        let mut cur = thrown.to_string();
+        loop {
+            if &cur == caught {
+                return Some(true);
+            }
+            // The roots: reaching one without a match means no match.
+            if cur == "java/lang/Object" {
+                return Some(false);
+            }
+            match self.prog.supers.get(&cur) {
+                Some(next) => cur = next.clone(),
+                None => {
+                    // Outside the program. The JDK exception hierarchy we rely
+                    // on is small and fixed, so it is known rather than guessed.
+                    return jdk_exception_super(&cur).map(|sup| {
+                        let mut c = sup.to_string();
+                        loop {
+                            if &c == caught {
+                                return true;
+                            }
+                            match jdk_exception_super(&c) {
+                                Some(n) => c = n.to_string(),
+                                None => return false,
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Raise `class` in `tid`, transferring to a handler if one covers the
+    /// current program point.
+    ///
+    /// Walks outward through the frame stack exactly as the JVM does: a frame
+    /// with no matching handler is popped and the search continues in its
+    /// caller. Running out of frames terminates the thread, which is what an
+    /// uncaught exception in a `run()` does -- it kills that thread and no
+    /// other.
+    fn raise(&mut self, g: &mut GlobalState, tid: ThreadId, class: &str) -> Result<Step, String> {
+        let ti = tid.0 as usize;
+        loop {
+            let Some(frame) = self.frames[ti].last().cloned() else {
+                self.hb.release(tid.0, SyncKey::Thread(tid.0));
+                if let Some(t) = g.threads.iter_mut().find(|t| t.id == tid) {
+                    t.status = ThreadStatus::Terminated;
+                }
+                return Ok(Step::Terminated);
+            };
+            let Some(body) = self.prog.body(&frame.at.method) else {
+                return Err(format!("no body for {}", frame.at.method));
+            };
+            let block = body.block(frame.at.block);
+            let mut target = None;
+            for edge in &block.exceptional {
+                match self.handler_catches(&edge.class, class) {
+                    Some(true) => {
+                        target = Some(edge.target);
+                        break;
+                    }
+                    Some(false) => continue,
+                    None => {
+                        return Err(format!(
+                            "cannot tell whether a handler catches {class}"
+                        ))
+                    }
+                }
+            }
+            if let Some(t) = target {
+                // The handler expects the exception object on entry. A fresh
+                // object of the thrown class is enough: the benchmarks that
+                // matter read its type, not its fields.
+                let id = self.next_obj;
+                self.next_obj += 1;
+                self.obj_class.insert(id, class.to_string());
+                if let Some(f) = self.frames[ti].last_mut() {
+                    f.at.block = t;
+                    f.at.index = 0;
+                    if let Some(b) = self.prog.body(&f.at.method) {
+                        if let Some((idx, _)) = b
+                            .vars
+                            .iter()
+                            .enumerate()
+                            .find(|(_, vi)| matches!(vi.kind, ajave_ir::VarKind::Local(0)))
+                        {
+                            let _ = idx;
+                        }
+                    }
+                    // The lifter's handler blocks read the caught value from
+                    // whatever the first statement assigns; binding it by name
+                    // is not possible here, so the object is published through
+                    // the frame's scratch slot.
+                    f.locals.insert(VarId(0), Val::Ref(id));
+                }
+                return Ok(Step::Advanced(Vec::new()));
+            }
+            // No handler here: unwind.
+            self.frames[ti].pop();
+        }
+    }
+
     /// Take the next decision from the tape, or ask for one.
     ///
     /// `None` means "the explorer has not decided yet": the caller must leave
@@ -804,10 +919,24 @@ impl<'a> Interp<'a> {
                         .nonzero(),
                 };
                 if holds {
-                    Ok(None)
-                } else {
-                    Ok(Some(Step::Violated(*oid, frame.at.method.clone())))
+                    return Ok(None);
                 }
+                // A *guarded* obligation is one whose exception a handler in
+                // this method catches, so it is not a property violation --
+                // the program recovers. It is also not a no-op: the exception
+                // really is raised, and control goes to the handler rather than
+                // continuing as though the check had passed.
+                //
+                // Ignoring the flag reported `throw new RuntimeException()`
+                // inside a try/catch as a violation, in a program that catches
+                // it and carries on.
+                if ob.guarded {
+                    let class = ajave_models::exception_class(ob.kind)
+                        .unwrap_or("java/lang/RuntimeException");
+                    let step = self.raise(g, tid, class)?;
+                    return Ok(Some(step));
+                }
+                Ok(Some(Step::Violated(*oid, frame.at.method.clone())))
             }
             Stmt::Nop => Ok(None),
             other => Err(format!("unsupported statement {other:?}")),
@@ -999,24 +1128,23 @@ impl<'a> Interp<'a> {
                     let Some(&t) = self.thread_objs.get(&recv) else {
                         return Err("interrupt() on an unrecognised Thread object".into());
                     };
-                    // Interrupting a *parked* thread makes it throw
-                    // InterruptedException and resume, which is exception
-                    // injection this interpreter does not do. Modelling it as
-                    // "sets a flag" would leave the thread parked forever and
-                    // report a deadlock the program recovers from -- a wrong
-                    // FALSE. Setting the flag is only sound while the target is
-                    // running, where it just has to be polled.
-                    let parked = g.threads.iter().any(|x| {
-                        x.id == t
-                            && matches!(
-                                x.status,
-                                ThreadStatus::Waiting { .. } | ThreadStatus::Blocked { .. }
-                            )
-                    });
-                    if parked {
-                        return Err("interrupt() of a parked thread is not modelled".into());
-                    }
                     self.interrupted.insert(t);
+                    // Wake a thread parked in an interruptible wait so it
+                    // re-runs the call and observes the flag, which raises.
+                    //
+                    // The flag alone is not enough, and getting that wrong was
+                    // a wrong FALSE rather than a missing feature: the refusal
+                    // this replaces only fired when the target was *already*
+                    // parked, so interrupting before it parked set a flag the
+                    // subsequent wait ignored, and the thread hung forever in a
+                    // program the JVM completes. `InterruptWakesParkedThread`
+                    // is the benchmark.
+                    if let Some(x) = g.threads.iter_mut().find(|x| x.id == t) {
+                        if matches!(x.status, ThreadStatus::Waiting { .. }) {
+                            x.status = ThreadStatus::Runnable;
+                            x.timed_wait = false;
+                        }
+                    }
                     return Ok(None);
                 }
                 "isInterrupted" => {
@@ -1314,6 +1442,35 @@ impl<'a> Interp<'a> {
             let ti = tid.0 as usize;
             match target.name.as_str() {
                 "wait" => {
+                    // Interruption is checked first, at both phases: a thread
+                    // interrupted before it parks must not park, and one
+                    // interrupted while parked must throw rather than resume
+                    // normally. The monitor is reacquired before throwing,
+                    // exactly as a normal return from wait would (JLS 17.2.1).
+                    if self.interrupted.remove(&tid) {
+                        let depth = g.threads[ti].wait_depth;
+                        if depth > 0 {
+                            if g.monitor_owner.get(&recv).is_some_and(|&o| o != tid) {
+                                self.interrupted.insert(tid);
+                                g.threads[ti].status = ThreadStatus::Blocked { monitor: recv };
+                                return Ok(None);
+                            }
+                            self.hb.acquire(tid.0, SyncKey::Monitor(recv.0));
+                            g.monitor_owner.insert(recv, tid);
+                            for _ in 0..depth {
+                                g.threads[ti].enter(recv);
+                            }
+                            g.threads[ti].wait_depth = 0;
+                        }
+                        g.threads[ti].status = ThreadStatus::Runnable;
+                        g.threads[ti].timed_wait = false;
+                        // `raise` has already moved the program counter to the
+                        // handler (or unwound the thread), so returning
+                        // normally is correct: `advance` only steps past a
+                        // statement whose frame did not move.
+                        self.raise(g, tid, "java/lang/InterruptedException")?;
+                        return Ok(None);
+                    }
                     // Two phases at the same statement, because the thread
                     // stays parked on the `wait()` call while it is waiting.
                     //
@@ -2357,11 +2514,20 @@ impl<'a> Interp<'a> {
                 }
                 Ok(None)
             }
-            Terminator::Throw(_) => {
-                // An explicit throw with no handler terminates the thread. The
-                // obligations that matter are already `Check`s.
-                g.threads[ti].status = ThreadStatus::Terminated;
-                Ok(Some(Step::Terminated))
+            Terminator::Throw(op) => {
+                // Previously this terminated the thread outright, so a worker
+                // that threw never ran its own handlers and every `try`/`catch`
+                // inside a thread was invisible.
+                let class = match self.eval(frame, &op) {
+                    Some(Val::Ref(r)) if r != 0 => self
+                        .obj_class
+                        .get(&r)
+                        .cloned()
+                        .unwrap_or_else(|| "java/lang/RuntimeException".to_string()),
+                    _ => "java/lang/RuntimeException".to_string(),
+                };
+                let step = self.raise(g, tid, &class)?;
+                Ok(Some(step))
             }
             other => Err(format!("unsupported terminator {other:?}")),
         }
@@ -2426,5 +2592,35 @@ pub fn spawn_state(
         locals: Default::default(),
         stack: Vec::new(),
         monitors: Vec::new(),
+    })
+}
+
+/// The JDK exception hierarchy we depend on, which is small, fixed and
+/// specified — so it is known rather than guessed. Anything outside it makes
+/// `handler_catches` decline rather than assume.
+fn jdk_exception_super(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "java/lang/InterruptedException" => "java/lang/Exception",
+        "java/lang/IllegalStateException"
+        | "java/lang/IllegalArgumentException"
+        | "java/lang/NullPointerException"
+        | "java/lang/ArithmeticException"
+        | "java/lang/ClassCastException"
+        | "java/lang/IllegalMonitorStateException"
+        | "java/lang/NegativeArraySizeException"
+        | "java/lang/UnsupportedOperationException"
+        | "java/lang/IndexOutOfBoundsException" => "java/lang/RuntimeException",
+        "java/lang/ArrayIndexOutOfBoundsException"
+        | "java/lang/StringIndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
+        "java/lang/NumberFormatException" => "java/lang/IllegalArgumentException",
+        "java/util/NoSuchElementException" => "java/lang/RuntimeException",
+        "java/util/concurrent/BrokenBarrierException"
+        | "java/util/concurrent/TimeoutException"
+        | "java/util/concurrent/ExecutionException" => "java/lang/Exception",
+        "java/lang/RuntimeException" => "java/lang/Exception",
+        "java/lang/Exception" | "java/lang/Error" => "java/lang/Throwable",
+        "java/lang/AssertionError" => "java/lang/Error",
+        "java/lang/Throwable" => "java/lang/Object",
+        _ => return None,
     })
 }
