@@ -822,6 +822,7 @@ impl<'a> Interp<'a> {
                         | "java/util/concurrent/LinkedBlockingDeque"
                         | "java/util/concurrent/ConcurrentHashMap"
                         | "java/util/concurrent/ConcurrentMap"
+                        | "java/util/concurrent/CompletableFuture"
                 ) || target
                     .class
                     .starts_with("java/util/concurrent/locks/ReentrantReadWriteLock") =>
@@ -2802,6 +2803,81 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 other => return Err(format!("unmodelled ThreadLocal.{other}")),
+            }
+        }
+
+        // CompletableFuture, in its one-shot form: a value cell plus a
+        // release/acquire pair.
+        //
+        // Not the same shape as `Future`, which is bound to a task and reads
+        // its completion from that thread's status. This one is completed
+        // explicitly by whoever holds it, so a waiter parks on the future
+        // itself and the completer publishes to it -- and a future nobody
+        // completes leaves the waiter parked, which the deadlock check finds
+        // with nothing class-specific.
+        //
+        // The composition API (`thenApply`, `supplyAsync`, `thenCombine`, ...)
+        // is refused: each takes a lambda that a model would have to invoke,
+        // and `supplyAsync` additionally spawns onto a pool.
+        if target.class == "java/util/concurrent/CompletableFuture" {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved CompletableFuture receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let done = g
+                .heap
+                .get(&(recv, "$done".to_string()))
+                .map(|&(_, v)| v)
+                .unwrap_or(0)
+                == 1;
+            match target.name.as_str() {
+                "<init>" => return Ok(None),
+                "complete" => {
+                    if done {
+                        return Ok(Some(Val::Int(0)));
+                    }
+                    let v = match args.get(1).and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Ref(r)) => r as i64,
+                        Some(Val::Int(n)) => n,
+                        None => return Err("CompletableFuture value is unknown".into()),
+                    };
+                    g.heap.insert((recv, "$v".to_string()), (false, v));
+                    g.heap.insert((recv, "$done".to_string()), (false, 1));
+                    self.hb.release(tid.0, SyncKey::Sync(recv.0));
+                    for t in g.threads.iter_mut() {
+                        if t.status == (ThreadStatus::Waiting { monitor: recv })
+                            && t.wait_depth == 0
+                        {
+                            t.status = ThreadStatus::Runnable;
+                        }
+                    }
+                    return Ok(Some(Val::Int(1)));
+                }
+                "get" | "join" => {
+                    if !done {
+                        g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                        return Ok(None);
+                    }
+                    self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
+                    let v = g.heap.get(&(recv, "$v".to_string())).map(|&(_, x)| x).unwrap_or(0);
+                    return Ok(Some(Val::Ref(v as u32)));
+                }
+                "getNow" => {
+                    if done {
+                        self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
+                        let v =
+                            g.heap.get(&(recv, "$v".to_string())).map(|&(_, x)| x).unwrap_or(0);
+                        return Ok(Some(Val::Ref(v as u32)));
+                    }
+                    let d = match args.get(1).and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Ref(r)) => r,
+                        _ => 0,
+                    };
+                    return Ok(Some(Val::Ref(d)));
+                }
+                "isDone" => return Ok(Some(Val::Int(done as i64))),
+                other => return Err(format!("unmodelled CompletableFuture.{other}")),
             }
         }
 

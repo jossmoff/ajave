@@ -94,7 +94,6 @@ const UNMODELLED_PRIMITIVES: &[&str] = &[
     // modelled there are refused individually, so an unmodelled `newCondition`
     // still declines rather than being silently ignored.
     "java/util/concurrent/Phaser",
-    "java/util/concurrent/CompletableFuture",
     "java/util/concurrent/ForkJoinPool",
 ];
 
