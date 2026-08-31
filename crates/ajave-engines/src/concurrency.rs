@@ -484,6 +484,11 @@ impl<'a> Explorer<'a> {
             let saved_obj_class = interp.obj_class.clone();
             let saved_interrupted = interp.interrupted.clone();
             let saved_exec_tasks = interp.executor_tasks.clone();
+            // Happens-before and the access history are properties of *one*
+            // execution. Carrying them into a sibling branch would order
+            // actions that never both happened, which hides races.
+            let saved_hb = interp.hb.clone();
+            let saved_last_access = interp.last_access.clone();
             g2.schedule_step(tid);
 
             let step = interp.advance(&mut g2, tid);
@@ -534,6 +539,8 @@ impl<'a> Explorer<'a> {
                     interp.obj_class = saved_obj_class;
                     interp.interrupted = saved_interrupted;
                     interp.executor_tasks = saved_exec_tasks;
+                    interp.hb = saved_hb;
+                    interp.last_access = saved_last_access;
                     continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
@@ -560,6 +567,8 @@ impl<'a> Explorer<'a> {
             interp.obj_class = saved_obj_class;
             interp.interrupted = saved_interrupted;
             interp.executor_tasks = saved_exec_tasks;
+            interp.hb = saved_hb;
+            interp.last_access = saved_last_access;
         }
 
         self.backtrack.truncate(depth);
@@ -762,6 +771,12 @@ pub fn explore(
         explored: 0,
     };
     let result = ex.explore(g, &mut interp);
+    if let Some(r) = &interp.race {
+        log::info!(
+            "concurrency: data race on {} between threads {} and {}",
+            r.location, r.threads.0, r.threads.1
+        );
+    }
     log::debug!(
         "concurrency: {:?} explored {} state(s)",
         strategy,

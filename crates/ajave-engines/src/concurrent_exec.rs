@@ -40,6 +40,8 @@ use ajave_ir::{
     Terminator, VarId,
 };
 
+use ajave_ir::FieldKey;
+use crate::vclock::SyncKey;
 use crate::concurrent_state::{GlobalState, ObjId, ThreadState, ThreadStatus};
 
 /// A concrete value. Mirrors `concrete::Value` but local to this interpreter.
@@ -106,6 +108,16 @@ impl Access {
             _ => false,
         }
     }
+}
+
+/// Two accesses to one location, by different threads, unordered by
+/// happens-before, at least one a write. That is the JLS 17.4.5 definition of a
+/// data race verbatim -- and note it is a property of the *relation*, not of the
+/// schedule: in the schedule one access is simply before the other.
+#[derive(Clone, Debug)]
+pub struct Race {
+    pub location: String,
+    pub threads: (u32, u32),
 }
 
 /// What happened when a thread was advanced.
@@ -218,6 +230,13 @@ pub struct Interp<'a> {
     pub interrupted: std::collections::HashSet<ThreadId>,
     /// Tasks submitted to each executor, for `awaitTermination`.
     pub executor_tasks: HashMap<u32, Vec<ThreadId>>,
+    /// The happens-before relation of the execution being explored.
+    pub hb: crate::vclock::Hb,
+    /// Last write and reads per memory location, for race detection.
+    #[allow(clippy::type_complexity)]
+    pub last_access: HashMap<(u32, String), (Option<(u32, crate::vclock::VClock)>, Vec<(u32, crate::vclock::VClock)>)>,
+    /// The first data race found, if any.
+    pub race: Option<Race>,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -244,6 +263,9 @@ impl<'a> Interp<'a> {
             obj_class: HashMap::new(),
             interrupted: std::collections::HashSet::new(),
             executor_tasks: HashMap::new(),
+            hb: Default::default(),
+            last_access: HashMap::new(),
+            race: None,
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -345,6 +367,9 @@ impl<'a> Interp<'a> {
             }
 
             let Some(frame) = self.frames[tid.0 as usize].last().cloned() else {
+                // A terminating thread publishes everything it did, so a later
+                // join() or Future.get() inherits it.
+                self.hb.release(tid.0, SyncKey::Thread(tid.0));
                 g.threads[ti].status = ThreadStatus::Terminated;
                 return Step::Terminated;
             };
@@ -364,7 +389,7 @@ impl<'a> Interp<'a> {
 
             let stmt = block.stmts[frame.at.index].clone();
             let visible = Self::is_visible(&stmt);
-            self.record_access(g, &stmt, &frame, &mut accesses);
+            self.record_access(g, tid, &stmt, &frame, &mut accesses);
             match self.run_stmt(g, tid, &stmt, &frame) {
                 Ok(Some(step)) => return step,
                 Ok(None) => {}
@@ -410,9 +435,62 @@ impl<'a> Interp<'a> {
     }
 
     /// Note what this statement touches, before executing it.
+    /// Note a memory access, and report a race if this one is unordered with a
+    /// conflicting earlier access.
+    ///
+    /// A *volatile* access is skipped: it is a synchronising action, cannot
+    /// take part in a race by definition (JLS 17.4.1), and instead contributes
+    /// a happens-before edge here.
+    fn note_access(&mut self, tid: u32, obj: u32, field: &FieldKey, write: bool) {
+        log::trace!("access t{tid} obj{obj} {}.{} write={write}", field.class, field.name);
+        if self.prog.volatile_fields.contains(field) {
+            if write {
+                self.hb.release(tid, SyncKey::Volatile(obj, field.name.clone()));
+            } else {
+                self.hb.acquire(tid, SyncKey::Volatile(obj, field.name.clone()));
+            }
+            return;
+        }
+        let clock = self.hb.clock(tid);
+        let key = (obj, field.name.clone());
+        let entry = self.last_access.entry(key).or_insert((None, Vec::new()));
+
+        // A race needs a conflicting pair, so a read only conflicts with the
+        // last write, while a write conflicts with the last write *and* every
+        // read that is not yet ordered before it.
+        if let Some((wt, wc)) = &entry.0 {
+            if *wt != tid && !wc.happens_before(&clock) && self.race.is_none() {
+                log::debug!(
+                    "race: {}.{} prev-write t{wt} {:?} vs t{tid} {:?}",
+                    field.class, field.name, wc, clock
+                );
+                self.race = Some(Race {
+                    location: format!("{}.{}", field.class, field.name),
+                    threads: (*wt, tid),
+                });
+            }
+        }
+        if write {
+            for (rt, rc) in &entry.1 {
+                if *rt != tid && !rc.happens_before(&clock) && self.race.is_none() {
+                    self.race = Some(Race {
+                        location: format!("{}.{}", field.class, field.name),
+                        threads: (*rt, tid),
+                    });
+                }
+            }
+            entry.0 = Some((tid, clock));
+            entry.1.clear();
+        } else {
+            entry.1.retain(|(rt, _)| *rt != tid);
+            entry.1.push((tid, clock));
+        }
+    }
+
     fn record_access(
-        &self,
+        &mut self,
         _g: &GlobalState,
+        tid: ThreadId,
         stmt: &Stmt,
         frame: &Frame,
         out: &mut Vec<Access>,
@@ -425,13 +503,18 @@ impl<'a> Interp<'a> {
                         name: field.name.clone(),
                         write: true,
                     });
+                    self.note_access(tid.0, r, field, true);
                 }
             }
-            Stmt::PutStatic(fk, _) => out.push(Access::Static {
-                class: fk.class.clone(),
-                name: fk.name.clone(),
-                write: true,
-            }),
+            Stmt::PutStatic(fk, _) => {
+                out.push(Access::Static {
+                    class: fk.class.clone(),
+                    name: fk.name.clone(),
+                    write: true,
+                });
+                // Statics have no receiver; object 0 is the class-level cell.
+                self.note_access(tid.0, 0, fk, true);
+            }
             Stmt::MonitorEnter(o) | Stmt::MonitorExit(o) => {
                 if let Some(Val::Ref(r)) = self.eval(frame, o) {
                     out.push(Access::Monitor(ObjId(r)));
@@ -444,13 +527,17 @@ impl<'a> Interp<'a> {
                         name: field.name.clone(),
                         write: false,
                     });
+                    self.note_access(tid.0, r, field, false);
                 }
             }
-            Stmt::Assign(_, Rvalue::GetStatic(fk)) => out.push(Access::Static {
-                class: fk.class.clone(),
-                name: fk.name.clone(),
-                write: false,
-            }),
+            Stmt::Assign(_, Rvalue::GetStatic(fk)) => {
+                out.push(Access::Static {
+                    class: fk.class.clone(),
+                    name: fk.name.clone(),
+                    write: false,
+                });
+                self.note_access(tid.0, 0, fk, false);
+            }
             // A lock or atomic operation touches shared state and must be
             // visible to the dependency relation, or DPOR will happily commute
             // two updates to the same counter.
@@ -604,6 +691,10 @@ impl<'a> Interp<'a> {
                         return Ok(Some(Step::Blocked(Some(m))));
                     }
                     _ => {
+                        // Acquire: absorb whatever the last releaser of this
+                        // monitor knew (JLS 17.4.4). This is what orders a
+                        // guarded write before a later guarded read.
+                        self.hb.acquire(tid.0, SyncKey::Monitor(m.0));
                         g.monitor_owner.insert(m, tid);
                         // Acquiring clears `Blocked`. A thread that reaches
                         // here after being blocked now *owns* the monitor, and
@@ -625,7 +716,12 @@ impl<'a> Interp<'a> {
                     return Err("monitorexit on a non-reference".into());
                 };
                 let m = ObjId(r);
+                // Release: publish what this thread knows to the monitor, so
+                // the next acquirer inherits it. Only on the outermost exit --
+                // a reentrant exit does not release the monitor and so
+                // synchronises with nobody.
                 if g.threads[ti].exit(m) {
+                    self.hb.release(tid.0, SyncKey::Monitor(m.0));
                     g.monitor_owner.remove(&m);
                     // Threads blocked on this monitor become runnable again.
                     for t in g.threads.iter_mut() {
@@ -929,11 +1025,14 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
+                    self.hb.fork(tid.0, target_tid.0);
                     if let Some(t) = g.threads.iter_mut().find(|t| t.id == target_tid) {
                         // Only now does the thread become schedulable. Before
                         // this it is NotStarted, so no interleaving can run
                         // its body early.
                         if t.status == ThreadStatus::NotStarted {
+                            // Everything the starter has done happens-before
+                            // the started thread's first action (JLS 17.4.5).
                             t.status = ThreadStatus::Runnable;
                             // Bind the worker's `this` to the real object.
                             if let Some(o) = obj {
@@ -968,6 +1067,8 @@ impl<'a> Interp<'a> {
                         // join() creates; without it the joiner could observe
                         // state from before the thread ran.
                         g.threads[ti].status = ThreadStatus::Joining { on: target_tid };
+                    } else {
+                        self.hb.acquire(tid.0, SyncKey::Thread(target_tid.0));
                     }
                     Ok(None)
                 }
@@ -1012,6 +1113,7 @@ impl<'a> Interp<'a> {
                             return Ok(None);
                         }
                         _ => {
+                            self.hb.acquire(tid.0, SyncKey::Monitor(recv.0));
                             g.monitor_owner.insert(recv, tid);
                             g.threads[ti].status = ThreadStatus::Runnable;
                             g.threads[ti].enter(recv);
@@ -1024,6 +1126,7 @@ impl<'a> Interp<'a> {
                         return Err("unlock() without holding the lock".into());
                     }
                     if g.threads[ti].exit(recv) {
+                        self.hb.release(tid.0, SyncKey::Monitor(recv.0));
                         g.monitor_owner.remove(&recv);
                         for t in g.threads.iter_mut() {
                             if t.status == (ThreadStatus::Blocked { monitor: recv }) {
@@ -1182,6 +1285,7 @@ impl<'a> Interp<'a> {
                             return Ok(None);
                         }
                         let depth = g.threads[ti].wait_depth;
+                        self.hb.acquire(tid.0, SyncKey::Monitor(recv.0));
                         g.monitor_owner.insert(recv, tid);
                         for _ in 0..depth {
                             g.threads[ti].enter(recv);
@@ -1200,6 +1304,11 @@ impl<'a> Interp<'a> {
                         return Err("wait() without owning the monitor".into());
                     }
                     let depth = g.threads[ti].monitors.iter().filter(|&&m| m == recv).count();
+                    // Parking in wait() releases the monitor for real, so it
+                    // publishes like any other release. `notify` itself needs
+                    // no edge: the ordering comes from the notifier leaving the
+                    // synchronized block, which is an ordinary monitor release.
+                    self.hb.release(tid.0, SyncKey::Monitor(recv.0));
                     g.threads[ti].monitors.retain(|&m| m != recv);
                     g.monitor_owner.remove(&recv);
                     g.threads[ti].wait_depth = depth;
@@ -1259,12 +1368,19 @@ impl<'a> Interp<'a> {
                 _ => return Err("unresolved synchronizer receiver".into()),
             };
             let ti = tid.0 as usize;
-            let arg = |i: usize| -> Option<i64> {
-                args.get(i).and_then(|a| self.eval(frame, a)).map(|v| match v {
-                    Val::Int(n) => n,
-                    Val::Ref(r) => r as i64,
+            // Arguments are evaluated eagerly rather than through a closure
+            // over `self`: the happens-before edges below need `&mut self`, and
+            // a closure holding an immutable borrow of it would outlive them.
+            let argv: Vec<Option<i64>> = args
+                .iter()
+                .map(|a| {
+                    self.eval(frame, a).map(|v| match v {
+                        Val::Int(n) => n,
+                        Val::Ref(r) => r as i64,
+                    })
                 })
-            };
+                .collect();
+            let arg = |i: usize| -> Option<i64> { argv.get(i).copied().flatten() };
             let get = |g: &GlobalState, f: &str| -> i64 {
                 g.heap.get(&(recv, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
             };
@@ -1293,6 +1409,7 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 ("java/util/concurrent/CountDownLatch", "countDown") => {
+                    self.hb.release(tid.0, SyncKey::Sync(recv.0));
                     let c = get(g, "$count");
                     if c > 0 {
                         set(g, "$count", c - 1);
@@ -1309,6 +1426,7 @@ impl<'a> Interp<'a> {
                         return Err("unmodelled timed CountDownLatch.await".into());
                     }
                     if get(g, "$count") == 0 {
+                        self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
                         return Ok(None);
                     }
                     park(g);
@@ -1331,6 +1449,7 @@ impl<'a> Interp<'a> {
                     };
                     let have = get(g, "$permits");
                     if have >= want {
+                        self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
                         set(g, "$permits", have - want);
                         return Ok(None);
                     }
@@ -1338,6 +1457,7 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 ("java/util/concurrent/Semaphore", "release") => {
+                    self.hb.release(tid.0, SyncKey::Sync(recv.0));
                     let n = if target.desc.starts_with("(I)") {
                         arg(1).ok_or("semaphore release count")?
                     } else {
@@ -1384,6 +1504,8 @@ impl<'a> Interp<'a> {
                     // release flag marks "you already arrived and the barrier
                     // tripped", which is the generation counter in miniature.
                     let flag = format!("$released_{}", ti);
+                    self.hb.release(tid.0, SyncKey::Sync(recv.0));
+                    self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
                     if get(g, &flag) == 1 {
                         set(g, &flag, 0);
                         let idx = get(g, &format!("$idx_{}", ti));
@@ -1460,6 +1582,7 @@ impl<'a> Interp<'a> {
                             return Ok(None);
                         }
                         let depth = g.threads[ti].wait_depth;
+                        self.hb.acquire(tid.0, SyncKey::Monitor(lock.0));
                         g.monitor_owner.insert(lock, tid);
                         for _ in 0..depth {
                             g.threads[ti].enter(lock);
@@ -1473,6 +1596,7 @@ impl<'a> Interp<'a> {
                         return Err("Condition.await without holding the lock".into());
                     }
                     let depth = g.threads[ti].monitors.iter().filter(|&&m| m == lock).count();
+                    self.hb.release(tid.0, SyncKey::Monitor(lock.0));
                     g.threads[ti].monitors.retain(|&m| m != lock);
                     g.monitor_owner.remove(&lock);
                     g.threads[ti].wait_depth = depth;
@@ -1675,6 +1799,7 @@ impl<'a> Interp<'a> {
                         return Ok(None);
                     }
                     // A Runnable task computes no value, so `get()` is null.
+                    self.hb.acquire(tid.0, SyncKey::Thread(t.0));
                     return Ok(Some(Val::Ref(0)));
                 }
                 "isDone" => {
@@ -1762,6 +1887,7 @@ impl<'a> Interp<'a> {
                     };
                     set(g, &format!("$e{tail}"), v);
                     set(g, "$tail", tail + 1);
+                    self.hb.release(tid.0, SyncKey::Sync(recv.0));
                     wake_all(g);
                     if target.name == "put" {
                         return Ok(None);
@@ -1785,6 +1911,7 @@ impl<'a> Interp<'a> {
                     }
                     let v = get(g, &format!("$e{head}"));
                     set(g, "$head", head + 1);
+                    self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
                     wake_all(g);
                     return Ok(Some(Val::Ref(v as u32)));
                 }
@@ -1886,6 +2013,11 @@ impl<'a> Interp<'a> {
                             g.threads[ti].status = ThreadStatus::Waiting { monitor: parent };
                             return Ok(None);
                         }
+                        // A writer is ordered after the last writer *and* after
+                        // every reader that has finished.
+                        self.hb.acquire(tid.0, SyncKey::Sync(parent.0));
+                        self.hb
+                            .acquire(tid.0, SyncKey::Volatile(parent.0, "$read".into()));
                         set(g, "$writer", mine);
                         set(g, "$wcount", get(g, "$wcount") + 1);
                         return Ok(None);
@@ -1895,6 +2027,11 @@ impl<'a> Interp<'a> {
                         g.threads[ti].status = ThreadStatus::Waiting { monitor: parent };
                         return Ok(None);
                     }
+                    // A reader is ordered after the last writer only. Two
+                    // readers hold the lock at once and are genuinely
+                    // concurrent, so ordering them here would hide a write
+                    // performed inside a read section.
+                    self.hb.acquire(tid.0, SyncKey::Sync(parent.0));
                     set(g, "$readers", get(g, "$readers") + 1);
                     let n = get(g, &my_reads) + 1;
                     set(g, &my_reads, n);
@@ -1909,6 +2046,7 @@ impl<'a> Interp<'a> {
                         set(g, "$wcount", n);
                         if n == 0 {
                             set(g, "$writer", 0);
+                            self.hb.release(tid.0, SyncKey::Sync(parent.0));
                         }
                         wake_all(g);
                         return Ok(None);
@@ -1917,6 +2055,10 @@ impl<'a> Interp<'a> {
                         return Err("read unlock without holding the read lock".into());
                     }
                     set(g, &my_reads, get(g, &my_reads) - 1);
+                    // Published on the reader channel, which only writers
+                    // absorb -- never other readers.
+                    self.hb
+                        .release(tid.0, SyncKey::Volatile(parent.0, "$read".into()));
                     let r = get(g, "$readers") - 1;
                     set(g, "$readers", r);
                     if r == 0 {
@@ -2067,6 +2209,13 @@ impl<'a> Interp<'a> {
             Terminator::Return(_) => {
                 self.frames[tid.0 as usize].pop();
                 if self.frames[tid.0 as usize].is_empty() {
+                    // A terminating thread publishes everything it did, so a
+                    // later join() or Future.get() inherits it (JLS 17.4.5).
+                    // This is where threads actually finish -- the check at the
+                    // top of `advance` only catches an already-empty stack, so
+                    // putting the edge there alone meant a joiner learned
+                    // nothing and every joined write looked like a race.
+                    self.hb.release(tid.0, SyncKey::Thread(tid.0));
                     g.threads[ti].status = ThreadStatus::Terminated;
                     return Ok(Some(Step::Terminated));
                 }
