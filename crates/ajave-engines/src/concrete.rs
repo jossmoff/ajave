@@ -118,11 +118,34 @@ struct Run {
     /// the solution one ULP of an input moves the compared expression by far
     /// more than the remaining gap, so any step overshoots.
     min_cmp_signed: f64,
+    /// Vars whose declared type is `float` or `double`.
+    ///
+    /// `Value` has no float variant — a double lives in `Value::I64` as its raw
+    /// bit pattern — so without this, `eval_bin` cannot tell a double from a
+    /// long and computes float arithmetic as *integer* arithmetic on bit
+    /// patterns. `NaN * NaN` became a `wrapping_mul` of two bit patterns,
+    /// producing a value that is not NaN, after which every comparison behaves
+    /// differently from the JVM. That is a divergence between the interpreter
+    /// and the real semantics, and it made search-based falsification report
+    /// violations the JVM then refuted.
+    float_ty: std::rc::Rc<std::collections::HashSet<VarId>>,
 }
 
 impl Run {
-    fn new(store: HashMap<VarId, Value>, min_cmp_distance: f64) -> Run {
-        Run { store, min_cmp_distance, min_cmp_signed: f64::INFINITY }
+    fn new(
+        store: HashMap<VarId, Value>,
+        min_cmp_distance: f64,
+        float_ty: std::rc::Rc<std::collections::HashSet<VarId>>,
+    ) -> Run {
+        Run { store, min_cmp_distance, min_cmp_signed: f64::INFINITY, float_ty }
+    }
+
+    fn is_float_operand(&self, o: &Operand) -> bool {
+        match o {
+            Operand::Var(v) => self.float_ty.contains(v),
+            Operand::Const(Const::Float(_)) | Operand::Const(Const::Double(_)) => true,
+            _ => false,
+        }
     }
 
     /// `|a-b| / (1 + |a-b|)`: the standard bounded branch distance from
@@ -167,7 +190,16 @@ impl Run {
                 Value::I64(v) => Value::I64(v.wrapping_neg()),
                 _ => Value::Unknown,
             },
-            Rvalue::Bin(op, a, b) => self.eval_bin(*op, self.eval(a), self.eval(b)),
+            Rvalue::Bin(op, a, b) => {
+                // Route float arithmetic to real f64/f32 operations. The
+                // integer path below would multiply bit patterns.
+                if self.is_float_operand(a) || self.is_float_operand(b) {
+                    if let Some(v) = self.eval_float_bin(*op, a, b) {
+                        return v;
+                    }
+                }
+                self.eval_bin(*op, self.eval(a), self.eval(b))
+            }
             Rvalue::New(_cls) => Value::Unknown, // handled in run_with_choices
             Rvalue::NewArray { .. } => Value::Ref(0), // handled in run_with_choices
             Rvalue::GetStatic(_) | Rvalue::GetField { .. } | Rvalue::ArrayLoad { .. } => {
@@ -231,6 +263,45 @@ impl Run {
             Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
                 unreachable!("Nondet/Havoc is handled in run_with_choices")
             }
+        }
+    }
+
+    /// `a op b` in real float arithmetic, or `None` if the operands are not
+    /// both usable floats.
+    ///
+    /// Doubles are 64-bit (`Value::I64` holding the bit pattern) and floats
+    /// 32-bit (`Value::I32`), matching how the lifter stores them.
+    fn eval_float_bin(&self, op: BinOp, a: &Operand, b: &Operand) -> Option<Value> {
+        use BinOp::*;
+        let (av, bv) = (self.eval(a), self.eval(b));
+        if matches!(av, Value::Unknown) || matches!(bv, Value::Unknown) {
+            return Some(Value::Unknown);
+        }
+        let wide = matches!(av, Value::I64(_)) || matches!(bv, Value::I64(_));
+        if wide {
+            let x = f64::from_bits(av.as_i64() as u64);
+            let y = f64::from_bits(bv.as_i64() as u64);
+            let r = match op {
+                Add => x + y,
+                Sub => x - y,
+                Mul => x * y,
+                Div => x / y,
+                Rem => x % y,
+                _ => return None,
+            };
+            Some(Value::I64(r.to_bits() as i64))
+        } else {
+            let x = f32::from_bits(av.as_i64() as i32 as u32);
+            let y = f32::from_bits(bv.as_i64() as i32 as u32);
+            let r = match op {
+                Add => x + y,
+                Sub => x - y,
+                Mul => x * y,
+                Div => x / y,
+                Rem => x % y,
+                _ => return None,
+            };
+            Some(Value::I32(r.to_bits() as i32))
         }
     }
 
@@ -340,6 +411,9 @@ struct ConcreteState<'a> {
     min_cmp_distance: f64,
     /// See `Run::min_cmp_signed`.
     min_cmp_signed: f64,
+    /// Float-typed vars of the body currently executing. Saved and restored
+    /// around inlined calls, since each body has its own numbering.
+    float_ty: std::rc::Rc<std::collections::HashSet<VarId>>,
     choices: &'a [i64],
     choice_idx: usize,
     trace: Vec<i64>,
@@ -369,6 +443,7 @@ impl<'a> ConcreteState<'a> {
             prog,
             min_cmp_distance: f64::INFINITY,
             min_cmp_signed: f64::INFINITY,
+            float_ty: std::rc::Rc::new(std::collections::HashSet::new()),
             choices,
             choice_idx: 0,
             trace: Vec::new(),
@@ -549,7 +624,7 @@ impl<'a> ConcreteState<'a> {
                     }
                     Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
                     None => {
-                        let mut r = Run::new(std::mem::take(store), self.min_cmp_distance);
+                        let mut r = Run::new(std::mem::take(store), self.min_cmp_distance, self.float_ty.clone());
                         let val = r.eval_rvalue(rv);
                         *store = r.store;
                         self.min_cmp_distance = r.min_cmp_distance;
@@ -591,7 +666,7 @@ impl<'a> ConcreteState<'a> {
                     }))
             }
             other => {
-                let mut r = Run::new(std::mem::take(store), self.min_cmp_distance);
+                let mut r = Run::new(std::mem::take(store), self.min_cmp_distance, self.float_ty.clone());
                 let val = r.eval_rvalue(other);
                 *store = r.store;
                 self.min_cmp_distance = r.min_cmp_distance;
@@ -728,6 +803,25 @@ impl<'a> ConcreteState<'a> {
     }
 
     fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
+        // Each body numbers its vars independently, so the float set is per
+        // body and has to be restored when an inlined call returns.
+        let saved_float_ty = std::mem::replace(
+            &mut self.float_ty,
+            std::rc::Rc::new(
+                body.vars
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, vi)| matches!(vi.ty, Ty::Float | Ty::Double))
+                    .map(|(i, _)| VarId(i as u32))
+                    .collect(),
+            ),
+        );
+        let out = self.run_body_inner(body, std::mem::take(&mut store));
+        self.float_ty = saved_float_ty;
+        out
+    }
+
+    fn run_body_inner(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
         let mut block = body.entry;
         let mut idx = 0usize;
 
