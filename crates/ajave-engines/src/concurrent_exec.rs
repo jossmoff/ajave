@@ -1536,6 +1536,27 @@ impl<'a> Interp<'a> {
                     wake_all(g);
                     return Ok(None);
                 }
+                // Timed tryAcquire: the timeout may expire before a permit is
+                // released, and only the deadline decides which. Offered only
+                // when no permit is free -- with one available the call returns
+                // true without waiting.
+                ("java/util/concurrent/Semaphore", "tryAcquire")
+                    if target.desc.starts_with("(JL") =>
+                {
+                    let have = get(g, "$permits");
+                    if have >= 1 {
+                        self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
+                        set(g, "$permits", have - 1);
+                        return Ok(Some(Val::Int(1)));
+                    }
+                    let Some(c) = self.choose(2) else { return Ok(None) };
+                    if c == 0 {
+                        return Ok(Some(Val::Int(0)));
+                    }
+                    park(g);
+                    g.threads[ti].timed_wait = true;
+                    return Ok(None);
+                }
                 ("java/util/concurrent/Semaphore", "tryAcquire") if target.desc == "()Z" => {
                     let have = get(g, "$permits");
                     if have >= 1 {
@@ -1564,8 +1585,13 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 ("java/util/concurrent/CyclicBarrier", "await") => {
+                    // A timed barrier await that expires breaks the barrier for
+                    // every party (BrokenBarrierException), which needs the
+                    // exception machinery of phase 2. Until then the expiry
+                    // branch is refused rather than approximated: pretending it
+                    // cannot expire would prove programs that hang.
                     if target.desc != "()I" {
-                        return Err("unmodelled timed CyclicBarrier.await".into());
+                        return Err("timed CyclicBarrier.await needs broken-barrier exceptions".into());
                     }
                     // The barrier is the one synchronizer whose wait is not
                     // idempotent: re-running `await` after release would count
@@ -1819,6 +1845,28 @@ impl<'a> Interp<'a> {
                     return Ok(Some(Val::Int(all_done as i64)));
                 }
                 "awaitTermination" => {
+                    // The timeout is real: it may expire with tasks still
+                    // running, in which case the call reports false and the
+                    // program continues *without* the ordering a completed
+                    // await would have given it. Modelling it as untimed
+                    // assumed the ordering always holds, which is the
+                    // assumption the surrounding code is making when it ignores
+                    // the returned boolean -- but not one we may make for it.
+                    if let Some(ts) = self.executor_tasks.get(&recv.0) {
+                        let any_running = ts.iter().any(|t| {
+                            g.threads
+                                .iter()
+                                .find(|x| x.id == *t)
+                                .map(|x| x.status != ThreadStatus::Terminated)
+                                .unwrap_or(false)
+                        });
+                        if any_running {
+                            let Some(c) = self.choose(2) else { return Ok(None) };
+                            if c == 0 {
+                                return Ok(Some(Val::Int(0)));
+                            }
+                        }
+                    }
                     // Join every task in turn. Parking does not advance, so the
                     // call is re-entered until none is left running, which is
                     // how one `Joining { on }` slot covers a set of tasks.
@@ -1976,10 +2024,19 @@ impl<'a> Interp<'a> {
                         // blocking. Only the untimed form: a timed poll can
                         // return null after a wait we cannot decide.
                         if target.name == "poll" {
-                            if !target.desc.starts_with("()") {
-                                return Err("unmodelled timed poll".into());
+                            // Untimed: reports emptiness immediately.
+                            if target.desc.starts_with("()") {
+                                return Ok(Some(Val::Ref(0)));
                             }
-                            return Ok(Some(Val::Ref(0)));
+                            // Timed: either nothing arrived before the deadline,
+                            // or an element did and this behaves as `take`.
+                            let Some(c) = self.choose(2) else { return Ok(None) };
+                            if c == 0 {
+                                return Ok(Some(Val::Ref(0)));
+                            }
+                            g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                            g.threads[ti].timed_wait = true;
+                            return Ok(None);
                         }
                         g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
                         return Ok(None);
