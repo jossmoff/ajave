@@ -350,6 +350,25 @@ impl<'a> Interp<'a> {
                 Ok(None) => {}
                 Err(why) => return Step::Unsupported(why),
             }
+            // A statement that parked the thread must be *retried*, not
+            // stepped past. `monitorenter` says so by returning a `Step`, but a
+            // modelled call cannot -- `do_call` returns a value -- so those
+            // models set the status and rely on this check. Without it the
+            // generic advance below stepped a blocked thread straight past its
+            // own `lock()` and into the critical section unlocked, and parked a
+            // `wait()` past the call so phase 2 never ran.
+            //
+            // Status is therefore the single source of truth for parking, and
+            // any future model (latches, semaphores, barriers) blocks correctly
+            // just by setting it.
+            if let Some(t) = g.threads.iter().find(|t| t.id == tid) {
+                match t.status {
+                    ThreadStatus::Blocked { monitor } | ThreadStatus::Waiting { monitor } => {
+                        return Step::Blocked(Some(monitor));
+                    }
+                    _ => {}
+                }
+            }
             // Advance the program counter unless the statement moved it
             // itself (a call pushes a frame).
             if let Some(f) = self.frames[tid.0 as usize].last_mut() {
@@ -405,6 +424,30 @@ impl<'a> Interp<'a> {
                 name: fk.name.clone(),
                 write: false,
             }),
+            // A lock or atomic operation touches shared state and must be
+            // visible to the dependency relation, or DPOR will happily commute
+            // two updates to the same counter.
+            Stmt::Assign(_, Rvalue::Call { target, args, .. })
+                if target.class == "java/util/concurrent/locks/ReentrantLock" =>
+            {
+                if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
+                    out.push(Access::Monitor(ObjId(r)));
+                }
+            }
+            Stmt::Assign(_, Rvalue::Call { target, args, .. })
+                if target.class.starts_with("java/util/concurrent/atomic/") =>
+            {
+                if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
+                    out.push(Access::Field {
+                        obj: ObjId(r),
+                        name: "$value".to_string(),
+                        // Conservatively a write: `get` alone commutes, but
+                        // treating a read as a write only over-approximates the
+                        // dependency, which costs exploration, never soundness.
+                        write: true,
+                    });
+                }
+            }
             Stmt::Assign(_, Rvalue::Call { target, args, .. })
                 if target.class == "java/lang/Thread" =>
             {
@@ -642,7 +685,10 @@ impl<'a> Interp<'a> {
             }
             Rvalue::Call { target, args, .. } => {
                 let before = self.stepped_over;
-                self.do_call(g, tid, target, args, frame)?;
+                if let Some(v) = self.do_call(g, tid, target, args, frame)? {
+                    // A modelled library call that produced a value.
+                    return Ok(Some(v));
+                }
                 if self.stepped_over > before {
                     // Stepped over an unmodelled call: the destination must not
                     // keep whatever it held before, or a later read sees a stale
@@ -664,7 +710,7 @@ impl<'a> Interp<'a> {
         target: &MethodKey,
         args: &[Operand],
         frame: &Frame,
-    ) -> Result<(), String> {
+    ) -> Result<Option<Val>, String> {
         // Thread lifecycle is handled by the explorer, not here.
         if target.class == "java/lang/Thread" {
             let recv = match args.first().and_then(|a| self.eval(frame, a)) {
@@ -690,7 +736,7 @@ impl<'a> Interp<'a> {
                             self.runnable_objs.insert(t, recv);
                         }
                     }
-                    Ok(())
+                    Ok(None)
                 }
                 "start" => {
                     let Some(&target_tid) = self.thread_objs.get(&recv) else {
@@ -720,7 +766,7 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
-                    Ok(())
+                    Ok(None)
                 }
                 "join" => {
                     let Some(&target_tid) = self.thread_objs.get(&recv) else {
@@ -738,11 +784,165 @@ impl<'a> Interp<'a> {
                         // state from before the thread ran.
                         g.threads[ti].status = ThreadStatus::Joining { on: target_tid };
                     }
-                    Ok(())
+                    Ok(None)
                 }
                 other => Err(format!("unmodelled Thread.{other}")),
             };
         }
+        // java.util.concurrent.locks.ReentrantLock.
+        //
+        // A ReentrantLock is a monitor with a different spelling: the same
+        // owner map, the same reentrancy, the same blocking. Modelling it on
+        // that machinery rather than a parallel one means DPOR's dependency
+        // relation (`Access::Monitor`) already covers it.
+        //
+        // Not modelled: fairness, lockInterruptibly, newCondition, and the
+        // timed tryLock. Those fall through and are refused, which is why the
+        // class stays in UNMODELLED_PRIMITIVES for anything but these members.
+        if target.class == "java/util/concurrent/locks/ReentrantLock" {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved ReentrantLock receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            match target.name.as_str() {
+                "<init>" => {
+                    if let Some(f) = self.frames[ti].last_mut() {
+                        f.at.index += 1;
+                    }
+                    return Ok(None);
+                }
+                "lock" => {
+                    match g.monitor_owner.get(&recv) {
+                        Some(&owner) if owner != tid => {
+                            g.threads[ti].status = ThreadStatus::Blocked { monitor: recv };
+                            // Do not advance: retry once the lock frees.
+                            return Ok(None);
+                        }
+                        _ => {
+                            g.monitor_owner.insert(recv, tid);
+                            g.threads[ti].status = ThreadStatus::Runnable;
+                            g.threads[ti].enter(recv);
+                            if let Some(f) = self.frames[ti].last_mut() {
+                                f.at.index += 1;
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+                "unlock" => {
+                    if !g.threads[ti].holds(recv) {
+                        return Err("unlock() without holding the lock".into());
+                    }
+                    if g.threads[ti].exit(recv) {
+                        g.monitor_owner.remove(&recv);
+                        for t in g.threads.iter_mut() {
+                            if t.status == (ThreadStatus::Blocked { monitor: recv }) {
+                                t.status = ThreadStatus::Runnable;
+                            }
+                        }
+                    }
+                    if let Some(f) = self.frames[ti].last_mut() {
+                        f.at.index += 1;
+                    }
+                    return Ok(None);
+                }
+                "tryLock" if target.desc == "()Z" => {
+                    // Never blocks: reports whether it got the lock.
+                    let got = match g.monitor_owner.get(&recv) {
+                        Some(&owner) => owner == tid,
+                        None => true,
+                    };
+                    if got {
+                        g.monitor_owner.insert(recv, tid);
+                        g.threads[ti].enter(recv);
+                    }
+                    if let Some(f) = self.frames[ti].last_mut() {
+                        f.at.index += 1;
+                    }
+                    return Ok(Some(Val::Int(got as i64)));
+                }
+                "isLocked" => {
+                    let locked = g.monitor_owner.contains_key(&recv);
+                    if let Some(f) = self.frames[ti].last_mut() {
+                        f.at.index += 1;
+                    }
+                    return Ok(Some(Val::Int(locked as i64)));
+                }
+                _ => return Err(format!("unmodelled ReentrantLock.{}", target.name)),
+            }
+        }
+
+        // java.util.concurrent.atomic.Atomic{Integer,Long,Boolean}.
+        //
+        // The value lives in a synthetic `$value` field so it shares the heap
+        // and the dependency relation with ordinary fields; DPOR then sees two
+        // atomic updates conflict exactly as two field writes do.
+        //
+        // Each operation is one transition, which is the whole point: a
+        // read-modify-write that cannot be interleaved is what makes
+        // `incrementAndGet` race-free where `n++` is not. The explorer's step
+        // granularity gives that for free, since the call is a single statement.
+        if matches!(
+            target.class.as_str(),
+            "java/util/concurrent/atomic/AtomicInteger"
+                | "java/util/concurrent/atomic/AtomicLong"
+                | "java/util/concurrent/atomic/AtomicBoolean"
+        ) {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved atomic receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let key = (recv, "$value".to_string());
+            let cur = g.heap.get(&key).map(|&(_, v)| v).unwrap_or(0);
+            let arg = |i: usize| -> Option<i64> {
+                args.get(i).and_then(|a| self.eval(frame, a)).map(|v| match v {
+                    Val::Int(n) => n,
+                    Val::Ref(r) => r as i64,
+                })
+            };
+            let (result, new) = match target.name.as_str() {
+                "<init>" => (None, Some(arg(1).unwrap_or(0))),
+                "get" | "intValue" | "longValue" => (Some(cur), None),
+                "set" | "lazySet" => (None, Some(arg(1).ok_or("atomic set arg")?)),
+                "incrementAndGet" => (Some(cur + 1), Some(cur + 1)),
+                "decrementAndGet" => (Some(cur - 1), Some(cur - 1)),
+                "getAndIncrement" => (Some(cur), Some(cur + 1)),
+                "getAndDecrement" => (Some(cur), Some(cur - 1)),
+                "addAndGet" => {
+                    let d = arg(1).ok_or("atomic addAndGet arg")?;
+                    (Some(cur + d), Some(cur + d))
+                }
+                "getAndAdd" => {
+                    let d = arg(1).ok_or("atomic getAndAdd arg")?;
+                    (Some(cur), Some(cur + d))
+                }
+                "getAndSet" => (Some(cur), Some(arg(1).ok_or("atomic getAndSet arg")?)),
+                "compareAndSet" | "weakCompareAndSet" | "compareAndExchange" => {
+                    let expect = arg(1).ok_or("atomic cas expected")?;
+                    let update = arg(2).ok_or("atomic cas update")?;
+                    if cur == expect {
+                        (Some(1), Some(update))
+                    } else {
+                        (Some(0), None)
+                    }
+                }
+                other => return Err(format!("unmodelled atomic.{other}")),
+            };
+            if let Some(v) = new {
+                g.heap.insert(key, (false, v));
+            }
+            // Deliberately not advancing the frame here. `Stmt::Assign` only
+            // stores a result when the frame has not moved -- that is how it
+            // distinguishes "a call pushed a frame, assign on return" from "the
+            // value is ready now" -- so advancing first silently discarded the
+            // result and the next read of it failed as an unknown operand.
+            // The generic path in `advance` steps past the statement.
+            let _ = ti;
+            return Ok(result.map(Val::Int));
+        }
+
         // Object.wait / notify / notifyAll.
         //
         // `wait` is not a call that can be stepped over: it releases the
@@ -775,7 +975,7 @@ impl<'a> Interp<'a> {
                         // outer locks of a reentrant wait.
                         if g.monitor_owner.get(&recv).is_some_and(|&o| o != tid) {
                             g.threads[ti].status = ThreadStatus::Blocked { monitor: recv };
-                            return Ok(());
+                            return Ok(None);
                         }
                         let depth = g.threads[ti].wait_depth;
                         g.monitor_owner.insert(recv, tid);
@@ -790,7 +990,7 @@ impl<'a> Interp<'a> {
                         if let Some(f) = self.frames[ti].last_mut() {
                             f.at.index += 1;
                         }
-                        return Ok(());
+                        return Ok(None);
                     }
 
                     // Phase 1: park. `wait` releases the monitor *entirely*, so
@@ -805,7 +1005,7 @@ impl<'a> Interp<'a> {
                     g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
                     // Deliberately not advanced: the thread resumes on this
                     // same statement and takes phase 2.
-                    return Ok(());
+                    return Ok(None);
                 }
                 // A signal with no waiter is *lost*, not remembered — which is
                 // the whole of the missed-signal bug. Woken threads go to
@@ -824,7 +1024,7 @@ impl<'a> Interp<'a> {
                     if let Some(f) = self.frames[ti].last_mut() {
                         f.at.index += 1;
                     }
-                    return Ok(());
+                    return Ok(None);
                 }
                 _ => unreachable!(),
             }
@@ -879,7 +1079,7 @@ impl<'a> Interp<'a> {
             if !pure {
                 self.skipped_calls.push(target.to_string());
             }
-            return Ok(());
+            return Ok(None);
         };
         if self.frames[tid.0 as usize].len() > 32 {
             return Err("call depth exceeded".into());
@@ -919,7 +1119,7 @@ impl<'a> Interp<'a> {
             locals,
             ret_to: None,
         });
-        Ok(())
+        Ok(None)
     }
 
     fn run_terminator(

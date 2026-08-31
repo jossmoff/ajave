@@ -537,10 +537,12 @@ const PURE_OWNERS: &[&str] = &[
     "java/util/Random",
     "java/util/Scanner",
     "java/util/StringTokenizer",
-    // Concurrent (rarely property-relevant)
-    "java/util/concurrent/atomic/AtomicInteger",
-    "java/util/concurrent/atomic/AtomicLong",
-    "java/util/concurrent/atomic/AtomicBoolean",
+    // The scalar atomics were here as "rarely property-relevant", which was
+    // true while nothing modelled them and is not any more: the concurrency
+    // explorer models them, and `Pure` erases a call -- rewriting it to a
+    // `Havoc` -- so `incrementAndGet()` never reached the interpreter and the
+    // counter it updates was invisible. They are the whole point of a
+    // concurrency engine, so the call has to survive into the IR.
     // I/O — PrintWriter is excluded: securibench benchmarks subclass it
     // with mock objects that contain assertion obligations.
     "java/io/PrintStream",

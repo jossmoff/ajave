@@ -306,6 +306,7 @@ mod tests {
             locals: BTreeMap::new(),
             stack: Vec::new(),
             monitors: Vec::new(),
+            wait_depth: 0,
         }
     }
 
