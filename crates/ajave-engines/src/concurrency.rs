@@ -508,6 +508,11 @@ impl<'a> Explorer<'a> {
             let saved_hb = interp.hb.clone();
             let saved_last_access = interp.last_access.clone();
             let saved_choice_at = interp.choice_at;
+            let saved_spurious = interp.spurious_used;
+            // Captured so a step that only stopped to ask a question can be
+            // un-counted. See the `Step::Choice` arm.
+            let sched_before = g2.schedule.clone();
+            let switches_before = g2.switches;
             g2.schedule_step(tid);
 
             let step = interp.advance(&mut g2, tid);
@@ -537,15 +542,26 @@ impl<'a> Explorer<'a> {
                 Step::Choice(n) => {
                     for alt in 0..n {
                         interp.choices.push(alt);
-                        // Recurse from `g`, not `g2`. `g2` already counted a
-                        // schedule step for the attempt that stopped to ask,
-                        // and that attempt did no work -- the statement is
-                        // retried. Carrying the phantom step into the recorded
-                        // schedule made witnesses unreplayable: replay has the
-                        // decision on the tape from the start, so the statement
-                        // completes on its first attempt and every later slice
-                        // is off by one.
-                        let g_retry = g.clone();
+                        // Retry from `g2`, with only the schedule bookkeeping
+                        // rolled back.
+                        //
+                        // `g2` must be the base: `advance` runs invisible
+                        // statements eagerly, so by the time it stopped to ask
+                        // it had already taken a monitor, written fields and
+                        // moved `interp.frames` forward. Recursing from `g`
+                        // instead -- the state before this thread ran at all --
+                        // leaves the frames ahead of the world, and the thread
+                        // finds it does not hold the monitor it just acquired.
+                        //
+                        // Only the step *count* is wrong, because the attempt
+                        // that asked did no work and the statement is retried.
+                        // Leaving it in made witnesses unreplayable: replay
+                        // starts with the decision on the tape, completes the
+                        // statement first time, and every later slice is off by
+                        // one.
+                        let mut g_retry = g2.clone();
+                        g_retry.schedule = sched_before.clone();
+                        g_retry.switches = switches_before;
                         // Pushed like any other transition so the recursive
                         // call gets its own depth. Without it the child reuses
                         // the parent's `backtrack`/`done` slot and truncates it
@@ -580,6 +596,7 @@ impl<'a> Explorer<'a> {
                         interp.hb = saved_hb.clone();
                         interp.last_access = saved_last_access.clone();
                         interp.choice_at = saved_choice_at;
+                        interp.spurious_used = saved_spurious;
                     }
                 }
                 Step::Violated(oid, method) => {
@@ -618,6 +635,7 @@ impl<'a> Explorer<'a> {
                     interp.hb = saved_hb;
                     interp.last_access = saved_last_access;
                     interp.choice_at = saved_choice_at;
+                    interp.spurious_used = saved_spurious;
                     continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
@@ -647,6 +665,7 @@ impl<'a> Explorer<'a> {
             interp.hb = saved_hb;
             interp.last_access = saved_last_access;
             interp.choice_at = saved_choice_at;
+            interp.spurious_used = saved_spurious;
         }
 
         self.backtrack.truncate(depth);
@@ -850,6 +869,7 @@ pub fn explore_for(
     }
 
     let mut interp = Interp::new(prog, bounds.max_steps);
+    interp.max_spurious = bounds.max_spurious;
     let g = match build_initial_state(prog, entries, bounds, &mut interp) {
         Ok(g) => g,
         Err(why) => return Exploration::Incomplete(why),
@@ -943,6 +963,7 @@ pub fn replay_schedule(
     // statics against a schedule recorded on one whose class initialisers had
     // run: it could not reproduce the violation, and the FALSE was discarded.
     let mut interp = Interp::new(prog, bounds.max_steps);
+    interp.max_spurious = bounds.max_spurious;
     let mut g = match build_initial_state(prog, entries, bounds, &mut interp) {
         Ok(g) => g,
         Err(_) => return false,

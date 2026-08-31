@@ -164,6 +164,15 @@ pub struct Bounds {
     pub max_states: u64,
     /// Deepest schedule the search may build, bounding native stack use.
     pub max_depth: usize,
+    /// Spurious events (wakeups, weak-CAS failures) allowed per execution.
+    ///
+    /// The specification permits unboundedly many, so an exhaustive search
+    /// over them does not terminate: a loop-guarded wait can be woken
+    /// spuriously forever. No real JVM does that and no useful analysis
+    /// considers it, so this is a fairness bound of the same kind as
+    /// `max_switches` -- it costs completeness, never soundness, and one
+    /// spurious event is already enough to break an `if`-guarded wait.
+    pub max_spurious: u32,
 }
 
 impl Default for Bounds {
@@ -202,6 +211,7 @@ impl Default for Bounds {
             // exceeding either yields UNKNOWN, never a verdict.
             max_states: 2_000_000,
             max_depth: 4_000,
+            max_spurious: 2,
         }
     }
 
@@ -225,6 +235,7 @@ impl Bounds {
             max_threads: var("AJAVE_MAX_THREADS", d.max_threads),
             max_states: var("AJAVE_MAX_STATES", d.max_states),
             max_depth: var("AJAVE_MAX_DEPTH", d.max_depth),
+            max_spurious: var("AJAVE_MAX_SPURIOUS", d.max_spurious),
         }
     }
 }

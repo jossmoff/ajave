@@ -258,6 +258,9 @@ pub struct Interp<'a> {
     pub choice_at: usize,
     /// Arity of a decision that was needed and not yet on the tape.
     pub pending_choice: Option<u32>,
+    /// Spurious events used on this path, against `Bounds::max_spurious`.
+    pub spurious_used: u32,
+    pub max_spurious: u32,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -290,6 +293,8 @@ impl<'a> Interp<'a> {
             choices: Vec::new(),
             choice_at: 0,
             pending_choice: None,
+            spurious_used: 0,
+            max_spurious: 2,
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -529,12 +534,35 @@ impl<'a> Interp<'a> {
     /// uncaught exception in a `run()` does -- it kills that thread and no
     /// other.
     fn raise(&mut self, g: &mut GlobalState, tid: ThreadId, class: &str) -> Result<Step, String> {
+        self.raise_from(g, tid, class, None)
+    }
+
+    /// As `raise`, but remembering the obligation that produced the exception.
+    ///
+    /// A `guarded` obligation is one whose exception *could* be caught here,
+    /// and `synchronized` makes that true of everything inside it: javac wraps
+    /// the block in a catch-all that releases the monitor. But a `finally`
+    /// does not catch, it rethrows -- so the exception still escapes and the
+    /// property is still violated. Reporting the violation only when nothing
+    /// actually handles it is what distinguishes the two, and it is why this
+    /// carries the obligation all the way out.
+    fn raise_from(
+        &mut self,
+        g: &mut GlobalState,
+        tid: ThreadId,
+        class: &str,
+        from: Option<(ObligationId, MethodKey)>,
+    ) -> Result<Step, String> {
         let ti = tid.0 as usize;
         loop {
             let Some(frame) = self.frames[ti].last().cloned() else {
                 self.hb.release(tid.0, SyncKey::Thread(tid.0));
                 if let Some(t) = g.threads.iter_mut().find(|t| t.id == tid) {
                     t.status = ThreadStatus::Terminated;
+                }
+                // Escaped every frame: nothing handled it after all.
+                if let Some((oid, method)) = from {
+                    return Ok(Step::Violated(oid, method));
                 }
                 return Ok(Step::Terminated);
             };
@@ -596,6 +624,25 @@ impl<'a> Interp<'a> {
     /// the program counter alone and return, and will be re-run once a decision
     /// exists. Callers must therefore make the same sequence of `choose` calls
     /// on the re-run, which holds for a deterministic model.
+    /// Offer a spurious alternative, if this path has budget for one.
+    ///
+    /// Returns `Some(true)` for "behave spuriously", `Some(false)` for "behave
+    /// normally", and `None` when a decision is pending. Once the budget is
+    /// spent the answer is simply "normally", so the search terminates.
+    fn choose_spurious(&mut self) -> Option<bool> {
+        if self.spurious_used >= self.max_spurious {
+            return Some(false);
+        }
+        match self.choose(2) {
+            None => None,
+            Some(0) => {
+                self.spurious_used += 1;
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
     fn choose(&mut self, alternatives: u32) -> Option<u32> {
         if self.choice_at < self.choices.len() {
             let v = self.choices[self.choice_at];
@@ -940,10 +987,41 @@ impl<'a> Interp<'a> {
                 // Ignoring the flag reported `throw new RuntimeException()`
                 // inside a try/catch as a violation, in a program that catches
                 // it and carries on.
-                if ob.guarded {
+                // `guarded` says an exception raised here *could* be caught in
+                // this method, but it is computed from the exception edges and
+                // so cannot tell a `catch` from a `finally`. Only `finally`
+                // emits a class-less edge, and a finally does not handle
+                // anything -- it runs its cleanup and rethrows -- so an
+                // obligation covered by nothing else still escapes and is still
+                // a violation.
+                //
+                // That distinction matters everywhere, because `synchronized`
+                // compiles to try/finally: treating its catch-all as a handler
+                // silently swallowed every assertion failure inside a
+                // synchronized block. `SpuriousWakeupBreaksIfGuard` is the
+                // benchmark.
+                let typed_handler = self
+                    .prog
+                    .body(&frame.at.method)
+                    .map(|b| b.block(frame.at.block))
+                    .map(|blk| {
+                        blk.exceptional.iter().any(|e| {
+                            e.class.is_some()
+                                && ajave_models::exception_class(ob.kind)
+                                    .and_then(|c| self.handler_catches(&e.class, c))
+                                    .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if ob.guarded && typed_handler {
                     let class = ajave_models::exception_class(ob.kind)
                         .unwrap_or("java/lang/RuntimeException");
-                    let step = self.raise(g, tid, class)?;
+                    let step = self.raise_from(
+                        g,
+                        tid,
+                        class,
+                        Some((*oid, frame.at.method.clone())),
+                    )?;
                     return Ok(Some(step));
                 }
                 Ok(Some(Step::Violated(*oid, frame.at.method.clone())))
@@ -1420,13 +1498,32 @@ impl<'a> Interp<'a> {
                     (Some(cur), Some(cur + d))
                 }
                 "getAndSet" => (Some(cur), Some(arg(1).ok_or("atomic getAndSet arg")?)),
-                "compareAndSet" | "weakCompareAndSet" | "compareAndExchange" => {
+                "compareAndSet" | "compareAndExchange" => {
                     let expect = arg(1).ok_or("atomic cas expected")?;
                     let update = arg(2).ok_or("atomic cas update")?;
                     if cur == expect {
                         (Some(1), Some(update))
                     } else {
                         (Some(0), None)
+                    }
+                }
+                // `weakCompareAndSet` is documented to fail spuriously: it may
+                // report false even when the witness value matches. That is
+                // what makes it cheaper than `compareAndSet`, and why its
+                // contract says it must be used in a retry loop. Modelling it
+                // as an exact CAS reports code that uses it once as correct.
+                "weakCompareAndSet" | "weakCompareAndSetPlain"
+                | "weakCompareAndSetAcquire" | "weakCompareAndSetRelease" => {
+                    let expect = arg(1).ok_or("atomic cas expected")?;
+                    let update = arg(2).ok_or("atomic cas update")?;
+                    if cur != expect {
+                        (Some(0), None)
+                    } else {
+                        match self.choose_spurious() {
+                            None => return Ok(None),
+                            Some(true) => (Some(0), None),
+                            Some(false) => (Some(1), Some(update)),
+                        }
                     }
                 }
                 // The arithmetic members do not exist on AtomicReference and
@@ -1530,10 +1627,29 @@ impl<'a> Interp<'a> {
                         return Ok(None);
                     }
 
-                    // Phase 1: park. `wait` releases the monitor *entirely*, so
-                    // a notifier can enter the guarded region at all.
+                    // Phase 1: park -- or not.
+                    //
+                    // JLS 17.2.1 permits `wait` to return with no notify, no
+                    // interrupt and no timeout: a *spurious wakeup*. It is not
+                    // a rare implementation quirk to be ignored but the reason
+                    // the specification requires a wait to sit inside a loop
+                    // re-testing its condition, and a program guarding with
+                    // `if` instead of `while` is incorrect because of it.
+                    //
+                    // Modelling it as a choice both finds that bug and keeps
+                    // the loop-guarded version provable: the spurious branch
+                    // re-tests and waits again. Refusing to model it reports
+                    // `if`-guarded waits safe, which is a wrong TRUE against
+                    // the language, however reliably a given JVM behaves.
                     if !g.threads[ti].holds(recv) {
                         return Err("wait() without owning the monitor".into());
+                    }
+                    match self.choose_spurious() {
+                        // Woke spuriously: the monitor was never released, so
+                        // there is nothing to reacquire. Fall through the call.
+                        Some(true) => return Ok(None),
+                        None => return Ok(None),
+                        Some(false) => {}
                     }
                     let depth = g.threads[ti].monitors.iter().filter(|&&m| m == recv).count();
                     // Parking in wait() releases the monitor for real, so it
