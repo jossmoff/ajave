@@ -2,6 +2,61 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-08-31 — float category 18 -> 40, and three self-inflicted regressions
+
+`float-nonlinear-calculation` went from 18 to 40 on valid-assert while
+no-runtime-exception held at 166. **None of the gain came from better solving.**
+It came from being able to run and encode the program correctly:
+
+1. The concrete evaluator handled only `abs/min/max/round/signum`. Every other
+   `Math` call returned Unknown and ended the run Inconclusive, so a program
+   calling `Math.sin` was not executable and every engine that depends on
+   running it was blind. `coral17` is violated at x = -0.5, which was already in
+   the search's seed list — we simply could not run the program.
+2. The interpreter had no float arithmetic at all. `Add|Sub|Mul|Div|Rem` on
+   `Value::I64` did `wrapping_mul` on raw bit patterns, so `NaN * NaN` produced
+   a non-NaN value and every downstream comparison diverged from the JVM.
+3. `float_search` wrote 64-bit patterns for 32-bit `nondetFloat` slots, so the
+   engine searched with -3.88e9 while the JVM replayed 18.145. A confirmation
+   under those conditions is meaningless, and since a confirmed violation is
+   reported as FALSE unchecked, that is a soundness hazard.
+
+This is worth generalising: SMT-LIB has **no transcendental functions** — there
+is no `fp.sin` — so no encoding work can decide most of this category. Solving
+over the reals gives answers correct over R but not IEEE-754. `Math.sin` is
+specified only to within 1 ulp, so there is no unique symbolic answer: the JVM
+is the ground truth. These benchmarks come from `concolic-walk` and `jpf-symbc`,
+which exist to be solved by search.
+
+### Three regressions I introduced and then had to find
+
+- **FPA defaulted on from a valid-assert-only measurement.** +7 there, -69 on
+  no-runtime-exception, shipped as an improvement. Resolved by escalation: a
+  second BMC pass with FPA that only touches obligations the cheap pass left
+  open, returns immediately when nothing is open, and is bounded to 5s per query
+  so a bonus pass cannot spend the whole task budget. Recovered both.
+- **`float_search` wired into the portfolio with no applicability guard**, so it
+  ran on every property, burning up to 300k concrete executions against
+  exception obligations its fitness cannot steer toward.
+- **A per-call `HashSet` allocation** in the interpreter's hot path, now cached
+  per method.
+
+Each was caught by measurement, not review. The lesson is not "be more careful"
+but "measure both properties before calling a default settled".
+
+### A benchmark defect
+
+`argv-tasks/ReverseInterpolator_true` expects TRUE. We answer FALSE with
+`input = 16.342388153076172f`, and a standalone `java -ea` run exits 1 with
+`AssertionError`. The guard `|input| <= 100.0f` admits it, and the assertion
+asks a reverse interpolator to match `x^5 * 16` within 1.1. Deliberately not
+worked around: suppressing a correct, JVM-verified answer to match an expected
+verdict is overfitting. Costs -32 until resolved upstream.
+
+Final: valid-assert 816 (672 correct — 848 excluding the disputed task),
+no-runtime-exception 1021 (527 correct). 24 more tasks answered correctly than
+at the start of the day.
+
 ## 2026-08-30 — verdicts were not reproducible, and it was being read as timeout noise
 
 ### What was wrong
