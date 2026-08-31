@@ -56,7 +56,7 @@ no-runtime-exception across 1,033 task files) — within ~3% of the official
 count, so essentially the same benchmark set. Maximum achievable score on it is
 2,829.
 
-**ajave scores 1,837 on that corpus** (816 + 1021), or 65% of maximum.
+**ajave scores 1,850 on that corpus** (815 + 1035), or 65% of maximum, with **zero wrong answers of its own**.
 
 ### Why that number is not yet a claim
 
@@ -74,8 +74,10 @@ between it and a defensible comparison:
    laptop; SV-COMP allows 900s on standardised hardware. This handicaps us — 35
    valid-assert and 23 no-runtime-exception tasks timed out — so the gap is if
    anything understated on that axis.
-3. **Two wrong answers remain.** One is an upstream benchmark defect; one is
-   real and parked.
+3. **No wrong answers remain.** The real one (`Pan_exceptionprone`) is fixed;
+   the only entry still in the "wrong" column is a mislabelled benchmark
+   (issue #72), where our FALSE is correct and confirmed by executing the
+   program on a JVM with the witness input.
 
 The honest framing: *on the same corpus and the same scoring formula, with a 15×
 smaller time budget, ajave computes 1,837 points' worth of correct verdicts.*
@@ -238,7 +240,8 @@ Ordered by value per unit of risk:
 
 1. **Emit competition-format witnesses and run an official validator.** Converts
    an internal number into a defensible one. Everything in §2 depends on it.
-2. **Fix the two wrong answers.** Any wrong answer undermines every other claim.
+2. ~~Fix the two wrong answers.~~ **Done.** `Pan_exceptionprone` fixed; the
+   remaining entry is issue #72, a benchmark to report upstream.
 3. **Held-out benchmark split and constant sweep** (issue #47).
 4. **Package the concurrency suite as an SV-COMP benchmark contribution.**
 5. **Decide on the JMM.** Either scope it out explicitly, or implement enough of
