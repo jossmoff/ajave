@@ -485,6 +485,10 @@ impl<'a> Interp<'a> {
                         | "java/util/concurrent/Semaphore"
                         | "java/util/concurrent/CyclicBarrier"
                         | "java/util/concurrent/locks/Condition"
+                        | "java/util/concurrent/ArrayBlockingQueue"
+                        | "java/util/concurrent/LinkedBlockingQueue"
+                        | "java/util/concurrent/BlockingQueue"
+                        | "java/util/concurrent/LinkedBlockingDeque"
                 ) =>
             {
                 if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
@@ -1682,6 +1686,116 @@ impl<'a> Interp<'a> {
                 }
                 "cancel" => return Err("Future.cancel is not modelled".into()),
                 other => return Err(format!("unmodelled Future.{other}")),
+            }
+        }
+
+        // BlockingQueue: ArrayBlockingQueue and LinkedBlockingQueue.
+        //
+        // A bounded FIFO whose `put` and `take` park on the queue object, so a
+        // consumer waiting on a queue nobody fills leaves no runnable thread
+        // and is found by the existing deadlock check. Elements live in the
+        // heap under `$e{index}` with monotonic head and tail cursors, so a
+        // taken element is not overwritten by a later put and FIFO order is
+        // exact rather than approximated by a count.
+        //
+        // Parking re-executes the call, so both operations re-test their
+        // condition on wake-up and need no extra state.
+        if matches!(
+            target.class.as_str(),
+            "java/util/concurrent/ArrayBlockingQueue"
+                | "java/util/concurrent/LinkedBlockingQueue"
+                | "java/util/concurrent/BlockingQueue"
+                | "java/util/concurrent/LinkedBlockingDeque"
+        ) {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved queue receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let get = |g: &GlobalState, f: &str| -> i64 {
+                g.heap.get(&(recv, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+            };
+            let set = |g: &mut GlobalState, f: &str, v: i64| {
+                g.heap.insert((recv, f.to_string()), (false, v));
+            };
+            let wake_all = |g: &mut GlobalState| {
+                for t in g.threads.iter_mut() {
+                    if t.status == (ThreadStatus::Waiting { monitor: recv }) && t.wait_depth == 0 {
+                        t.status = ThreadStatus::Runnable;
+                    }
+                }
+            };
+            match target.name.as_str() {
+                "<init>" => {
+                    // Unbounded when no capacity is given. i64::MAX stands in
+                    // for "never full", which is what LinkedBlockingQueue is
+                    // in every program that does not exhaust memory.
+                    let cap = match args.get(1).and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Int(n)) if n > 0 => n,
+                        None => i64::MAX,
+                        _ => return Err("queue capacity is not a known positive int".into()),
+                    };
+                    set(g, "$cap", cap);
+                    set(g, "$head", 0);
+                    set(g, "$tail", 0);
+                    return Ok(None);
+                }
+                "put" | "offer" | "add" => {
+                    let (head, tail, cap) = (get(g, "$head"), get(g, "$tail"), get(g, "$cap"));
+                    if tail - head >= cap {
+                        // `offer` reports failure rather than blocking.
+                        if target.name == "offer" && target.desc.ends_with(")Z") {
+                            return Ok(Some(Val::Int(0)));
+                        }
+                        if target.name == "add" {
+                            return Err("add() on a full queue throws IllegalStateException".into());
+                        }
+                        g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                        return Ok(None);
+                    }
+                    let v = match args.get(1).and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Ref(r)) => r as i64,
+                        Some(Val::Int(n)) => n,
+                        None => return Err("queue element is unknown".into()),
+                    };
+                    set(g, &format!("$e{tail}"), v);
+                    set(g, "$tail", tail + 1);
+                    wake_all(g);
+                    if target.name == "put" {
+                        return Ok(None);
+                    }
+                    return Ok(Some(Val::Int(1)));
+                }
+                "take" | "poll" => {
+                    let (head, tail) = (get(g, "$head"), get(g, "$tail"));
+                    if head == tail {
+                        // `poll` reports emptiness with null rather than
+                        // blocking. Only the untimed form: a timed poll can
+                        // return null after a wait we cannot decide.
+                        if target.name == "poll" {
+                            if !target.desc.starts_with("()") {
+                                return Err("unmodelled timed poll".into());
+                            }
+                            return Ok(Some(Val::Ref(0)));
+                        }
+                        g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                        return Ok(None);
+                    }
+                    let v = get(g, &format!("$e{head}"));
+                    set(g, "$head", head + 1);
+                    wake_all(g);
+                    return Ok(Some(Val::Ref(v as u32)));
+                }
+                "size" => return Ok(Some(Val::Int(get(g, "$tail") - get(g, "$head")))),
+                "isEmpty" => {
+                    return Ok(Some(Val::Int((get(g, "$tail") == get(g, "$head")) as i64)))
+                }
+                "remainingCapacity" => {
+                    return Ok(Some(Val::Int(
+                        get(g, "$cap") - (get(g, "$tail") - get(g, "$head")),
+                    )))
+                }
+                other => return Err(format!("unmodelled BlockingQueue.{other}")),
             }
         }
 

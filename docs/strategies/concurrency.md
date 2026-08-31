@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — 44/46 of the concurrency suite, 0 wrong
+**Status:** working — 48/50 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
 library models), `concurrency.rs` (engine, precondition checks, DPOR)
@@ -456,8 +456,10 @@ easy and wrong, and the engine answers UNKNOWN instead.
 | `ExecutorService` execute/submit/shutdown/awaitTermination | modelled |
 | `Future` get/isDone | modelled; `cancel` **refused** |
 | Pool with fewer workers than tasks | **refused** — see below |
-| `Phaser`, `ForkJoinPool`, `CompletableFuture`, `AtomicReference` | **refused** |
-| Timed `await`, `submit(Callable)` | **refused** |
+| `AtomicReference` including CAS | modelled |
+| `ArrayBlockingQueue` / `LinkedBlockingQueue` put/take/offer/poll | modelled |
+| `Phaser`, `ForkJoinPool`, `CompletableFuture` | **refused** |
+| Timed `await`, timed `poll`, `submit(Callable)` | **refused** |
 
 ### Why those refusals are refusals
 
