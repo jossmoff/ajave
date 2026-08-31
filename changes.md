@@ -2,6 +2,85 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-08-31 — DRF-SC: turning "we assume sequential consistency" into a checked condition
+
+The concurrency explorer only ever considered sequentially consistent
+executions, and said so in a document. That is the assumption a reviewer attacks
+first, and the honest reading of it is worse than it sounds: **on a racy program
+an exhaustive SC search proves nothing about a real JVM**, because JLS 17.4.5
+gives the SC guarantee to data-race-free programs only. Every TRUE we issued for
+a racy concurrent program described a machine the JVM is not obliged to be.
+
+The fix is not to implement the Java Memory Model. It is to detect races and
+make race freedom the *precondition of the proof*:
+
+> A TRUE from this engine is sound under the JMM, because it is only issued for
+> programs verified data-race-free.
+
+### Happens-before is a relation, not the schedule
+
+The design decision that matters, and the one chosen to avoid a dead end.
+
+Under sequential consistency an execution *is* a total order, so "did A happen
+before B" could be read off positions in the interleaving. That answer is
+useless for the question that matters — whether two accesses are ordered *by
+synchronisation* — and in schedule order **every pair is comparable, so a data
+race is not even expressible**.
+
+So happens-before is built from release/acquire edges emitted by the
+synchronisation primitives themselves (`vclock.rs`), never from scheduling
+order. Two payoffs, both deliberate:
+
+* races become expressible, as incomparable clocks;
+* the relation survives non-SC exploration. A weak-memory explorer branches a
+  read over the writes it may observe, and none of these edges change. A
+  relation derived from the schedule would have to be thrown away at that point.
+
+### Read locks are where the modelling gets interesting
+
+Two readers hold a read lock simultaneously and are genuinely concurrent, so
+ordering them would hide a write performed inside a read section — which is a
+real bug shape, and `ReadWriteLockConcurrentReaders` is built from it. Readers
+therefore acquire only from the writer channel and publish to a separate channel
+that only writers absorb. Writers absorb both.
+
+This is the general shape of the problem: **too few edges reports races that do
+not exist, too many hides races that do**, and both are wrong answers rather
+than precision losses.
+
+### Two bugs the benchmarks caught, both about *when* rather than *what*
+
+`release` advanced the thread's own clock component **before** publishing, so
+the acquirer inherited a clock that already covered the releaser's next action.
+Everything then looked ordered, and the detector reported no races at all —
+including on a two-line unsynchronised counter. Publishing must precede the tick.
+
+Thread termination published nothing, because the edge sat where `advance`
+notices an already-empty frame stack rather than at `Terminator::Return`, where
+threads actually finish. A joiner learned nothing from the thread it joined, so
+every joined write looked racy. Both were found by disagreement between the
+detector and benchmarks whose race status was known by construction.
+
+`submit` was not a fork either: an executor task shared no history with its
+submitter, so values the submitter had already initialised looked racy to it.
+
+### What it cost, and why that is the point
+
+`NoJoinNoOrdering` and `NonVolatileNoGuarantee` were reported TRUE and are now
+UNKNOWN. Both are racy, so the SC result does not transfer. `NonVolatileNoGuarantee`
+is the sharp case: its bug *requires* weak memory to appear, so under SC the
+program looks correct — which is exactly why that TRUE had to go. Both carry a
+`DRF-SC BOUNDARY` note so the UNKNOWN reads as a boundary rather than a
+regression.
+
+### Still out of reach
+
+Detecting reordering-dependent bugs, as opposed to declining to verify them.
+That needs a weak-memory explorer where a read branches over visible writes. It
+also breaks the certification story: a JMM-permitted but rare behaviour cannot be
+reproduced by running on a JVM, so the replay net that backs every other FALSE
+stops working exactly where it would be needed most.
+
 ## 2026-08-31 — concurrency: from litmus tests to real programs, and the five wrong answers that found
 
 The concurrency engine went from 22 to 46 benchmarks and from intrinsic monitors
