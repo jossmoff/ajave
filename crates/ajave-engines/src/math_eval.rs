@@ -17,6 +17,15 @@ pub(crate) fn is_concrete_math_call(owner: &str, name: &str) -> bool {
             "abs" | "min" | "max" | "addExact" | "subtractExact"
                 | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
                 | "round"
+                // Transcendentals. Without these a program calling Math.sin is
+                // simply not executable: the call yields Unknown, the run ends
+                // Inconclusive, and every engine that depends on running the
+                // program concretely -- the concrete probe and float-search --
+                // is blind. That was the whole of float-nonlinear-calculation.
+                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+                | "sqrt" | "cbrt" | "exp" | "expm1" | "log" | "log10" | "log1p"
+                | "pow" | "hypot" | "floor" | "ceil" | "rint" | "signum"
+                | "sinh" | "cosh" | "tanh" | "toRadians" | "toDegrees"
         ),
         "java/lang/Integer" => matches!(
             name,
@@ -98,6 +107,108 @@ pub(crate) fn eval_math_call(
 
     match owner {
         "java/lang/Math" | "java/lang/StrictMath" => {
+            // Float/double overloads first: `Value::I64` carries the raw bit
+            // pattern of a double, so the integer arms below would silently
+            // misread it. `Math.abs(-2.5)` under the integer arm applies
+            // `wrapping_abs` to the bit pattern and yields ~0.4375, because
+            // two's-complement negation is not sign-bit clearing.
+            //
+            // These results come from Rust's libm, which need not agree
+            // bit-for-bit with the JVM's: JLS 17 permits `Math` transcendentals
+            // one ulp of error and does not require correct rounding. That is
+            // tolerable here precisely because this engine may only publish
+            // violations, and every violation is replayed on a real JVM before
+            // it counts — a disagreement costs a refuted witness, never a wrong
+            // answer.
+            let dbl = |i: usize| -> Option<f64> {
+                match get_val(i) {
+                    Value::I64(bits) => Some(f64::from_bits(bits as u64)),
+                    _ => None,
+                }
+            };
+            let flt = |i: usize| -> Option<f32> {
+                match get_val(i) {
+                    Value::I32(bits) => Some(f32::from_bits(bits as u32)),
+                    _ => None,
+                }
+            };
+            let is_d = target.desc.starts_with("(D)") || target.desc.starts_with("(DD)");
+            let is_f = target.desc.starts_with("(F)") || target.desc.starts_with("(FF)");
+
+            if is_d {
+                let unary = |f: fn(f64) -> f64| -> Value {
+                    match dbl(0) {
+                        Some(x) => Value::I64(f(x).to_bits() as i64),
+                        None => Value::Unknown,
+                    }
+                };
+                let binary = |f: fn(f64, f64) -> f64| -> Value {
+                    match (dbl(0), dbl(1)) {
+                        (Some(a), Some(b)) => Value::I64(f(a, b).to_bits() as i64),
+                        _ => Value::Unknown,
+                    }
+                };
+                let v = match name {
+                    "sin" => unary(f64::sin),
+                    "cos" => unary(f64::cos),
+                    "tan" => unary(f64::tan),
+                    "asin" => unary(f64::asin),
+                    "acos" => unary(f64::acos),
+                    "atan" => unary(f64::atan),
+                    "sqrt" => unary(f64::sqrt),
+                    "cbrt" => unary(f64::cbrt),
+                    "exp" => unary(f64::exp),
+                    "expm1" => unary(f64::exp_m1),
+                    "log" => unary(f64::ln),
+                    "log10" => unary(f64::log10),
+                    "log1p" => unary(f64::ln_1p),
+                    "sinh" => unary(f64::sinh),
+                    "cosh" => unary(f64::cosh),
+                    "tanh" => unary(f64::tanh),
+                    "floor" => unary(f64::floor),
+                    "ceil" => unary(f64::ceil),
+                    "rint" => unary(|x| {
+                        // Java's rint is round-half-to-even; Rust's round is
+                        // half-away-from-zero.
+                        let r = x.round();
+                        if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+                            r - x.signum()
+                        } else {
+                            r
+                        }
+                    }),
+                    "abs" => unary(f64::abs),
+                    "signum" => unary(f64::signum),
+                    "toRadians" => unary(f64::to_radians),
+                    "toDegrees" => unary(f64::to_degrees),
+                    "atan2" => binary(f64::atan2),
+                    "pow" => binary(f64::powf),
+                    "hypot" => binary(f64::hypot),
+                    "min" => binary(f64::min),
+                    "max" => binary(f64::max),
+                    _ => Value::Unknown,
+                };
+                if v != Value::Unknown {
+                    return v;
+                }
+            } else if is_f {
+                let unary = |f: fn(f32) -> f32| -> Value {
+                    match flt(0) {
+                        Some(x) => Value::I32(f(x).to_bits() as i32),
+                        None => Value::Unknown,
+                    }
+                };
+                let v = match name {
+                    "abs" => unary(f32::abs),
+                    "signum" => unary(f32::signum),
+                    "sqrt" => unary(f32::sqrt),
+                    _ => Value::Unknown,
+                };
+                if v != Value::Unknown {
+                    return v;
+                }
+            }
+
             match name {
                 "abs" => match get_val(0) {
                     Value::I32(v) => Value::I32(v.wrapping_abs()),
