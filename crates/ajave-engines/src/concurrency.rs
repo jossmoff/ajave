@@ -226,7 +226,16 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
 
     let entries = match discover(prog) {
         ThreadDiscovery::Sequential => return Err(Refusal::Sequential),
-        ThreadDiscovery::Unresolved(why) => return Err(Refusal::UnresolvedThread(why)),
+        // Advisory, not fatal. Thread bodies are resolved at `start()` from the
+        // object actually passed, so a shape this static pass cannot trace --
+        // a loop, a factory, a field, a Thread subclass -- is no longer a
+        // reason to decline. If the interpreter genuinely cannot resolve one it
+        // says so there, which is the honest place for it.
+        ThreadDiscovery::Unresolved(why) => {
+            log::debug!("concurrency: thread discovery is incomplete ({why}); \
+                         bodies will be resolved at start()");
+            Vec::new()
+        }
         ThreadDiscovery::Resolved(e) => e,
     };
 
@@ -906,6 +915,7 @@ pub fn explore_for(
 
     let mut interp = Interp::new(prog, bounds.max_steps);
     interp.max_spurious = bounds.max_spurious;
+    interp.max_threads = bounds.max_threads;
     let g = match build_initial_state(prog, entries, bounds, &mut interp) {
         Ok(g) => g,
         Err(why) => return Exploration::Incomplete(why),
@@ -1001,6 +1011,7 @@ pub fn replay_schedule(
     // run: it could not reproduce the violation, and the FALSE was discarded.
     let mut interp = Interp::new(prog, bounds.max_steps);
     interp.max_spurious = bounds.max_spurious;
+    interp.max_threads = bounds.max_threads;
     let mut g = match build_initial_state(prog, entries, bounds, &mut interp) {
         Ok(g) => g,
         Err(_) => return false,

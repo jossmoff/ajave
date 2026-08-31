@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — 77/81 of the concurrency suite, 0 wrong
+**Status:** working — 80/84 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
 library models), `concurrency.rs` (engine, precondition checks, DPOR)
@@ -427,12 +427,15 @@ easy and wrong, and the engine answers UNKNOWN instead.
 | Feature | Status |
 |---|---|
 | `Thread.start` / `join` | modelled; `join` is a happens-before edge |
-| Thread identity | one per construction, body resolved at `start()` from the Runnable object's class |
+| Thread identity | created at `start()`, body resolved from the Runnable object's class |
+| `class W extends Thread` | modelled |
+| Threads in a loop, from a factory, a field, or a collection | modelled |
 | `Thread.sleep` / `yield` / `onSpinWait` | modelled as no-ops — they order nothing |
 | `Thread.isAlive` / `currentThread` | modelled |
 | `Thread.interrupt` / `isInterrupted` | flag only; **refused** when the target is parked |
 | `Runnable` via subclassing or delegation | both |
 | `new Thread(null)` | **refused** |
+| More than `max_threads` live at once | **refused** (bound, not a defect) |
 
 ### Locks and conditions
 

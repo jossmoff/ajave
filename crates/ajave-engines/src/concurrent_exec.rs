@@ -261,6 +261,8 @@ pub struct Interp<'a> {
     /// Spurious events used on this path, against `Bounds::max_spurious`.
     pub spurious_used: u32,
     pub max_spurious: u32,
+    /// Live-thread bound, enforced where threads are now created.
+    pub max_threads: usize,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -294,7 +296,8 @@ impl<'a> Interp<'a> {
             choice_at: 0,
             pending_choice: None,
             spurious_used: 0,
-            max_spurious: 2,
+            max_spurious: 1,
+            max_threads: 4,
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -618,6 +621,20 @@ impl<'a> Interp<'a> {
         }
     }
 
+
+    /// Is `class` `java/lang/Thread` or a subclass of it?
+    fn is_thread_subclass(&self, class: &str) -> bool {
+        let mut cur = class.to_string();
+        for _ in 0..64 {
+            match self.prog.supers.get(&cur) {
+                Some(sup) if sup == "java/lang/Thread" => return true,
+                Some(sup) => cur = sup.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Take the next decision from the tape, or ask for one.
     ///
     /// `None` means "the explorer has not decided yet": the caller must leave
@@ -836,7 +853,14 @@ impl<'a> Interp<'a> {
                     .iter()
                     .any(|o| matches!(o, Operand::Var(x) if self.is_tainted(tid, *x)));
                 if let Some(f) = self.frames[tid.0 as usize].last_mut() {
-                    // A call pushed a frame; the assignment happens on return.
+                    // A call pushed a frame; the assignment happens on return,
+                    // so record where the result belongs. `ret_to` existed and
+                    // was never set, which meant no user method could return a
+                    // value: `Thread t = make();` left `t` unknown, and any
+                    // thread built by a factory was unanalysable.
+                    if f.at != frame.at {
+                        f.ret_to = Some(*v);
+                    }
                     if f.at == frame.at {
                         if let Some(val) = val {
                             f.locals.insert(*v, val);
@@ -1154,7 +1178,10 @@ impl<'a> Interp<'a> {
         frame: &Frame,
     ) -> Result<Option<Val>, String> {
         // Thread lifecycle is handled by the explorer, not here.
-        if target.class == "java/lang/Thread" {
+        // Subclass-aware, not an exact match. `class W extends Thread` makes
+        // javac emit `invokevirtual Main$W.start()`, the *declared* type, so an
+        // equality test sees no Thread call at all and the thread never starts.
+        if target.class == "java/lang/Thread" || self.is_thread_subclass(&target.class) {
             // Static members first: they have no receiver, so `args[0]` is an
             // argument and reading it as one is how `Thread.sleep(50)` came out
             // as "a call on a non-reference receiver".
@@ -1264,16 +1291,39 @@ impl<'a> Interp<'a> {
                     let Some(&target_tid) = self.thread_objs.get(&recv) else {
                         return Err("start() on an unrecognised Thread object".into());
                     };
-                    // A start() we cannot carry out must not be ignored. When
-                    // thread discovery under-counted threads this branch found
-                    // no state for the identity and fell through silently, so
-                    // the thread simply never ran and the explorer reported no
-                    // deadlock for `DiningPhilosophers`, whose cycle needs all
-                    // three. Silence on an unmodelled start is a wrong TRUE.
-                    if !g.threads.iter().any(|t| t.id == target_tid) {
-                        return Err(format!("start() on thread {} with no state", target_tid.0));
-                    }
+                    // The thread is created *here*, not pre-allocated from a
+                    // static scan. Its body comes from the class of the object
+                    // it was actually given, so where that object was
+                    // constructed -- a loop, a factory, a field, a subclass of
+                    // Thread -- stops mattering.
                     let obj = self.runnable_objs.get(&target_tid).copied();
+                    if !g.threads.iter().any(|t| t.id == target_tid) {
+                        if g.threads.len() >= self.max_threads {
+                            return Err(format!(
+                                "{} live threads exceeds bound {}",
+                                g.threads.len() + 1,
+                                self.max_threads
+                            ));
+                        }
+                        let Some(o) = obj else {
+                            return Err("start() on a thread with no Runnable".into());
+                        };
+                        let Some(cls) = self.obj_class.get(&o).cloned() else {
+                            return Err("start() on a Runnable of unknown class".into());
+                        };
+                        let run = MethodKey {
+                            class: cls,
+                            name: "run".to_string(),
+                            desc: "()V".to_string(),
+                        };
+                        let Some(st) = spawn_state(target_tid, &run, self.prog, false) else {
+                            return Err(format!("no body for {run}"));
+                        };
+                        g.threads.push(st);
+                        while self.frames.len() <= target_tid.0 as usize {
+                            self.frames.push(Vec::new());
+                        }
+                    }
                     // Bind the body from the Runnable *object*, not from the
                     // thread's position in the entry list. Entries are sorted
                     // for determinism while identities are assigned in
@@ -2728,8 +2778,16 @@ impl<'a> Interp<'a> {
                 f.at.index = 0;
                 Ok(None)
             }
-            Terminator::Return(_) => {
-                self.frames[tid.0 as usize].pop();
+            Terminator::Return(ret) => {
+                // Carry the returned value back to the caller's destination.
+                let val = match &ret {
+                    Some(op) => self.eval(frame, op),
+                    None => None,
+                };
+                // The destination belongs to the frame being popped -- it was
+                // recorded on the callee when the call pushed it -- not to the
+                // caller, whose own `ret_to` is about a different call.
+                let dest = self.frames[tid.0 as usize].pop().and_then(|f| f.ret_to);
                 if self.frames[tid.0 as usize].is_empty() {
                     // A terminating thread publishes everything it did, so a
                     // later join() or Future.get() inherits it (JLS 17.4.5).
@@ -2741,8 +2799,12 @@ impl<'a> Interp<'a> {
                     g.threads[ti].status = ThreadStatus::Terminated;
                     return Ok(Some(Step::Terminated));
                 }
-                // Returning into the caller: skip past the call statement.
+                // Returning into the caller: deliver the result, then skip
+                // past the call statement.
                 if let Some(caller) = self.frames[tid.0 as usize].last_mut() {
+                    if let (Some(d), Some(v)) = (dest, val) {
+                        caller.locals.insert(d, v);
+                    }
                     caller.at.index += 1;
                 }
                 Ok(None)

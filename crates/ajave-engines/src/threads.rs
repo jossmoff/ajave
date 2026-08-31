@@ -77,6 +77,26 @@ pub fn is_executor(class: &str) -> bool {
     )
 }
 
+/// Is `class` `java/lang/Thread` or a subclass?
+///
+/// `class W extends Thread` makes javac emit `invokevirtual Main$W.start()` --
+/// the declared type -- so testing for `java/lang/Thread` by equality sees no
+/// thread start at all and the program is classified sequential.
+pub fn is_thread_class(prog: &Program, class: &str) -> bool {
+    if class == "java/lang/Thread" {
+        return true;
+    }
+    let mut cur = class.to_string();
+    for _ in 0..64 {
+        match prog.supers.get(&cur) {
+            Some(sup) if sup == "java/lang/Thread" => return true,
+            Some(sup) => cur = sup.clone(),
+            None => return false,
+        }
+    }
+    false
+}
+
 pub fn discover(prog: &Program) -> ThreadDiscovery {
     // (declaring method, position within it, entry). Threads are identified at
     // run time in construction order, so entries must preserve multiplicity;
@@ -234,7 +254,7 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                 ThreadEntry { run, started_from: caller.clone() },
                             ));
                             ordinal += 1;
-                        } else if target.class == "java/lang/Thread" && target.name == "start" {
+                        } else if is_thread_class(prog, &target.class) && target.name == "start" {
                             saw_start = true;
                             let recv = match args.first() {
                                 Some(Operand::Var(v)) => *v,
