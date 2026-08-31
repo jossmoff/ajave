@@ -88,6 +88,11 @@ pub struct ThreadState {
     /// `ObjId` may appear more than once and only the outermost release
     /// actually frees it.
     pub monitors: Vec<ObjId>,
+    /// Reentrant depth held on the monitor this thread is `Waiting` on.
+    ///
+    /// `wait` releases every acquisition and must restore exactly that many on
+    /// wake (JLS 17.2.1). Restoring one would silently drop the outer locks.
+    pub wait_depth: usize,
 }
 
 impl ThreadState {

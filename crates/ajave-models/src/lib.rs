@@ -201,6 +201,24 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         }
 
         // ── java.lang.Object ────────────────────────────────────────────
+        // Monitor operations, listed before the class-level fallback below.
+        //
+        // `PURE_OWNERS` contains `java/lang/Object`, and a class-level entry is
+        // exactly what this file warns against: `wait` blocks the calling
+        // thread and *releases the monitor*, and `notify`/`notifyAll` move
+        // other threads between wait sets. Treating them as pure let the
+        // concurrency explorer step over a `wait()` as though it were free,
+        // after which a thread that waits forever appeared to terminate and a
+        // program that provably hangs was reported as deadlock-free — a wrong
+        // TRUE. See benchmarks/ajave/concurrency/MissedSignalDeadlock.
+        //
+        // All three throw `IllegalMonitorStateException` unless the caller owns
+        // the monitor, and `wait` also throws `InterruptedException`. That is
+        // not expressible over the arguments, so it is `Unexpressible`.
+        ("java/lang/Object", "wait" | "notify" | "notifyAll") => Contract {
+            requires: &[Precondition::Unexpressible],
+            effect: Effect::Unknown,
+        },
         ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
             Contract::TOTAL
         }
@@ -678,6 +696,18 @@ fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
                 | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
                 | "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod" | "divideExact"
         ),
+        // Monitor operations. All three throw `IllegalMonitorStateException`
+        // unless the caller owns the monitor, and `wait` also throws
+        // `InterruptedException`.
+        //
+        // Keeping them out of `Pure` matters for a second reason beyond
+        // throwing: `Pure` *erases* the call, and a void one disappears from
+        // the IR entirely. A `wait()` that is not in the IR cannot block, so a
+        // thread that waits forever appears to terminate and a program that
+        // provably hangs is reported deadlock-free — the same shape as the
+        // `System.arraycopy` disappearance in issue #49, which is why that
+        // entry sits directly below.
+        "java/lang/Object" => matches!(name, "wait" | "notify" | "notifyAll"),
         // IndexOutOfBounds / ArrayStore / NPE.
         "java/lang/System" => name == "arraycopy",
         // Boxing from a String parses, and parsing throws.

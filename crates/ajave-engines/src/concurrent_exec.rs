@@ -501,6 +501,16 @@ impl<'a> Interp<'a> {
                     }
                     _ => {
                         g.monitor_owner.insert(m, tid);
+                        // Acquiring clears `Blocked`. A thread that reaches
+                        // here after being blocked now *owns* the monitor, and
+                        // leaving the status set makes `runnable()` treat it as
+                        // still waiting on a monitor it holds — the state then
+                        // looks deadlocked with nobody actually stuck.
+                        //
+                        // Only reachable once a thread can be blocked and later
+                        // acquire, which is what `wait` releasing the monitor
+                        // made routine.
+                        g.threads[ti].status = ThreadStatus::Runnable;
                         g.threads[ti].enter(m);
                     }
                 }
@@ -733,6 +743,93 @@ impl<'a> Interp<'a> {
                 other => Err(format!("unmodelled Thread.{other}")),
             };
         }
+        // Object.wait / notify / notifyAll.
+        //
+        // `wait` is not a call that can be stepped over: it releases the
+        // monitor and parks the thread until someone signals. Stepping over it
+        // makes a thread that waits forever appear to terminate, which reports
+        // a hanging program as deadlock-free.
+        if target.class == "java/lang/Object"
+            && matches!(target.name.as_str(), "wait" | "notify" | "notifyAll")
+        {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                // A null or untracked receiver: decline rather than guess. The
+                // NPE is the lifter's precondition check, not ours.
+                _ => return Err(format!("unresolved receiver for Object.{}", target.name)),
+            };
+            let ti = tid.0 as usize;
+            match target.name.as_str() {
+                "wait" => {
+                    // Two phases at the same statement, because the thread
+                    // stays parked on the `wait()` call while it is waiting.
+                    //
+                    // Phase 2 first: `wait_depth > 0` means this thread already
+                    // waited here and has been notified, so it is resuming.
+                    if g.threads[ti].wait_depth > 0 {
+                        // Reacquire the monitor before continuing. A woken
+                        // thread does not hold it -- `notify` does not transfer
+                        // ownership, it only moves the waiter to the entry set
+                        // -- and it must reacquire *every* level it released
+                        // (JLS 17.2.1). Restoring one would silently drop the
+                        // outer locks of a reentrant wait.
+                        if g.monitor_owner.get(&recv).is_some_and(|&o| o != tid) {
+                            g.threads[ti].status = ThreadStatus::Blocked { monitor: recv };
+                            return Ok(());
+                        }
+                        let depth = g.threads[ti].wait_depth;
+                        g.monitor_owner.insert(recv, tid);
+                        for _ in 0..depth {
+                            g.threads[ti].enter(recv);
+                        }
+                        g.threads[ti].wait_depth = 0;
+                        g.threads[ti].status = ThreadStatus::Runnable;
+                        // Now step past the call, so the caller's loop
+                        // re-tests its condition -- which is exactly why a wait
+                        // must be written as `while (!cond) wait();`.
+                        if let Some(f) = self.frames[ti].last_mut() {
+                            f.at.index += 1;
+                        }
+                        return Ok(());
+                    }
+
+                    // Phase 1: park. `wait` releases the monitor *entirely*, so
+                    // a notifier can enter the guarded region at all.
+                    if !g.threads[ti].holds(recv) {
+                        return Err("wait() without owning the monitor".into());
+                    }
+                    let depth = g.threads[ti].monitors.iter().filter(|&&m| m == recv).count();
+                    g.threads[ti].monitors.retain(|&m| m != recv);
+                    g.monitor_owner.remove(&recv);
+                    g.threads[ti].wait_depth = depth;
+                    g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                    // Deliberately not advanced: the thread resumes on this
+                    // same statement and takes phase 2.
+                    return Ok(());
+                }
+                // A signal with no waiter is *lost*, not remembered — which is
+                // the whole of the missed-signal bug. Woken threads go to
+                // `Blocked`, not `Runnable`: they must reacquire the monitor,
+                // which the notifier still holds until it leaves the block.
+                "notify" | "notifyAll" => {
+                    let all = target.name == "notifyAll";
+                    for t in g.threads.iter_mut() {
+                        if t.status == (ThreadStatus::Waiting { monitor: recv }) {
+                            t.status = ThreadStatus::Blocked { monitor: recv };
+                            if !all {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(f) = self.frames[ti].last_mut() {
+                        f.at.index += 1;
+                    }
+                    return Ok(());
+                }
+                _ => unreachable!(),
+            }
+        }
+
         let Some(body) = self.prog.body(target) else {
             // A library call with no body. Step over it and record that we did.
             //
@@ -916,6 +1013,7 @@ pub fn spawn_state(
 ) -> Option<ThreadState> {
     let body = prog.body(method)?;
     Some(ThreadState {
+        wait_depth: 0,
         id,
         at: ProgramPoint {
             method: method.clone(),

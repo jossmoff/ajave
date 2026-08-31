@@ -21,6 +21,7 @@ ajave/concurrency/DeadlockNeedsBlockedDependency.yml	no-deadlock	correct	FALSE	0
 ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	correct	TRUE	0.6
 ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	0.4
 ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.3
+ajave/concurrency/MissedSignalDeadlock.yml	no-deadlock	correct	FALSE	0.3
 ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	0.4
 ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	0.4
 ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	0.4
@@ -31,5 +32,6 @@ ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	0.4
 ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	0.4
 ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.4
 ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.4
-ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.3
-ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.3
+ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.4
+ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.4
+ajave/concurrency/WaitNotifyHandshake.yml	no-deadlock	correct	TRUE	0.3
