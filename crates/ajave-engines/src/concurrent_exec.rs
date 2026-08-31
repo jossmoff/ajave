@@ -1742,13 +1742,33 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 ("java/util/concurrent/CyclicBarrier", "await") => {
-                    // A timed barrier await that expires breaks the barrier for
-                    // every party (BrokenBarrierException), which needs the
-                    // exception machinery of phase 2. Until then the expiry
-                    // branch is refused rather than approximated: pretending it
-                    // cannot expire would prove programs that hang.
+                    // A timed await that expires does not merely return: it
+                    // *breaks* the barrier, so every other party waiting on it
+                    // fails too. Modelling expiry without that would release
+                    // one thread and leave the rest waiting on a barrier that
+                    // can never trip -- a deadlock the JVM does not have.
                     if target.desc != "()I" {
-                        return Err("timed CyclicBarrier.await needs broken-barrier exceptions".into());
+                        let Some(c) = self.choose(2) else { return Ok(None) };
+                        if c == 0 {
+                            set(g, "$broken", 1);
+                            for t in g.threads.iter_mut() {
+                                if t.status == (ThreadStatus::Waiting { monitor: recv })
+                                    && t.wait_depth == 0
+                                {
+                                    t.status = ThreadStatus::Runnable;
+                                    t.timed_wait = false;
+                                }
+                            }
+                            self.raise(g, tid, "java/util/concurrent/BrokenBarrierException")?;
+                            return Ok(None);
+                        }
+                    }
+                    // A party arriving at an already-broken barrier fails
+                    // immediately rather than waiting for a trip that cannot
+                    // happen.
+                    if get(g, "$broken") == 1 {
+                        self.raise(g, tid, "java/util/concurrent/BrokenBarrierException")?;
+                        return Ok(None);
                     }
                     // The barrier is the one synchronizer whose wait is not
                     // idempotent: re-running `await` after release would count
@@ -2091,7 +2111,23 @@ impl<'a> Interp<'a> {
                         .unwrap_or(true);
                     return Ok(Some(Val::Int(done as i64)));
                 }
-                "cancel" => return Err("Future.cancel is not modelled".into()),
+                "cancel" => {
+                    // Only the already-finished case is exact: cancel() returns
+                    // false and changes nothing. Cancelling a *running* task
+                    // needs interruption to be delivered at an arbitrary point
+                    // inside it, which is not the same as interrupting at a
+                    // blocking call, so that stays refused.
+                    let done = g
+                        .threads
+                        .iter()
+                        .find(|x| x.id == t)
+                        .map(|x| x.status == ThreadStatus::Terminated)
+                        .unwrap_or(true);
+                    if done {
+                        return Ok(Some(Val::Int(0)));
+                    }
+                    return Err("cancelling a running task is not modelled".into());
+                }
                 other => return Err(format!("unmodelled Future.{other}")),
             }
         }
@@ -2155,7 +2191,8 @@ impl<'a> Interp<'a> {
                             return Ok(Some(Val::Int(0)));
                         }
                         if target.name == "add" {
-                            return Err("add() on a full queue throws IllegalStateException".into());
+                            self.raise(g, tid, "java/lang/IllegalStateException")?;
+                            return Ok(None);
                         }
                         g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
                         return Ok(None);
