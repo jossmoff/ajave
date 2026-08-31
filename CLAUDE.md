@@ -147,6 +147,40 @@ not a regression.** Reproduce it under the conditions above before looking for a
 cause. `CLAUDE.md` already warns that a score improvement without a soundness
 argument is a red flag; the converse needs stating too.
 
+## Every Engine Finding Gets a Minimal Benchmark — MANDATORY
+
+When investigation of an engine turns up a real behaviour — a wrong verdict, a
+semantic divergence from the JVM, a witness that cannot replay, a precision loss
+with an identifiable cause — **reduce it to a minimal program and add it to
+`benchmarks/ajave/` before fixing it.**
+
+This is not the same as the smoke canary rule above. A canary is an existing
+SV-COMP task pinned so it cannot regress. This is a *new, minimal* program that
+isolates the behaviour, so the next person can see the mechanism in ten lines
+instead of rediscovering it in a 60-line benchmark with four confounds.
+
+### The rule
+1. Reduce to the smallest program that still exhibits the behaviour.
+2. Establish the expected verdict **by construction, from the JLS or the JVMS**,
+   and then confirm it by running a real JVM. Never from what ajave currently
+   says — that is the thing under test.
+3. Put it in the matching `benchmarks/ajave/` category and write the reasoning
+   in the header: what the JVM does, what we did, and why they differ.
+4. Add it *before* the fix, so the benchmark is demonstrated to reproduce.
+5. `tools/validate_own_benchmarks.py` checks the suite against a real JVM; run
+   it after adding.
+
+### Why
+The corpus tasks are large and confounded. `float-nonlinear-calculation`
+concealed three independent defects — no transcendentals in the concrete
+evaluator, float arithmetic computed on integer bit patterns, and violations
+published from havoced values — and each was only separable once reduced. A
+finding that stays in a 60-line benchmark is a finding that gets rediscovered.
+
+`benchmarks/ajave/jvm-floats/NaNComparisonIsAlwaysFalse` is the model: three
+lines, ground truth argued from IEEE-754 and the `dcmpg` bytecode, and a header
+that states what ajave did wrong and why it did not produce a wrong answer.
+
 ## Guarding Against Benchmark Overfitting
 
 Every entry above was added while looking at `sv-benchmarks/`, which is also
