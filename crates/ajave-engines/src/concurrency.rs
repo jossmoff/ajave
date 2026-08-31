@@ -45,7 +45,7 @@ use ajave_ir::verdict::{ScheduleSlice, ThreadId, Witness};
 use ajave_ir::{MethodKey, ObligationId};
 
 use crate::concurrent_exec::{spawn_state, Access, Interp, Step, Val};
-use crate::concurrent_state::{Bounds, GlobalState, ThreadStatus};
+use crate::concurrent_state::{Bounds, GlobalState, ObjId};
 use crate::threads::{discover, ThreadDiscovery};
 
 /// Why the explorer declined to analyse a program.
@@ -568,6 +568,93 @@ pub fn explore(
     }
 
     let mut interp = Interp::new(prog, bounds.max_steps);
+    // Establish the static state by *running* `<clinit>`, not by guessing it.
+    //
+    // Class initialisers were previously approximated: a static whose
+    // initialiser was visibly a `new` got a fresh object id, and anything else
+    // stayed `Val::Ref(0)` -- null. Both halves of that misfired.
+    //
+    // Reading an uninitialised static as null does not merely lose precision
+    // here, it flips verdicts. `static final Condition cond = lock.newCondition()`
+    // is not a `new`, so `cond` read as null, the null-check before `await`
+    // pruned every path that reaches it, and a program that deadlocks on a
+    // missed signal was reported TRUE. Pruning paths is how an under-approximation
+    // turns into a wrong proof.
+    //
+    // Running the initialiser is also simply what the JVM does, and it gets
+    // aliasing, factory methods and computed initial values right for free.
+    //
+    // Approximation that remains: every `<clinit>` runs up front, in
+    // `bodies` order, whereas the JVM runs each lazily on first use. That
+    // differs only for initialisers that read another class's statics before
+    // it is initialised -- which observes a default value on a real JVM too,
+    // just possibly a different one. No benchmark here does it, and the
+    // alternative (lazy initialisation during exploration) needs `<clinit>`
+    // frames pushed mid-schedule.
+    let mut statics: std::collections::BTreeMap<(String, String), (bool, i64)> =
+        Default::default();
+    let mut heap: std::collections::BTreeMap<(ObjId, String), (bool, i64)> = Default::default();
+    let mut clinit_failed: Option<String> = None;
+    for mk in prog.bodies.keys().filter(|k| k.name == "<clinit>").cloned() {
+        let Some(st) = spawn_state(ThreadId(0), &mk, prog, true) else {
+            continue;
+        };
+        let Some(frame) = interp.initial_frame(&mk, None) else {
+            continue;
+        };
+        let mut cg = GlobalState {
+            threads: vec![st],
+            monitor_owner: Default::default(),
+            heap: heap.clone(),
+            statics: statics.clone(),
+            schedule: Vec::new(),
+            switches: 0,
+        };
+        interp.frames = vec![vec![frame]];
+        let mut done = false;
+        for _ in 0..bounds.max_steps {
+            match interp.advance(&mut cg, ThreadId(0)) {
+                Step::Terminated => {
+                    done = true;
+                    break;
+                }
+                Step::Advanced(_) => {}
+                Step::Blocked(_) => {
+                    // A class initialiser that blocks is either deadlocked at
+                    // class-init time or uses a primitive we do not model.
+                    clinit_failed = Some(format!("{} blocked", mk.class));
+                    break;
+                }
+                Step::Unsupported(why) => {
+                    clinit_failed = Some(format!("{}: {}", mk.class, why));
+                    break;
+                }
+                // A check violated during class initialisation is a real
+                // violation, reachable before main even starts. Reporting it
+                // needs a witness carrying a schedule that never entered the
+                // scheduler, so decline instead of claiming either verdict.
+                Step::Violated(..) => {
+                    clinit_failed = Some(format!("{} violates a check", mk.class));
+                    break;
+                }
+            }
+        }
+        if !done {
+            if clinit_failed.is_none() {
+                clinit_failed = Some(format!("{} did not finish", mk.class));
+            }
+            break;
+        }
+        statics = cg.statics;
+        heap = cg.heap;
+    }
+    // An initialiser we could not run leaves statics at their default null
+    // reading, which is exactly the unsound case above. Refuse rather than
+    // explore a state we know is wrong.
+    if let Some(why) = clinit_failed {
+        return Exploration::Incomplete(format!("could not run class initialiser: {why}"));
+    }
+
     let mut threads = Vec::new();
     let mut frames = Vec::new();
 
@@ -589,8 +676,13 @@ pub fn explore(
             return Exploration::Incomplete(format!("no body for {}", e.run));
         };
         threads.push(st);
-        // `this` for the Runnable: a fresh object identity.
-        let this = Val::Ref(1000 + i as u32);
+        // `this` for the Runnable: a fresh object identity. Drawn from the
+        // allocator rather than a fixed 1000+i base, which could collide with
+        // an object a class initialiser allocated and silently alias two
+        // distinct objects.
+        let _ = i;
+        let this = Val::Ref(interp.next_obj);
+        interp.next_obj += 1;
         match interp.initial_frame(&e.run, Some(this)) {
             Some(f) => frames.push(vec![f]),
             None => return Exploration::Incomplete(format!("no frame for {}", e.run)),
@@ -598,49 +690,10 @@ pub fn explore(
     }
     interp.frames = frames;
 
-    // Give every static initialised from a `new` in `<clinit>` its own object.
-    //
-    // `<clinit>` is not executed here, so an uninitialised static reference
-    // reads as `Val::Ref(0)` -- null. Two distinct `static final Object` locks
-    // then denote the *same* object, and an AB/BA deadlock between them becomes
-    // unrepresentable: the explorer reported TRUE for a program that plainly
-    // deadlocks.
-    //
-    // Only fields whose initialiser is visibly a `new` are seeded. A static we
-    // cannot see initialised keeps its null reading, because assuming it
-    // non-null could discharge a null-dereference obligation that really can
-    // fire -- precision is worth less than a wrong TRUE.
-    let mut statics: std::collections::BTreeMap<(String, String), (bool, i64)> =
-        Default::default();
-    for (mk, body) in &prog.bodies {
-        if mk.name != "<clinit>" {
-            continue;
-        }
-        let mut from_new: std::collections::HashSet<ajave_ir::VarId> = Default::default();
-        for block in &body.blocks {
-            for st in &block.stmts {
-                match st {
-                    Stmt::Assign(v, Rvalue::New(_)) => {
-                        from_new.insert(*v);
-                    }
-                    Stmt::Assign(v, Rvalue::Use(Operand::Var(src))) if from_new.contains(src) => {
-                        from_new.insert(*v);
-                    }
-                    Stmt::PutStatic(fk, Operand::Var(src)) if from_new.contains(src) => {
-                        let id = interp.next_obj;
-                        interp.next_obj += 1;
-                        statics.insert((fk.class.clone(), fk.name.clone()), (true, id as i64));
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
     let g = GlobalState {
         threads,
         monitor_owner: Default::default(),
-        heap: Default::default(),
+        heap,
         statics,
         schedule: Vec::new(),
         switches: 0,

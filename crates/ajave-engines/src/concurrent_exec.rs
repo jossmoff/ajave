@@ -457,6 +457,7 @@ impl<'a> Interp<'a> {
                     "java/util/concurrent/CountDownLatch"
                         | "java/util/concurrent/Semaphore"
                         | "java/util/concurrent/CyclicBarrier"
+                        | "java/util/concurrent/locks/Condition"
                 ) =>
             {
                 if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
@@ -883,6 +884,16 @@ impl<'a> Interp<'a> {
                     let locked = g.monitor_owner.contains_key(&recv);
                     return Ok(Some(Val::Int(locked as i64)));
                 }
+                "newCondition" => {
+                    // A fresh object per call, matching the JDK: two calls give
+                    // two independent wait sets. It remembers its lock in
+                    // `$lock`, because `await` has to release and reacquire
+                    // that lock while parking on the condition itself.
+                    let id = self.next_obj;
+                    self.next_obj += 1;
+                    g.heap.insert((ObjId(id), "$lock".to_string()), (false, recv.0 as i64));
+                    return Ok(Some(Val::Ref(id)));
+                }
                 _ => return Err(format!("unmodelled ReentrantLock.{}", target.name)),
             }
         }
@@ -1223,6 +1234,81 @@ impl<'a> Interp<'a> {
                 }
 
                 (c, m) => return Err(format!("unmodelled {}.{}", c.rsplit('/').next().unwrap_or(c), m)),
+            }
+        }
+
+        // java.util.concurrent.locks.Condition.
+        //
+        // Structurally this is `Object.wait`/`notify` with the wait set and the
+        // lock separated: a thread parks on the *condition* but releases and
+        // reacquires the *lock* the condition was created from. That is why the
+        // condition object stores its lock in `$lock` -- `Waiting { monitor }`
+        // carries one object, and here the two differ.
+        //
+        // Signals are not remembered. A `signal` with no waiter is lost, which
+        // is the whole of the missed-signal bug and the reason a condition wait
+        // is written `while (!cond) await();`.
+        if target.class == "java/util/concurrent/locks/Condition" {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved Condition receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let lock = match g.heap.get(&(recv, "$lock".to_string())) {
+                Some(&(_, l)) if l != 0 => ObjId(l as u32),
+                _ => return Err("Condition with no owning lock".into()),
+            };
+            match target.name.as_str() {
+                "await" => {
+                    if target.desc != "()V" {
+                        return Err("unmodelled timed Condition.await".into());
+                    }
+                    // Phase 2: already waited here and has been signalled.
+                    // Reacquire every level of the lock that was released
+                    // (JLS 17.2.1 for monitors; Condition.await is specified to
+                    // restore the hold count identically).
+                    if g.threads[ti].wait_depth > 0 {
+                        if g.monitor_owner.get(&lock).is_some_and(|&o| o != tid) {
+                            g.threads[ti].status = ThreadStatus::Blocked { monitor: lock };
+                            return Ok(None);
+                        }
+                        let depth = g.threads[ti].wait_depth;
+                        g.monitor_owner.insert(lock, tid);
+                        for _ in 0..depth {
+                            g.threads[ti].enter(lock);
+                        }
+                        g.threads[ti].wait_depth = 0;
+                        g.threads[ti].status = ThreadStatus::Runnable;
+                        return Ok(None);
+                    }
+                    // Phase 1: release the lock entirely and park.
+                    if !g.threads[ti].holds(lock) {
+                        return Err("Condition.await without holding the lock".into());
+                    }
+                    let depth = g.threads[ti].monitors.iter().filter(|&&m| m == lock).count();
+                    g.threads[ti].monitors.retain(|&m| m != lock);
+                    g.monitor_owner.remove(&lock);
+                    g.threads[ti].wait_depth = depth;
+                    g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+                    return Ok(None);
+                }
+                "signal" | "signalAll" => {
+                    // Woken threads go to `Blocked` on the lock, not
+                    // `Runnable`: the signaller still holds it until it leaves
+                    // the guarded region.
+                    let all = target.name == "signalAll";
+                    for t in g.threads.iter_mut() {
+                        if t.status == (ThreadStatus::Waiting { monitor: recv }) && t.wait_depth > 0
+                        {
+                            t.status = ThreadStatus::Blocked { monitor: lock };
+                            if !all {
+                                break;
+                            }
+                        }
+                    }
+                    return Ok(None);
+                }
+                other => return Err(format!("unmodelled Condition.{other}")),
             }
         }
 
