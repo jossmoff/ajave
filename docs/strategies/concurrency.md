@@ -512,18 +512,47 @@ Stated at each phase, never overstated. As of 2026-08-31:
 
 > Sound for falsification under **sequential consistency**, over the modelled
 > subset above, within the context-switch, state and depth bounds. A TRUE is
-> claimed only when the search completed within every bound; hitting any bound
-> yields UNKNOWN. Does not model the Java Memory Model.
+> claimed only when the search completed within every bound **and the program
+> was proved free of data races**; hitting any bound, or finding a race, yields
+> UNKNOWN.
 
-Do not claim JMM soundness until the Phase 7 litmus tests actually pass.
+### DRF-SC: the assumption is now checked rather than assumed
 
-**The SC assumption is the largest remaining gap, and it is one-directional.**
-Under SC we cannot see bugs that need reordering: broken double-checked locking,
-and publication through a non-volatile field, both *look* correct to this engine.
-It will therefore report TRUE for some programs that fail on a real JVM. No such
-benchmark is in the suite, because adding one we knowingly answer wrongly would
-put a wrong answer in a suite whose value is that it has none — the gap is
-recorded here instead.
+The explorer considers only sequentially consistent executions. JLS 17.4.5 gives
+the SC guarantee to **data-race-free programs only**, so on a racy program an
+exhaustive SC search proves nothing about a real JVM — the TRUE it derives
+describes a machine the JVM is not obliged to be.
+
+Race freedom is therefore treated as the *precondition of the proof* rather than
+as a separate property: the engine detects races during the same search, and
+declines to discharge anything when it finds one. That converts "we assume
+sequential consistency" from an unstated assumption into a checked one, and
+gives a statable boundary:
+
+> **A TRUE from this engine is sound under the Java Memory Model, because it is
+> only issued for programs verified data-race-free.**
+
+The cost is visible and intended. `NoJoinNoOrdering` and `NonVolatileNoGuarantee`
+were previously reported TRUE and are now UNKNOWN: both are racy, so the SC
+result did not transfer, and both carry a `DRF-SC BOUNDARY` note saying so. The
+alternative was claiming a proof a real JVM need not honour.
+
+Happens-before is built as its own relation from release/acquire edges emitted
+by the synchronisation primitives, never from the schedule order — see
+`vclock.rs`. That is what makes a race expressible at all (in schedule order
+every pair of accesses is comparable) and what keeps the relation valid if
+executions later stop being sequentially consistent.
+
+### What is still out of reach
+
+Bugs that *require* reordering to manifest. Broken double-checked locking and
+publication through a non-volatile field are racy, so we now correctly decline
+to verify them rather than wrongly proving them safe — but detecting them needs
+a weak-memory explorer, where a read branches over the writes it may observe.
+
+The certification asymmetry is worth stating too: a JMM-permitted but rare
+behaviour cannot be reproduced by running on a JVM, so the replay net that backs
+every other FALSE stops working exactly where weak memory would need it.
 
 ## Notes on the source proposal
 

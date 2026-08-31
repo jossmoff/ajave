@@ -267,7 +267,17 @@ pub enum Exploration {
     /// This licenses a `Discharged` *only* because no bound was hit — the
     /// space was genuinely covered, not merely sampled. If any bound had cut
     /// the search short we would report `Incomplete` instead.
-    ExhaustiveNoViolation,
+    ExhaustiveNoViolation {
+        /// No data race was found anywhere in the covered space.
+        ///
+        /// This is the DRF-SC precondition (JLS 17.4.5): the explorer only ever
+        /// considers *sequentially consistent* executions, so a TRUE it derives
+        /// describes the JVM only for programs whose executions are all
+        /// sequentially consistent -- which is exactly the data-race-free ones.
+        /// For a racy program the same TRUE says nothing about a real JVM, and
+        /// must not be published.
+        race_free: bool,
+    },
     /// A violating interleaving, with the schedule that produces it.
     Violation {
         obligation: ObligationId,
@@ -276,6 +286,11 @@ pub enum Exploration {
     },
     /// A reachable state where no thread can proceed and not all terminated.
     Deadlock { schedule: Vec<ScheduleSlice> },
+    /// Two conflicting accesses unordered by happens-before.
+    DataRace {
+        location: String,
+        schedule: Vec<ScheduleSlice>,
+    },
     /// A bound was hit or a construct was unsupported, so the space was not
     /// covered. Proves nothing in either direction.
     Incomplete(String),
@@ -743,6 +758,17 @@ pub fn explore(
     bounds: Bounds,
     strategy: Strategy,
 ) -> Exploration {
+    explore_for(prog, entries, bounds, strategy, false)
+}
+
+/// As `explore`, but reporting a data race as the outcome when `want_races`.
+pub fn explore_for(
+    prog: &Program,
+    entries: &[crate::threads::ThreadEntry],
+    bounds: Bounds,
+    strategy: Strategy,
+    want_races: bool,
+) -> Exploration {
     let Some(entry) = prog.entry.clone() else {
         return Exploration::Incomplete("no entry method".into());
     };
@@ -777,6 +803,19 @@ pub fn explore(
             r.location, r.threads.0, r.threads.1
         );
     }
+    // A race found anywhere in the explored space is a real race: it is
+    // exhibited by a concrete interleaving, so it needs no completeness
+    // argument. Race *freedom* does, and is handled by the caller only when the
+    // search was exhaustive.
+    if want_races {
+        if let Some(r) = interp.race.clone() {
+            return Exploration::DataRace {
+                location: r.location,
+                schedule: Vec::new(),
+            };
+        }
+    }
+    let race_free = interp.race.is_none();
     log::debug!(
         "concurrency: {:?} explored {} state(s)",
         strategy,
@@ -800,7 +839,7 @@ pub fn explore(
                     names.join(", ")
                 ))
             }
-            None => Exploration::ExhaustiveNoViolation,
+            None => Exploration::ExhaustiveNoViolation { race_free },
         },
     }
 }
@@ -917,7 +956,10 @@ impl Engine for ConcurrencyEngine {
                         .join(", ")
                 );
 
-                match explore(prog, &entries, self.bounds, Strategy::Dpor) {
+                // Race detection runs with the search, because it is the
+                // precondition of the proof rather than a separate question --
+                // see the DRF-SC note on the ExhaustiveNoViolation arm.
+                match explore_for(prog, &entries, self.bounds, Strategy::Dpor, false) {
                     Exploration::Violation { obligation, method, schedule } => {
                         info!(
                             "concurrency: violation of {method}#{} under a {}-slice schedule",
@@ -940,6 +982,15 @@ impl Engine for ConcurrencyEngine {
                         );
                         if published.is_ok() { Progress::Advanced } else { Progress::Stalled }
                     }
+                    // Same reasoning as a deadlock: a race is not a violation
+                    // of either scored property. It matters because it decides
+                    // whether the sequentially-consistent reasoning behind
+                    // those verdicts says anything about the JMM at all, which
+                    // the caller reports; here it is only for visibility.
+                    Exploration::DataRace { location, .. } => {
+                        info!("concurrency: data race on {location}");
+                        Progress::Exhausted
+                    }
                     Exploration::Deadlock { schedule } => {
                         // Neither valid-assert nor no-runtime-exception is
                         // violated by a deadlock — the program hangs rather
@@ -952,7 +1003,25 @@ impl Engine for ConcurrencyEngine {
                         );
                         Progress::Stalled
                     }
-                    Exploration::ExhaustiveNoViolation => {
+                    // DRF-SC (JLS 17.4.5): a program whose executions are all
+                    // sequentially consistent is exactly a data-race-free one.
+                    // This explorer only considers SC executions, so on a racy
+                    // program its exhaustive TRUE describes a machine the JVM is
+                    // not obliged to be, and publishing it would be a wrong TRUE
+                    // on a real JVM. Race freedom is therefore the precondition
+                    // of the proof, not a separate property.
+                    //
+                    // This is what turns "we assume sequential consistency" from
+                    // an unstated assumption into a checked one.
+                    Exploration::ExhaustiveNoViolation { race_free: false } => {
+                        info!(
+                            "concurrency: exhaustive and violation-free, but the program \
+                             has a data race — sequentially consistent reasoning does not \
+                             transfer to the JVM, so nothing is discharged"
+                        );
+                        Progress::Exhausted
+                    }
+                    Exploration::ExhaustiveNoViolation { race_free: true } => {
                         // Every interleaving within the bounds was explored and
                         // no bound was hit, so the bounded space was genuinely
                         // covered. That licenses discharging the obligations in

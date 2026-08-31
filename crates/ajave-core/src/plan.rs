@@ -50,6 +50,15 @@ pub enum Property {
     NoRuntimeException,
     /// `no-deadlock.prp` — answered outside the obligation system.
     NoDeadlock,
+    /// `no-data-race.prp` — likewise answered by the explorer directly.
+    ///
+    /// Not an SV-COMP Java property today; the Java track has only the two
+    /// sequential specifications. It exists because a race is what decides
+    /// whether our sequentially-consistent reasoning says anything about the
+    /// Java Memory Model at all (JLS 17.4.5: a data-race-free program has only
+    /// sequentially consistent executions), so this is the precondition of
+    /// every other verdict rather than a category of its own.
+    NoDataRace,
 }
 
 impl Property {
@@ -58,6 +67,7 @@ impl Property {
             "assert" | "valid-assert" => Some(Property::ValidAssert),
             "no-runtime-exception" => Some(Property::NoRuntimeException),
             "no-deadlock" => Some(Property::NoDeadlock),
+            "no-data-race" => Some(Property::NoDataRace),
             _ => None,
         }
     }
@@ -86,7 +96,10 @@ impl Property {
             .collect(),
             // Deadlock is a property of the execution, not of any program
             // point, so it consumes no point obligations at all.
-            Property::NoDeadlock => HashSet::new(),
+            // Neither is violated by an obligation: both are decided by the
+            // explorer from the shape of the execution, not from a check
+            // embedded in the program.
+            Property::NoDeadlock | Property::NoDataRace => HashSet::new(),
         }
     }
 

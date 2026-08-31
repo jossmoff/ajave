@@ -50,12 +50,14 @@ PROPERTIES = {
     "assert": "valid-assert",
     "no-runtime-exception": "no-runtime-exception",
     "no-deadlock": "no-deadlock",
+    "no-data-race": "no-data-race",
 }
 # ajave's CLI spells valid-assert as "assert".
 CLI_PROPERTY = {
     "valid-assert": "assert",
     "no-runtime-exception": "no-runtime-exception",
     "no-deadlock": "no-deadlock",
+    "no-data-race": "no-data-race",
 }
 # SV-COMP scoring. A wrong answer costs eight correct TRUEs.
 POINTS = {("TRUE", True): 2, ("FALSE", False): 1,
@@ -408,7 +410,7 @@ def main():
         epilog=__doc__.split("Ground truth")[0].split("\n", 2)[2])
     ap.add_argument("--set", default="smoke",
                     help="set name in benchmarks/sets, or a path (default: smoke)")
-    ap.add_argument("--property", choices=["valid-assert",
+    ap.add_argument("--property", choices=["no-data-race", "valid-assert",
                                            "no-runtime-exception",
                                            "no-deadlock", "all"],
                     help="override the property; default is each task's own")

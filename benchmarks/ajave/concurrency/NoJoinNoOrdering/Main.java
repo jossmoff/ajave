@@ -13,6 +13,18 @@
 //   one that reports TRUE for valid-assert without reasoning about the
 //   interleaving is guessing.
 
+//
+// DRF-SC BOUNDARY -- this now reports UNKNOWN, and that is correct.
+//
+// The program has a data race, and the explorer only considers sequentially
+// consistent executions. JLS 17.4.5 gives the SC guarantee to data-race-free
+// programs only, so on a racy program an exhaustive SC search proves nothing
+// about a real JVM and the engine declines to discharge. The verdict below is
+// still the JVM's ground truth; we simply cannot establish it this way.
+//
+// Losing this TRUE is the point of the gate: the alternative is claiming a
+// proof that a real JVM is not obliged to honour.
+
 public class Main {
 
   static class Setter implements Runnable {

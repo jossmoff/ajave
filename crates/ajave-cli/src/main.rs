@@ -639,15 +639,69 @@ fn main() {
                 }
                 // Exhaustive *and* no bound was hit, so the whole interleaving
                 // space within the modelled fragment was covered.
-                ajave_engines::concurrency::Exploration::ExhaustiveNoViolation => {
+                // Deadlock freedom is a property of the schedule, not of the
+                // memory model: a race cannot create or remove a deadlock, so
+                // this verdict does not need the DRF-SC precondition.
+                ajave_engines::concurrency::Exploration::ExhaustiveNoViolation { .. } => {
                     verdict::Verdict::True
                 }
                 // A violation of some other property is not a deadlock.
                 ajave_engines::concurrency::Exploration::Violation { .. } => {
                     verdict::Verdict::True
                 }
+                // A race is not a deadlock.
+                ajave_engines::concurrency::Exploration::DataRace { .. } => {
+                    verdict::Verdict::True
+                }
                 ajave_engines::concurrency::Exploration::Incomplete(why) => {
                     info!("no-deadlock: exploration incomplete — {why}");
+                    verdict::Verdict::Unknown
+                }
+            },
+        };
+        println!("{verdict}");
+        return;
+    }
+
+    if plan.property == ajave_core::plan::Property::NoDataRace {
+        let verdict = match ajave_engines::concurrency::check_preconditions(&prog) {
+            // A program that starts no threads has no races, trivially. Every
+            // other refusal means we did not look.
+            Err(ajave_engines::concurrency::Refusal::Sequential) => verdict::Verdict::True,
+            Err(why) => {
+                info!("no-data-race: {why}");
+                verdict::Verdict::Unknown
+            }
+            Ok(entries) => match ajave_engines::concurrency::explore_for(
+                &prog,
+                &entries,
+                ajave_engines::concurrent_state::Bounds::from_env(),
+                ajave_engines::concurrency::Strategy::Dpor,
+                true,
+            ) {
+                // A race is exhibited by a concrete interleaving, so finding
+                // one needs no completeness argument.
+                ajave_engines::concurrency::Exploration::DataRace { location, .. } => {
+                    if cli.trace {
+                        eprintln!("no-data-race: race on {location}");
+                    }
+                    verdict::Verdict::False
+                }
+                // Race *freedom* does need one: it is a claim about every
+                // interleaving, so only an exhaustive search that hit no bound
+                // can support it.
+                ajave_engines::concurrency::Exploration::ExhaustiveNoViolation { .. } => {
+                    verdict::Verdict::True
+                }
+                // The search stopped at a violation of a different property, so
+                // it did not cover the space and cannot claim race freedom.
+                ajave_engines::concurrency::Exploration::Violation { .. }
+                | ajave_engines::concurrency::Exploration::Deadlock { .. } => {
+                    info!("no-data-race: search stopped at another property's violation");
+                    verdict::Verdict::Unknown
+                }
+                ajave_engines::concurrency::Exploration::Incomplete(why) => {
+                    info!("no-data-race: exploration incomplete — {why}");
                     verdict::Verdict::Unknown
                 }
             },

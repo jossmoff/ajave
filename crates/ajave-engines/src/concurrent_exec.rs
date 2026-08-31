@@ -1713,6 +1713,12 @@ impl<'a> Interp<'a> {
                         st.at = ProgramPoint { method: run, block: entry_block, index: 0 };
                         st.status = ThreadStatus::Runnable;
                     }
+                    // Submitting is a fork: everything the submitter has done
+                    // happens-before the task's first action. Without this the
+                    // task shares no history with anyone and every value it
+                    // touches looks racy -- including ones the submitter had
+                    // already initialised.
+                    self.hb.fork(tid.0, t.0);
                     self.executor_tasks.entry(recv.0).or_default().push(t);
 
                     // `submit` hands back a Future; `execute` returns nothing.

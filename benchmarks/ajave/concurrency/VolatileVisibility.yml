@@ -5,5 +5,7 @@ input_files:
 properties:
   - property_file: ../../properties/no-runtime-exception.prp
     expected_verdict: true
+  - property_file: ../../properties/no-data-race.prp
+    expected_verdict: true
 options:
   language: Java

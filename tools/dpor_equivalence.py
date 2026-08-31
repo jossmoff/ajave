@@ -28,7 +28,7 @@ for y in sorted(glob.glob("benchmarks/ajave/concurrency/*.yml")):
     d=read_yaml_task(y)
     if not d: continue
     for prop, exp in d["expected"].items():
-        cli={"valid-assert":"assert","no-runtime-exception":"no-runtime-exception","no-deadlock":"no-deadlock"}[prop]
+        cli={"valid-assert":"assert","no-runtime-exception":"no-runtime-exception","no-deadlock":"no-deadlock","no-data-race":"no-data-race"}[prop]
         out={}
         for mode in ("1","0"):
             env=dict(os.environ, AJAVE_DEADLOCK_EXHAUSTIVE=mode)
