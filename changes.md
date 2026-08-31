@@ -2,6 +2,86 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-01 — the concurrency completeness plan, phases 1-5
+
+Thirty-odd unsupported features turned out to be five missing *mechanisms*.
+Building the mechanisms closed the features in batches; building the features
+one at a time would have produced thirty special cases. All five landed, plus
+the two wrong answers they exposed on the way.
+
+### The mechanisms
+
+**Choice points.** The explorer's only nondeterminism was which thread runs
+next, so everything else had to be refused. A decision *tape* fixes that — the
+interpreter cannot ask the explorer anything mid-statement, so it signals that a
+decision is needed and leaves the program counter alone, the explorer appends
+one and re-runs the statement, and the second run reads it back. That is the
+same "do not advance, re-execute" contract parking already used. Consumers now:
+every timed operation, spurious wakeups, spurious weak-CAS failure, arbitrary
+`notify`/`signal` waiter selection, exact `nondetBoolean`, and stale reads.
+
+**Exception handling.** There was none: `Terminator::Throw` killed the thread and
+the lifter's `! exc:` edges were never followed, so `try`/`finally` around a lock
+worked only because nothing on the normal path throws.
+
+**Threads created at `start()`.** Bodies were already resolved from the object's
+real class; only the *allocation* was static, one identity per construction site.
+Creating the thread where it starts made where the object came from irrelevant,
+closing `extends Thread`, loops, factories, fields and collections at once.
+
+**Library models.** `ConcurrentHashMap`, `ThreadLocal`, `CompletableFuture`.
+
+**Weak memory**, in the one form that is both useful and honest: a racing read
+may observe the value the location held before the racing write. A *subset* of
+what the JMM permits, so it is usable in one direction only — a FALSE found this
+way is real, and no TRUE may rest on it.
+
+### The general lesson: nondeterminism is not one thing
+
+Six independent sources, each mapping to a bug class invisible without it. The
+ones that surprised me were the ones the *specification* grants and an
+implementation reliably hides:
+
+- `wait` may return spuriously (JLS 17.2.1) — which is *why* a wait must sit in a
+  loop, so a program guarding with `if` is incorrect because of it
+- `notify` wakes an arbitrary waiter — waking a fixed one makes the verdict
+  depend on the interpreter's iteration order rather than on the program
+- `weakCompareAndSet` may fail spuriously — that is what makes it cheap, and why
+  its contract demands a retry loop
+
+Two need a fairness bound, since the specification permits unboundedly many.
+`max_spurious` is 1, measured: every benchmark is decided there and 2 exhausts
+the state bound on a three-thread program.
+
+### Two wrong answers, both from pretending a mechanism away
+
+**Sequential engines were proving concurrent programs.** `Thread.start()` is not
+a call a sequential engine follows, so to one of them the thread never runs, and
+any obligation whose reachability depends on another thread's writes looks
+unreachable. smt-bmc "proved" the assertion in the canonical unsafe-publication
+bug on exactly that basis. The *violation* side of this blind spot was already
+handled — a sequential engine's candidate is refuted at replay — but nothing
+guarded the *proof* side, which is the more expensive direction. Now enforced at
+the blackboard's publish gate, beside the direction discipline it already
+applies, and free: the concurrency engine handles concurrent programs itself and
+the scored corpus has none.
+
+**Taint did not follow control flow.** A branch taken on a placeholder from a
+stepped-over call decides *which code runs*, and everything computed afterwards
+is conditioned on a guess even though no single variable in it is tainted. Two
+benchmarks reported FALSE against a ground truth of TRUE before the classes they
+exercise were modelled at all.
+
+### And one that only a deterministic search could show
+
+The explorer chose the next thread by iterating a `HashSet`, and Rust seeds
+hashers per process. `SleepIsNotSynchronization` returned FALSE or UNKNOWN across
+identical runs. Fixing it to `BTreeSet` then locked in the *unlucky* outcome,
+which exposed the real bug underneath: the race search returned at the first
+assertion violation, when under `no-data-race` an exception merely kills that
+thread and the program continues. Determinism did not just make results
+repeatable; it made a second defect visible.
+
 ## 2026-08-31 — DRF-SC: turning "we assume sequential consistency" into a checked condition
 
 The concurrency explorer only ever considered sequentially consistent

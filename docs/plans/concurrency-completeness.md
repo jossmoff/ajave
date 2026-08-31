@@ -178,13 +178,36 @@ best at — not shipping wrong answers.
 
 ## Sequencing
 
-| Phase | Mechanism | Unlocks | Risk |
-|---|---|---|---|
-| 1 | Choice points | all timed ops, #63, `tryAcquire` | low |
-| 2 | Exceptions | interrupts, `cancel`, throwing members, faithful `finally` | medium |
-| 3 | Dynamic threads | `extends Thread`, loops, factories, fields, pools | **high** |
-| 4 | Models as data | concurrent collections, `ThreadLocal`, `Phaser`, … (+ #67) | medium |
-| 5 | Weak memory | detecting reordering bugs | research |
+| Phase | Mechanism | Status |
+|---|---|---|
+| 1 | Choice points | **done** (#68 closed) |
+| 2 | Exceptions | **done** (#69 closed) |
+| 3 | Dynamic threads | **done** (#70 closed) |
+| 4 | Models as data | **coverage done**, refactor open (#71) |
+| 5 | Weak memory | **stale reads done**; the rest remains research |
+
+### What actually landed, against what was planned
+
+Phases 1–3 landed as designed. Two caveats worth keeping honest:
+
+**Phase 4 delivered the coverage, not the refactor.** `ConcurrentHashMap`,
+`ThreadLocal` and `CompletableFuture` are modelled, but `do_call` is still a long
+match rather than a table over an effect vocabulary. The refactor is the part
+that makes the *next* ten classes cheap and that #67 needs to order, so #71 stays
+open for it. `Phaser` and `ForkJoinPool` are still refused.
+
+**Phase 5 was scoped out and then partly done anyway.** The recommendation was to
+treat weak memory as a separate decision, because it is research and because it
+weakens certification. What landed is the narrow, one-directional slice: a racing
+read may observe the value the location held before the racing write. That is a
+subset of what the JMM permits, so a FALSE found this way is real while no TRUE
+may rest on it — and it is enough to find unsafe publication, which is *correct
+under sequential consistency* and so unreachable by interleaving search.
+
+The full model — reordering a thread's own writes, multiple stale values,
+committed executions — is not attempted, and the certification asymmetry stands:
+a JMM-permitted rare behaviour cannot be reproduced on a JVM, so the replay net
+is silent exactly there.
 
 Bounds (`max_threads: 4`) are raised as part of phase 3, since a dynamic thread
 count is what makes the bound meaningful rather than structural.
