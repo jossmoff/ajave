@@ -283,6 +283,9 @@ pub enum Exploration {
         obligation: ObligationId,
         method: MethodKey,
         schedule: Vec<ScheduleSlice>,
+        /// Decisions this execution needed, in order. Replaying the schedule
+        /// without them reaches a different state.
+        choices: Vec<u32>,
     },
     /// A reachable state where no thread can proceed and not all terminated.
     Deadlock { schedule: Vec<ScheduleSlice> },
@@ -504,6 +507,7 @@ impl<'a> Explorer<'a> {
             // actions that never both happened, which hides races.
             let saved_hb = interp.hb.clone();
             let saved_last_access = interp.last_access.clone();
+            let saved_choice_at = interp.choice_at;
             g2.schedule_step(tid);
 
             let step = interp.advance(&mut g2, tid);
@@ -522,10 +526,58 @@ impl<'a> Explorer<'a> {
             };
 
             match step {
+                // Nondeterminism inside a thread's own step, not between
+                // threads. Every alternative is enumerated -- no reduction
+                // applies, because these are outcomes of one transition rather
+                // than independent transitions that might commute.
+                //
+                // The decision is appended to the tape and the same thread is
+                // re-run; the thread's program counter did not move, so it
+                // re-executes the statement and reads the decision back.
+                Step::Choice(n) => {
+                    for alt in 0..n {
+                        interp.choices.push(alt);
+                        // Pushed like any other transition so the recursive
+                        // call gets its own depth. Without it the child reuses
+                        // the parent's `backtrack`/`done` slot and truncates it
+                        // away on return, and the parent then indexes past the
+                        // end. It carries no accesses, so it is independent of
+                        // everything and invisible to the dependency test --
+                        // which is right: a choice is not a memory action.
+                        self.stack.push(Transition {
+                            thread: tid,
+                            accesses: Vec::new(),
+                            enabled: enabled.clone(),
+                        });
+                        let found = self.explore(g2.clone(), interp);
+                        self.stack.pop();
+                        interp.choices.pop();
+                        if found.is_some() {
+                            interp.frames = saved_frames;
+                            interp.thread_objs = saved_objs;
+                            interp.runnable_objs = saved_runnables;
+                            return found;
+                        }
+                        // Each alternative starts from the same interpreter
+                        // state, or the second would inherit the first's.
+                        interp.frames = saved_frames.clone();
+                        interp.thread_objs = saved_objs.clone();
+                        interp.runnable_objs = saved_runnables.clone();
+                        interp.next_obj = saved_next_obj;
+                        interp.next_tid = saved_next_tid;
+                        interp.obj_class = saved_obj_class.clone();
+                        interp.interrupted = saved_interrupted.clone();
+                        interp.executor_tasks = saved_exec_tasks.clone();
+                        interp.hb = saved_hb.clone();
+                        interp.last_access = saved_last_access.clone();
+                        interp.choice_at = saved_choice_at;
+                    }
+                }
                 Step::Violated(oid, method) => {
                     return Some(Exploration::Violation {
                         obligation: oid,
                         method,
+                        choices: interp.choices.clone(),
                         schedule: g2.schedule.clone(),
                     })
                 }
@@ -556,6 +608,7 @@ impl<'a> Explorer<'a> {
                     interp.executor_tasks = saved_exec_tasks;
                     interp.hb = saved_hb;
                     interp.last_access = saved_last_access;
+                    interp.choice_at = saved_choice_at;
                     continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
@@ -584,6 +637,7 @@ impl<'a> Explorer<'a> {
             interp.executor_tasks = saved_exec_tasks;
             interp.hb = saved_hb;
             interp.last_access = saved_last_access;
+            interp.choice_at = saved_choice_at;
         }
 
         self.backtrack.truncate(depth);
@@ -685,6 +739,12 @@ fn build_initial_state(
                 // scheduler, so decline instead of claiming either verdict.
                 Step::Violated(..) => {
                     clinit_failed = Some(format!("{} violates a check", mk.class));
+                    break;
+                }
+                // Deciding this needs the search, which is not running yet.
+                Step::Choice(_) => {
+                    clinit_failed =
+                        Some(format!("{} depends on a nondeterministic choice", mk.class));
                     break;
                 }
             }
@@ -866,6 +926,7 @@ pub fn replay_schedule(
     entries: &[crate::threads::ThreadEntry],
     oref: &ObligationRef,
     schedule: &[ScheduleSlice],
+    choices: &[u32],
     bounds: Bounds,
 ) -> bool {
     // Same constructor the explorer used. Reconstructing the initial state
@@ -877,11 +938,18 @@ pub fn replay_schedule(
         Ok(g) => g,
         Err(_) => return false,
     };
+    // Replay the recorded decisions alongside the recorded interleaving. Both
+    // are needed: the same schedule with the other outcome of a timed wait
+    // reaches a different state.
+    interp.choices = choices.to_vec();
 
     // Follow the recorded interleaving exactly.
     for slice in schedule {
         for _ in 0..slice.steps {
             match interp.advance(&mut g, slice.thread) {
+                // The tape ran out, so this witness does not describe the
+                // execution it claims to. Refuse rather than pick an outcome.
+                Step::Choice(_) => return false,
                 Step::Violated(oid, ref m) => {
                     // Reproduced only if it is the *same* obligation. A
                     // different violation would mean the schedule reaches some
@@ -960,7 +1028,7 @@ impl Engine for ConcurrencyEngine {
                 // precondition of the proof rather than a separate question --
                 // see the DRF-SC note on the ExhaustiveNoViolation arm.
                 match explore_for(prog, &entries, self.bounds, Strategy::Dpor, false) {
-                    Exploration::Violation { obligation, method, schedule } => {
+                    Exploration::Violation { obligation, method, schedule, choices } => {
                         info!(
                             "concurrency: violation of {method}#{} under a {}-slice schedule",
                             obligation.0,
@@ -971,6 +1039,7 @@ impl Engine for ConcurrencyEngine {
                             nondet_sequence: Vec::new(),
                             entries: Vec::new(),
                             schedule,
+                            choices,
                         };
                         let published = _bb.publish(
                             self.id(),

@@ -126,6 +126,15 @@ pub enum Step {
     /// Ran to the next visible action (or terminated); explorer may switch.
     /// Carries what the step accessed, for DPOR's dependency test.
     Advanced(Vec<Access>),
+    /// The thread reached a decision the *program* does not determine, with
+    /// this many alternatives. The explorer must try each.
+    ///
+    /// Distinct from a thread interleaving: this is nondeterminism inside one
+    /// thread's step -- whether a timed wait expired, and later which write a
+    /// read observes. Unlike the interleaving choice it gets no partial-order
+    /// reduction, because the alternatives are not independent transitions that
+    /// might commute; they are different outcomes of the same one.
+    Choice(u32),
     /// Thread finished.
     Terminated,
     /// Could not proceed. `Some(monitor)` when the thread blocked trying to
@@ -237,6 +246,18 @@ pub struct Interp<'a> {
     pub last_access: HashMap<(u32, String), (Option<(u32, crate::vclock::VClock)>, Vec<(u32, crate::vclock::VClock)>)>,
     /// The first data race found, if any.
     pub race: Option<Race>,
+    /// Decisions taken on this path, in the order they were needed.
+    ///
+    /// A tape rather than a callback because the interpreter cannot ask the
+    /// explorer anything mid-statement: it signals that a decision is needed,
+    /// the explorer appends one and re-runs the statement, and the second run
+    /// reads it from here. The same "do not advance, re-execute" shape that
+    /// parking uses.
+    pub choices: Vec<u32>,
+    /// How much of the tape this path has consumed.
+    pub choice_at: usize,
+    /// Arity of a decision that was needed and not yet on the tape.
+    pub pending_choice: Option<u32>,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -266,6 +287,9 @@ impl<'a> Interp<'a> {
             hb: Default::default(),
             last_access: HashMap::new(),
             race: None,
+            choices: Vec::new(),
+            choice_at: 0,
+            pending_choice: None,
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -395,6 +419,12 @@ impl<'a> Interp<'a> {
                 Ok(None) => {}
                 Err(why) => return Step::Unsupported(why),
             }
+            // A decision the program does not determine: same contract as
+            // parking -- the statement is retried, not stepped past, once the
+            // explorer has chosen.
+            if let Some(n) = self.pending_choice.take() {
+                return Step::Choice(n);
+            }
             // A statement that parked the thread must be *retried*, not
             // stepped past. `monitorenter` says so by returning a `Step`, but a
             // modelled call cannot -- `do_call` returns a value -- so those
@@ -435,6 +465,22 @@ impl<'a> Interp<'a> {
     }
 
     /// Note what this statement touches, before executing it.
+    /// Take the next decision from the tape, or ask for one.
+    ///
+    /// `None` means "the explorer has not decided yet": the caller must leave
+    /// the program counter alone and return, and will be re-run once a decision
+    /// exists. Callers must therefore make the same sequence of `choose` calls
+    /// on the re-run, which holds for a deterministic model.
+    fn choose(&mut self, alternatives: u32) -> Option<u32> {
+        if self.choice_at < self.choices.len() {
+            let v = self.choices[self.choice_at];
+            self.choice_at += 1;
+            return Some(v);
+        }
+        self.pending_choice = Some(alternatives);
+        None
+    }
+
     /// Note a memory access, and report a race if this one is unordered with a
     /// conflicting earlier access.
     ///
@@ -1392,6 +1438,7 @@ impl<'a> Interp<'a> {
                 for t in g.threads.iter_mut() {
                     if t.status == (ThreadStatus::Waiting { monitor: recv }) && t.wait_depth == 0 {
                         t.status = ThreadStatus::Runnable;
+                        t.timed_wait = false;
                     }
                 }
             };
@@ -1420,10 +1467,32 @@ impl<'a> Interp<'a> {
                     return Ok(None);
                 }
                 ("java/util/concurrent/CountDownLatch", "await") => {
-                    // Only the untimed form. `await(long, TimeUnit)` can return
-                    // false on timeout, which is a behaviour we cannot decide.
+                    // Timed form: the timeout may or may not expire, and the
+                    // program does not decide which -- so it is a choice, not a
+                    // computation. Both outcomes occur on a real JVM.
+                    //
+                    // Expiry is only offered while the latch is still up. Once
+                    // the count reaches zero `await` returns true without
+                    // consulting the clock, so a timeout branch there would
+                    // invent a false the JVM cannot produce.
                     if target.desc != "()V" {
-                        return Err("unmodelled timed CountDownLatch.await".into());
+                        if get(g, "$count") == 0 {
+                            self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
+                            return Ok(Some(Val::Int(1)));
+                        }
+                        let Some(c) = self.choose(2) else {
+                            return Ok(None);
+                        };
+                        if c == 0 {
+                            // Timed out: returns false, holding no ordering.
+                            return Ok(Some(Val::Int(0)));
+                        }
+                        // Otherwise wait as the untimed form does, but flagged:
+                        // this thread's timeout will fire, so a state holding it
+                        // is not a deadlock even when nothing else can run.
+                        park(g);
+                        g.threads[ti].timed_wait = true;
+                        return Ok(None);
                     }
                     if get(g, "$count") == 0 {
                         self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
@@ -2285,6 +2354,7 @@ pub fn spawn_state(
     let body = prog.body(method)?;
     Some(ThreadState {
         wait_depth: 0,
+        timed_wait: false,
         id,
         at: ProgramPoint {
             method: method.clone(),

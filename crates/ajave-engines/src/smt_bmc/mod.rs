@@ -1139,6 +1139,7 @@ impl<'a> ExploreCtx<'a> {
             entries,
             // Sequential engine: no interleaving to record.
             schedule: Vec::new(),
+                choices: Vec::new(),
         }
     }
 }

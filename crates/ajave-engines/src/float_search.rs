@@ -491,7 +491,7 @@ impl Engine for FloatSearch {
         }
 
         info!("float-search: violation for {oref} after {evals} candidate runs");
-        let witness = Witness { nondet_sequence: seq, entries, schedule: Vec::new() };
+        let witness = Witness { nondet_sequence: seq, entries, schedule: Vec::new(), choices: Vec::new() };
         let _ = bb.publish(
             self.id(),
             Direction::Under,

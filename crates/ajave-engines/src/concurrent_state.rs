@@ -104,6 +104,13 @@ pub struct ThreadState {
     /// `wait` releases every acquisition and must restore exactly that many on
     /// wake (JLS 17.2.1). Restoring one would silently drop the outer locks.
     pub wait_depth: usize,
+    /// Parked inside a *timed* wait.
+    ///
+    /// Such a thread is never deadlocked: its timeout fires and it continues.
+    /// The continuation is explored as the other alternative of the same choice
+    /// point, so this flag exists only to stop the parked branch reporting a
+    /// deadlock the JVM cannot reach.
+    pub timed_wait: bool,
 }
 
 impl ThreadState {
@@ -273,7 +280,13 @@ impl GlobalState {
     /// `Blocked`) and a missed notify (all `Waiting`), which is why the two
     /// statuses are tracked separately.
     pub fn is_deadlocked(&self) -> bool {
-        !self.all_terminated() && self.runnable().is_empty() && !self.has_unstarted()
+        !self.all_terminated()
+            && self.runnable().is_empty()
+            && !self.has_unstarted()
+            // A thread waiting with a timeout will be released by that timeout,
+            // so a state holding one is not stuck. Counting it as a deadlock
+            // reported the timed variant of every wait as hanging.
+            && !self.threads.iter().any(|t| t.timed_wait)
     }
 
     /// Record that `thread` is about to run, extending the current slice or
@@ -361,6 +374,7 @@ mod tests {
             stack: Vec::new(),
             monitors: Vec::new(),
             wait_depth: 0,
+            timed_wait: false,
         }
     }
 

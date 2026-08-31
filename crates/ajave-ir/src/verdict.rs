@@ -151,6 +151,16 @@ pub struct Witness {
     /// therefore needs a different certifier, and until one exists a
     /// concurrency FALSE is weaker evidence than every other FALSE ajave emits.
     pub schedule: Vec<ScheduleSlice>,
+    /// Decisions the program itself does not determine, in the order the
+    /// execution needed them — whether a timed wait expired, and later which
+    /// write a read observed.
+    ///
+    /// A third independent source of nondeterminism alongside inputs and the
+    /// schedule. An execution that consulted one of these is not reproducible
+    /// from the schedule alone: replaying the same interleaving with the other
+    /// outcome reaches a different state, so the violation would not recur and
+    /// a correct FALSE would be discarded as unreproducible.
+    pub choices: Vec<u32>,
 }
 
 impl Witness {
@@ -160,6 +170,11 @@ impl Witness {
     /// go to `JvmReplay`, a scheduled one cannot.
     pub fn needs_schedule(&self) -> bool {
         !self.schedule.is_empty()
+    }
+
+    /// Did this execution depend on a decision the program does not make?
+    pub fn needs_choices(&self) -> bool {
+        !self.choices.is_empty()
     }
 }
 

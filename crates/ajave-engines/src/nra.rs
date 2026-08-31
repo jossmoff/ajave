@@ -821,6 +821,7 @@ fn build_witness_from_nondets(
         entries,
         // Sequential engine: no interleaving to record.
         schedule: Vec::new(),
+                choices: Vec::new(),
     })
 }
 
@@ -855,6 +856,7 @@ fn build_witness_direct(
         entries,
         // Sequential engine: no interleaving to record.
         schedule: Vec::new(),
+                choices: Vec::new(),
     })
 }
 

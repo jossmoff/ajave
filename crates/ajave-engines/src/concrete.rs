@@ -1015,6 +1015,7 @@ fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)
                 entries,
                 // Sequential engine: no interleaving to record.
                 schedule: Vec::new(),
+                choices: Vec::new(),
             },
         )]
     } else {

@@ -338,6 +338,7 @@ fn confirm_violations(
                 &entries,
                 &violation.obligation_ref,
                 &violation.witness.schedule,
+                &violation.witness.choices,
                 Default::default(),
             );
             if trace || ok {
