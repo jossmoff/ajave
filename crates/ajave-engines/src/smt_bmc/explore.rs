@@ -1149,6 +1149,22 @@ impl<'a> ExploreCtx<'a> {
             let feas = self.check_sat_with_path();
             log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
                 then_.0, self.body.key, feas, cond_tainted);
+            // `Unknown` means the solver could not decide whether this branch
+            // is reachable. Exploring it anyway is right -- refusing would miss
+            // bugs -- but the subtree it opens cannot support a claim of having
+            // covered everything, because we do not know the constraint we
+            // explored under is satisfiable.
+            //
+            // This is how `Pan_exceptionprone` became a wrong TRUE. A freshly
+            // allocated array's `!= null` came back Unknown, so BMC explored
+            // the impossible `== null` branch, every constraint below it was
+            // contradictory, both branches of the loop test came back Unsat,
+            // nothing was explored -- and `all_paths_complete` was still true,
+            // so 62 obligations including an unconditional out-of-bounds read
+            // were discharged as exhaustively proven.
+            if feas == SatResult::Unknown {
+                self.completeness.all_paths_complete = false;
+            }
             if feas != SatResult::Unsat {
                 self.explore_block_until(then_, 0, stop_at);
                 then_explored = true;
@@ -1167,11 +1183,24 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return = ir_before;
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
+        // Running out of budget mid-fork leaves one side of the branch
+        // unexplored, which is exactly the thing a completeness claim must not
+        // paper over.
+        if self.budget_exhausted() {
+            log::trace!("smt-bmc: fork-else bb{} in {} SKIPPED: budget exhausted",
+                else_.0, self.body.key);
+            self.completeness.all_paths_complete = false;
+        }
         if !self.budget_exhausted() {
             if cond_tainted { self.path_tainted = true; }
             if !cond_tainted {
                 self.path_constraints.push(cond_bool);
                 let feas = self.check_sat_with_path();
+                log::trace!("smt-bmc: fork-else bb{} in {} feas={:?}",
+                    else_.0, self.body.key, feas);
+                if feas == SatResult::Unknown {
+                    self.completeness.all_paths_complete = false;
+                }
                 if feas != SatResult::Unsat {
                     self.explore_block_until(else_, 0, stop_at);
                     else_explored = true;
@@ -1186,6 +1215,16 @@ impl<'a> ExploreCtx<'a> {
         let else_irs = self.inline_return_str;
         let else_irt = self.inline_return_tainted;
 
+        // Deliberately *not* clearing completeness when neither side is
+        // reachable. Both branches Unsat means the path condition that got here
+        // is contradictory, so no execution follows it and pruning is exactly
+        // right -- an infeasible path costs nothing to skip.
+        //
+        // The case that looked like it needed guarding here, a subtree silently
+        // lost because an earlier feasibility answer was wrong, is caught at
+        // its source instead: an undecided branch now clears completeness where
+        // the `Unknown` occurs. Measured on the smoke set, guarding here as
+        // well costs 5 correct answers and 10 points and prevents nothing.
         if then_explored || else_explored {
             self.restore_state(saved);
             let base_len = self.nondet_terms.len();

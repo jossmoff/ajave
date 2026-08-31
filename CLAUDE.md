@@ -4,7 +4,12 @@
 When implementing a new technique, engine, analysis, or any notable architectural decision, add a dated entry to `changes.md` describing what was done and why it's interesting. Focus on what would be worth mentioning in a paper: novel combinations, design trade-offs, performance insights, soundness arguments.
 
 ## Smoke Tests — MANDATORY before scoring
-Run `python3 tools/smoke_test.py` after building (`cargo build --release`) and BEFORE any full scoring run. Exit code 0 = safe to score, 1 = regressions detected. Takes ~3 minutes.
+Run `python3 tools/bench.py --set smoke --check` after building (`cargo build
+--release`) and BEFORE any full scoring run. Exit code 0 = safe to score, 1 =
+regressions detected. Takes ~1 minute.
+
+(`tools/smoke_test.py` was the old harness and is superseded by `bench.py`; the
+canary list now lives in `benchmarks/sets/smoke.set`.)
 
 ### When to add a smoke test
 Add a new entry to the `TESTS` list in `tools/smoke_test.py` when:
@@ -14,13 +19,18 @@ Add a new entry to the `TESTS` list in `tools/smoke_test.py` when:
 4. **Fixing a bug that caused UNKNOWN on a previously-correct benchmark** — add it to prevent re-breakage.
 
 ### How to add a smoke test
-1. Pick a benchmark `.yml` path from `sv-benchmarks/`.
-2. Choose an appropriate category string (e.g., `"exhaust-true"`, `"exceptions"`, `"canary"`, `"string"`, `"autostub"`).
-3. Set the expected verdict to the **known-correct** answer (`"TRUE"` or `"FALSE"`).
-4. Add the tuple to the `TESTS` list in the appropriate section.
-5. Run the smoke test to verify it passes.
+1. Pick a benchmark `.yml` path under `benchmarks/sv-comp/`.
+2. Add a line to `benchmarks/sets/smoke.set` under a comment naming the category.
+3. Name the property explicitly — entries are curated one property at a time,
+   because letting a task expand to every property it declares doubled the
+   runtime and changed what the gate covers.
+4. Run `tools/bench.py --set smoke` to verify.
 
-Format: `("category", "sv-benchmarks/path/to.yml", "EXPECTED_VERDICT"),`
+Format: `<path-relative-to-benchmarks>.yml <property>`
+
+The expected verdict comes from the task's own `.yml`, so a canary for a
+wrong-answer fix needs no separate assertion: it scores WRONG if the bug
+returns, and unproven if the fix is honest but imprecise.
 
 ### Rules
 - Keep the suite under 80 tests (~5 min). Quality over quantity.

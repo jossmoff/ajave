@@ -180,3 +180,11 @@ sv-comp/securibench/Basic11.yml valid-assert
 sv-comp/securibench/Basic4.yml valid-assert
 sv-comp/securibench/Inter1.yml valid-assert
 sv-comp/securibench/Inter5.yml valid-assert
+
+# canary: the only wrong TRUE the corpus ever produced (#51). BMC explored an
+# impossible branch after an undecided feasibility check, found every path
+# below it contradictory, explored nothing, and still discharged 62 obligations
+# -- including an unconditional out-of-bounds read -- as exhaustively proven.
+# Expected FALSE; UNKNOWN is honest and scores as unproven, TRUE means the
+# completeness claim has come back.
+sv-comp/argv-tasks/Pan_exceptionprone.yml no-runtime-exception
