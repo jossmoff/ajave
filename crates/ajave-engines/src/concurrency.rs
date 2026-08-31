@@ -86,15 +86,14 @@ impl std::fmt::Display for Refusal {
 /// cannot. For an Under engine that is a wrong FALSE, so their presence is a
 /// refusal rather than an approximation.
 const UNMODELLED_PRIMITIVES: &[&str] = &[
-    // ReentrantLock and the scalar atomics are modelled in `concurrent_exec`:
+    // ReentrantLock, the scalar atomics and the three basic synchronizers
+    // (CountDownLatch, Semaphore, CyclicBarrier) are modelled in
+    // `concurrent_exec`:
     // a lock is a monitor with a different spelling, and an atomic update is a
     // single transition on a synthetic `$value` field. Members outside what is
     // modelled there are refused individually, so an unmodelled `newCondition`
     // still declines rather than being silently ignored.
     "java/util/concurrent/locks/ReentrantReadWriteLock",
-    "java/util/concurrent/CountDownLatch",
-    "java/util/concurrent/CyclicBarrier",
-    "java/util/concurrent/Semaphore",
     "java/util/concurrent/Phaser",
     "java/util/concurrent/ExecutorService",
     "java/util/concurrent/CompletableFuture",

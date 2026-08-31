@@ -448,6 +448,25 @@ impl<'a> Interp<'a> {
                     });
                 }
             }
+            // A synchronizer operation reads and writes state shared by every
+            // party, so it must be dependent with every other operation on the
+            // same object or DPOR would commute a countDown past an await.
+            Stmt::Assign(_, Rvalue::Call { target, args, .. })
+                if matches!(
+                    target.class.as_str(),
+                    "java/util/concurrent/CountDownLatch"
+                        | "java/util/concurrent/Semaphore"
+                        | "java/util/concurrent/CyclicBarrier"
+                ) =>
+            {
+                if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
+                    out.push(Access::Field {
+                        obj: ObjId(r),
+                        name: "$sync".to_string(),
+                        write: true,
+                    });
+                }
+            }
             Stmt::Assign(_, Rvalue::Call { target, args, .. })
                 if target.class == "java/lang/Thread" =>
             {
@@ -799,6 +818,16 @@ impl<'a> Interp<'a> {
         // Not modelled: fairness, lockInterruptibly, newCondition, and the
         // timed tryLock. Those fall through and are refused, which is why the
         // class stays in UNMODELLED_PRIMITIVES for anything but these members.
+        // Invariant for every modelled call below: do not touch the frame's
+        // program counter. `advance` steps past the statement afterwards unless
+        // the call parked the thread, which it detects from the thread status.
+        //
+        // Advancing here breaks both directions. `Stmt::Assign` stores a
+        // returned value only while the frame has not moved, so a model that
+        // advanced first silently dropped its own result (`tryLock`'s boolean,
+        // `incrementAndGet`'s count) and the next read of it failed as an
+        // unknown operand; and a model that parked and advanced sent the thread
+        // past the very call it was blocked on.
         if target.class == "java/util/concurrent/locks/ReentrantLock" {
             let recv = match args.first().and_then(|a| self.eval(frame, a)) {
                 Some(Val::Ref(r)) if r != 0 => ObjId(r),
@@ -807,9 +836,6 @@ impl<'a> Interp<'a> {
             let ti = tid.0 as usize;
             match target.name.as_str() {
                 "<init>" => {
-                    if let Some(f) = self.frames[ti].last_mut() {
-                        f.at.index += 1;
-                    }
                     return Ok(None);
                 }
                 "lock" => {
@@ -823,9 +849,6 @@ impl<'a> Interp<'a> {
                             g.monitor_owner.insert(recv, tid);
                             g.threads[ti].status = ThreadStatus::Runnable;
                             g.threads[ti].enter(recv);
-                            if let Some(f) = self.frames[ti].last_mut() {
-                                f.at.index += 1;
-                            }
                             return Ok(None);
                         }
                     }
@@ -842,9 +865,6 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
-                    if let Some(f) = self.frames[ti].last_mut() {
-                        f.at.index += 1;
-                    }
                     return Ok(None);
                 }
                 "tryLock" if target.desc == "()Z" => {
@@ -857,16 +877,10 @@ impl<'a> Interp<'a> {
                         g.monitor_owner.insert(recv, tid);
                         g.threads[ti].enter(recv);
                     }
-                    if let Some(f) = self.frames[ti].last_mut() {
-                        f.at.index += 1;
-                    }
                     return Ok(Some(Val::Int(got as i64)));
                 }
                 "isLocked" => {
                     let locked = g.monitor_owner.contains_key(&recv);
-                    if let Some(f) = self.frames[ti].last_mut() {
-                        f.at.index += 1;
-                    }
                     return Ok(Some(Val::Int(locked as i64)));
                 }
                 _ => return Err(format!("unmodelled ReentrantLock.{}", target.name)),
@@ -893,7 +907,6 @@ impl<'a> Interp<'a> {
                 Some(Val::Ref(r)) if r != 0 => ObjId(r),
                 _ => return Err("unresolved atomic receiver".into()),
             };
-            let ti = tid.0 as usize;
             let key = (recv, "$value".to_string());
             let cur = g.heap.get(&key).map(|&(_, v)| v).unwrap_or(0);
             let arg = |i: usize| -> Option<i64> {
@@ -933,13 +946,6 @@ impl<'a> Interp<'a> {
             if let Some(v) = new {
                 g.heap.insert(key, (false, v));
             }
-            // Deliberately not advancing the frame here. `Stmt::Assign` only
-            // stores a result when the frame has not moved -- that is how it
-            // distinguishes "a call pushed a frame, assign on return" from "the
-            // value is ready now" -- so advancing first silently discarded the
-            // result and the next read of it failed as an unknown operand.
-            // The generic path in `advance` steps past the statement.
-            let _ = ti;
             return Ok(result.map(Val::Int));
         }
 
@@ -987,9 +993,6 @@ impl<'a> Interp<'a> {
                         // Now step past the call, so the caller's loop
                         // re-tests its condition -- which is exactly why a wait
                         // must be written as `while (!cond) wait();`.
-                        if let Some(f) = self.frames[ti].last_mut() {
-                            f.at.index += 1;
-                        }
                         return Ok(None);
                     }
 
@@ -1021,12 +1024,205 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
-                    if let Some(f) = self.frames[ti].last_mut() {
-                        f.at.index += 1;
-                    }
                     return Ok(None);
                 }
                 _ => unreachable!(),
+            }
+        }
+
+        // java.util.concurrent synchronizers: CountDownLatch, Semaphore,
+        // CyclicBarrier.
+        //
+        // All three park on `ThreadStatus::Waiting`, which `runnable()` never
+        // makes runnable on its own, so a party that is never released leaves
+        // the state with no runnable thread and unterminated threads -- exactly
+        // `is_deadlocked()`. The missing countDown, the exhausted permit and
+        // the absent third party are therefore all found by the existing
+        // deadlock check rather than by anything specific to these classes.
+        //
+        // Parking does not advance the program counter, so a released thread
+        // re-executes the same call and re-tests its condition. That makes
+        // `await` and `acquire` naturally idempotent under wake-ups and is why
+        // only the barrier needs extra state (below).
+        //
+        // The wait sets are shared with `Object.wait` but stay distinct because
+        // a `wait()` parks with `wait_depth >= 1` (the monitor levels it must
+        // restore) and these park with 0. Waking only `wait_depth == 0` threads
+        // means `synchronized (latch) { latch.wait(); }` cannot be woken by a
+        // `countDown`.
+        if matches!(
+            target.class.as_str(),
+            "java/util/concurrent/CountDownLatch"
+                | "java/util/concurrent/Semaphore"
+                | "java/util/concurrent/CyclicBarrier"
+        ) {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved synchronizer receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let arg = |i: usize| -> Option<i64> {
+                args.get(i).and_then(|a| self.eval(frame, a)).map(|v| match v {
+                    Val::Int(n) => n,
+                    Val::Ref(r) => r as i64,
+                })
+            };
+            let get = |g: &GlobalState, f: &str| -> i64 {
+                g.heap.get(&(recv, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+            };
+            let set = |g: &mut GlobalState, f: &str, v: i64| {
+                g.heap.insert((recv, f.to_string()), (false, v));
+            };
+            // Release every thread parked on this object by a synchronizer.
+            let wake_all = |g: &mut GlobalState| {
+                for t in g.threads.iter_mut() {
+                    if t.status == (ThreadStatus::Waiting { monitor: recv }) && t.wait_depth == 0 {
+                        t.status = ThreadStatus::Runnable;
+                    }
+                }
+            };
+            let park = |g: &mut GlobalState| {
+                g.threads[ti].status = ThreadStatus::Waiting { monitor: recv };
+            };
+
+            match (target.class.as_str(), target.name.as_str()) {
+                ("java/util/concurrent/CountDownLatch", "<init>") => {
+                    let n = arg(1).ok_or("latch count")?;
+                    if n < 0 {
+                        return Err("negative latch count".into());
+                    }
+                    set(g, "$count", n);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/CountDownLatch", "countDown") => {
+                    let c = get(g, "$count");
+                    if c > 0 {
+                        set(g, "$count", c - 1);
+                        if c - 1 == 0 {
+                            wake_all(g);
+                        }
+                    }
+                    return Ok(None);
+                }
+                ("java/util/concurrent/CountDownLatch", "await") => {
+                    // Only the untimed form. `await(long, TimeUnit)` can return
+                    // false on timeout, which is a behaviour we cannot decide.
+                    if target.desc != "()V" {
+                        return Err("unmodelled timed CountDownLatch.await".into());
+                    }
+                    if get(g, "$count") == 0 {
+                        return Ok(None);
+                    }
+                    park(g);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/CountDownLatch", "getCount") => {
+                    return Ok(Some(Val::Int(get(g, "$count"))));
+                }
+
+                ("java/util/concurrent/Semaphore", "<init>") => {
+                    set(g, "$permits", arg(1).ok_or("semaphore permits")?);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/Semaphore", "acquire")
+                | ("java/util/concurrent/Semaphore", "acquireUninterruptibly") => {
+                    let want = if target.desc.starts_with("(I)") {
+                        arg(1).ok_or("semaphore acquire count")?
+                    } else {
+                        1
+                    };
+                    let have = get(g, "$permits");
+                    if have >= want {
+                        set(g, "$permits", have - want);
+                        return Ok(None);
+                    }
+                    park(g);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/Semaphore", "release") => {
+                    let n = if target.desc.starts_with("(I)") {
+                        arg(1).ok_or("semaphore release count")?
+                    } else {
+                        1
+                    };
+                    set(g, "$permits", get(g, "$permits") + n);
+                    wake_all(g);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/Semaphore", "tryAcquire") if target.desc == "()Z" => {
+                    let have = get(g, "$permits");
+                    if have >= 1 {
+                        set(g, "$permits", have - 1);
+                        return Ok(Some(Val::Int(1)));
+                    }
+                    return Ok(Some(Val::Int(0)));
+                }
+                ("java/util/concurrent/Semaphore", "availablePermits") => {
+                    return Ok(Some(Val::Int(get(g, "$permits"))));
+                }
+
+                ("java/util/concurrent/CyclicBarrier", "<init>") => {
+                    // `CyclicBarrier(int, Runnable)` runs a barrier action on
+                    // the tripping thread. Executing it means pushing a frame
+                    // from inside a model, which this does not do, so refuse.
+                    if target.desc != "(I)V" {
+                        return Err("unmodelled CyclicBarrier barrier action".into());
+                    }
+                    let n = arg(1).ok_or("barrier parties")?;
+                    if n <= 0 {
+                        return Err("non-positive barrier parties".into());
+                    }
+                    set(g, "$parties", n);
+                    set(g, "$arrived", 0);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/CyclicBarrier", "await") => {
+                    if target.desc != "()I" {
+                        return Err("unmodelled timed CyclicBarrier.await".into());
+                    }
+                    // The barrier is the one synchronizer whose wait is not
+                    // idempotent: re-running `await` after release would count
+                    // the thread as arriving a second time. A per-thread
+                    // release flag marks "you already arrived and the barrier
+                    // tripped", which is the generation counter in miniature.
+                    let flag = format!("$released_{}", ti);
+                    if get(g, &flag) == 1 {
+                        set(g, &flag, 0);
+                        let idx = get(g, &format!("$idx_{}", ti));
+                        return Ok(Some(Val::Int(idx)));
+                    }
+                    let parties = get(g, "$parties");
+                    let arrived = get(g, "$arrived") + 1;
+                    // Arrival index: getParties()-1 for the first to arrive,
+                    // 0 for the last (the one that trips it).
+                    let idx = parties - arrived;
+                    set(g, &format!("$idx_{}", ti), idx);
+                    if arrived == parties {
+                        set(g, "$arrived", 0);
+                        for t in g.threads.iter() {
+                            if t.status == (ThreadStatus::Waiting { monitor: recv })
+                                && t.wait_depth == 0
+                            {
+                                let other = t.id.0 as usize;
+                                g.heap
+                                    .insert((recv, format!("$released_{}", other)), (false, 1));
+                            }
+                        }
+                        wake_all(g);
+                        return Ok(Some(Val::Int(idx)));
+                    }
+                    set(g, "$arrived", arrived);
+                    park(g);
+                    return Ok(None);
+                }
+                ("java/util/concurrent/CyclicBarrier", "getParties") => {
+                    return Ok(Some(Val::Int(get(g, "$parties"))));
+                }
+                ("java/util/concurrent/CyclicBarrier", "getNumberWaiting") => {
+                    return Ok(Some(Val::Int(get(g, "$arrived"))));
+                }
+
+                (c, m) => return Err(format!("unmodelled {}.{}", c.rsplit('/').next().unwrap_or(c), m)),
             }
         }
 
