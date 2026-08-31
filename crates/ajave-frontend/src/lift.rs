@@ -2056,6 +2056,14 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
             field.name.clone(),
             field.desc.clone(),
         ));
+        // ACC_VOLATILE (JVMS 4.5, table 4.5-A).
+        if field.access & 0x0040 != 0 {
+            prog.volatile_fields.insert(ajave_ir::FieldKey {
+                class: cf.this_class.clone(),
+                name: field.name.clone(),
+                desc: field.desc.clone(),
+            });
+        }
     }
 
     for m in &cf.methods {
@@ -2093,5 +2101,41 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod volatile_tests {
+    use super::*;
+    use crate::classfile::{ClassFile, Field};
+
+    fn cf_with(fields: Vec<Field>) -> ClassFile {
+        ClassFile {
+            cp: vec![],
+            this_class: "C".into(),
+            super_class: None,
+            interfaces: vec![],
+            fields,
+            methods: vec![],
+            bootstrap_methods: vec![],
+        }
+    }
+
+    #[test]
+    fn volatile_fields_are_recorded_and_plain_ones_are_not() {
+        // ACC_VOLATILE is 0x0040. The flag was dropped entirely until race
+        // detection needed it, so this pins that it survives lifting.
+        let mut prog = Program::default();
+        lift_class(
+            &cf_with(vec![
+                Field { name: "v".into(), desc: "I".into(), access: 0x0040 | 0x0008 },
+                Field { name: "plain".into(), desc: "I".into(), access: 0x0008 },
+            ]),
+            &mut prog,
+        );
+        let vol = ajave_ir::FieldKey { class: "C".into(), name: "v".into(), desc: "I".into() };
+        let plain = ajave_ir::FieldKey { class: "C".into(), name: "plain".into(), desc: "I".into() };
+        assert!(prog.volatile_fields.contains(&vol));
+        assert!(!prog.volatile_fields.contains(&plain));
     }
 }

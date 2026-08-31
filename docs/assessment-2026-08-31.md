@@ -110,7 +110,39 @@ the score above suggests it would not be an embarrassing debut. Prerequisites
 are mechanical: competition witness format, official validator, BenchExec
 integration.
 
-**As an empirical paper: there is one, and it is not about the engine.** The
+**As an empirical paper about the architecture: yes, and it is the strongest
+result here.** Measured 2026-08-31 over 1,716 of the 1,785 task-property pairs
+(the remainder timed out at 60s), counting how often execution-based
+certification changed the answer and in which direction:
+
+| | count |
+|---|---|
+| FALSE verdicts proposed by the portfolio | 792 |
+| ...refuted by certification, and **would have been wrong** | **131** |
+| ...refuted by certification, but were actually correct (recall lost) | 147 |
+| ...confirmed and kept | 514 |
+
+**16.5% of every FALSE the portfolio proposes is wrong, and execution-based
+certification catches all of them.** Without it the tool would ship ~131 wrong
+answers instead of 2; at −32 each that is ~4,200 points of penalty avoided
+against 147 points of recall given up.
+
+That is a quantified argument for a design principle: in a portfolio of
+under-approximating engines, *proposing* a violation and *establishing* one must
+be separate steps, and the second should be concrete execution rather than
+inspection of a witness. It also says something uncomfortable about tools that
+lack such a step, since nothing about our engines is unusually careless — the
+gap between "my search reached a violating state" and "this program really does
+that" is simply large. The Java setting is what makes the check cheap: we can
+run the actual program on the actual JVM.
+
+Caveats to state in any write-up: certification only guards FALSE, so the wrong
+TRUEs it cannot see (`Pan_exceptionprone`) remain; and for concurrency the
+refuter is our own interpreter replaying a schedule, which is weaker evidence
+than a JVM and is precisely what an independent schedule-witness validator would
+fix.
+
+**A second empirical paper, independent of the engine.** The
 measurement-discipline findings are unusually concrete and under-reported:
 verdicts that depended on `HashMap` iteration order; stale `/tmp` directories
 letting one run analyse another run's classes; a rebuild mid-run producing a
@@ -171,13 +203,18 @@ proposal is concrete, useful to everyone, and carries a paper.
 
 ### Ranking
 
-1. **SV-COMP 2027 entry + Java concurrency category proposal** (c). Highest
-   value, lowest risk, and (c) is a genuine unoccupied gap.
-2. **The empirical paper on litmus-vs-realistic validation** (a), with the
+1. **The certification result** (§3). The strongest and best-evidenced claim we
+   have, it is about the tool in general rather than concurrency, and the
+   experiment is already run.
+2. **SV-COMP 2027 entry + Java concurrency category proposal** (c). Highest
+   value per unit of risk, and (c) is a genuine unoccupied gap.
+3. **The empirical paper on litmus-vs-realistic validation** (a), with the
    approximation catalogue (b) as a section.
-3. **The measurement-discipline paper** (§3). Independent of concurrency; the
+4. **The measurement-discipline paper** (§3). Independent of concurrency; the
    evidence is already collected.
-4. **A technique paper on the engine.** Not recommended.
+5. **A technique paper on the engine as a whole.** Still not recommended — but
+   see #67, which proposes the one part of it with a real claim to being a
+   technique.
 
 ### What a reviewer will attack first
 

@@ -438,6 +438,15 @@ pub struct Program {
     /// Set of (class, field_name, field_desc) for fields declared by each class.
     /// Used to resolve field references to the declaring class.
     pub declared_fields: HashSet<(String, String, String)>,
+    /// Fields declared `volatile`.
+    ///
+    /// Dropped by the lifter until now, because under sequential consistency a
+    /// volatile field behaves exactly like an ordinary one and the flag has
+    /// nothing to say. It is not decoration: `volatile` is what turns an access
+    /// into a synchronising one, so it is the difference between a correct
+    /// handoff and a data race. Without it a race detector reports every
+    /// volatile publication as a race.
+    pub volatile_fields: HashSet<FieldKey>,
     pub entry: Option<MethodKey>,
     /// Does this program start a thread anywhere?
     ///
