@@ -14,8 +14,19 @@
 //!   bugs manifest with very few preemptions, so a small bound finds most bugs
 //!   at a fraction of the cost. It is a *completeness* bound, not a soundness
 //!   one — we may miss a bug needing more switches, never invent one.
-//! * **Steps per thread.** Bounded by `max_steps`, so a spinning thread cannot
-//!   consume the whole budget.
+//! * **Steps in one uninterrupted segment.** Bounded by `max_steps`. A thread
+//!   that diverges does so without reaching a visible action, so it spins
+//!   inside a single `advance` call; that call is where the guard belongs.
+//!
+//!   This budget used to be allocated once for the whole search and decremented
+//!   across every interleaving, so the cap meant to stop one spinning thread
+//!   was really a cap on total exploration. Programs that terminate perfectly
+//!   well ran out of it purely by having many interleavings, and a provable
+//!   TRUE degraded into UNKNOWN as the program grew rather than as it misbehaved.
+//! * **States explored.** Bounded by `max_states`, which is the honest place
+//!   for "this search is too big", now that it is no longer smuggled into the
+//!   step budget. Search depth is bounded with it: a thread that spins *with*
+//!   visible actions never diverges inside one segment, it just recurses.
 //! * **Live threads.** Bounded by `max_threads`.
 //!
 //! Every bound is a reason to answer UNKNOWN rather than TRUE. An explorer
@@ -142,6 +153,10 @@ pub struct Bounds {
     pub max_switches: u32,
     pub max_steps: u64,
     pub max_threads: usize,
+    /// Total states the search may visit before giving up.
+    pub max_states: u64,
+    /// Deepest schedule the search may build, bounding native stack use.
+    pub max_depth: usize,
 }
 
 impl Default for Bounds {
@@ -161,9 +176,48 @@ impl Default for Bounds {
         // could not have gone here. Still a completeness bound, never a
         // soundness one, and still fitted rather than derived (#50).
         Bounds {
-            max_switches: 10,
+            // Raised from 10, which was below what a three-thread program
+            // needs to be *exhausted*: BankTransferOrdered and
+            // DiningPhilosophersOrdered both deadlock-free, both reported
+            // UNKNOWN at 10 because the search hit the bound before finishing.
+            //
+            // Measured across the suite at 10/16/32/64: verdicts are identical
+            // from 16 upward and total runtime is flat at 4s, so above the
+            // threshold this is not a tuning knob -- DPOR and `max_states` are
+            // what actually bound the search. 32 leaves 2x headroom over the
+            // observed threshold at no measurable cost. Overridable via
+            // AJAVE_MAX_SWITCHES to re-run that sweep.
+            max_switches: 32,
             max_steps: 100_000,
             max_threads: 4,
+            // Resource bounds, not tuned to any benchmark: they exist so an
+            // unbounded search terminates. Both cost completeness only --
+            // exceeding either yields UNKNOWN, never a verdict.
+            max_states: 2_000_000,
+            max_depth: 4_000,
+        }
+    }
+
+}
+
+impl Bounds {
+    /// Defaults, with each bound overridable from the environment.
+    ///
+    /// These exist so the sensitivity of a result to its bounds can be measured
+    /// rather than asserted. A verdict that changes when a bound moves was
+    /// never a property of the program, and CLAUDE.md asks for exactly this
+    /// check on any constant chosen by watching benchmarks.
+    pub fn from_env() -> Bounds {
+        fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
+            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        }
+        let d = Bounds::default();
+        Bounds {
+            max_switches: var("AJAVE_MAX_SWITCHES", d.max_switches),
+            max_steps: var("AJAVE_MAX_STEPS", d.max_steps),
+            max_threads: var("AJAVE_MAX_THREADS", d.max_threads),
+            max_states: var("AJAVE_MAX_STATES", d.max_states),
+            max_depth: var("AJAVE_MAX_DEPTH", d.max_depth),
         }
     }
 }

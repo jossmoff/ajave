@@ -619,7 +619,9 @@ fn main() {
             Ok(entries) => match ajave_engines::concurrency::explore(
                 &prog,
                 &entries,
-                Default::default(),
+                // `from_env`, not `default`: the bounds are overridable so their
+                // effect on a verdict can be measured rather than assumed.
+                ajave_engines::concurrent_state::Bounds::from_env(),
                 // Switchable so the two strategies can be compared directly; see the
                 // equivalence test. AJAVE_DEADLOCK_EXHAUSTIVE=1 forces the
                 // unreduced baseline.

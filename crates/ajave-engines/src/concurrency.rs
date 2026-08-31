@@ -401,6 +401,14 @@ impl<'a> Explorer<'a> {
             return None;
         }
         self.explored += 1;
+        if self.explored > self.bounds.max_states {
+            self.incomplete = Some(format!("state bound {} reached", self.bounds.max_states));
+            return None;
+        }
+        if self.stack.len() > self.bounds.max_depth {
+            self.incomplete = Some(format!("depth bound {} reached", self.bounds.max_depth));
+            return None;
+        }
 
         if g.is_deadlocked() {
             return Some(Exploration::Deadlock {
@@ -829,7 +837,7 @@ impl ConcurrencyEngine {
     pub fn new() -> Self {
         ConcurrencyEngine {
             done: false,
-            bounds: Bounds::default(),
+            bounds: Bounds::from_env(),
         }
     }
 }
@@ -1016,9 +1024,14 @@ mod tests {
 
     #[test]
     fn unmodelled_primitive_refuses() {
-        // A CountDownLatch treated as a no-op would drop the ordering the
+        // A synchronizer treated as a no-op would drop the ordering the
         // program relies on, letting us produce interleavings the JVM cannot —
         // a wrong FALSE for an Under engine.
+        //
+        // Uses `Phaser`, which is genuinely unmodelled. This test named
+        // `CountDownLatch` until that was modelled, at which point it began
+        // asserting that a supported feature is refused; the mechanism under
+        // test is the refusal, so it needs a primitive still outside the model.
         let mut prog = Program::default();
         prog.bodies.insert(
             mk("Main", "main", "()V"),
@@ -1026,7 +1039,7 @@ mod tests {
                 vec![Stmt::Assign(
                     VarId(0),
                     Rvalue::Call {
-                        target: mk("java/util/concurrent/CountDownLatch", "await", "()V"),
+                        target: mk("java/util/concurrent/Phaser", "arriveAndAwaitAdvance", "()I"),
                         args: vec![Operand::Var(VarId(1))],
                         is_virtual: true,
                     },
@@ -1036,7 +1049,7 @@ mod tests {
         );
         match check_preconditions(&prog) {
             Err(Refusal::UnmodelledPrimitive(c)) => {
-                assert!(c.contains("CountDownLatch"))
+                assert!(c.contains("Phaser"))
             }
             other => panic!("expected UnmodelledPrimitive, got {other:?}"),
         }

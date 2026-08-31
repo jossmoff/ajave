@@ -175,6 +175,10 @@ pub struct Interp<'a> {
     /// Per-thread frame stacks, indexed by `ThreadId.0`.
     pub frames: Vec<Vec<Frame>>,
     /// Budget shared across all threads, so a spinning thread cannot hang us.
+    /// Maximum statements one uninterrupted thread segment may run. Applied
+    /// per `advance` call, and *not* carried across calls: a thread diverges
+    /// within a single segment, whereas exploring many interleavings is not
+    /// divergence and is bounded by `Bounds::max_states` instead.
     pub steps_left: u64,
     /// Locals holding a value invented for a call we could not model, per
     /// thread, and anything derived from one.
@@ -208,6 +212,8 @@ pub struct Interp<'a> {
     /// mapping `start()` and `join()` cannot tell *which* thread they refer
     /// to, and both would have to be no-ops.
     pub thread_objs: HashMap<u32, ThreadId>,
+    /// Class of each allocated object, for resolving a Runnable's `run()`.
+    pub obj_class: HashMap<u32, String>,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -231,6 +237,7 @@ impl<'a> Interp<'a> {
             tainted: Vec::new(),
             stepped_over: 0,
             thread_objs: HashMap::new(),
+            obj_class: HashMap::new(),
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -292,11 +299,14 @@ impl<'a> Interp<'a> {
     /// thread, so interleaving them would only enlarge the search.
     pub fn advance(&mut self, g: &mut GlobalState, tid: ThreadId) -> Step {
         let mut accesses: Vec<Access> = Vec::new();
+        let mut budget = self.steps_left;
         loop {
-            if self.steps_left == 0 {
-                return Step::Unsupported("step budget exhausted".into());
+            if budget == 0 {
+                return Step::Unsupported(
+                    "a thread ran too long without a visible action".into(),
+                );
             }
-            self.steps_left -= 1;
+            budget -= 1;
 
             let ti = match g.threads.iter().position(|t| t.id == tid) {
                 Some(i) => i,
@@ -642,9 +652,12 @@ impl<'a> Interp<'a> {
             Rvalue::Use(o) => self
                 .eval(frame, o)
                 .ok_or_else(|| format!("unknown operand {o:?}"))?,
-            Rvalue::New(_) => {
+            Rvalue::New(class) => {
                 let id = self.next_obj;
                 self.next_obj += 1;
+                // Remember the class: `start()` resolves a thread's body from
+                // the class of the Runnable it was actually given.
+                self.obj_class.insert(id, class.clone());
                 Val::Ref(id)
             }
             Rvalue::Bin(op, a, b) => {
@@ -762,6 +775,48 @@ impl<'a> Interp<'a> {
                     let Some(&target_tid) = self.thread_objs.get(&recv) else {
                         return Err("start() on an unrecognised Thread object".into());
                     };
+                    // A start() we cannot carry out must not be ignored. When
+                    // thread discovery under-counted threads this branch found
+                    // no state for the identity and fell through silently, so
+                    // the thread simply never ran and the explorer reported no
+                    // deadlock for `DiningPhilosophers`, whose cycle needs all
+                    // three. Silence on an unmodelled start is a wrong TRUE.
+                    if !g.threads.iter().any(|t| t.id == target_tid) {
+                        return Err(format!("start() on thread {} with no state", target_tid.0));
+                    }
+                    let obj = self.runnable_objs.get(&target_tid).copied();
+                    // Bind the body from the Runnable *object*, not from the
+                    // thread's position in the entry list. Entries are sorted
+                    // for determinism while identities are assigned in
+                    // construction order, so the two lists need not correspond
+                    // -- pairing them by index gave a thread another thread's
+                    // body whenever those orders differed.
+                    if let Some(o) = obj {
+                        if let Some(cls) = self.obj_class.get(&o).cloned() {
+                            let run = MethodKey {
+                                class: cls,
+                                name: "run".to_string(),
+                                desc: "()V".to_string(),
+                            };
+                            if self.prog.body(&run).is_some() {
+                                match self.initial_frame(&run, Some(Val::Ref(o))) {
+                                    Some(f) => {
+                                        self.frames[target_tid.0 as usize] = vec![f];
+                                        if let Some(t) =
+                                            g.threads.iter_mut().find(|t| t.id == target_tid)
+                                        {
+                                            t.at = ProgramPoint {
+                                                method: run.clone(),
+                                                block: self.prog.body(&run).unwrap().entry,
+                                                index: 0,
+                                            };
+                                        }
+                                    }
+                                    None => return Err(format!("no frame for {run}")),
+                                }
+                            }
+                        }
+                    }
                     if let Some(t) = g.threads.iter_mut().find(|t| t.id == target_tid) {
                         // Only now does the thread become schedulable. Before
                         // this it is NotStarted, so no interleaving can run
@@ -769,17 +824,15 @@ impl<'a> Interp<'a> {
                         if t.status == ThreadStatus::NotStarted {
                             t.status = ThreadStatus::Runnable;
                             // Bind the worker's `this` to the real object.
-                            if let Some(&obj) = self.runnable_objs.get(&target_tid) {
-                                if let Some(f) =
-                                    self.frames[target_tid.0 as usize].last_mut()
-                                {
+                            if let Some(o) = obj {
+                                if let Some(f) = self.frames[target_tid.0 as usize].last_mut() {
                                     if let Some(body) = self.prog.body(&f.at.method) {
                                         if let Some((idx, _)) =
                                             body.vars.iter().enumerate().find(|(_, vi)| {
                                                 matches!(vi.kind, ajave_ir::VarKind::Local(0))
                                             })
                                         {
-                                            f.locals.insert(VarId(idx as u32), Val::Ref(obj));
+                                            f.locals.insert(VarId(idx as u32), Val::Ref(o));
                                         }
                                     }
                                 }

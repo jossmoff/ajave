@@ -66,7 +66,12 @@ pub enum ThreadDiscovery {
 /// Anything else (a `Runnable` from a field, a factory, an array, a lambda that
 /// did not lift to a concrete class) yields `Unresolved`.
 pub fn discover(prog: &Program) -> ThreadDiscovery {
-    let mut entries = Vec::new();
+    // (declaring method, position within it, entry). Threads are identified at
+    // run time in construction order, so entries must preserve multiplicity;
+    // `prog.bodies` is a HashMap, so the pair is also what makes the order
+    // deterministic across runs.
+    let mut pending: Vec<(String, usize, ThreadEntry)> = Vec::new();
+    let mut ordinal: usize = 0;
     let mut saw_start = false;
 
     for (caller, body) in &prog.bodies {
@@ -132,7 +137,15 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                     }
                                 }
                                 Some(Operand::Const(Const::Null)) => {
-                                    // `new Thread(null)` — run() does nothing.
+                                    // `new Thread(null)` still consumes a
+                                    // thread identity at run time but has no
+                                    // body to give an entry, so the entry list
+                                    // and the identities would no longer
+                                    // correspond. Refuse rather than silently
+                                    // analyse the wrong number of threads.
+                                    return ThreadDiscovery::Unresolved(format!(
+                                        "{caller}: new Thread(null) has no body to model"
+                                    ));
                                 }
                                 None => {
                                     // `new Thread()`: a Thread subclass, so the
@@ -142,6 +155,26 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                     }
                                 }
                                 _ => {}
+                            }
+                            // One entry per construction. Two `new Thread(new W())`
+                            // are two threads even though both run `W.run`, so
+                            // the entry cannot be keyed on the run method.
+                            if let Some(cls) = alloc_runnable.get(&recv_alloc).cloned() {
+                                let run = MethodKey {
+                                    class: cls,
+                                    name: "run".to_string(),
+                                    desc: "()V".to_string(),
+                                };
+                                if prog.body(&run).is_none() {
+                                    return ThreadDiscovery::Unresolved(format!(
+                                        "{caller}: resolved thread body {run} has no lifted body"
+                                    ));
+                                }
+                                pending.push((caller.to_string(), ordinal, ThreadEntry {
+                                    run,
+                                    started_from: caller.clone(),
+                                }));
+                                ordinal += 1;
                             }
                         } else if target.class == "java/lang/Thread" && target.name == "start" {
                             saw_start = true;
@@ -173,10 +206,11 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                     "{caller}: resolved thread body {run} has no lifted body"
                                 ));
                             }
-                            entries.push(ThreadEntry {
-                                run,
-                                started_from: caller.clone(),
-                            });
+                            // The entry was recorded at construction; this
+                            // branch only checks that the body is resolvable
+                            // from here, and that a start() we cannot trace
+                            // refuses rather than being ignored.
+                            let _ = run;
                         }
                     }
                     _ => {}
@@ -188,9 +222,16 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
     if !saw_start {
         return ThreadDiscovery::Sequential;
     }
-    entries.sort_by(|a, b| a.run.to_string().cmp(&b.run.to_string()));
-    entries.dedup();
-    ThreadDiscovery::Resolved(entries)
+    // Sorted for determinism only. Which body each thread actually runs is
+    // decided at `start()` from the Runnable object itself, so this order no
+    // longer carries meaning -- it used to, and pairing a sorted list against
+    // construction-ordered identities gave one thread another's body.
+    //
+    // Deliberately no `dedup()`: it collapsed two threads running the same
+    // run() into one, so a program starting two identical workers was analysed
+    // as starting one. `TwoWorkersSameClass` was reported FALSE on that basis.
+    pending.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    ThreadDiscovery::Resolved(pending.into_iter().map(|(_, _, e)| e).collect())
 }
 
 #[cfg(test)]
