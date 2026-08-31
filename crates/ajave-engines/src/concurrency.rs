@@ -537,6 +537,15 @@ impl<'a> Explorer<'a> {
                 Step::Choice(n) => {
                     for alt in 0..n {
                         interp.choices.push(alt);
+                        // Recurse from `g`, not `g2`. `g2` already counted a
+                        // schedule step for the attempt that stopped to ask,
+                        // and that attempt did no work -- the statement is
+                        // retried. Carrying the phantom step into the recorded
+                        // schedule made witnesses unreplayable: replay has the
+                        // decision on the tape from the start, so the statement
+                        // completes on its first attempt and every later slice
+                        // is off by one.
+                        let g_retry = g.clone();
                         // Pushed like any other transition so the recursive
                         // call gets its own depth. Without it the child reuses
                         // the parent's `backtrack`/`done` slot and truncates it
@@ -549,7 +558,7 @@ impl<'a> Explorer<'a> {
                             accesses: Vec::new(),
                             enabled: enabled.clone(),
                         });
-                        let found = self.explore(g2.clone(), interp);
+                        let found = self.explore(g_retry, interp);
                         self.stack.pop();
                         interp.choices.pop();
                         if found.is_some() {

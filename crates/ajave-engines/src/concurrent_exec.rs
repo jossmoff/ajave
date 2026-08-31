@@ -417,7 +417,17 @@ impl<'a> Interp<'a> {
             match self.run_stmt(g, tid, &stmt, &frame) {
                 Ok(Some(step)) => return step,
                 Ok(None) => {}
-                Err(why) => return Step::Unsupported(why),
+                Err(why) => {
+                    // A decision needed from deep inside expression evaluation
+                    // unwinds as an error, because `eval` has no way to say
+                    // "ask the explorer". It is not a failure: the statement is
+                    // retried once a decision exists, exactly as for a model
+                    // that requests one directly.
+                    if let Some(n) = self.pending_choice.take() {
+                        return Step::Choice(n);
+                    }
+                    return Step::Unsupported(why);
+                }
             }
             // A decision the program does not determine: same contract as
             // parking -- the statement is retried, not stepped past, once the
@@ -954,6 +964,25 @@ impl<'a> Interp<'a> {
             Rvalue::Use(o) => self
                 .eval(frame, o)
                 .ok_or_else(|| format!("unknown operand {o:?}"))?,
+            // A nondeterministic input.
+            //
+            // `Verifier.nondetBoolean()` has exactly two values, so branching
+            // over both is *complete*: it supports a TRUE as well as a FALSE.
+            // The descriptor byte the lifter kept (`b'Z'`) is what makes that
+            // distinguishable from an int.
+            //
+            // Every wider type is deliberately left unsupported rather than
+            // sampled. Trying a handful of values would find some violations,
+            // but the exploration could no longer claim to have covered the
+            // input space, and picking which values to try from the program's
+            // own constants is the benchmark-fitting CLAUDE.md forbids. Those
+            // belong to the solving engines, which is what #63 tracks.
+            Rvalue::Nondet(_, Some(b'Z')) => {
+                let Some(c) = self.choose(2) else {
+                    return Err("$choice".into());
+                };
+                Val::Int(c as i64)
+            }
             Rvalue::New(class) => {
                 let id = self.next_obj;
                 self.next_obj += 1;
