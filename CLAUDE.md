@@ -138,6 +138,23 @@ Timings are noisy, and a baseline recorded on a loaded machine is inflated,
 which *masks* future slowdowns. Record baselines on an idle machine for the same
 reason scores are.
 
+### A killed process scores as a wrong-looking verdict, not as a timeout
+
+Contention does not only inflate timeout counts. Under load the harness's own
+process-group kills and memory pressure **terminate tasks by signal**, and
+`bench.py` scores `returncode < 0` as `ERROR` — which reads as a verdict change,
+not as noise.
+
+A valid-assert run scored 807 against 815 with **5 tasks going FALSE → ERROR**,
+while the timeout count *fell* (35 vs 39). The usual tell that a run is contended
+was therefore absent and it looked exactly like a code regression. All 5
+reproduced as FALSE individually; the machine had been at load 7.3 because a
+build and other benchmark sets were running alongside. The clean idle-gated
+re-run returned exactly 815/672.
+
+So: **run nothing else during a scoring run.** Snapshotting the binary makes a
+rebuild safe for *which* build is measured, and does nothing about this.
+
 ### The build under test must not change mid-run
 A scoring run invokes the binary once per task over many minutes. Rebuilding
 during that window swaps it underneath the run, so early tasks measure one build
