@@ -369,6 +369,13 @@ struct Explorer<'a> {
     backtrack: Vec<std::collections::BTreeSet<ThreadId>>,
     /// Threads already explored at each depth.
     done: Vec<std::collections::BTreeSet<ThreadId>>,
+    /// Looking for data races rather than obligation violations.
+    ///
+    /// Changes what a violation *means* to the search: under `no-data-race` an
+    /// assertion failure is not the answer, it is a thread dying. Returning at
+    /// the first one stopped the race search before it started, which is how a
+    /// program that plainly races reported UNKNOWN.
+    want_races: bool,
     explored: u64,
 }
 
@@ -607,6 +614,25 @@ impl<'a> Explorer<'a> {
                         interp.last_access = saved_last_access.clone();
                         interp.choice_at = saved_choice_at;
                         interp.spurious_used = saved_spurious;
+                    }
+                }
+                // Under `no-data-race` a violated obligation is not the
+                // answer. On a real JVM the exception propagates and kills that
+                // thread, so the search continues with the rest -- which is
+                // what lets a race later on the same path still be found.
+                Step::Violated(..) if self.want_races => {
+                    if let Some(t) = g2.threads.iter_mut().find(|t| t.id == tid) {
+                        t.status = crate::concurrent_state::ThreadStatus::Terminated;
+                    }
+                    self.stack.push(Transition {
+                        thread: tid,
+                        accesses: accesses.clone(),
+                        enabled: enabled.clone(),
+                    });
+                    let found = self.explore(g2, interp);
+                    self.stack.pop();
+                    if found.is_some() {
+                        return found;
                     }
                 }
                 Step::Violated(oid, method) => {
@@ -894,6 +920,7 @@ pub fn explore_for(
         backtrack: Vec::new(),
         done: Vec::new(),
         explored: 0,
+        want_races,
     };
     let result = ex.explore(g, &mut interp);
     if let Some(r) = &interp.race {
