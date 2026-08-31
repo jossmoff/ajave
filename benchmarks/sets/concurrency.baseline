@@ -18,9 +18,9 @@
 ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	correct	TRUE	0.6
 ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	0.7
 ajave/concurrency/DeadlockNeedsBlockedDependency.yml	no-deadlock	correct	FALSE	0.6
-ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	0.6
+ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	correct	TRUE	0.6
 ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	0.4
-ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.3
+ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.4
 ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	0.4
 ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	0.4
 ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	0.4

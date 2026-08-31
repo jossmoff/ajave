@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 
 use ajave_core::artifact::ProgramPoint;
+use ajave_models as models;
 use ajave_ir::verdict::ThreadId;
 use ajave_ir::{
     BinOp, BlockId, Body, Const, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt,
@@ -184,6 +185,14 @@ pub struct Interp<'a> {
     /// nothing to catch it: a wrong answer, not a precision loss. Checks whose
     /// condition is tainted therefore decline instead of reporting.
     pub tainted: Vec<std::collections::HashSet<VarId>>,
+    /// How many bodyless calls have been stepped over, of any purity.
+    ///
+    /// Separate from `skipped_calls`, which records only the ones that cost
+    /// completeness. Every stepped-over call needs its destination given a
+    /// placeholder and marked tainted, whether or not the callee was pure —
+    /// conflating the two left pure calls with an unassigned destination, and
+    /// the path died on "unknown operand" one statement later.
+    pub stepped_over: usize,
     /// Library calls with no body that were stepped over.
     ///
     /// Stepping over them lets an interleaving run to completion, which DPOR
@@ -220,6 +229,7 @@ impl<'a> Interp<'a> {
             steps_left: steps,
             skipped_calls: Vec::new(),
             tainted: Vec::new(),
+            stepped_over: 0,
             thread_objs: HashMap::new(),
             runnable_objs: HashMap::new(),
             next_tid: 1,
@@ -418,9 +428,9 @@ impl<'a> Interp<'a> {
         let ti = g.threads.iter().position(|t| t.id == tid).unwrap();
         match stmt {
             Stmt::Assign(v, rv) => {
-                let before = self.skipped_calls.len();
+                let before = self.stepped_over;
                 let val = self.eval_rvalue(g, tid, rv, frame)?;
-                let stepped_over = self.skipped_calls.len() > before;
+                let stepped_over = self.stepped_over > before;
                 let from_tainted = rvalue_operands(rv)
                     .iter()
                     .any(|o| matches!(o, Operand::Var(x) if self.is_tainted(tid, *x)));
@@ -621,9 +631,9 @@ impl<'a> Interp<'a> {
                 }
             }
             Rvalue::Call { target, args, .. } => {
-                let before = self.skipped_calls.len();
+                let before = self.stepped_over;
                 self.do_call(g, tid, target, args, frame)?;
-                if self.skipped_calls.len() > before {
+                if self.stepped_over > before {
                     // Stepped over an unmodelled call: the destination must not
                     // keep whatever it held before, or a later read sees a stale
                     // value and proceeds on it. Returning `None` here leaves it
@@ -741,9 +751,37 @@ impl<'a> Interp<'a> {
             // destination — `eval` then returns `None` for it and a check on it
             // declines rather than guessing.
             //
-            // The exploration is marked incomplete, so an exhausted search that
-            // stepped over a call cannot be mistaken for a proof.
-            self.skipped_calls.push(target.to_string());
+            // Whether this costs completeness depends on what the call does.
+            //
+            // A `Pure` call writes nothing we track, so it cannot affect what
+            // another thread observes and cannot change the schedule space.
+            // Stepping over it leaves the search complete, and recording it as
+            // a gap would refuse proofs for no reason: `GuardedNullDeref` is
+            // correctly synchronised and provable, and returned UNKNOWN only
+            // because `String.length()` had been stepped over.
+            //
+            // Anything else may write shared state, which does change what
+            // other threads can see, so the search no longer covers every
+            // behaviour and must not be reported as a proof.
+            //
+            // Note `Pure` means "writes nothing we track", not "cannot throw" —
+            // `String.charAt` is pure and throws on a bad index. That is safe
+            // here because the lifter seeds a precondition obligation *before*
+            // the call, so the throw is caught by a `Check` in the IR rather
+            // than by executing the callee. Stepping over the body therefore
+            // loses the callee's writes, which purity rules out, and nothing
+            // else.
+            //
+            // The judgement comes from `contract_of`, the single table the
+            // codebase already derives this from -- deliberately not a sixth
+            // private list, which is how issues #48 and #49 happened.
+            let pure = models::contract_of(&target.class, &target.name, &target.desc)
+                .map(|c| matches!(c.effect, models::Effect::Pure))
+                .unwrap_or(false);
+            self.stepped_over += 1;
+            if !pure {
+                self.skipped_calls.push(target.to_string());
+            }
             return Ok(());
         };
         if self.frames[tid.0 as usize].len() > 32 {
