@@ -210,6 +210,14 @@ pub struct Interp<'a> {
     /// nothing to catch it: a wrong answer, not a precision loss. Checks whose
     /// condition is tainted therefore decline instead of reporting.
     pub tainted: Vec<std::collections::HashSet<VarId>>,
+    /// Per thread: did this path branch on a value we invented?
+    ///
+    /// Tainting individual variables is not enough. A branch taken on a
+    /// placeholder from a stepped-over call decides *which code runs*, and
+    /// everything computed afterwards is conditioned on a guess even though no
+    /// single variable in it is tainted. A violation found there is not a
+    /// violation of the program.
+    pub path_tainted: Vec<bool>,
     /// How many bodyless calls have been stepped over, of any purity.
     ///
     /// Separate from `skipped_calls`, which records only the ones that cost
@@ -284,6 +292,7 @@ impl<'a> Interp<'a> {
             steps_left: steps,
             skipped_calls: Vec::new(),
             tainted: Vec::new(),
+            path_tainted: Vec::new(),
             stepped_over: 0,
             thread_objs: HashMap::new(),
             obj_class: HashMap::new(),
@@ -811,6 +820,8 @@ impl<'a> Interp<'a> {
                         | "java/util/concurrent/LinkedBlockingQueue"
                         | "java/util/concurrent/BlockingQueue"
                         | "java/util/concurrent/LinkedBlockingDeque"
+                        | "java/util/concurrent/ConcurrentHashMap"
+                        | "java/util/concurrent/ConcurrentMap"
                 ) || target
                     .class
                     .starts_with("java/util/concurrent/locks/ReentrantReadWriteLock") =>
@@ -988,8 +999,18 @@ impl<'a> Interp<'a> {
             Stmt::Check(oid) => {
                 let body = self.prog.body(&frame.at.method).unwrap();
                 let ob = body.obligation(*oid);
-                // Never report a violation that rests on an invented value.
+                // Never report a violation that rests on an invented value --
+                // directly, or by having reached this point down a branch taken
+                // on one.
                 if matches!(&ob.cond, Operand::Var(x) if self.is_tainted(tid, *x)) {
+                    return Ok(None);
+                }
+                if self
+                    .path_tainted
+                    .get(tid.0 as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     return Ok(None);
                 }
                 let holds = match &ob.cond {
@@ -2660,6 +2681,130 @@ impl<'a> Interp<'a> {
             }
         }
 
+        // ConcurrentHashMap.
+        //
+        // Entries live in the heap under `$k{key}` with a presence marker
+        // `$p{key}`, so "absent" is distinguishable from "present and zero".
+        // Keys are the concrete i64 the interpreter already has -- an object
+        // identity or an int -- which is exact for the reference and boxed
+        // keys real code uses.
+        //
+        // Every operation is a single transition, and that is the whole point
+        // of the class: `putIfAbsent` modelled as a get followed by a put would
+        // let two threads both find the key absent and both win, which is the
+        // race ConcurrentHashMap exists to prevent.
+        if target.class == "java/util/concurrent/ConcurrentHashMap"
+            || target.class == "java/util/concurrent/ConcurrentMap"
+        {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved map receiver".into()),
+            };
+            let argv: Vec<Option<i64>> = args
+                .iter()
+                .map(|a| {
+                    self.eval(frame, a).map(|v| match v {
+                        Val::Int(n) => n,
+                        Val::Ref(r) => r as i64,
+                    })
+                })
+                .collect();
+            let arg = |i: usize| -> Option<i64> { argv.get(i).copied().flatten() };
+            let present = |g: &GlobalState, k: i64| -> bool {
+                g.heap.get(&(recv, format!("$p{k}"))).map(|&(_, v)| v).unwrap_or(0) == 1
+            };
+            let value = |g: &GlobalState, k: i64| -> i64 {
+                g.heap.get(&(recv, format!("$k{k}"))).map(|&(_, v)| v).unwrap_or(0)
+            };
+            match target.name.as_str() {
+                "<init>" => return Ok(None),
+                "put" | "putIfAbsent" => {
+                    let k = arg(1).ok_or("map key")?;
+                    let v = arg(2).ok_or("map value")?;
+                    let had = present(g, k);
+                    let old = value(g, k);
+                    if target.name == "putIfAbsent" && had {
+                        return Ok(Some(Val::Ref(old as u32)));
+                    }
+                    g.heap.insert((recv, format!("$k{k}")), (false, v));
+                    g.heap.insert((recv, format!("$p{k}")), (false, 1));
+                    if !had {
+                        let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                        g.heap.insert((recv, "$n".to_string()), (false, n + 1));
+                    }
+                    // Both report the previous mapping, or null when absent.
+                    return Ok(Some(Val::Ref(if had { old as u32 } else { 0 })));
+                }
+                "get" => {
+                    let k = arg(1).ok_or("map key")?;
+                    return Ok(Some(Val::Ref(if present(g, k) { value(g, k) as u32 } else { 0 })));
+                }
+                "containsKey" => {
+                    let k = arg(1).ok_or("map key")?;
+                    return Ok(Some(Val::Int(present(g, k) as i64)));
+                }
+                "remove" if target.desc.starts_with("(Ljava/lang/Object;)") => {
+                    let k = arg(1).ok_or("map key")?;
+                    if !present(g, k) {
+                        return Ok(Some(Val::Ref(0)));
+                    }
+                    let old = value(g, k);
+                    g.heap.insert((recv, format!("$p{k}")), (false, 0));
+                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    g.heap.insert((recv, "$n".to_string()), (false, n - 1));
+                    return Ok(Some(Val::Ref(old as u32)));
+                }
+                "size" => {
+                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    return Ok(Some(Val::Int(n)));
+                }
+                "isEmpty" => {
+                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    return Ok(Some(Val::Int((n == 0) as i64)));
+                }
+                // `compute*` and `merge` take a lambda the interpreter would
+                // have to invoke from inside a model, which it cannot do.
+                other => return Err(format!("unmodelled ConcurrentHashMap.{other}")),
+            }
+        }
+
+        // ThreadLocal: one cell per thread, keyed by the thread's own id.
+        //
+        // Being per-thread is the entire semantics, and modelling it as a
+        // shared field would make two threads' writes race and let each read
+        // the other's value. It also means these accesses are *not* shared
+        // state, so they contribute nothing to the dependency relation.
+        if target.class == "java/lang/ThreadLocal" {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved ThreadLocal receiver".into()),
+            };
+            let cell = (recv, format!("$tl{}", tid.0));
+            match target.name.as_str() {
+                // `withInitial` and an overridden `initialValue` both supply a
+                // value by calling back into user code, which a model cannot do.
+                "<init>" => return Ok(None),
+                "set" => {
+                    let v = match args.get(1).and_then(|a| self.eval(frame, a)) {
+                        Some(Val::Ref(r)) => r as i64,
+                        Some(Val::Int(n)) => n,
+                        None => return Err("ThreadLocal value is unknown".into()),
+                    };
+                    g.heap.insert(cell, (false, v));
+                    return Ok(None);
+                }
+                "get" => {
+                    let v = g.heap.get(&cell).map(|&(_, v)| v).unwrap_or(0);
+                    return Ok(Some(Val::Ref(v as u32)));
+                }
+                "remove" => {
+                    g.heap.insert(cell, (false, 0));
+                    return Ok(None);
+                }
+                other => return Err(format!("unmodelled ThreadLocal.{other}")),
+            }
+        }
+
         let Some(body) = self.prog.body(target) else {
             // A library call with no body. Step over it and record that we did.
             //
@@ -2770,6 +2915,13 @@ impl<'a> Interp<'a> {
                 Ok(None)
             }
             Terminator::Branch { cond, then_, else_ } => {
+                if matches!(&cond, Operand::Var(x) if self.is_tainted(tid, *x)) {
+                    let ti = tid.0 as usize;
+                    while self.path_tainted.len() <= ti {
+                        self.path_tainted.push(false);
+                    }
+                    self.path_tainted[ti] = true;
+                }
                 let c = self
                     .eval(frame, &cond)
                     .ok_or_else(|| "unknown branch condition".to_string())?;

@@ -535,6 +535,7 @@ impl<'a> Explorer<'a> {
             let saved_last_access = interp.last_access.clone();
             let saved_choice_at = interp.choice_at;
             let saved_spurious = interp.spurious_used;
+            let saved_path_tainted = interp.path_tainted.clone();
             // Captured so a step that only stopped to ask a question can be
             // un-counted. See the `Step::Choice` arm.
             let sched_before = g2.schedule.clone();
@@ -623,6 +624,7 @@ impl<'a> Explorer<'a> {
                         interp.last_access = saved_last_access.clone();
                         interp.choice_at = saved_choice_at;
                         interp.spurious_used = saved_spurious;
+                    interp.path_tainted = saved_path_tainted.clone();
                     }
                 }
                 // Under `no-data-race` a violated obligation is not the
@@ -681,6 +683,7 @@ impl<'a> Explorer<'a> {
                     interp.last_access = saved_last_access;
                     interp.choice_at = saved_choice_at;
                     interp.spurious_used = saved_spurious;
+                    interp.path_tainted = saved_path_tainted.clone();
                     continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
@@ -711,6 +714,7 @@ impl<'a> Explorer<'a> {
             interp.last_access = saved_last_access;
             interp.choice_at = saved_choice_at;
             interp.spurious_used = saved_spurious;
+                    interp.path_tainted = saved_path_tainted.clone();
         }
 
         self.backtrack.truncate(depth);

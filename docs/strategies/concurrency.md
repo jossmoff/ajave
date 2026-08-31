@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — 80/84 of the concurrency suite, 0 wrong
+**Status:** working — 82/86 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
 library models), `concurrency.rs` (engine, precondition checks, DPOR)
@@ -461,7 +461,10 @@ easy and wrong, and the engine answers UNKNOWN instead.
 | Pool with fewer workers than tasks | **refused** — see below |
 | `AtomicReference` including CAS | modelled |
 | `ArrayBlockingQueue` / `LinkedBlockingQueue` put/take/offer/poll | modelled |
+| `ConcurrentHashMap` put/get/putIfAbsent/remove/size | modelled |
+| `ThreadLocal` get/set/remove | modelled |
 | `Phaser`, `ForkJoinPool`, `CompletableFuture` | **refused** |
+| `ConcurrentHashMap.compute*`/`merge`, `ThreadLocal.withInitial` | **refused** — they call back into user code |
 | Timed `await`, timed `poll`, `submit(Callable)` | **refused** |
 
 
