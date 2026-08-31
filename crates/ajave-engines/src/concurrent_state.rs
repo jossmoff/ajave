@@ -211,7 +211,11 @@ impl Default for Bounds {
             // exceeding either yields UNKNOWN, never a verdict.
             max_states: 2_000_000,
             max_depth: 4_000,
-            max_spurious: 2,
+            // 1, measured. Every spurious-behaviour benchmark is decided at
+            // 1 -- one wakeup is all it takes to break an `if` guard -- while 2
+            // exhausts the state bound on a three-thread wait/notify program.
+            // More budget buys no verdicts and costs whole searches.
+            max_spurious: 1,
         }
     }
 

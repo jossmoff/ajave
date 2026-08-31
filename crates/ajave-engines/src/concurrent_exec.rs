@@ -1671,13 +1671,40 @@ impl<'a> Interp<'a> {
                 // which the notifier still holds until it leaves the block.
                 "notify" | "notifyAll" => {
                     let all = target.name == "notifyAll";
-                    for t in g.threads.iter_mut() {
-                        if t.status == (ThreadStatus::Waiting { monitor: recv }) {
-                            t.status = ThreadStatus::Blocked { monitor: recv };
-                            if !all {
-                                break;
+                    let waiters: Vec<ThreadId> = g
+                        .threads
+                        .iter()
+                        .filter(|t| t.status == (ThreadStatus::Waiting { monitor: recv }))
+                        .map(|t| t.id)
+                        .collect();
+                    if all {
+                        for t in g.threads.iter_mut() {
+                            if t.status == (ThreadStatus::Waiting { monitor: recv }) {
+                                t.status = ThreadStatus::Blocked { monitor: recv };
                             }
                         }
+                        return Ok(None);
+                    }
+                    // `notify` wakes exactly one waiter and the JLS does not
+                    // say which. Waking a fixed one -- the first, as this did
+                    // -- makes the verdict depend on the interpreter's
+                    // iteration order rather than on the program: a signal that
+                    // reaches the wrong waiter is spent, and the thread that
+                    // needed it is stranded. That is the whole reason to prefer
+                    // notifyAll, and `NotifyMayWakeWrongWaiter` is built on it.
+                    //
+                    // Chosen before anything is mutated, so re-running the call
+                    // after the explorer decides is safe.
+                    let chosen = match waiters.len() {
+                        0 => return Ok(None),
+                        1 => waiters[0],
+                        n => match self.choose(n as u32) {
+                            None => return Ok(None),
+                            Some(i) => waiters[i as usize],
+                        },
+                    };
+                    if let Some(t) = g.threads.iter_mut().find(|t| t.id == chosen) {
+                        t.status = ThreadStatus::Blocked { monitor: recv };
                     }
                     return Ok(None);
                 }
