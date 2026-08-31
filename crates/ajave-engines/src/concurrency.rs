@@ -414,6 +414,35 @@ impl<'a> Explorer<'a> {
             }
             Strategy::Dpor => {
                 self.backtrack[depth].insert(enabled[0]);
+                // Also seed any enabled thread that has not run anywhere on
+                // this path.
+                //
+                // DPOR grows backtrack sets from *executed* transitions: it
+                // compares what a thread just did against the history. A thread
+                // that has never executed has no accesses to compare, so no
+                // dependency is ever found for it, so no backtrack point is
+                // created, so it never executes — a fixed point at "only ever
+                // run thread 0".
+                //
+                // Classic DPOR escapes this because the first interleaving is
+                // *maximal*: the running thread finishes and the others become
+                // the only enabled ones. That guarantee does not hold here,
+                // because an unmodellable construct can end a path early. In
+                // RacyNullDeref main walks into `String.length()`, which has no
+                // body, before it ever terminates — so the worker never took a
+                // turn, its write to `h.s` was never compared against main's
+                // read, and the race was unreachable by construction.
+                //
+                // Seeding a thread's first execution is a small
+                // over-approximation of the persistent set: it can explore an
+                // interleaving DPOR would have proved redundant, but it cannot
+                // miss one. `tools/dpor_equivalence.py` checks that against the
+                // unreduced baseline.
+                for t in &enabled {
+                    if !self.stack.iter().any(|tr| tr.thread == *t) {
+                        self.backtrack[depth].insert(*t);
+                    }
+                }
             }
         }
 
@@ -455,11 +484,26 @@ impl<'a> Explorer<'a> {
                     })
                 }
                 Step::Unsupported(why) => {
+                    // One unmodellable construct kills this *interleaving*, not
+                    // the search.
+                    //
+                    // `break` abandoned every remaining backtrack point at this
+                    // depth, so a single library call with no body stopped the
+                    // sibling schedules from ever being tried. RacyNullDeref
+                    // died exactly that way: the first interleaving read a
+                    // non-null `h.s` and walked into `String.length()`, which
+                    // has no body, and the interleaving where the worker writes
+                    // null *first* -- the one that raises the NPE -- was never
+                    // explored. Nine states, then silence.
+                    //
+                    // The run is still marked incomplete, so an exhausted
+                    // search cannot be mistaken for a proof. It simply carries
+                    // on with the other threads at this point.
                     self.incomplete = Some(why);
                     interp.frames = saved_frames;
                     interp.thread_objs = saved_objs;
                     interp.runnable_objs = saved_runnables;
-                    break;
+                    continue;
                 }
                 Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
                     if self.strategy == Strategy::Dpor {
@@ -566,6 +610,20 @@ pub fn explore(
         Some(found) => found,
         None => match ex.incomplete {
             Some(why) => Exploration::Incomplete(why),
+            // Stepping over an unmodelled call lets an interleaving finish,
+            // which DPOR needs, but the callee's effects were not modelled — so
+            // the search covered every *schedule* without covering every
+            // *behaviour*, and must not be reported as a proof.
+            None if !interp.skipped_calls.is_empty() => {
+                let mut names: Vec<String> = interp.skipped_calls.clone();
+                names.sort();
+                names.dedup();
+                Exploration::Incomplete(format!(
+                    "stepped over {} unmodelled call(s): {}",
+                    names.len(),
+                    names.join(", ")
+                ))
+            }
             None => Exploration::ExhaustiveNoViolation,
         },
     }

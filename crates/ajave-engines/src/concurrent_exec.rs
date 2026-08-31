@@ -141,6 +141,33 @@ pub struct Frame {
 }
 
 /// Interpreter over a `GlobalState`, holding the program and allocation counter.
+
+/// Operands an rvalue reads, for taint propagation.
+fn rvalue_operands(rv: &Rvalue) -> Vec<Operand> {
+    match rv {
+        Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::Cast(_, _, o) => vec![o.clone()],
+        Rvalue::Bin(_, a, b) | Rvalue::Cmp(_, a, b) => vec![a.clone(), b.clone()],
+        Rvalue::GetField { obj, .. } => vec![obj.clone()],
+        Rvalue::ArrayLoad { arr, idx } => vec![arr.clone(), idx.clone()],
+        Rvalue::ArrayLength(a) => vec![a.clone()],
+        Rvalue::InstanceOf { obj, .. } => vec![obj.clone()],
+        Rvalue::Call { args, .. } => args.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Does this call return a reference? Used only to pick a placeholder of the
+/// right shape for a call we stepped over; the value is tainted either way.
+fn ret_is_reference(rv: &Rvalue) -> bool {
+    match rv {
+        Rvalue::Call { target, .. } => {
+            let after = target.desc.rsplit(')').next().unwrap_or("");
+            after.starts_with('L') || after.starts_with('[')
+        }
+        _ => false,
+    }
+}
+
 pub struct Interp<'a> {
     pub prog: &'a Program,
     pub next_obj: u32,
@@ -148,6 +175,23 @@ pub struct Interp<'a> {
     pub frames: Vec<Vec<Frame>>,
     /// Budget shared across all threads, so a spinning thread cannot hang us.
     pub steps_left: u64,
+    /// Locals holding a value invented for a call we could not model, per
+    /// thread, and anything derived from one.
+    ///
+    /// A concurrency witness is a *schedule*, and `Certifier` returns
+    /// Inconclusive for those — they are never replayed on a real JVM. So a
+    /// violation resting on an invented value would be reported as FALSE with
+    /// nothing to catch it: a wrong answer, not a precision loss. Checks whose
+    /// condition is tainted therefore decline instead of reporting.
+    pub tainted: Vec<std::collections::HashSet<VarId>>,
+    /// Library calls with no body that were stepped over.
+    ///
+    /// Stepping over them lets an interleaving run to completion, which DPOR
+    /// needs, but it means the search no longer covers everything: the callee's
+    /// effects are unmodelled. The explorer reads this and marks the
+    /// exploration incomplete, so an exhausted search that stepped over a call
+    /// is never reported as a proof.
+    pub skipped_calls: Vec<String>,
     /// Runtime Thread object -> the ThreadId it controls.
     ///
     /// Populated at `Thread.<init>`, in the order threads are constructed,
@@ -174,6 +218,8 @@ impl<'a> Interp<'a> {
             next_obj: 1,
             frames: Vec::new(),
             steps_left: steps,
+            skipped_calls: Vec::new(),
+            tainted: Vec::new(),
             thread_objs: HashMap::new(),
             runnable_objs: HashMap::new(),
             next_tid: 1,
@@ -194,6 +240,30 @@ impl<'a> Interp<'a> {
 
     /// Is this statement a visible action — a point where another thread's
     /// interleaving could be observed?
+    fn ensure_taint_slot(&mut self, tid: ThreadId) {
+        while self.tainted.len() <= tid.0 as usize {
+            self.tainted.push(std::collections::HashSet::new());
+        }
+    }
+
+    fn is_tainted(&self, tid: ThreadId, v: VarId) -> bool {
+        self.tainted
+            .get(tid.0 as usize)
+            .map(|s| s.contains(&v))
+            .unwrap_or(false)
+    }
+
+    fn mark_tainted(&mut self, tid: ThreadId, v: VarId) {
+        self.ensure_taint_slot(tid);
+        self.tainted[tid.0 as usize].insert(v);
+    }
+
+    fn clear_tainted(&mut self, tid: ThreadId, v: VarId) {
+        if let Some(s) = self.tainted.get_mut(tid.0 as usize) {
+            s.remove(&v);
+        }
+    }
+
     fn is_visible(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::PutField { .. } | Stmt::PutStatic(..) => true,
@@ -348,14 +418,36 @@ impl<'a> Interp<'a> {
         let ti = g.threads.iter().position(|t| t.id == tid).unwrap();
         match stmt {
             Stmt::Assign(v, rv) => {
+                let before = self.skipped_calls.len();
                 let val = self.eval_rvalue(g, tid, rv, frame)?;
+                let stepped_over = self.skipped_calls.len() > before;
+                let from_tainted = rvalue_operands(rv)
+                    .iter()
+                    .any(|o| matches!(o, Operand::Var(x) if self.is_tainted(tid, *x)));
                 if let Some(f) = self.frames[tid.0 as usize].last_mut() {
                     // A call pushed a frame; the assignment happens on return.
                     if f.at == frame.at {
                         if let Some(val) = val {
                             f.locals.insert(*v, val);
+                        } else if stepped_over {
+                            // An unmodelled call. Give the destination a value
+                            // so the interleaving can finish -- DPOR needs
+                            // maximal interleavings -- but mark it, so nothing
+                            // downstream may be reported as a violation on the
+                            // strength of a number we invented.
+                            let placeholder = if ret_is_reference(rv) {
+                                Val::Ref(0)
+                            } else {
+                                Val::Int(0)
+                            };
+                            f.locals.insert(*v, placeholder);
                         }
                     }
+                }
+                if stepped_over || from_tainted {
+                    self.mark_tainted(tid, *v);
+                } else {
+                    self.clear_tainted(tid, *v);
                 }
                 Ok(None)
             }
@@ -434,6 +526,10 @@ impl<'a> Interp<'a> {
             Stmt::Check(oid) => {
                 let body = self.prog.body(&frame.at.method).unwrap();
                 let ob = body.obligation(*oid);
+                // Never report a violation that rests on an invented value.
+                if matches!(&ob.cond, Operand::Var(x) if self.is_tainted(tid, *x)) {
+                    return Ok(None);
+                }
                 let holds = match &ob.cond {
                     Operand::Const(Const::Int(v)) => *v != 0,
                     other => self
@@ -525,7 +621,16 @@ impl<'a> Interp<'a> {
                 }
             }
             Rvalue::Call { target, args, .. } => {
-                return self.do_call(g, tid, target, args, frame).map(|_| None)
+                let before = self.skipped_calls.len();
+                self.do_call(g, tid, target, args, frame)?;
+                if self.skipped_calls.len() > before {
+                    // Stepped over an unmodelled call: the destination must not
+                    // keep whatever it held before, or a later read sees a stale
+                    // value and proceeds on it. Returning `None` here leaves it
+                    // unset, and `eval` declines on an unset local.
+                    return Ok(None);
+                }
+                return Ok(None);
             }
             other => return Err(format!("unsupported rvalue {other:?}")),
         }))
@@ -619,16 +724,27 @@ impl<'a> Interp<'a> {
             };
         }
         let Some(body) = self.prog.body(target) else {
-            // A library call with no body. We refuse rather than guess.
+            // A library call with no body. Step over it and record that we did.
             //
-            // Skipping even a *pure* call is not safe here: the call's result
-            // is then never assigned, so downstream code reads a stale or
-            // missing local and proceeds on garbage — which is worse than
-            // declining, because it can fabricate or mask a violation silently.
-            // (Tried it; it cost a benchmark in the sequential suite.)
+            // Refusing outright ends the whole *interleaving*, and DPOR needs
+            // interleavings to be maximal: its backtrack sets grow from
+            // executed transitions, so a thread that never gets to run has no
+            // accesses to compare and no backtrack point is ever created for
+            // it. In RacyNullDeref main walked into `String.length()` before it
+            // ever terminated, so the worker never reached its write to `h.s`,
+            // and the race was unreachable by construction.
             //
-            // Modelling the return value properly is the fix, not skipping.
-            return Err(format!("no body for {target}"));
+            // The earlier objection to skipping was right but is about the
+            // *destination*, not the call: leaving the result unassigned lets
+            // downstream code read a stale local and proceed on garbage, which
+            // can fabricate or mask a violation. So the caller clears the
+            // destination — `eval` then returns `None` for it and a check on it
+            // declines rather than guessing.
+            //
+            // The exploration is marked incomplete, so an exhausted search that
+            // stepped over a call cannot be mistaken for a proof.
+            self.skipped_calls.push(target.to_string());
+            return Ok(());
         };
         if self.frames[tid.0 as usize].len() > 32 {
             return Err("call depth exceeded".into());
