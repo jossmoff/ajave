@@ -166,8 +166,25 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
                     Stmt::Assign(v, Rvalue::GetField { field, .. }) => {
                         var_field.insert(*v, field.clone());
                     }
+                    // A static field names a monitor exactly as an instance
+                    // field does, and `static final Object LOCK = new Object()`
+                    // is the commonest lock idiom in Java. Without this arm the
+                    // load traces to neither an allocation nor a field, the
+                    // monitor is called unresolved, and every program locking a
+                    // static was refused outright.
+                    //
+                    // Same ambiguity rule as instance fields: the identity is
+                    // unambiguous only if the field is written once
+                    // program-wide, which for a `static final` initialised in
+                    // `<clinit>` is exactly one `putstatic`.
+                    Stmt::Assign(v, Rvalue::GetStatic(fk)) => {
+                        var_field.insert(*v, fk.clone());
+                    }
                     Stmt::PutField { field, .. } => {
                         *field_writes.entry(field.clone()).or_insert(0) += 1;
+                    }
+                    Stmt::PutStatic(fk, _) => {
+                        *field_writes.entry(fk.clone()).or_insert(0) += 1;
                     }
                     Stmt::Assign(_, Rvalue::Call { target, .. }) => {
                         if UNMODELLED_PRIMITIVES.contains(&target.class.as_str()) {
@@ -581,11 +598,50 @@ pub fn explore(
     }
     interp.frames = frames;
 
+    // Give every static initialised from a `new` in `<clinit>` its own object.
+    //
+    // `<clinit>` is not executed here, so an uninitialised static reference
+    // reads as `Val::Ref(0)` -- null. Two distinct `static final Object` locks
+    // then denote the *same* object, and an AB/BA deadlock between them becomes
+    // unrepresentable: the explorer reported TRUE for a program that plainly
+    // deadlocks.
+    //
+    // Only fields whose initialiser is visibly a `new` are seeded. A static we
+    // cannot see initialised keeps its null reading, because assuming it
+    // non-null could discharge a null-dereference obligation that really can
+    // fire -- precision is worth less than a wrong TRUE.
+    let mut statics: std::collections::BTreeMap<(String, String), (bool, i64)> =
+        Default::default();
+    for (mk, body) in &prog.bodies {
+        if mk.name != "<clinit>" {
+            continue;
+        }
+        let mut from_new: std::collections::HashSet<ajave_ir::VarId> = Default::default();
+        for block in &body.blocks {
+            for st in &block.stmts {
+                match st {
+                    Stmt::Assign(v, Rvalue::New(_)) => {
+                        from_new.insert(*v);
+                    }
+                    Stmt::Assign(v, Rvalue::Use(Operand::Var(src))) if from_new.contains(src) => {
+                        from_new.insert(*v);
+                    }
+                    Stmt::PutStatic(fk, Operand::Var(src)) if from_new.contains(src) => {
+                        let id = interp.next_obj;
+                        interp.next_obj += 1;
+                        statics.insert((fk.class.clone(), fk.name.clone()), (true, id as i64));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let g = GlobalState {
         threads,
         monitor_owner: Default::default(),
         heap: Default::default(),
-        statics: Default::default(),
+        statics,
         schedule: Vec::new(),
         switches: 0,
     };
