@@ -25,6 +25,7 @@ mod str_eval;
 pub mod imc;
 pub mod interpolation;
 pub mod interval;
+pub mod math_interval;
 pub mod kinduction;
 pub mod nra;
 pub mod predicate;

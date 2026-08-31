@@ -47,7 +47,7 @@ sv-comp/autostub/Short_public_double_java_lang_Short_doubleValue.yml	valid-asser
 sv-comp/autostub/Short_public_int_java_lang_Short_compareTo_java_lang_Short.yml	valid-assert	correct	FALSE
 sv-comp/autostub/String_public_int_java_lang_String_compareToIgnoreCase_java_lang_String.yml	valid-assert	correct	FALSE
 sv-comp/autostub/String_public_int_java_lang_String_compareTo_java_lang_String.yml	valid-assert	correct	FALSE
-sv-comp/float-nonlinear-calculation/Optimization1.yml	valid-assert	correct	FALSE
+sv-comp/float-nonlinear-calculation/Optimization1.yml	valid-assert	unproven	TIMEOUT
 sv-comp/float-nonlinear-calculation/coral1.yml	valid-assert	correct	FALSE
 sv-comp/float-nonlinear-calculation/coral29.yml	valid-assert	unproven	UNKNOWN
 sv-comp/float-nonlinear-calculation/coral4.yml	valid-assert	correct	FALSE

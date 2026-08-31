@@ -804,6 +804,26 @@ impl IState {
             Rvalue::Nondet(Ty::Float | Ty::Double, _) | Rvalue::Havoc(Ty::Float | Ty::Double) => {
                 FloatInterval::top()
             }
+            // `java.lang.Math` bounds. Without these every call is `top`, and a
+            // program whose assertion rests on `Math.sin` cannot be proved no
+            // matter how precise the rest of the analysis is.
+            //
+            // `math_interval::eval` over-approximates and returns `top`
+            // wherever the call could produce NaN, so this cannot introduce an
+            // unsound narrowing.
+            Rvalue::Call { target, args, .. } => {
+                let ranges: Vec<crate::math_interval::Range> = args
+                    .iter()
+                    .map(|a| {
+                        let fi = self.eval_operand_float(a);
+                        crate::math_interval::Range::new(fi.lo, fi.hi)
+                    })
+                    .collect();
+                match crate::math_interval::eval(target, &ranges) {
+                    Some(r) if !r.is_top() => FloatInterval { lo: r.lo, hi: r.hi },
+                    _ => FloatInterval::top(),
+                }
+            }
             // Int-to-float cast: use the integer interval bounds.
             Rvalue::Use(Operand::Var(v)) => {
                 let iv = self.get(*v);
