@@ -93,7 +93,6 @@ const UNMODELLED_PRIMITIVES: &[&str] = &[
     // single transition on a synthetic `$value` field. Members outside what is
     // modelled there are refused individually, so an unmodelled `newCondition`
     // still declines rather than being silently ignored.
-    "java/util/concurrent/locks/ReentrantReadWriteLock",
     "java/util/concurrent/Phaser",
     "java/util/concurrent/CompletableFuture",
     "java/util/concurrent/ForkJoinPool",
@@ -569,25 +568,32 @@ impl<'a> Explorer<'a> {
     }
 }
 
-/// Explore every interleaving of `entries` plus the main thread.
-pub fn explore(
+/// Build the state every thread starts from: class initialisers run, thread
+/// states created, and `interp.frames` populated.
+///
+/// Shared by `explore` and `replay_schedule` deliberately. They had drifted:
+/// the explorer ran `<clinit>` and drew Runnable identities from the allocator
+/// while the replayer started with empty statics and a fixed `Ref(1000 + i)`
+/// base. A certifier that reconstructs a *different* initial state can only
+/// confirm violations in programs whose statics do not matter, and silently
+/// fails to reproduce every other one -- which reads as "the explorer was
+/// wrong" when it was the certifier that never saw the same program.
+fn build_initial_state(
     prog: &Program,
     entries: &[crate::threads::ThreadEntry],
     bounds: Bounds,
-    strategy: Strategy,
-) -> Exploration {
+    interp: &mut Interp,
+) -> Result<GlobalState, String> {
     let Some(entry) = prog.entry.clone() else {
-        return Exploration::Incomplete("no entry method".into());
+        return Err("no entry method".into());
     };
     if entries.len() + 1 > bounds.max_threads {
-        return Exploration::Incomplete(format!(
+        return Err(format!(
             "{} threads exceeds bound {}",
             entries.len() + 1,
             bounds.max_threads
         ));
     }
-
-    let mut interp = Interp::new(prog, bounds.max_steps);
     // Establish the static state by *running* `<clinit>`, not by guessing it.
     //
     // Class initialisers were previously approximated: a static whose
@@ -672,7 +678,7 @@ pub fn explore(
     // reading, which is exactly the unsound case above. Refuse rather than
     // explore a state we know is wrong.
     if let Some(why) = clinit_failed {
-        return Exploration::Incomplete(format!("could not run class initialiser: {why}"));
+        return Err(format!("could not run class initialiser: {why}"));
     }
 
     let mut threads = Vec::new();
@@ -685,7 +691,7 @@ pub fn explore(
     // start all threads before joining — a more faithful model needs start()
     // to spawn, which is the next refinement.
     let Some(main_state) = spawn_state(ThreadId(0), &entry, prog, true) else {
-        return Exploration::Incomplete("no body for entry".into());
+        return Err("no body for entry".into());
     };
     threads.push(main_state);
     frames.push(vec![interp.initial_frame(&entry, None).unwrap()]);
@@ -693,7 +699,7 @@ pub fn explore(
     for (i, e) in entries.iter().enumerate() {
         let tid = ThreadId(i as u32 + 1);
         let Some(st) = spawn_state(tid, &e.run, prog, false) else {
-            return Exploration::Incomplete(format!("no body for {}", e.run));
+            return Err(format!("no body for {}", e.run));
         };
         threads.push(st);
         // `this` for the Runnable: a fresh object identity. Drawn from the
@@ -705,18 +711,44 @@ pub fn explore(
         interp.next_obj += 1;
         match interp.initial_frame(&e.run, Some(this)) {
             Some(f) => frames.push(vec![f]),
-            None => return Exploration::Incomplete(format!("no frame for {}", e.run)),
+            None => return Err(format!("no frame for {}", e.run)),
         }
     }
     interp.frames = frames;
 
-    let g = GlobalState {
+    Ok(GlobalState {
         threads,
         monitor_owner: Default::default(),
         heap,
         statics,
         schedule: Vec::new(),
         switches: 0,
+    })
+
+}
+
+/// Explore every interleaving of `entries` plus the main thread.
+pub fn explore(
+    prog: &Program,
+    entries: &[crate::threads::ThreadEntry],
+    bounds: Bounds,
+    strategy: Strategy,
+) -> Exploration {
+    let Some(entry) = prog.entry.clone() else {
+        return Exploration::Incomplete("no entry method".into());
+    };
+    if entries.len() + 1 > bounds.max_threads {
+        return Exploration::Incomplete(format!(
+            "{} threads exceeds bound {}",
+            entries.len() + 1,
+            bounds.max_threads
+        ));
+    }
+
+    let mut interp = Interp::new(prog, bounds.max_steps);
+    let g = match build_initial_state(prog, entries, bounds, &mut interp) {
+        Ok(g) => g,
+        Err(why) => return Exploration::Incomplete(why),
     };
 
     let mut ex = Explorer {
@@ -782,43 +814,14 @@ pub fn replay_schedule(
     schedule: &[ScheduleSlice],
     bounds: Bounds,
 ) -> bool {
-    let Some(entry) = prog.entry.clone() else {
-        return false;
-    };
+    // Same constructor the explorer used. Reconstructing the initial state
+    // independently is how this certifier came to replay a program with empty
+    // statics against a schedule recorded on one whose class initialisers had
+    // run: it could not reproduce the violation, and the FALSE was discarded.
     let mut interp = Interp::new(prog, bounds.max_steps);
-    let mut threads = Vec::new();
-    let mut frames = Vec::new();
-
-    let Some(main_state) = spawn_state(ThreadId(0), &entry, prog, true) else {
-        return false;
-    };
-    threads.push(main_state);
-    let Some(mf) = interp.initial_frame(&entry, None) else {
-        return false;
-    };
-    frames.push(vec![mf]);
-
-    for (i, e) in entries.iter().enumerate() {
-        let tid = ThreadId(i as u32 + 1);
-        let Some(st) = spawn_state(tid, &e.run, prog, false) else {
-            return false;
-        };
-        threads.push(st);
-        let this = Val::Ref(1000 + i as u32);
-        match interp.initial_frame(&e.run, Some(this)) {
-            Some(f) => frames.push(vec![f]),
-            None => return false,
-        }
-    }
-    interp.frames = frames;
-
-    let mut g = GlobalState {
-        threads,
-        monitor_owner: Default::default(),
-        heap: Default::default(),
-        statics: Default::default(),
-        schedule: Vec::new(),
-        switches: 0,
+    let mut g = match build_initial_state(prog, entries, bounds, &mut interp) {
+        Ok(g) => g,
+        Err(_) => return false,
     };
 
     // Follow the recorded interleaving exactly.

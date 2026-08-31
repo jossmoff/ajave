@@ -489,7 +489,9 @@ impl<'a> Interp<'a> {
                         | "java/util/concurrent/LinkedBlockingQueue"
                         | "java/util/concurrent/BlockingQueue"
                         | "java/util/concurrent/LinkedBlockingDeque"
-                ) =>
+                ) || target
+                    .class
+                    .starts_with("java/util/concurrent/locks/ReentrantReadWriteLock") =>
             {
                 if let Some(Val::Ref(r)) = args.first().and_then(|a| self.eval(frame, a)) {
                     out.push(Access::Field {
@@ -1796,6 +1798,151 @@ impl<'a> Interp<'a> {
                     )))
                 }
                 other => return Err(format!("unmodelled BlockingQueue.{other}")),
+            }
+        }
+
+        // ReentrantReadWriteLock.
+        //
+        // `readLock()` and `writeLock()` return view objects; all the state
+        // lives on the parent, keyed `$readers`, `$r{tid}` (per-thread read
+        // holds, for reentrancy), `$writer` (owning tid + 1, 0 for none) and
+        // `$wcount`. Views may therefore be allocated fresh per call, which is
+        // what `rw.readLock().lock()` ... `rw.readLock().unlock()` needs.
+        //
+        // The grant rules are the whole model:
+        //   read  -- no writer, or I am the writer (downgrade is allowed)
+        //   write -- no readers at all, and no other writer
+        //
+        // "No readers at all" is what makes upgrading deadlock, without any
+        // special case for it: a thread holding the read lock is itself a
+        // reader, so it waits for a lock only it could release. The Javadoc is
+        // explicit that upgrading is not supported, and this is why.
+        //
+        // Modelling the read lock as exclusive would be the tempting
+        // simplification and is unsound in the expensive direction: it
+        // serialises two readers and hides a real race, a wrong TRUE.
+        // ReadWriteLockConcurrentReaders exists to catch exactly that.
+        if target.class.starts_with("java/util/concurrent/locks/ReentrantReadWriteLock") {
+            let recv = match args.first().and_then(|a| self.eval(frame, a)) {
+                Some(Val::Ref(r)) if r != 0 => ObjId(r),
+                _ => return Err("unresolved ReentrantReadWriteLock receiver".into()),
+            };
+            let ti = tid.0 as usize;
+            let is_view = target.class.contains('$');
+            // A view delegates to its parent; the parent is its own subject.
+            let parent = if is_view {
+                match g.heap.get(&(recv, "$rwlock".to_string())) {
+                    Some(&(_, v)) if v != 0 => ObjId(v as u32),
+                    _ => return Err("read/write lock view has no parent".into()),
+                }
+            } else {
+                recv
+            };
+            let get = |g: &GlobalState, f: &str| -> i64 {
+                g.heap.get(&(parent, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+            };
+            let set = |g: &mut GlobalState, f: &str, v: i64| {
+                g.heap.insert((parent, f.to_string()), (false, v));
+            };
+            let wake_all = |g: &mut GlobalState| {
+                for t in g.threads.iter_mut() {
+                    if t.status == (ThreadStatus::Waiting { monitor: parent }) && t.wait_depth == 0
+                    {
+                        t.status = ThreadStatus::Runnable;
+                    }
+                }
+            };
+            let mine = tid.0 as i64 + 1;
+            let my_reads = format!("$r{ti}");
+
+            if !is_view {
+                match target.name.as_str() {
+                    "<init>" => return Ok(None),
+                    "readLock" | "writeLock" => {
+                        let id = self.next_obj;
+                        self.next_obj += 1;
+                        let cls = if target.name == "readLock" {
+                            "java/util/concurrent/locks/ReentrantReadWriteLock$ReadLock"
+                        } else {
+                            "java/util/concurrent/locks/ReentrantReadWriteLock$WriteLock"
+                        };
+                        self.obj_class.insert(id, cls.to_string());
+                        g.heap
+                            .insert((ObjId(id), "$rwlock".to_string()), (false, parent.0 as i64));
+                        return Ok(Some(Val::Ref(id)));
+                    }
+                    other => {
+                        return Err(format!("unmodelled ReentrantReadWriteLock.{other}"))
+                    }
+                }
+            }
+
+            let writing = target.class.ends_with("$WriteLock");
+            match target.name.as_str() {
+                "lock" | "lockInterruptibly" => {
+                    if writing {
+                        let writer = get(g, "$writer");
+                        if get(g, "$readers") > 0 || (writer != 0 && writer != mine) {
+                            g.threads[ti].status = ThreadStatus::Waiting { monitor: parent };
+                            return Ok(None);
+                        }
+                        set(g, "$writer", mine);
+                        set(g, "$wcount", get(g, "$wcount") + 1);
+                        return Ok(None);
+                    }
+                    let writer = get(g, "$writer");
+                    if writer != 0 && writer != mine {
+                        g.threads[ti].status = ThreadStatus::Waiting { monitor: parent };
+                        return Ok(None);
+                    }
+                    set(g, "$readers", get(g, "$readers") + 1);
+                    let n = get(g, &my_reads) + 1;
+                    set(g, &my_reads, n);
+                    return Ok(None);
+                }
+                "unlock" => {
+                    if writing {
+                        if get(g, "$writer") != mine {
+                            return Err("write unlock without holding the write lock".into());
+                        }
+                        let n = get(g, "$wcount") - 1;
+                        set(g, "$wcount", n);
+                        if n == 0 {
+                            set(g, "$writer", 0);
+                        }
+                        wake_all(g);
+                        return Ok(None);
+                    }
+                    if get(g, &my_reads) <= 0 {
+                        return Err("read unlock without holding the read lock".into());
+                    }
+                    set(g, &my_reads, get(g, &my_reads) - 1);
+                    let r = get(g, "$readers") - 1;
+                    set(g, "$readers", r);
+                    if r == 0 {
+                        wake_all(g);
+                    }
+                    return Ok(None);
+                }
+                "tryLock" if target.desc == "()Z" => {
+                    if writing {
+                        let writer = get(g, "$writer");
+                        if get(g, "$readers") > 0 || (writer != 0 && writer != mine) {
+                            return Ok(Some(Val::Int(0)));
+                        }
+                        set(g, "$writer", mine);
+                        set(g, "$wcount", get(g, "$wcount") + 1);
+                        return Ok(Some(Val::Int(1)));
+                    }
+                    let writer = get(g, "$writer");
+                    if writer != 0 && writer != mine {
+                        return Ok(Some(Val::Int(0)));
+                    }
+                    set(g, "$readers", get(g, "$readers") + 1);
+                    set(g, &my_reads, get(g, &my_reads) + 1);
+                    return Ok(Some(Val::Int(1)));
+                }
+                other => return Err(format!("unmodelled read/write lock .{other}")),
             }
         }
 
