@@ -15,19 +15,20 @@
 # handing the slow ones extra time would make our score stop
 # predicting competition performance.
 # Format: <task>\t<property>\t<outcome>\t<verdict>\t<seconds>
-ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	unproven	UNKNOWN	1.4
-ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	1.4
-ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	1.4
-ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	1.3
-ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	1.3
-ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	1.4
-ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	1.1
-ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	1.0
-ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	1.1
-ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN	1.1
-ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	1.1
-ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	1.1
-ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.9
-ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.9
-ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.9
-ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.9
+ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	correct	TRUE	0.6
+ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	0.7
+ajave/concurrency/DeadlockNeedsBlockedDependency.yml	no-deadlock	correct	FALSE	0.7
+ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	0.6
+ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	0.4
+ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.3
+ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	0.4
+ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	0.4
+ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	0.4
+ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	unproven	UNKNOWN	0.4
+ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN	0.4
+ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	0.4
+ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	0.4
+ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.4
+ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.4
+ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.4
+ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.2

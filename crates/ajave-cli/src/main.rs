@@ -620,7 +620,14 @@ fn main() {
                 &prog,
                 &entries,
                 Default::default(),
-                ajave_engines::concurrency::Strategy::Exhaustive,
+                // Switchable so the two strategies can be compared directly; see the
+                // equivalence test. AJAVE_DEADLOCK_EXHAUSTIVE=1 forces the
+                // unreduced baseline.
+                if std::env::var("AJAVE_DEADLOCK_EXHAUSTIVE").map(|v| v == "1").unwrap_or(false) {
+                    ajave_engines::concurrency::Strategy::Exhaustive
+                } else {
+                    ajave_engines::concurrency::Strategy::Dpor
+                },
             ) {
                 ajave_engines::concurrency::Exploration::Deadlock { schedule } => {
                     if cli.trace {

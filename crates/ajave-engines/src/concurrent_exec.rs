@@ -115,8 +115,16 @@ pub enum Step {
     Advanced(Vec<Access>),
     /// Thread finished.
     Terminated,
-    /// Could not acquire a monitor; thread is now `Blocked`.
-    Blocked,
+    /// Could not proceed. `Some(monitor)` when the thread blocked trying to
+    /// acquire that monitor; `None` for a `join` waiting on another thread.
+    ///
+    /// The monitor is carried because DPOR needs it. A blocked acquire is
+    /// *dependent* with whoever holds or will acquire the same monitor — that
+    /// dependency is the whole reason the deadlocking interleaving exists — and
+    /// without it the backtrack computation never creates the point that would
+    /// explore the other acquire order. That is why no-deadlock previously had
+    /// to run unreduced.
+    Blocked(Option<ObjId>),
     /// An obligation's condition evaluated false.
     Violated(ObligationId, MethodKey),
     /// A construct this interpreter does not model.
@@ -227,7 +235,8 @@ impl<'a> Interp<'a> {
                     .map(|t| t.status == ThreadStatus::Terminated)
                     .unwrap_or(true);
                 if !done {
-                    return Step::Blocked;
+                    // Waiting on a thread, not a monitor.
+                    return Step::Blocked(None);
                 }
                 g.threads[ti].status = ThreadStatus::Runnable;
                 if let Some(f) = self.frames[tid.0 as usize].last_mut() {
@@ -386,7 +395,7 @@ impl<'a> Interp<'a> {
                         g.threads[ti].status = ThreadStatus::Blocked { monitor: m };
                         // Do NOT advance past the monitorenter: the thread
                         // must retry it once the monitor frees.
-                        return Ok(Some(Step::Blocked));
+                        return Ok(Some(Step::Blocked(Some(m))));
                     }
                     _ => {
                         g.monitor_owner.insert(m, tid);

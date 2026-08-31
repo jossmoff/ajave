@@ -434,6 +434,15 @@ impl<'a> Explorer<'a> {
             let step = interp.advance(&mut g2, tid);
             let accesses = match &step {
                 Step::Advanced(a) => a.clone(),
+                // A blocked acquire is a monitor access for dependency
+                // purposes. It did not take the lock, but it *contended* for
+                // it, and that contention is dependent with whoever holds or
+                // acquires the same monitor. Recording it is what lets DPOR
+                // find the deadlocking interleaving: without it a blocking
+                // transition carries no accesses, no dependency is seen, and
+                // the backtrack point that would try the other acquire order is
+                // never created.
+                Step::Blocked(Some(m)) => vec![Access::Monitor(*m)],
                 _ => Vec::new(),
             };
 
@@ -452,7 +461,7 @@ impl<'a> Explorer<'a> {
                     interp.runnable_objs = saved_runnables;
                     break;
                 }
-                Step::Advanced(_) | Step::Terminated | Step::Blocked => {
+                Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {
                     if self.strategy == Strategy::Dpor {
                         self.add_backtrack(tid, &accesses);
                     }
@@ -636,7 +645,7 @@ pub fn replay_schedule(
                     return oid == oref.id && *m == oref.method;
                 }
                 Step::Unsupported(_) => return false,
-                Step::Advanced(_) | Step::Terminated | Step::Blocked => {}
+                Step::Advanced(_) | Step::Terminated | Step::Blocked(_) => {}
             }
         }
     }
