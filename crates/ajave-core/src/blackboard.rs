@@ -38,6 +38,11 @@ pub struct Blackboard {
     proved_safe: std::collections::BTreeSet<ObligationRef>,
     invariants: Vec<Invariant>,
     traces: Vec<AbstractTrace>,
+    /// Does the program under analysis start threads?
+    ///
+    /// Gates the discharge rule below. Set from `seed`, which is the only
+    /// place the blackboard sees the program.
+    concurrent_program: bool,
     next_seq: u64,
     next_inv: u32,
     pub rejections: Vec<String>,
@@ -68,6 +73,7 @@ impl Blackboard {
     /// obligations nothing ever analyses, which is exactly the bug that
     /// showed up the first time this ran end to end.
     pub fn seed(&mut self, prog: &Program, assertion_only: bool) {
+        self.concurrent_program = prog.uses_concurrency();
         self.assertion_only = assertion_only;
         let reachable: std::collections::HashSet<_> =
             prog.reachable_from_entry().into_iter().collect();
@@ -140,6 +146,29 @@ impl Blackboard {
                 (Direction::Over, Status::Violated { .. }) => {
                     return self.reject(format!(
                         "{producer} is over-approximating and may not violate {oref}"
+                    ))
+                }
+                // An engine that does not model threads may not prove anything
+                // about a program that starts them.
+                //
+                // `Thread.start()` is not a call a sequential engine follows,
+                // so to one of them the thread simply never runs. Any
+                // obligation whose reachability depends on another thread's
+                // writes then looks unreachable and is discharged as proven.
+                // `UnsafePublicationSeesStaleData` is the case: the reader's
+                // `if (ready == 1)` is dead if nothing ever sets `ready`, so
+                // the assertion inside it was "proved" -- a wrong TRUE for the
+                // canonical unsafe-publication bug.
+                //
+                // The violation side of the same blind spot was already
+                // handled, by refuting candidates at replay. Nothing guarded
+                // the proof side, which is the more expensive direction.
+                (_, Status::Discharged { .. })
+                    if self.concurrent_program && producer != EngineId("concurrency") =>
+                {
+                    return self.reject(format!(
+                        "{producer} does not model threads and may not discharge {oref} \
+                         in a program that starts them"
                     ))
                 }
                 _ => {}
