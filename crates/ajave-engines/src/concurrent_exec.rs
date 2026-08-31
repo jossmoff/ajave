@@ -214,6 +214,8 @@ pub struct Interp<'a> {
     pub thread_objs: HashMap<u32, ThreadId>,
     /// Class of each allocated object, for resolving a Runnable's `run()`.
     pub obj_class: HashMap<u32, String>,
+    /// Threads whose interrupt flag has been set.
+    pub interrupted: std::collections::HashSet<ThreadId>,
     /// ThreadId -> the Runnable object its `run()` executes against.
     ///
     /// The worker's `this` must be the very object main passed to
@@ -238,6 +240,7 @@ impl<'a> Interp<'a> {
             stepped_over: 0,
             thread_objs: HashMap::new(),
             obj_class: HashMap::new(),
+            interrupted: std::collections::HashSet::new(),
             runnable_objs: HashMap::new(),
             next_tid: 1,
         }
@@ -754,6 +757,38 @@ impl<'a> Interp<'a> {
     ) -> Result<Option<Val>, String> {
         // Thread lifecycle is handled by the explorer, not here.
         if target.class == "java/lang/Thread" {
+            // Static members first: they have no receiver, so `args[0]` is an
+            // argument and reading it as one is how `Thread.sleep(50)` came out
+            // as "a call on a non-reference receiver".
+            match target.name.as_str() {
+                // `sleep` deliberately does nothing.
+                //
+                // It establishes no happens-before edge -- the JLS gives it no
+                // memory-model meaning at all -- so modelling it as ordering
+                // would let the explorer prove programs safe that are not.
+                // `SleepIsNotSynchronization` is the case: a real JVM nearly
+                // always makes it pass, and it is still a race.
+                //
+                // Doing nothing is also not a lost scheduling opportunity: the
+                // explorer already considers a switch at every visible action,
+                // so sleeping cannot enable an interleaving it would otherwise
+                // miss.
+                "sleep" | "yield" | "onSpinWait" => return Ok(None),
+                "currentThread" => {
+                    // The Thread object for the running thread, if one was
+                    // constructed. Main has no Thread object in this model.
+                    let obj = self
+                        .thread_objs
+                        .iter()
+                        .find(|(_, &t)| t == tid)
+                        .map(|(&o, _)| o);
+                    return match obj {
+                        Some(o) => Ok(Some(Val::Ref(o))),
+                        None => Err("currentThread() on a thread with no Thread object".into()),
+                    };
+                }
+                _ => {}
+            }
             let recv = match args.first().and_then(|a| self.eval(frame, a)) {
                 Some(Val::Ref(r)) => r,
                 _ => return Err("Thread call on a non-reference receiver".into()),
@@ -778,6 +813,55 @@ impl<'a> Interp<'a> {
                         }
                     }
                     Ok(None)
+                }
+                "isAlive" => {
+                    let Some(&t) = self.thread_objs.get(&recv) else {
+                        return Err("isAlive() on an unrecognised Thread object".into());
+                    };
+                    // Alive means started and not yet finished. A thread that
+                    // has not been started is not alive either.
+                    let alive = g
+                        .threads
+                        .iter()
+                        .find(|x| x.id == t)
+                        .map(|x| {
+                            !matches!(
+                                x.status,
+                                ThreadStatus::Terminated | ThreadStatus::NotStarted
+                            )
+                        })
+                        .unwrap_or(false);
+                    return Ok(Some(Val::Int(alive as i64)));
+                }
+                "interrupt" => {
+                    let Some(&t) = self.thread_objs.get(&recv) else {
+                        return Err("interrupt() on an unrecognised Thread object".into());
+                    };
+                    // Interrupting a *parked* thread makes it throw
+                    // InterruptedException and resume, which is exception
+                    // injection this interpreter does not do. Modelling it as
+                    // "sets a flag" would leave the thread parked forever and
+                    // report a deadlock the program recovers from -- a wrong
+                    // FALSE. Setting the flag is only sound while the target is
+                    // running, where it just has to be polled.
+                    let parked = g.threads.iter().any(|x| {
+                        x.id == t
+                            && matches!(
+                                x.status,
+                                ThreadStatus::Waiting { .. } | ThreadStatus::Blocked { .. }
+                            )
+                    });
+                    if parked {
+                        return Err("interrupt() of a parked thread is not modelled".into());
+                    }
+                    self.interrupted.insert(t);
+                    return Ok(None);
+                }
+                "isInterrupted" => {
+                    let Some(&t) = self.thread_objs.get(&recv) else {
+                        return Err("isInterrupted() on an unrecognised Thread object".into());
+                    };
+                    return Ok(Some(Val::Int(self.interrupted.contains(&t) as i64)));
                 }
                 "start" => {
                     let Some(&target_tid) = self.thread_objs.get(&recv) else {
