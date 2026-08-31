@@ -2,6 +2,140 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-08-31 — concurrency: from litmus tests to real programs, and the five wrong answers that found
+
+The concurrency engine went from 22 to 46 benchmarks and from intrinsic monitors
+to most of `java.util.concurrent`. The interesting part is not the feature list;
+it is that **every serious defect was found by writing a realistic program, not
+by writing a litmus test**, and four of the five were wrong answers rather than
+missing coverage.
+
+### The pattern: litmus tests agree with their own assumptions
+
+The suite had 22 benchmarks, all passing, all two threads and one worker class.
+Adding six programs that a Java developer would recognise — a bank transfer,
+dining philosophers, a semaphore pool, a latch scatter/gather — immediately
+produced a wrong TRUE and a wrong FALSE:
+
+- `discover` ended with `sort(); dedup()`, so **two threads running the same
+  `run()` collapsed into one entry**. Every existing benchmark had one worker per
+  class, so the bug was invisible. `TwoWorkersSameClass` was FALSE (−32) because
+  only one of its two writes happened; `DiningPhilosophers` was TRUE (−16)
+  because its three-node wait-for cycle needs all three philosophers.
+- `start()` on a thread with no state fell through an `if let` with no `else`,
+  which is what converted the under-count from a refusal into a wrong answer.
+  **Silence on an unmodelled operation is the most expensive failure mode there
+  is**: refusing costs a point, answering wrongly costs sixteen or thirty-two.
+
+Neither is exotic. Both needed a third thread or a second instance, which no
+litmus test had.
+
+### Ordering that was load-bearing by accident
+
+Thread identities are assigned in construction order; entries were sorted by
+method name because `prog.bodies` is a `HashMap` and determinism demanded *some*
+order. Pairing those two lists by index is only correct when the orders agree.
+The fix is not a better sort — it is to stop pairing: `start()` now resolves the
+body from the class of the Runnable object it was actually handed, so entry
+order carries no meaning at all.
+
+A benchmark written to catch this (`WorkersBoundInConstructionOrder`) passed
+against the buggy engine, because neither thread body read `this`. It was
+rewritten until it discriminated. **A regression test that passes against the
+bug it was written for is worse than none**, and the only way to know is to run
+it against the unfixed engine first.
+
+### Guessing at `<clinit>` cost two verdicts in opposite directions
+
+Class initialisers were approximated: a static whose initialiser was visibly a
+`new` got a fresh object id, everything else read as null.
+
+- The "from new" test was a set that only ever *grew*, so when javac reused a
+  register — `static final Condition cond = lock.newCondition()` reuses the one
+  that held the lock — the second `putstatic` still looked like a `new`.
+  Identity was minted at the `putstatic` rather than at the `new`, so
+  `static final Object B = A` produced a second object for the same one, and two
+  threads taking A-then-B and B-then-A were reported to deadlock between a lock
+  and itself. Reentrancy makes that impossible: wrong FALSE.
+- Fixing identity exposed the opposite error. `cond` correctly stopped being
+  seeded, read as null, and **its null-check pruned every path that reached
+  `await`** — reporting TRUE for a program that deadlocks on a missed signal.
+
+The second is the more instructive: an under-approximation that *prunes paths*
+does not lose precision, it manufactures proofs. Both went away by running
+`<clinit>` rather than pattern-matching it, which is also just what the JVM
+does, and gets aliasing, factory methods and computed initial values right for
+free.
+
+### One rule, three bugs
+
+Whether a modelled call may advance its own program counter looked like a detail
+and was three defects:
+
+- `Stmt::Assign` stores a returned value only while the frame has not moved.
+  A model that advanced first silently discarded its own result — `tryLock`'s
+  boolean, `incrementAndGet`'s count, `Future.get`'s value — and the next read
+  failed as an unknown operand.
+- A model that parked *and* advanced sent the thread past the call it was
+  blocked on, walking a blocked `lock()` into the critical section without the
+  lock. `wait()` had the same defect, so the handshake benchmarks had been
+  passing for the wrong reason.
+
+The invariant now: **no modelled call touches the program counter**, and thread
+status is the single source of truth for parking. Every synchronizer added
+afterwards — latch, semaphore, barrier, condition, executor — blocked correctly
+without any new machinery, which is the sign the abstraction was right.
+
+### Bounds that were not what they claimed
+
+Two constants were doing jobs they were not documented to do.
+
+`max_steps` was described as "steps per thread, so a spinning thread cannot
+consume the whole budget", but was allocated once and decremented across every
+interleaving — a cap on *total exploration*. Programs that terminate perfectly
+well exhausted it simply by having many interleavings, so a provable TRUE
+degraded into UNKNOWN as the program grew rather than as it misbehaved. It is
+now per-segment, which is where divergence actually happens, with explicit
+`max_states` and `max_depth` for search size.
+
+`max_switches` was 10, below what a three-thread program needs to be *exhausted*.
+Raised to 32 after measuring 10/16/32/64: verdicts identical from 16 upward and
+suite runtime flat at 4s, so above the threshold it does not behave as a tuning
+knob — DPOR and `max_states` bound the search. All bounds now take environment
+overrides so that sweep is repeatable, which is what CLAUDE.md asks for on any
+constant chosen by watching benchmarks.
+
+### Allocator state outliving its path
+
+The explorer restored frames and thread objects between sibling DFS branches but
+not the allocators. Sibling branches are alternative universes that re-execute
+the same statements, so a carried-over `next_tid` gave the same `submit` a
+different thread identity in each — beyond the states that exist. Thread
+constructions had escaped this only by happening at depth 0, before any
+branching, which is the same "the tests were too simple" pattern as the dedup
+bug. **Anything an interpreter accumulates has to be scoped to the path**, not
+to the search.
+
+### Where approximation was declined
+
+Several features are refused rather than approximated, each because the cheap
+version yields a wrong verdict rather than a lost proof: a thread pool with
+fewer workers than tasks (queued tasks are not concurrent — inventing that race
+is −32), interrupting a parked thread (must throw and resume, not stay parked),
+timed waits (can return false on expiry), and a `CyclicBarrier` action (needs a
+frame pushed from inside a model). `ExecutorSingleThreadSerialises` is kept in
+the suite *expecting UNKNOWN*, so that making the pool unsoundly concurrent
+shows up as a wrong answer.
+
+### What did not change
+
+Sequential consistency. The engine cannot see bugs that need reordering —
+broken double-checked locking and non-volatile publication both look correct to
+it — so it will report TRUE for some programs that fail on a real JVM. That gap
+is documented in `docs/strategies/concurrency.md` rather than benchmarked,
+because adding a benchmark we knowingly answer wrongly would put a wrong answer
+into a suite whose entire value is that it has none.
+
 ## 2026-08-31 — float category 18 -> 40, and three self-inflicted regressions
 
 `float-nonlinear-calculation` went from 18 to 40 on valid-assert while

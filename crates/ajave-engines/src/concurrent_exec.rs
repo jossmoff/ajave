@@ -1072,7 +1072,13 @@ impl<'a> Interp<'a> {
             "java/util/concurrent/atomic/AtomicInteger"
                 | "java/util/concurrent/atomic/AtomicLong"
                 | "java/util/concurrent/atomic/AtomicBoolean"
+                | "java/util/concurrent/atomic/AtomicReference"
         ) {
+            // A reference cell shares all of this machinery -- the value is
+            // just an ObjId rather than a number -- but its results must come
+            // back as references. Handing an `Int` to code that compares it
+            // against an object would silently compare the wrong kind of value.
+            let is_ref = target.class == "java/util/concurrent/atomic/AtomicReference";
             let recv = match args.first().and_then(|a| self.eval(frame, a)) {
                 Some(Val::Ref(r)) if r != 0 => ObjId(r),
                 _ => return Err("unresolved atomic receiver".into()),
@@ -1111,10 +1117,26 @@ impl<'a> Interp<'a> {
                         (Some(0), None)
                     }
                 }
+                // The arithmetic members do not exist on AtomicReference and
+                // fall through to here, which is what we want.
                 other => return Err(format!("unmodelled atomic.{other}")),
             };
             if let Some(v) = new {
                 g.heap.insert(key, (false, v));
+            }
+            if is_ref {
+                // `compareAndSet` still reports a boolean, not a reference.
+                let boolean = matches!(
+                    target.name.as_str(),
+                    "compareAndSet" | "weakCompareAndSet"
+                );
+                return Ok(result.map(|v| {
+                    if boolean {
+                        Val::Int(v)
+                    } else {
+                        Val::Ref(v as u32)
+                    }
+                }));
             }
             return Ok(result.map(Val::Int));
         }

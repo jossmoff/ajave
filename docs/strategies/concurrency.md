@@ -1,11 +1,14 @@
-# concurrency (engine: `ConcurrencyEngine`) — PLANNED
+# concurrency (engine: `ConcurrencyEngine`)
 
-**Direction:** Under (falsification) initially; Over only for the bounded case
+**Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — DPOR explorer solving 4/14 concurrency benchmarks
+**Status:** working — 44/46 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
-`concurrent_state.rs` (state model), `concurrency.rs` (engine skeleton and
-precondition checks)
+`concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
+library models), `concurrency.rs` (engine, precondition checks, DPOR)
+
+Most of the plan below is built. See **Modelled surface** for what the engine
+handles today and, more importantly, what it deliberately refuses.
 
 ## Why
 
@@ -413,16 +416,112 @@ JMM (volatile, `synchronizes-with`, final-field semantics), DPOR proper,
 alias/escape analysis, `java.util.concurrent` models. Each is a project; none is
 needed to answer the first benchmarks.
 
+## Modelled surface
+
+What follows is the state as of 2026-08-31. The refusals matter as much as the
+features: every one of them is a place where an approximation would have been
+easy and wrong, and the engine answers UNKNOWN instead.
+
+### Threads
+
+| Feature | Status |
+|---|---|
+| `Thread.start` / `join` | modelled; `join` is a happens-before edge |
+| Thread identity | one per construction, body resolved at `start()` from the Runnable object's class |
+| `Thread.sleep` / `yield` / `onSpinWait` | modelled as no-ops — they order nothing |
+| `Thread.isAlive` / `currentThread` | modelled |
+| `Thread.interrupt` / `isInterrupted` | flag only; **refused** when the target is parked |
+| `Runnable` via subclassing or delegation | both |
+| `new Thread(null)` | **refused** |
+
+### Locks and conditions
+
+| Feature | Status |
+|---|---|
+| `synchronized` blocks and methods, reentrancy | modelled |
+| `Object.wait` / `notify` / `notifyAll` | modelled, including full monitor release and restore (JLS 17.2.1) |
+| `ReentrantLock` lock/unlock/tryLock/isLocked | modelled |
+| `Condition` await/signal/signalAll | modelled |
+| Timed `await`, `lockInterruptibly`, fairness | **refused** |
+| `ReentrantReadWriteLock` | **refused** |
+
+### java.util.concurrent
+
+| Feature | Status |
+|---|---|
+| `CountDownLatch` await/countDown/getCount | modelled |
+| `Semaphore` acquire/release/tryAcquire | modelled |
+| `CyclicBarrier` await/getParties | modelled; barrier action **refused** |
+| Scalar atomics, including CAS | modelled, one transition per operation |
+| `ExecutorService` execute/submit/shutdown/awaitTermination | modelled |
+| `Future` get/isDone | modelled; `cancel` **refused** |
+| Pool with fewer workers than tasks | **refused** — see below |
+| `Phaser`, `ForkJoinPool`, `CompletableFuture`, `AtomicReference` | **refused** |
+| Timed `await`, `submit(Callable)` | **refused** |
+
+### Why those refusals are refusals
+
+Each one is a case where the cheap approximation produces a *wrong verdict*
+rather than a lost proof:
+
+- **A pool with fewer workers than tasks** runs some tasks one after another.
+  Treating every task as concurrently runnable invents interleavings the JVM
+  cannot produce — for two increments, the one where both read 0. That is a
+  wrong FALSE at −32.
+- **Interrupting a parked thread** must throw `InterruptedException` and resume.
+  Setting a flag and leaving it parked reports a deadlock the program recovers
+  from: another wrong FALSE.
+- **Timed waits** can return false on expiry, which we cannot decide; assuming
+  they never expire proves programs that hang.
+- **A barrier action** must run on the tripping thread, which means pushing a
+  frame from inside a library model.
+
+### The invariant that holds the interpreter together
+
+A modelled call must not touch its own program counter. `advance` steps past the
+statement afterwards, unless the call parked the thread — which it detects from
+the thread status, the single source of truth for parking.
+
+Both directions of violating this caused real bugs. `Stmt::Assign` stores a
+returned value only while the frame has not moved, so a model that advanced
+first silently dropped its own result (`tryLock`'s boolean, `incrementAndGet`'s
+count, `Future.get`'s value). A model that parked *and* advanced sent the thread
+past the call it was blocked on — walking a blocked `lock()` into the critical
+section unlocked.
+
+### Object identity
+
+Monitor identity is concrete: a monitor operand evaluates to the `ObjId` of the
+`new` that actually ran, so two `new Account(...)` are two monitors by
+construction. There is no allocation-site abstraction and no need for one. The
+only guard is that reference 0 — null, and how an untracked object reads — is
+refused as a monitor, since it is the one value that could collapse two distinct
+monitors into one.
+
+Class initialisers are **executed**, not pattern-matched. Guessing them was
+worth two wrong answers: aliased statics minted separate objects (inventing an
+AB/BA deadlock between a lock and itself), and a static initialised by a factory
+call read as null, whose null-check pruned every path reaching it and turned a
+real deadlock into a proof.
+
 ## Soundness boundary
 
-Stated at each phase, never overstated. After Phase 4:
+Stated at each phase, never overstated. As of 2026-08-31:
 
-> Sound for falsification only, under sequential consistency, with a bounded
-> number of context switches, over a modelled subset of `java.lang.Thread` and
-> intrinsic monitors. Proves nothing about programs it does not falsify. Does
-> not model the Java Memory Model.
+> Sound for falsification under **sequential consistency**, over the modelled
+> subset above, within the context-switch, state and depth bounds. A TRUE is
+> claimed only when the search completed within every bound; hitting any bound
+> yields UNKNOWN. Does not model the Java Memory Model.
 
 Do not claim JMM soundness until the Phase 7 litmus tests actually pass.
+
+**The SC assumption is the largest remaining gap, and it is one-directional.**
+Under SC we cannot see bugs that need reordering: broken double-checked locking,
+and publication through a non-volatile field, both *look* correct to this engine.
+It will therefore report TRUE for some programs that fail on a real JVM. No such
+benchmark is in the suite, because adding one we knowingly answer wrongly would
+put a wrong answer in a suite whose value is that it has none — the gap is
+recorded here instead.
 
 ## Notes on the source proposal
 

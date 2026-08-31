@@ -97,7 +97,6 @@ const UNMODELLED_PRIMITIVES: &[&str] = &[
     "java/util/concurrent/Phaser",
     "java/util/concurrent/CompletableFuture",
     "java/util/concurrent/ForkJoinPool",
-    "java/util/concurrent/atomic/AtomicReference",
 ];
 
 /// Decide whether the explorer may soundly analyse this program.
