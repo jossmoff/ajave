@@ -564,6 +564,14 @@ impl<'a> Interp<'a> {
                 let Some(Val::Ref(r)) = self.eval(frame, obj) else {
                     return Err("monitorenter on a non-reference".into());
                 };
+                // Reference 0 is null, and is also what an untracked object
+                // reads as. Locking it would make every such monitor the *same*
+                // monitor, which can both invent and hide a deadlock. This is
+                // the guard that makes concrete monitor identity safe enough to
+                // have replaced the static allocation-site ambiguity check.
+                if r == 0 {
+                    return Err("monitorenter on a null or untracked reference".into());
+                }
                 let m = ObjId(r);
                 match g.monitor_owner.get(&m) {
                     Some(&owner) if owner != tid => {

@@ -233,41 +233,30 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
         ThreadDiscovery::Resolved(e) => e,
     };
 
-    // Only a class we actually lock, and that has several allocation sites,
-    // makes monitor identity ambiguous.
-    for cls in &monitored {
-        if let Some(&n) = alloc_count.get(cls) {
-            if n > 1 {
-                return Err(Refusal::AmbiguousMonitor(format!("{cls} ({n} sites)")));
-            }
-        }
-    }
-    // A field-identified monitor is unambiguous only if the field is written
-    // exactly once program-wide — otherwise different objects could flow
-    // through it at different times.
-    for f in &monitored_fields {
-        match field_writes.get(f) {
-            Some(&1) => {}
-            Some(&n) => {
-                return Err(Refusal::AmbiguousMonitor(format!(
-                    "{}.{} is written {n} times, so it does not name one object",
-                    f.class, f.name
-                )))
-            }
-            None => {
-                return Err(Refusal::AmbiguousMonitor(format!(
-                    "{}.{} is never written in analysed code",
-                    f.class, f.name
-                )))
-            }
-        }
-    }
-
-    if unresolved_monitor {
-        return Err(Refusal::AmbiguousMonitor(
-            "a monitor whose object could not be traced to an allocation".into(),
-        ));
-    }
+    // The allocation-site ambiguity checks that used to live here are gone.
+    //
+    // They asked whether a *static* abstraction could tell two monitors apart:
+    // a locked class with several `new` sites, a monitor field written more
+    // than once, a monitor not traceable to an allocation were all refused.
+    // The explorer does not use that abstraction. It interprets the program
+    // and evaluates a monitor operand to the concrete `ObjId` produced by the
+    // `new` that actually ran, so two `new Account(...)` are two monitors by
+    // construction and no static disambiguation is required.
+    //
+    // Keeping the checks cost real coverage: `synchronized (from)` inside
+    // `transfer(from, to)` -- the single most common locking pattern in real
+    // code, and the shape of the classic transfer deadlock -- locks a
+    // parameter, which is traceable to no allocation site in its own method.
+    // BankTransferDeadlock was refused for that reason alone.
+    //
+    // What replaces them is a run-time guard rather than a static one: a
+    // monitor operand that evaluates to reference 0 is refused in the
+    // interpreter. 0 is null and is also how an untracked object reads, so it
+    // is the one value that could silently make two distinct monitors one.
+    // Anything else is a real, distinct object identity. An operand the
+    // interpreter cannot evaluate at all already stops exploration, so the
+    // failure mode is UNKNOWN rather than a wrong verdict.
+    let _ = (&monitored, &monitored_fields, &field_writes, &alloc_count, unresolved_monitor);
 
     Ok(entries)
 }
