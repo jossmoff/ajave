@@ -2051,15 +2051,39 @@ impl<'a> Interp<'a> {
                     // Woken threads go to `Blocked` on the lock, not
                     // `Runnable`: the signaller still holds it until it leaves
                     // the guarded region.
+                    //
+                    // `signal` picks one waiter arbitrarily, exactly as
+                    // `Object.notify` does, and for the same reason: a signal
+                    // delivered to a waiter whose condition is still false is
+                    // spent, stranding the one that needed it.
                     let all = target.name == "signalAll";
-                    for t in g.threads.iter_mut() {
-                        if t.status == (ThreadStatus::Waiting { monitor: recv }) && t.wait_depth > 0
-                        {
-                            t.status = ThreadStatus::Blocked { monitor: lock };
-                            if !all {
-                                break;
+                    let waiters: Vec<ThreadId> = g
+                        .threads
+                        .iter()
+                        .filter(|t| {
+                            t.status == (ThreadStatus::Waiting { monitor: recv })
+                                && t.wait_depth > 0
+                        })
+                        .map(|t| t.id)
+                        .collect();
+                    if all {
+                        for t in g.threads.iter_mut() {
+                            if waiters.contains(&t.id) {
+                                t.status = ThreadStatus::Blocked { monitor: lock };
                             }
                         }
+                        return Ok(None);
+                    }
+                    let chosen = match waiters.len() {
+                        0 => return Ok(None),
+                        1 => waiters[0],
+                        n => match self.choose(n as u32) {
+                            None => return Ok(None),
+                            Some(i) => waiters[i as usize],
+                        },
+                    };
+                    if let Some(t) = g.threads.iter_mut().find(|t| t.id == chosen) {
+                        t.status = ThreadStatus::Blocked { monitor: lock };
                     }
                     return Ok(None);
                 }

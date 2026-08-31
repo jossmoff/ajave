@@ -2,7 +2,7 @@
 
 **Direction:** Under (falsification); Over only where the search is exhaustive
 **Tier:** 2 (falsify)
-**Status:** working — 48/50 of the concurrency suite, 0 wrong
+**Status:** working — 77/81 of the concurrency suite, 0 wrong
 **Source:** `ajave-engines/src/threads.rs` (thread discovery),
 `concurrent_state.rs` (state model), `concurrent_exec.rs` (interpreter and
 library models), `concurrency.rs` (engine, precondition checks, DPOR)
@@ -460,6 +460,35 @@ easy and wrong, and the engine answers UNKNOWN instead.
 | `ArrayBlockingQueue` / `LinkedBlockingQueue` put/take/offer/poll | modelled |
 | `Phaser`, `ForkJoinPool`, `CompletableFuture` | **refused** |
 | Timed `await`, timed `poll`, `submit(Callable)` | **refused** |
+
+
+### Nondeterminism the engine models
+
+Concurrency is not only about which thread runs next. Each of these is a
+distinct source of nondeterminism the specification permits, and each maps to a
+bug class that is invisible without it:
+
+| Source | Bug it exposes |
+|---|---|
+| Thread interleaving | races, lock-order deadlock |
+| Timed waits expiring or not | code that ignores the returned boolean |
+| `Object.wait` returning spuriously (JLS 17.2.1) | a wait guarded by `if` instead of `while` |
+| `notify`/`signal` waking an **arbitrary** waiter | a signal spent on the wrong waiter — the reason to prefer `notifyAll` |
+| `weakCompareAndSet` failing spuriously | weak CAS used without a retry loop |
+| `Verifier.nondetBoolean()` | behaviour that depends on input *and* schedule together |
+
+Two of them need a bound, because the specification permits unboundedly many:
+spurious wakeups and weak-CAS failures. `max_spurious` (default 1, measured —
+every benchmark is decided at 1, and 2 exhausts the state bound on a
+three-thread wait/notify program) is a fairness bound of the same kind as
+`max_switches`: it costs completeness, never soundness.
+
+`nondetBoolean` is exact, since a boolean has two values, so it supports TRUE as
+well as FALSE. Wider nondeterministic inputs stay unsupported rather than
+sampled: trying a handful of values would find some violations but could no
+longer claim to have covered the input space, and choosing which values from the
+program's own constants is benchmark-fitting. Those belong to the solving
+engines (#63).
 
 ### Why those refusals are refusals
 
