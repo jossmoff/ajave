@@ -18,35 +18,41 @@ use super::ExploreCtx;
 /// and the point is lost. On, models are genuine float models and the witness
 /// replays.
 ///
-/// **On by default. Measured, not assumed.**
+/// **Off by default. Measured on both properties, after getting it wrong once.**
 ///
 /// With it off, float arithmetic runs on the bitvector path: a model satisfying
 /// it need not satisfy real float semantics, so the branch condition is tainted,
-/// `handle_branch` never imposes it, and the witness is arbitrary. See
-/// `fp_binop_modelled`.
+/// `handle_branch` never imposes it, and the witness is arbitrary. Turning it on
+/// fixes that — and makes proofs much harder.
 ///
-/// Full valid-assert, idle machine, identical build, binary snapshotted:
+/// float-nonlinear-calculation, 87 tasks, idle machine:
 ///
-/// | arithmetic | score | correct | timeouts | wall clock |
-/// |---|---|---|---|---|
-/// | bitvector (off) | 824 | 650 | 36 | 1060s |
-/// | FPA (on)        | 831 | 653 | 70 | 1650s |
+/// | property | FPA off | FPA on |
+/// |---|---|---|
+/// | valid-assert         | 18, 53s  | 35, 381s |
+/// | no-runtime-exception | 166, 32s | 114, 381s |
 ///
-/// +7 points, 0 wrong either way. Gains land where the theory predicts —
-/// float-nonlinear-calculation +2, jdart-regression +2, argv-tasks -1.
+/// Across the whole corpus that is roughly +7 on valid-assert and -69 on
+/// no-runtime-exception: **net -62**.
 ///
-/// The doubled timeout count looked like the deciding cost, on the assumption
-/// that a longer budget would convert those runs into points; SV-COMP allows
-/// 900s per task against our 60s. That assumption was wrong. On the float
-/// category, quadrupling the budget resolved 9 of 24 timeouts and gained **one
-/// point** (25 -> 26 at 240s). The extra time turns timeouts into UNKNOWNs, not
-/// into answers, so the timeouts cost nothing recoverable and the +7 stands.
+/// The asymmetry is the point. FPA helps *falsification*, because a model over
+/// real float semantics yields a witness that replays. It hurts *proving*,
+/// because the formulas become hard enough that the solver returns `unknown`
+/// instead of `unsat` — the losses are UNKNOWNs with **zero timeouts**, so this
+/// is not the budget, it is discharges that no longer complete.
+/// no-runtime-exception is overwhelmingly a proving problem (511 correct TRUE
+/// against 16 correct FALSE corpus-wide), so it pays the cost and collects none
+/// of the benefit.
 ///
-/// `AJAVE_FP_ARITH=0` restores the bitvector path for comparison.
+/// This was enabled by default on a valid-assert-only measurement and had to be
+/// reverted. A default justified on one property is not justified.
+///
+/// `AJAVE_FP_ARITH=1` enables it, and it is worth revisiting if the solver gets
+/// better at FP (see #27, Bitwuzla) or if it can be scoped to falsification.
 pub(super) fn fp_arith() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
-        std::env::var("AJAVE_FP_ARITH").map(|v| v != "0").unwrap_or(true)
+        std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
     })
 }
 

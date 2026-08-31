@@ -860,7 +860,38 @@ impl<'a> ExploreCtx<'a> {
             // float/string modeling. This lets us falsify programs where the
             // violation is real but the path went through havoced operations.
             if let Some(w) = witness {
-                self.violations.push((self.body.key.clone(), oid, w));
+                // ...except when the witness could not possibly reproduce it.
+                //
+                // A tainted path means the model rests on a value we
+                // approximated — a havoced call, imprecise float or string
+                // modelling. An *empty* nondet sequence means the program is
+                // deterministic and a witness has nothing to set. Together they
+                // make the violation unreplayable by construction: replay just
+                // re-runs the same deterministic program, and if the violation
+                // were real the concrete engine, which executes it exactly,
+                // would already have found it.
+                //
+                // Publishing anyway costs a JVM replay and, worse, occupies the
+                // obligation so an over-approximating engine that could have
+                // proved it safe never gets to. `Math.asin` is the clearest
+                // case: SMT-LIB has no fp.asin, so the call is havoced, the
+                // havoced value satisfies any comparison, and the witness is
+                // empty. See benchmarks/ajave/jvm-floats/NaNComparisonIsAlwaysFalse.
+                //
+                // Suppressing costs precision, never correctness: an
+                // under-approximating engine that declines to publish simply
+                // leaves the obligation open.
+                let unreplayable = self.path_tainted && w.nondet_sequence.is_empty();
+                if unreplayable {
+                    log::debug!(
+                        "smt-bmc: withholding {:?} in {} — tainted path with an \
+                         empty witness cannot replay",
+                        oid,
+                        self.body.key
+                    );
+                } else {
+                    self.violations.push((self.body.key.clone(), oid, w));
+                }
             }
         }
         if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown) {

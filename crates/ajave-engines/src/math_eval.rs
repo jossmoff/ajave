@@ -135,7 +135,17 @@ pub(crate) fn eval_math_call(
             let is_d = target.desc.starts_with("(D)") || target.desc.starts_with("(DD)");
             let is_f = target.desc.starts_with("(F)") || target.desc.starts_with("(FF)");
 
-            if is_d {
+            // A/B switch for the transcendental evaluation. Set
+            // AJAVE_NO_CONCRETE_MATH=1 to restore the previous behaviour, where
+            // these calls returned Unknown and ended the run Inconclusive.
+            // Kept so a regression can be attributed rather than guessed at.
+            static NO_MATH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let no_math = *NO_MATH.get_or_init(|| {
+                std::env::var("AJAVE_NO_CONCRETE_MATH").map(|v| v == "1").unwrap_or(false)
+            });
+            if no_math {
+                // fall through to the integer arms, which decline these names
+            } else if is_d {
                 let unary = |f: fn(f64) -> f64| -> Value {
                     match dbl(0) {
                         Some(x) => Value::I64(f(x).to_bits() as i64),

@@ -422,6 +422,33 @@ impl Engine for FloatSearch {
             return Progress::Exhausted;
         }
 
+        // Only run where the fitness signal can mean something.
+        //
+        // Fitness is the branch distance at float *comparisons*, which is what
+        // guards an assertion — `if (expr == 0.0) { assert false; }`. An
+        // exception obligation (NullDeref, ArrayBounds) is not guarded that
+        // way, so there is no gradient to descend and every candidate is a
+        // blind guess.
+        //
+        // Running anyway is not free: this engine spends up to MAX_EVALS
+        // concrete executions per task. On the no-runtime-exception property,
+        // where every open obligation is an exception kind, that burned the
+        // budget for nothing and cost 26 tasks in
+        // float-nonlinear-calculation alone — timeouts went from 32 to 71 and
+        // the score fell 1018 -> 949.
+        //
+        // Keyed on obligation kind rather than on the property, so the engine
+        // does not need to know which property is being checked.
+        let has_assertion = open.iter().any(|o| {
+            prog.body(&o.method)
+                .map(|b| b.obligation(o.id).kind.is_assertion())
+                .unwrap_or(false)
+        });
+        if !has_assertion {
+            debug!("float-search: no open assertion obligations, skipping");
+            return Progress::Exhausted;
+        }
+
         let mut evals = 0usize;
         let mut best_fitness = f64::INFINITY;
         let found = search(prog, body, &is_float, &mut evals, &mut best_fitness);

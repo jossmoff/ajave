@@ -414,6 +414,9 @@ struct ConcreteState<'a> {
     /// Float-typed vars of the body currently executing. Saved and restored
     /// around inlined calls, since each body has its own numbering.
     float_ty: std::rc::Rc<std::collections::HashSet<VarId>>,
+    /// Per-method cache for the above. Without it the set is rebuilt on every
+    /// inlined call, which is a per-call allocation in the hot path.
+    float_ty_cache: HashMap<MethodKey, std::rc::Rc<std::collections::HashSet<VarId>>>,
     choices: &'a [i64],
     choice_idx: usize,
     trace: Vec<i64>,
@@ -444,6 +447,7 @@ impl<'a> ConcreteState<'a> {
             min_cmp_distance: f64::INFINITY,
             min_cmp_signed: f64::INFINITY,
             float_ty: std::rc::Rc::new(std::collections::HashSet::new()),
+            float_ty_cache: HashMap::new(),
             choices,
             choice_idx: 0,
             trace: Vec::new(),
@@ -805,17 +809,25 @@ impl<'a> ConcreteState<'a> {
     fn run_body(&mut self, body: &Body, mut store: HashMap<VarId, Value>) -> Outcome {
         // Each body numbers its vars independently, so the float set is per
         // body and has to be restored when an inlined call returns.
-        let saved_float_ty = std::mem::replace(
-            &mut self.float_ty,
-            std::rc::Rc::new(
-                body.vars
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, vi)| matches!(vi.ty, Ty::Float | Ty::Double))
-                    .map(|(i, _)| VarId(i as u32))
-                    .collect(),
-            ),
-        );
+        // Cached per method. `run_body` is entered again for every inlined
+        // call, so building this set each time allocates once per call rather
+        // than once per method — and these programs inline heavily.
+        let cached = match self.float_ty_cache.get(&body.key) {
+            Some(set) => set.clone(),
+            None => {
+                let set: std::rc::Rc<std::collections::HashSet<VarId>> = std::rc::Rc::new(
+                    body.vars
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, vi)| matches!(vi.ty, Ty::Float | Ty::Double))
+                        .map(|(i, _)| VarId(i as u32))
+                        .collect(),
+                );
+                self.float_ty_cache.insert(body.key.clone(), set.clone());
+                set
+            }
+        };
+        let saved_float_ty = std::mem::replace(&mut self.float_ty, cached);
         let out = self.run_body_inner(body, std::mem::take(&mut store));
         self.float_ty = saved_float_ty;
         out
