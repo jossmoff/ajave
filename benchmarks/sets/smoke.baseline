@@ -14,7 +14,7 @@ sv-comp/argv-tasks/AbstractSerializationStreamReader_false.yml	valid-assert	corr
 sv-comp/argv-tasks/Base64.yml	valid-assert	unproven	UNKNOWN
 sv-comp/argv-tasks/EquidistantConicProjection_false.yml	valid-assert	unproven	UNKNOWN
 sv-comp/argv-tasks/HttpTransport_false.yml	valid-assert	unproven	UNKNOWN
-sv-comp/argv-tasks/MathHelper_true.yml	valid-assert	correct	FALSE
+sv-comp/argv-tasks/MathHelper_true.yml	valid-assert	unproven	TIMEOUT
 sv-comp/argv-tasks/StdRandom_exceptionprone.yml	no-runtime-exception	correct	FALSE
 sv-comp/argv-tasks/StrictLineReader.yml	valid-assert	unproven	UNKNOWN
 sv-comp/argv-tasks/VelocityTracker_false.yml	valid-assert	unproven	UNKNOWN
@@ -47,11 +47,11 @@ sv-comp/autostub/Short_public_double_java_lang_Short_doubleValue.yml	valid-asser
 sv-comp/autostub/Short_public_int_java_lang_Short_compareTo_java_lang_Short.yml	valid-assert	correct	FALSE
 sv-comp/autostub/String_public_int_java_lang_String_compareToIgnoreCase_java_lang_String.yml	valid-assert	correct	FALSE
 sv-comp/autostub/String_public_int_java_lang_String_compareTo_java_lang_String.yml	valid-assert	correct	FALSE
-sv-comp/float-nonlinear-calculation/Optimization1.yml	valid-assert	unproven	UNKNOWN
+sv-comp/float-nonlinear-calculation/Optimization1.yml	valid-assert	correct	FALSE
 sv-comp/float-nonlinear-calculation/coral1.yml	valid-assert	correct	FALSE
 sv-comp/float-nonlinear-calculation/coral29.yml	valid-assert	unproven	UNKNOWN
 sv-comp/float-nonlinear-calculation/coral4.yml	valid-assert	correct	FALSE
-sv-comp/float-nonlinear-calculation/coral48.yml	valid-assert	unproven	UNKNOWN
+sv-comp/float-nonlinear-calculation/coral48.yml	valid-assert	correct	FALSE
 sv-comp/float_unboundedloop/Bounded-Reset-Linear-Growth.yml	valid-assert	correct	TRUE
 sv-comp/float_unboundedloop/Ramp-and-Hold.yml	valid-assert	unproven	UNKNOWN
 sv-comp/float_unboundedloop/Saturating-Integrator.yml	valid-assert	correct	TRUE

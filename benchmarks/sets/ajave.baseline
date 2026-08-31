@@ -60,7 +60,7 @@ ajave/jvm-exceptions/CaughtExceptionNotPropagated.yml	no-runtime-exception	unpro
 ajave/jvm-exceptions/CheckedHandlerDoesNotCatchRuntime.yml	no-runtime-exception	correct	FALSE
 ajave/jvm-exceptions/FinallyRunsOnException.yml	valid-assert	unproven	UNKNOWN
 ajave/jvm-floats/AdditionNotAssociative.yml	no-runtime-exception	correct	TRUE
-ajave/jvm-floats/AdditionNotAssociative.yml	valid-assert	unproven	UNKNOWN
+ajave/jvm-floats/AdditionNotAssociative.yml	valid-assert	correct	TRUE
 ajave/jvm-floats/FloatDivByZeroIsInfinity.yml	no-runtime-exception	correct	TRUE
 ajave/jvm-floats/FloatDivByZeroIsInfinity.yml	valid-assert	correct	TRUE
 ajave/jvm-floats/NaNNotEqualItself.yml	no-runtime-exception	correct	TRUE
@@ -97,7 +97,7 @@ ajave/jvm-types/InstanceOfGuardsCast.yml	no-runtime-exception	correct	TRUE
 ajave/jvm-types/StaticInitRunsBeforeAccess.yml	no-runtime-exception	correct	TRUE
 ajave/jvm-types/StaticInitRunsBeforeAccess.yml	valid-assert	correct	TRUE
 ajave/jvm-types/VirtualDispatchPicksOverride.yml	no-runtime-exception	correct	TRUE
-ajave/jvm-types/VirtualDispatchPicksOverride.yml	valid-assert	unproven	UNKNOWN
+ajave/jvm-types/VirtualDispatchPicksOverride.yml	valid-assert	correct	TRUE
 ajave/witness/BooleanWitness.yml	valid-assert	correct	FALSE
 ajave/witness/SingleIntWitness.yml	valid-assert	correct	FALSE
 ajave/witness/TwoIntWitnessOrdering.yml	valid-assert	correct	FALSE

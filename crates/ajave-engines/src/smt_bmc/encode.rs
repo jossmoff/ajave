@@ -18,30 +18,35 @@ use super::ExploreCtx;
 /// and the point is lost. On, models are genuine float models and the witness
 /// replays.
 ///
-/// **Off by default. Measured, not assumed.**
+/// **On by default. Measured, not assumed.**
 ///
-/// The trade-off was previously recorded as "~2.5x slower end-to-end", measured
-/// before timeout counts were trustworthy, so it was re-measured on an idle
-/// machine with reproducible verdicts over the whole
-/// `float-nonlinear-calculation` category (87 tasks, valid-assert):
+/// With it off, float arithmetic runs on the bitvector path: a model satisfying
+/// it need not satisfy real float semantics, so the branch condition is tainted,
+/// `handle_branch` never imposes it, and the witness is arbitrary. See
+/// `fp_binop_modelled`.
 ///
-/// | arithmetic | wall clock | score |
-/// |---|---|---|
-/// | bitvector (off) |  52s | 18 |
-/// | FPA (on)        | 375s | 17 |
+/// Full valid-assert, idle machine, identical build, binary snapshotted:
 ///
-/// **7.2x slower and a point worse** — worse than the figure on record, and no
-/// precision gained where it matters. Enabling it does make the solver's models
-/// genuine float models, but that alone does not make witnesses replay, so the
-/// category's losses are not caused by bitvector arithmetic.
+/// | arithmetic | score | correct | timeouts | wall clock |
+/// |---|---|---|---|---|
+/// | bitvector (off) | 824 | 650 | 36 | 1060s |
+/// | FPA (on)        | 831 | 653 | 70 | 1650s |
 ///
-/// Kept behind `AJAVE_FP_ARITH=1` because the encoding is correct and worth
-/// re-testing if the witness-replay problem (#56) is solved by other means, or
-/// if a faster FP solver is adopted.
+/// +7 points, 0 wrong either way. Gains land where the theory predicts —
+/// float-nonlinear-calculation +2, jdart-regression +2, argv-tasks -1.
+///
+/// The doubled timeout count looked like the deciding cost, on the assumption
+/// that a longer budget would convert those runs into points; SV-COMP allows
+/// 900s per task against our 60s. That assumption was wrong. On the float
+/// category, quadrupling the budget resolved 9 of 24 timeouts and gained **one
+/// point** (25 -> 26 at 240s). The extra time turns timeouts into UNKNOWNs, not
+/// into answers, so the timeouts cost nothing recoverable and the +7 stands.
+///
+/// `AJAVE_FP_ARITH=0` restores the bitvector path for comparison.
 pub(super) fn fp_arith() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
-        std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
+        std::env::var("AJAVE_FP_ARITH").map(|v| v != "0").unwrap_or(true)
     })
 }
 
