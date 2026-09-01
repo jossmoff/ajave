@@ -232,9 +232,39 @@ fn perturbed(class: &str, name: &str) -> bool {
     matches!(spec, Some((c, n)) if c == class && n == name)
 }
 
+/// The contract for a method, always.
+///
+/// # Why a total function, and why `OPAQUE` is the default
+///
+/// `contract_of` returns `Option`, and that `None` conflates two different
+/// things: "this method is specified to throw for some inputs" and "we have
+/// never said anything about this method". Both leave the caller to invent a
+/// default, which is how a third of the JDK surface came to be answered outside
+/// the table at all.
+///
+/// Made total, the distinction is expressible -- a partial method gets a
+/// contract *with* preconditions, an unknown one gets `OPAQUE` -- and coverage
+/// stops being a number to chase: every method has a contract by construction,
+/// and the refinement order governs all of them.
+///
+/// `OPAQUE` is the right default because it is the top of the order: assuming a
+/// method may throw for reasons we cannot state, and may write anything, can
+/// only cost precision. The unsafe default would be `TOTAL`, which is exactly
+/// the mistake #48 catalogued 22 instances of.
+pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
+    contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
+}
+
 pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
     if perturbed(class, name) {
         return Some(Contract::OPAQUE);
+    }
+    // The signatures the JDK specifies as total, previously answered by a
+    // separate match inside the BMC. Consulted first so that everything the
+    // analyser asks about goes through this one function -- which is what makes
+    // the refinement order enforceable and the monotonicity test non-vacuous.
+    if is_total_jdk_signature(class, name, desc) {
+        return Some(Contract::TOTAL);
     }
     // Argument-null preconditions, the single most common shape in the JDK.
     const NN1: &[Precondition] = &[Precondition::NonNull(1)];
@@ -1224,4 +1254,221 @@ mod contract_order_tests {
         assert!(total.is_total());
         assert!(!Contract::OPAQUE.is_total());
     }
+}
+
+/// Signatures the JDK specifies as total: no input can make them throw.
+///
+/// # Why this lives here now
+///
+/// It was a `match` inside the BMC, consulted only after `contract_of` returned
+/// `None` -- so a third of the JDK surface the analyser actually asks about was
+/// answered *outside* the contract table. That made the refinement order in
+/// `Contract::at_least_as_conservative_as` unenforceable over most of the
+/// methods it exists to govern, and made the metamorphic monotonicity test
+/// vacuous: perturbing `String.length` changed nothing, because nothing
+/// consulted the contract for it.
+///
+/// Measured before the move: of 46 JDK signatures consulted across the smoke
+/// set, 17 had a stated contract, 23 were answered here, and 6 fell through to
+/// the default. Coverage was 36%.
+///
+/// Every entry is still a soundness commitment under the rules in CLAUDE.md --
+/// keyed on the full `(class, name, desc)`, never a whole class, never a
+/// partial function -- but now there is exactly one place that states them.
+pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
+    match class {
+        // `Object`'s own implementations are total. (Overrides are not: a
+        // subclass `equals`/`toString` can throw, but those have bodies we
+        // inline, so they never reach this check as havoced calls.)
+        "java/lang/Object" => matches!(
+            (name, desc),
+            ("<init>", "()V")
+                | ("getClass", "()Ljava/lang/Class;")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+        ),
+
+        // Only the no-argument queries. Anything taking a `String`/`CharSequence`
+        // throws NPE on null (`concat`, `contains`, `startsWith`, `replace`),
+        // anything taking an index throws (`charAt`, `substring`), the regex
+        // methods throw `PatternSyntaxException`, and `format` throws
+        // `IllegalFormatException`.
+        "java/lang/String" => matches!(
+            (name, desc),
+            ("length", "()I")
+                | ("isEmpty", "()Z")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
+                | ("intern", "()Ljava/lang/String;")
+                | ("trim", "()Ljava/lang/String;")
+                | ("toCharArray", "()[C")
+                | ("toUpperCase", "()Ljava/lang/String;")
+                | ("toLowerCase", "()Ljava/lang/String;")
+                // `equals` is null-tolerant by contract (returns false).
+                | ("equals", "(Ljava/lang/Object;)Z")
+        ),
+
+        // Unboxing accessors are total. `valueOf` only for the *primitive*
+        // overloads — the `String` ones throw `NumberFormatException`.
+        "java/lang/Integer" => matches!(
+            (name, desc),
+            ("intValue", "()I") | ("longValue", "()J") | ("doubleValue", "()D")
+                | ("floatValue", "()F") | ("shortValue", "()S") | ("byteValue", "()B")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(I)Ljava/lang/Integer;")
+                | ("toString", "(I)Ljava/lang/String;")
+                | ("compare", "(II)I")
+        ),
+        "java/lang/Long" => matches!(
+            (name, desc),
+            ("intValue", "()I") | ("longValue", "()J") | ("doubleValue", "()D")
+                | ("floatValue", "()F") | ("shortValue", "()S") | ("byteValue", "()B")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(J)Ljava/lang/Long;")
+                | ("toString", "(J)Ljava/lang/String;")
+                | ("compare", "(JJ)I")
+        ),
+        "java/lang/Short" => matches!(
+            (name, desc),
+            ("shortValue", "()S") | ("intValue", "()I") | ("longValue", "()J")
+                | ("doubleValue", "()D") | ("floatValue", "()F") | ("byteValue", "()B")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(S)Ljava/lang/Short;")
+        ),
+        "java/lang/Byte" => matches!(
+            (name, desc),
+            ("byteValue", "()B") | ("intValue", "()I") | ("longValue", "()J")
+                | ("doubleValue", "()D") | ("floatValue", "()F") | ("shortValue", "()S")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(B)Ljava/lang/Byte;")
+        ),
+        // Float/Double parsing throws; the accessors and primitive boxing do not.
+        "java/lang/Float" => matches!(
+            (name, desc),
+            ("floatValue", "()F") | ("doubleValue", "()D") | ("intValue", "()I")
+                | ("longValue", "()J") | ("shortValue", "()S") | ("byteValue", "()B")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(F)Ljava/lang/Float;")
+                | ("isNaN", "(F)Z") | ("isInfinite", "(F)Z")
+        ),
+        "java/lang/Double" => matches!(
+            (name, desc),
+            ("doubleValue", "()D") | ("floatValue", "()F") | ("intValue", "()I")
+                | ("longValue", "()J") | ("shortValue", "()S") | ("byteValue", "()B")
+                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(D)Ljava/lang/Double;")
+                | ("isNaN", "(D)Z") | ("isInfinite", "(D)Z")
+        ),
+        // `parseBoolean`/`valueOf(String)` are null-tolerant by contract here:
+        // they return false rather than throwing.
+        "java/lang/Boolean" => matches!(
+            (name, desc),
+            ("booleanValue", "()Z") | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(Z)Ljava/lang/Boolean;")
+                | ("parseBoolean", "(Ljava/lang/String;)Z")
+        ),
+        "java/lang/Character" => matches!(
+            (name, desc),
+            ("charValue", "()C") | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
+                | ("equals", "(Ljava/lang/Object;)Z")
+                | ("valueOf", "(C)Ljava/lang/Character;")
+                // Classification predicates are total over the whole char range.
+                | ("isDigit", "(C)Z") | ("isLetter", "(C)Z")
+                | ("isLetterOrDigit", "(C)Z") | ("isWhitespace", "(C)Z")
+                | ("isUpperCase", "(C)Z") | ("isLowerCase", "(C)Z")
+                | ("isAlphabetic", "(I)Z") | ("isSpaceChar", "(C)Z")
+                | ("toUpperCase", "(C)C") | ("toLowerCase", "(C)C")
+        ),
+
+        // Explicitly enumerated: the `*Exact` family throws `ArithmeticException`
+        // on overflow, and `floorDiv`/`floorMod`/`ceilDiv` throw on a zero
+        // divisor. The listed methods saturate to NaN/Infinity instead.
+        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+            name,
+            "abs" | "min" | "max" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
+                | "asin" | "acos" | "atan" | "atan2" | "exp" | "expm1"
+                | "log" | "log10" | "log1p" | "pow" | "floor" | "ceil"
+                | "rint" | "round" | "signum" | "hypot" | "random"
+                | "toRadians" | "toDegrees" | "ulp" | "nextUp" | "nextDown"
+                | "nextAfter" | "copySign" | "IEEEremainder" | "sinh" | "cosh"
+                | "tanh" | "fma" | "scalb" | "getExponent"
+        ),
+
+        // `arraycopy` throws `IndexOutOfBounds`/`ArrayStore`/NPE and `exit` can
+        // raise `SecurityException`, so neither is listed.
+        "java/lang/System" => matches!(
+            (name, desc),
+            ("currentTimeMillis", "()J") | ("nanoTime", "()J")
+                | ("identityHashCode", "(Ljava/lang/Object;)I")
+                | ("lineSeparator", "()Ljava/lang/String;")
+        ),
+
+        // The no-arg constructor and the primitive/String appends. The
+        // capacity constructor throws `NegativeArraySizeException`, and the
+        // `(char[], int, int)` append throws `IndexOutOfBoundsException`.
+        "java/lang/StringBuilder" | "java/lang/StringBuffer" => {
+            matches!((name, desc), ("<init>", "()V"))
+                || matches!((name, desc),
+                    ("length", "()I") | ("toString", "()Ljava/lang/String;"))
+                || (name == "append"
+                    && matches!(desc,
+                        "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+                        | "(Ljava/lang/String;)Ljava/lang/StringBuffer;"
+                        | "(I)Ljava/lang/StringBuilder;" | "(I)Ljava/lang/StringBuffer;"
+                        | "(J)Ljava/lang/StringBuilder;" | "(J)Ljava/lang/StringBuffer;"
+                        | "(C)Ljava/lang/StringBuilder;" | "(C)Ljava/lang/StringBuffer;"
+                        | "(Z)Ljava/lang/StringBuilder;" | "(Z)Ljava/lang/StringBuffer;"
+                        | "(D)Ljava/lang/StringBuilder;" | "(D)Ljava/lang/StringBuffer;"
+                        | "(F)Ljava/lang/StringBuilder;" | "(F)Ljava/lang/StringBuffer;"
+                        | "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+                        | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;"))
+        }
+
+        // `print`/`println` swallow IOException and render null as "null".
+        // `format`/`printf` throw `IllegalFormatException`, and `print(char[])`
+        // throws NPE on a null array, so neither is listed.
+        "java/io/PrintStream" | "java/io/PrintWriter" => {
+            (matches!(name, "print" | "println")
+                && matches!(desc,
+                    "()V" | "(Ljava/lang/String;)V" | "(I)V" | "(J)V" | "(C)V"
+                    | "(Z)V" | "(D)V" | "(F)V" | "(Ljava/lang/Object;)V"))
+                || matches!((name, desc), ("flush", "()V"))
+        }
+
+        // `compareTo` can raise `ClassCastException` across enum types, so it
+        // is excluded; the rest are total.
+        "java/lang/Enum" => matches!(
+            (name, desc),
+            ("ordinal", "()I") | ("name", "()Ljava/lang/String;")
+                | ("toString", "()Ljava/lang/String;") | ("hashCode", "()I")
+                | ("equals", "(Ljava/lang/Object;)Z")
+        ),
+
+        // Only the total queries on hash-based collections. `get`, `next`,
+        // `pop`, `peek` and the index-taking `add`/`remove` overloads are all
+        // partial. Sorted collections are excluded entirely: `TreeMap`/`TreeSet`
+        // throw NPE on a null key and `ClassCastException` on incomparable ones.
+        "java/util/ArrayList" | "java/util/LinkedList" | "java/util/HashSet"
+        | "java/util/HashMap" | "java/util/LinkedHashMap" | "java/util/LinkedHashSet" => {
+            matches!((name, desc), ("<init>", "()V"))
+                || matches!((name, desc), ("size", "()I") | ("isEmpty", "()Z") | ("clear", "()V"))
+        }
+
+        // `hasNext` is total; `next` throws `NoSuchElementException` when
+        // exhausted and `remove` throws `IllegalStateException`.
+        "java/util/Iterator" => matches!((name, desc), ("hasNext", "()Z")),
+
+        _ => false,
+    }
+
 }
