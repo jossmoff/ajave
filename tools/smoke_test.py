@@ -304,6 +304,16 @@ TESTS = [
     # was dropped, so these two were indistinguishable to the encoder.
     ("heap", "benchmarks/ajave/heap/ArrayInvariantViolated.yml", "FALSE"),
 
+    # ── string models: an unknown argument is not an empty one ───────────
+    # `new StringBuffer(x)` was modelled as "" whenever x's content could not
+    # be resolved, which proved `contains(...)` false, pruned the branch
+    # holding the assertion, and discharged it as unreachable. Basic15 is the
+    # corpus task that produced the wrong TRUE; the two reduced programs
+    # isolate the String and CharSequence constructors.
+    ("strings", "benchmarks/sv-comp/securibench/Basic15.yml", "FALSE"),
+    ("strings", "benchmarks/ajave/jvm-strings/StringBufferFromUnknownStringIsNotEmpty.yml", "FALSE"),
+    ("strings", "benchmarks/ajave/jvm-strings/StringBufferFromCharSequenceIsNotEmpty.yml", "FALSE"),
+
 ]
 
 import yaml

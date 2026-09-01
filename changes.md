@@ -1800,3 +1800,126 @@ discharges lost at −2 each and `autostub/Long...toString` gained at +1.
 Both properties re-measured on the shipping build, idle machine: **VA 800**
 (664 correct, 40 timeouts, 1 wrong = #72) and **NRE 1057** (537 correct, 0
 wrong, identical to baseline). Combined 1857.
+
+## 2026-09-01 — obligation ids collided across methods, blocking unrelated discharges
+
+**NRE 1057 → 1089 (+32), 553 correct, 0 wrong.** 16 tasks went UNKNOWN → TRUE,
+ten of them securibench.
+
+`ObligationId` is an index into one `Body`'s obligation list, so id 3 exists in
+every method that has four obligations. Both per-obligation guards at the BMC's
+discharge site were keyed by the id alone:
+
+```rust
+let violated_oids: HashSet<ObligationId> =
+    violations.iter().map(|(_, oid, _)| *oid).collect();   // method discarded
+...
+&& !ctx.skipped_obligations.contains(&oref.id)             // method ignored
+&& !violated_oids.contains(&oref.id)
+```
+
+The discharge loop iterates `ObligationRef { method, id }` and tested only the
+id, so a violation or an untrusted check in *one* method blocked discharge of an
+unrelated obligation that happened to share an index in *another*. The method
+was available at both sites — `violations` is `Vec<(MethodKey, ObligationId,
+Witness)>` and the map expression threw it away.
+
+Keyed by `(MethodKey, ObligationId)` now. This is a precision fix with no
+soundness question in it: both sets record a fact about a *specific* check —
+"this obligation's check could not be trusted", "this obligation had a candidate
+violation" — and blocking a different obligation on that basis was never
+justified by the record. The change restores the intended semantics rather than
+relaxing anything, which is why it can gain 32 points with 0 wrong.
+
+### Why it showed up on NRE and in securibench
+
+Valid-assert was unchanged. The property seeds one obligation kind, so a method
+rarely has enough obligations for indices to collide across methods.
+No-runtime-exception seeds six kinds, so ids run high in every method and
+collisions are common. securibench is the most multi-method corpus we score
+against, which is why ten of the sixteen gains are there — a collision needs two
+methods to collide *between*.
+
+### How it was found
+
+Not by reading the code, but by instrumenting it. An earlier attempt tallied
+*which completeness flags were set* on blocked tasks and concluded
+`has_tainted_paths` was the top blocker at 22/50. That was wrong:
+`has_tainted_paths` is consulted only in the assertion-only branch of
+`can_discharge`, so on no-runtime-exception a set taint flag blocks nothing at
+all. Counting set flags instead of refusing ones would have put the effort in
+the wrong place entirely.
+
+`Completeness::discharge_blocker` now reports which condition actually refuses,
+and is deliberately kept beside `can_discharge` in the same order so a
+measurement of where the points are cannot drift from what the code tests. The
+corrected tally over 80 blocked tasks in the two largest pools:
+
+| blocker | NRE | VA |
+|---|---|---|
+| discharge never attempted | 15 | 5 |
+| `violated` | 8 | 12 |
+| `skipped_obligation` | 4 | 13 |
+| `all_paths_complete` | 7 | 10 |
+| `has_potentially_throwing_havoc` | 6 | 0 |
+
+`violated` and `skipped_obligation` together are the largest bucket, and this
+change is why: a large share of them were collisions rather than real blocks.
+
+### The +32 exposed a wrong TRUE, and the wrong TRUE was pre-existing
+
+Measuring the collision fix on **both** properties, as the discipline above
+requires, gave NRE 1089 with 0 wrong and VA **786 with 2 wrong** — a new wrong
+TRUE on `securibench/Basic15`.
+
+The analysis script nearly hid it. Its diff regex was `^  [+.x]` and the WRONG
+marker is a capital `X`, so it reported "1 task differs" while a soundness
+regression sat in the same file. The regex now includes `X` and says why.
+
+Reduced to five lines
+(`benchmarks/ajave/jvm-strings/StringBufferFromUnknownStringIsNotEmpty`):
+
+```java
+String s2 = s + ";";                                    // untracked
+StringBuffer buf = new StringBuffer(s2);
+if (buf.toString().contains("<bad/>")) { assert false; }  // said TRUE, is FALSE
+```
+
+`handle_assign` modelled `new StringBuffer(x)` as the **empty string** whenever
+`x`'s symbolic content could not be resolved:
+
+```rust
+args.get(1).and_then(|a| self.encode_str_operand(a))
+    .unwrap_or_else(|| self.solver.str_const(""))
+```
+
+An unknown argument is not an empty one. Asserting `buf == ""` is a claim about
+content the program never made, and it is strong enough to prove
+`contains("<bad/>")` false — so the branch holding the assertion was pruned as
+infeasible, the obligation was **never checked**, and it was then discharged as
+unreachable.
+
+The `else` arm had the same defect for `(Ljava/lang/CharSequence;)`, which is
+specified to hold the argument's characters. Only `()V` and `(I)V` genuinely
+start empty. This is the descriptor-blind default the modelling rules warn
+about: testing part of a signature and letting everything else fall into one
+bucket that happens to assert something false.
+
+**The bug was pre-existing and masked by the collision.** The id collision was
+over-blocking discharge, and one of the things it over-blocked was this wrong
+one. That is the third time today the same pattern has appeared — k-induction's
+one-unrolling proof, CHC's LIA arithmetic, and now this — a wrong answer held
+back by an unrelated conservative gate rather than by design. Removing a gate
+does not create these; it reveals them.
+
+Concat matters and is not decoration: `s + ";"` compiles to its own
+StringBuilder chain, which is what leaves the result untracked at the point the
+StringBuffer is built. `new StringBuffer(s)` directly resolves and was always
+answered FALSE correctly.
+
+### Final, both properties, idle machine
+
+**VA 802** (665 correct, 40 timeouts, 1 wrong = the #72 benchmark defect),
+**NRE 1089** (553 correct, 0 wrong). Combined **1891**, against 1857 before this
+change and 1870 at the start of the day. Smoke 125 correct, 0 wrong, with
+`Basic15` and both reductions added as canaries.

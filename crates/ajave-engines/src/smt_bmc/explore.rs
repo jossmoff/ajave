@@ -482,13 +482,28 @@ impl<'a> ExploreCtx<'a> {
                 if target.name == "<init>" {
                     if let Some(recv) = args.first() {
                         if let Operand::Var(recv_v) = recv {
-                            let init_str = if target.desc.starts_with("(Ljava/lang/String;)") {
-                                // <init>(String) — use the string argument
-                                args.get(1).and_then(|a| self.encode_str_operand(a))
-                                    .unwrap_or_else(|| self.solver.str_const(""))
-                            } else {
-                                // <init>() — empty string
-                                self.solver.str_const("")
+                            // Only the no-argument and capacity constructors
+                            // start empty. Every other one copies its argument,
+                            // and an argument whose content we cannot resolve
+                            // is *unknown*, not empty -- asserting `buf == ""`
+                            // is a claim about content the program never made,
+                            // and it is strong enough to prove a guard false
+                            // and discharge a reachable obligation. That was a
+                            // wrong TRUE on securibench/Basic15, reduced in
+                            // `benchmarks/ajave/jvm-strings/
+                            // StringBufferFromUnknownStringIsNotEmpty`.
+                            let init_str = match target.desc.as_str() {
+                                "()V" | "(I)V" => self.solver.str_const(""),
+                                d if d.starts_with("(Ljava/lang/String;)")
+                                    || d.starts_with("(Ljava/lang/CharSequence;)") =>
+                                {
+                                    args.get(1)
+                                        .and_then(|a| self.encode_str_operand(a))
+                                        .unwrap_or_else(|| self.solver.fresh_str("sb_init"))
+                                }
+                                // A constructor we have not modelled. Its
+                                // contents are whatever it is; say nothing.
+                                _ => self.solver.fresh_str("sb_init"),
                             };
                             debug!("str <init> propagating to v{} (class={})", recv_v.0, target.class);
                             self.propagate_str_to_aliases(*recv_v, init_str);
@@ -801,7 +816,7 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown) {
-            self.skipped_obligations.insert(oid);
+            self.skipped_obligations.insert((self.body.key.clone(), oid));
         }
         if self.path_tainted {
             self.completeness.has_tainted_paths = true;
@@ -970,6 +985,10 @@ impl<'a> ExploreCtx<'a> {
             let count = self.loop_visits.entry(loop_key).or_insert(0);
             *count += 1;
             if *count > MAX_LOOP_UNROLL {
+                log::debug!(
+                    "smt-bmc: INCOMPLETE loop-unroll-cap at bb{} in {}",
+                    target.0, self.body.key
+                );
                 self.completeness.all_paths_complete = false;
             } else {
                 self.explore_block_until(target, 0, stop_at);

@@ -106,6 +106,42 @@ impl Completeness {
         }
     }
 
+    /// Which condition in `can_discharge` refuses, for diagnostics.
+    ///
+    /// Kept beside `can_discharge` and in the same order, so a measurement of
+    /// where the points are cannot drift from what the code actually tests.
+    /// The distinction matters: `has_tainted_paths` is consulted **only** in
+    /// the assertion-only branch, so on the no-runtime-exception property a
+    /// set taint flag is not a blocker at all, and counting set flags rather
+    /// than refusing ones would put the effort in the wrong place.
+    fn discharge_blocker(
+        &self,
+        method: &MethodKey,
+        entry: &MethodKey,
+        method_explored: bool,
+        assertion_only: bool,
+    ) -> Option<&'static str> {
+        if !assertion_only && self.has_potentially_throwing_havoc {
+            return Some("has_potentially_throwing_havoc");
+        }
+        if method == entry {
+            return self.has_unresolved_in_try.then_some("has_unresolved_in_try");
+        }
+        if method_explored {
+            if assertion_only && !self.has_unresolved_in_try && !self.has_depth_limited_havoc && !self.has_tainted_paths {
+                return None;
+            }
+            if assertion_only {
+                if self.has_unresolved_in_try { return Some("has_unresolved_in_try"); }
+                if self.has_depth_limited_havoc { return Some("has_depth_limited_havoc"); }
+                if self.has_tainted_paths { return Some("has_tainted_paths"); }
+            }
+            return (!self.all_calls_resolved).then_some("all_calls_resolved");
+        }
+        if !self.all_paths_complete { return Some("all_paths_complete"); }
+        (!self.all_calls_resolved).then_some("all_calls_resolved")
+    }
+
     /// Can we discharge an obligation for `method` given this completeness state?
     ///
     /// For NRE (assertion_only=false), havoced calls to methods that could
@@ -340,8 +376,13 @@ impl Engine for SmtBmc {
         let violations = std::mem::take(&mut ctx.violations);
         let violations_empty = violations.is_empty();
         // Collect violated obligation IDs before consuming violations.
-        let violated_oids: HashSet<ObligationId> = violations.iter()
-            .map(|(_, oid, _)| *oid)
+        // Keyed by (method, id). `ObligationId` is an index into one `Body`'s
+        // obligation list, so id 3 exists in every method that has four
+        // obligations — dropping the method here made a violation in one
+        // method block discharge of an unrelated obligation in another.
+        let violated_oids: HashSet<(MethodKey, ObligationId)> = violations
+            .iter()
+            .map(|(m, oid, _)| (m.clone(), *oid))
             .collect();
         // Check if a runtime-exception violation could dispatch to an exception
         // handler containing an Assertion. When the BMC finds e.g. ArrayBounds
@@ -452,6 +493,17 @@ impl Engine for SmtBmc {
         // violation and was not skipped. This is strictly more powerful than
         // the old "violations_empty" global gate — a violation on obligation A
         // no longer prevents discharging obligation B.
+        if log::log_enabled!(log::Level::Debug) {
+            // `open_or_unconfirmed` allocates, so it must not run when the
+            // level is off.
+            debug!(
+                "smt-bmc: discharge gate exhausted={} budget_left={} all_paths_complete={} open_or_unconfirmed={}",
+                ctx.exhausted,
+                ctx.budget_left(),
+                ctx.completeness.all_paths_complete,
+                bb.open_or_unconfirmed().len(),
+            );
+        }
         if !ctx.exhausted && ctx.budget_left() {
             if ctx.completeness.all_paths_complete {
                 // Include obligations whose only status is an unconfirmed
@@ -474,10 +526,21 @@ impl Engine for SmtBmc {
                             }
                         }
                     }
-                    if ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only)
-                        && !ctx.skipped_obligations.contains(&oref.id)
-                        && !violated_oids.contains(&oref.id)
-                    {
+                    let blocker = if !ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only) {
+                        ctx.completeness
+                            .discharge_blocker(&oref.method, entry, method_explored, assertion_only)
+                            .unwrap_or("completeness")
+                    } else if ctx.skipped_obligations.contains(&(oref.method.clone(), oref.id)) {
+                        "skipped_obligation"
+                    } else if violated_oids.contains(&(oref.method.clone(), oref.id)) {
+                        "violated"
+                    } else {
+                        ""
+                    };
+                    if !blocker.is_empty() {
+                        debug!("smt-bmc: BLOCKER {blocker} for {oref:?}");
+                    }
+                    if blocker.is_empty() {
                         debug!("smt-bmc: discharging {oref:?} (exhaustive exploration)");
                         let _ = bb.publish(
                             self.id(),
@@ -493,14 +556,21 @@ impl Engine for SmtBmc {
                         advanced = true;
                     }
                 }
-            } else if violations_empty {
+            } else {
+                debug!(
+                    "smt-bmc: BLOCKER all_paths_complete for every obligation (outer gate)"
+                );
+            }
+            if !ctx.completeness.all_paths_complete && violations_empty {
                 // Bounded publishing only when no violations at all
                 // (conservative: bounded status is only useful when clean).
                 // Also skip obligations that had a tainted-path violation
                 // suppressed — their bounded status is unsound because the
                 // solver DID find a satisfying assignment for the error path.
                 for oref in bb.open() {
-                    if &oref.method == entry && !ctx.skipped_obligations.contains(&oref.id) {
+                    if &oref.method == entry
+                        && !ctx.skipped_obligations.contains(&(oref.method.clone(), oref.id))
+                    {
                         let _ = bb.publish(
                             self.id(),
                             self.direction(),
@@ -545,7 +615,10 @@ struct ExploreCtx<'a> {
     solver_calls: u32,
     exhausted: bool,
     completeness: Completeness,
-    skipped_obligations: HashSet<ObligationId>,
+    /// Obligations whose check could not be trusted, keyed by
+    /// **(method, id)**. See `violated_oids` for why the method is part of
+    /// the key.
+    skipped_obligations: HashSet<(MethodKey, ObligationId)>,
 
     // ── Heap model ──────────────────────────────────────────────────────
     statics: HashMap<FK, Term>,
