@@ -288,6 +288,22 @@ TESTS = [
     # NRE proof canaries: benchmarks that should be provably TRUE for NRE.
     ("nre-true", "sv-benchmarks/jpf-regression/ExDarko_true.yml", "TRUE", "no-runtime-exception"),
     ("nre-true", "sv-benchmarks/jpf-regression/ExException_true.yml", "TRUE", "no-runtime-exception"),
+    # ── k-induction: a bounded check is not a proof (#76) ────────────────
+    # `try_step_case` encoded the body once and published the resulting UNSAT
+    # as an inductive proof. LoopFailsOnSecondIteration is the shape that
+    # separates the two -- it holds on the first iteration and fails on the
+    # second -- so a TRUE here means the engine has gone back to reporting one
+    # unrolling as an induction. LoopInvariantNeedsInduction is the converse:
+    # it needs a real step case, so an UNKNOWN means the capability was lost.
+    ("kinduction", "benchmarks/ajave/kinduction/LoopFailsOnSecondIteration.yml", "FALSE"),
+    ("kinduction", "benchmarks/ajave/kinduction/LoopInvariantNeedsInduction.yml", "TRUE"),
+    ("kinduction", "benchmarks/ajave/kinduction/LoopFreeEntryCallsLoopingHelper.yml", "FALSE"),
+
+    # ── heap: stored values reach later reads ────────────────────────────
+    # Every heap read used to be a fresh unconstrained value and every write
+    # was dropped, so these two were indistinguishable to the encoder.
+    ("heap", "benchmarks/ajave/heap/ArrayInvariantViolated.yml", "FALSE"),
+
 ]
 
 import yaml

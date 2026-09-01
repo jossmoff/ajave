@@ -64,6 +64,24 @@ impl Engine for KInduction {
             return Progress::Exhausted;
         }
 
+        // Obligations whose loop this engine can induct over. Since the base
+        // case is established here rather than taken from `Status::Bounded`,
+        // there is no reason to wait for that artifact — and good reason not
+        // to: it is published only when a run finds no violation anywhere, so
+        // requiring it starved the engine on exactly the programs with loops.
+        // Its `k` was never usable either, being a bound on path length rather
+        // than on iterations (#76).
+        let inductive: Vec<ObligationRef> = open
+            .iter()
+            .filter(|oref| {
+                prog.body(&oref.method)
+                    .is_some_and(|b| smt_encode::k_induction_applicable(b, oref.id))
+            })
+            .cloned()
+            .collect();
+
+        // Obligations the BMC exhausted to a depth, which the loop-free path
+        // below can discharge outright.
         let bounded: Vec<(ObligationRef, u32)> = open
             .iter()
             .filter_map(|oref| match bb.status(oref) {
@@ -72,17 +90,43 @@ impl Engine for KInduction {
             })
             .collect();
 
-        if bounded.is_empty() {
-            debug!("k-induction: no bounded obligations to work on");
+        if bounded.is_empty() && inductive.is_empty() {
+            debug!("k-induction: nothing to work on");
             return Progress::Stalled;
         }
 
         info!(
-            "k-induction: attempting step case for {} obligation(s)",
-            bounded.len()
+            "k-induction: {} obligation(s) with a bounded base case, {} inside \
+             a loop this can induct over",
+            bounded.len(),
+            inductive.len()
         );
 
         let mut advanced = false;
+
+        for oref in &inductive {
+            let Some(body) = prog.body(&oref.method) else { continue };
+            match self.try_k_induction(body, oref.id) {
+                Ok(Some(proved_k)) => {
+                    debug!("k-induction: proved {oref} by induction at k={proved_k}");
+                    let _ = bb.publish(
+                        self.id(),
+                        self.direction(),
+                        Artifact::Status(
+                            oref.clone(),
+                            Status::Discharged {
+                                by: self.id(),
+                                proof: ProofKind::KInduction { k: proved_k },
+                            },
+                        ),
+                    );
+                    advanced = true;
+                }
+                Ok(None) => {}
+                Err(e) => debug!("k-induction: solver error on {oref}: {e}"),
+            }
+        }
+
         for (oref, k) in &bounded {
             let Some(body) = prog.body(&oref.method) else {
                 continue;
@@ -118,7 +162,9 @@ impl Engine for KInduction {
                 continue;
             }
 
-            // Method has loops — try proper k-induction step case.
+            // Induction was already attempted above for anything shaped for
+            // it. What is left is a whole-body encoding, which can conclude
+            // something only when it covers every path.
             // Encode the body as an SMT formula and check if the property
             // is inductive (holds after one more step given it held before).
             if let Ok(result) = self.try_step_case(body, oref.id) {
@@ -185,7 +231,51 @@ fn reachable_has_loops(prog: &Program, entry: &MethodKey) -> bool {
     false
 }
 
+/// Depths attempted, in order. Each is a separate pair of solver queries, so
+/// this is a cost as well as a reach: past 3 the encodings get large and the
+/// programs that need a deeper induction usually need an invariant instead.
+const K_SCHEDULE: [u32; 3] = [1, 2, 3];
+
 impl KInduction {
+    /// Prove an obligation inside a loop by induction on the iteration count.
+    ///
+    /// Both queries must come back UNSAT. Checking only the step case would
+    /// prove nothing — a property that never holds is trivially preserved —
+    /// and checking only the base case is the bounded check this engine used
+    /// to publish as a proof (#76).
+    fn try_k_induction(&self, body: &Body, oid: ObligationId) -> Result<Option<u32>, String> {
+        for k in K_SCHEDULE {
+            let mut solver = self.factory.create()?;
+            let Some(q) = smt_encode::encode_k_induction(solver.as_mut(), body, oid, k) else {
+                // Shape the encoder cannot handle; a larger k will not change
+                // that, so stop rather than repeat the work.
+                return Ok(None);
+            };
+
+            solver.push();
+            solver.assert(q.base);
+            let base = solver.check_sat();
+            solver.pop();
+            if base != SatResult::Unsat {
+                // A violation within the first k iterations. This is a real
+                // counterexample if `base` is Sat, and unknown otherwise;
+                // either way there is nothing to prove and no larger k helps.
+                debug!("k-induction: base case for {oid:?} at k={k} came back {base:?}");
+                return Ok(None);
+            }
+
+            solver.push();
+            solver.assert(q.step);
+            let step = solver.check_sat();
+            solver.pop();
+            if step == SatResult::Unsat {
+                return Ok(Some(k));
+            }
+            debug!("k-induction: step case for {oid:?} not inductive at k={k}");
+        }
+        Ok(None)
+    }
+
     /// Try to prove the obligation cannot be violated anywhere in `body`.
     ///
     /// Returns `Ok(true)` only when the encoding covers **every** execution of
@@ -505,6 +595,365 @@ mod tests {
             "b",
         );
         assert!(flat.complete, "a loop-free body with no handlers is fully encoded");
+    }
+
+    // ---------------------------------------------------------------
+    // Heap. Before these, every heap read was a fresh unconstrained value
+    // and every write was discarded, so no property depending on a stored
+    // value could be proved -- the encoder could not tell
+    // `benchmarks/ajave/heap/ArrayInvariantHoldsForAllElements` from
+    // `ArrayInvariantViolated`.
+    // ---------------------------------------------------------------
+
+    /// A single straight-line block ending in `check`, over `nvars` locals.
+    fn straight_line(stmts: Vec<Stmt>, nvars: usize, cond: VarId) -> Body {
+        Body {
+            key: key(),
+            entry: BlockId(0),
+            vars: (0..nvars).map(|i| int_var(i as u16)).collect(),
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(cond),
+                bytecode_offset: 0,
+                line: None,
+                guarded: false,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts,
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            }],
+        }
+    }
+
+    fn prove(body: &Body) -> Result<bool, String> {
+        let Some(factory) = SmtLibFactory::from_env() else {
+            return Ok(true); // caller's assertion is skipped; see the guards
+        };
+        KInduction::new(Box::new(factory)).try_step_case(body, ObligationId(0))
+    }
+
+    fn have_solver() -> bool {
+        SmtLibFactory::from_env().is_some()
+    }
+
+    /// `a = new int[4]; a[0] = 5; x = a[0]; assert x > 0;`
+    #[test]
+    fn array_store_is_visible_to_a_later_load() {
+        if !have_solver() {
+            return;
+        }
+        let (a, x, c) = (VarId(0), VarId(1), VarId(2));
+        let body = straight_line(
+            vec![
+                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::ArrayStore {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(0),
+                    val: Operand::int(5),
+                },
+                Stmt::Assign(x, Rvalue::ArrayLoad {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(0),
+                }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            3,
+            c,
+        );
+        assert_eq!(prove(&body), Ok(true), "a[0] was written 5, so a[0] > 0");
+    }
+
+    /// The same shape storing 0, which does violate `a[0] > 0`. Guards against
+    /// the heap being modelled as something that satisfies everything.
+    #[test]
+    fn array_store_of_a_violating_value_is_not_proved() {
+        if !have_solver() {
+            return;
+        }
+        let (a, x, c) = (VarId(0), VarId(1), VarId(2));
+        let body = straight_line(
+            vec![
+                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::ArrayStore {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(0),
+                    val: Operand::int(0),
+                },
+                Stmt::Assign(x, Rvalue::ArrayLoad {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(0),
+                }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            3,
+            c,
+        );
+        assert_eq!(prove(&body), Ok(false), "a[0] was written 0, so a[0] > 0 fails");
+    }
+
+    /// A store at one index must not be visible at another.
+    #[test]
+    fn array_indices_are_separated() {
+        if !have_solver() {
+            return;
+        }
+        let (a, x, c) = (VarId(0), VarId(1), VarId(2));
+        let body = straight_line(
+            vec![
+                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::ArrayStore {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(0),
+                    val: Operand::int(5),
+                },
+                Stmt::Assign(x, Rvalue::ArrayLoad {
+                    arr: Operand::Var(a),
+                    idx: Operand::int(1),
+                }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            3,
+            c,
+        );
+        assert_eq!(
+            prove(&body),
+            Ok(false),
+            "a[1] was never written, so nothing bounds it"
+        );
+    }
+
+    /// `o = new; p = new; o.f = 1; p.f = 2; assert o.f == 1;`
+    ///
+    /// Two allocations are distinct objects, so the write through `p` cannot
+    /// disturb `o.f`. This is what the allocation addresses buy: with fresh
+    /// unconstrained references the solver could set `o == p` and the
+    /// assertion would come back violable.
+    #[test]
+    fn distinct_allocations_do_not_alias() {
+        if !have_solver() {
+            return;
+        }
+        let (o, q, y, c) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let body = straight_line(
+            vec![
+                Stmt::Assign(o, Rvalue::New("Obj".into())),
+                Stmt::Assign(q, Rvalue::New("Obj".into())),
+                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
+                Stmt::PutField { obj: Operand::Var(q), field: f.clone(), val: Operand::int(2) },
+                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            4,
+            c,
+        );
+        assert_eq!(prove(&body), Ok(true));
+    }
+
+    /// A reference the encoder did not allocate may alias anything, so a write
+    /// through it has to be assumed to reach `o.f`. Soundness in the other
+    /// direction: the heap must not prove things it cannot know.
+    #[test]
+    fn an_unknown_reference_may_alias() {
+        if !have_solver() {
+            return;
+        }
+        let (o, u, y, c) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let body = straight_line(
+            vec![
+                Stmt::Assign(o, Rvalue::New("Obj".into())),
+                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
+                // `u` is an incoming reference, not an allocation.
+                Stmt::Assign(u, Rvalue::Nondet(Ty::Ref, None)),
+                Stmt::PutField { obj: Operand::Var(u), field: f.clone(), val: Operand::int(2) },
+                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            4,
+            c,
+        );
+        assert_eq!(
+            prove(&body),
+            Ok(false),
+            "u could be o, so o.f may have been overwritten with 2"
+        );
+    }
+
+    /// A call that is not known to be pure can write any field, so a value
+    /// stored before it cannot be relied on afterwards.
+    #[test]
+    fn an_opaque_call_havocs_the_heap() {
+        if !have_solver() {
+            return;
+        }
+        let (o, y, c, r) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let body = straight_line(
+            vec![
+                Stmt::Assign(o, Rvalue::New("Obj".into())),
+                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
+                Stmt::Assign(r, Rvalue::Call {
+                    target: MethodKey {
+                        class: "Helper".into(),
+                        name: "mutate".into(),
+                        desc: "()V".into(),
+                    },
+                    args: vec![],
+                    is_virtual: false,
+                }),
+                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
+                Stmt::Check(ObligationId(0)),
+            ],
+            4,
+            c,
+        );
+        assert_eq!(prove(&body), Ok(false), "Helper.mutate may have written o.f");
+    }
+
+    // ---------------------------------------------------------------
+    // Induction over the iteration count.
+    // ---------------------------------------------------------------
+
+    /// ```text
+    /// B0: x = 0; i = 0;                  -> B1
+    /// B1: if (i < n) B2 else B3
+    /// B2: x = x + 2; check(x % 2 == 0); i = i + 1;  -> B1
+    /// B3: return
+    /// ```
+    ///
+    /// `n` is unconstrained, so no finite unrolling covers every execution.
+    /// The invariant is inductive as written: 0 is even, and even + 2 is even.
+    /// This is the IR of `benchmarks/ajave/kinduction/LoopInvariantNeedsInduction`.
+    fn loop_with_inductive_invariant() -> Body {
+        let (x, i, n, t) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let blk = |id: u32, stmts: Vec<Stmt>, term: Terminator| Block {
+            id: BlockId(id),
+            bytecode_offset: id as u16,
+            stmts,
+            term,
+            exceptional: vec![],
+        };
+        Body {
+            key: key(),
+            entry: BlockId(0),
+            vars: vec![int_var(0), int_var(1), int_var(2), int_var(3)],
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(t),
+                bytecode_offset: 0,
+                line: None,
+                guarded: false,
+            }],
+            blocks: vec![
+                blk(
+                    0,
+                    vec![
+                        Stmt::Assign(x, Rvalue::Use(Operand::int(0))),
+                        Stmt::Assign(i, Rvalue::Use(Operand::int(0))),
+                        Stmt::Assign(n, Rvalue::Nondet(Ty::Int, None)),
+                    ],
+                    Terminator::Goto(BlockId(1)),
+                ),
+                blk(
+                    1,
+                    vec![Stmt::Assign(
+                        t,
+                        Rvalue::Bin(BinOp::Lt, Operand::Var(i), Operand::Var(n)),
+                    )],
+                    Terminator::Branch {
+                        cond: Operand::Var(t),
+                        then_: BlockId(2),
+                        else_: BlockId(3),
+                    },
+                ),
+                blk(
+                    2,
+                    vec![
+                        Stmt::Assign(
+                            x,
+                            Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(2)),
+                        ),
+                        Stmt::Assign(
+                            t,
+                            Rvalue::Bin(BinOp::Rem, Operand::Var(x), Operand::int(2)),
+                        ),
+                        Stmt::Assign(
+                            t,
+                            Rvalue::Bin(BinOp::Eq, Operand::Var(t), Operand::int(0)),
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                        Stmt::Assign(
+                            i,
+                            Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::int(1)),
+                        ),
+                    ],
+                    Terminator::Goto(BlockId(1)),
+                ),
+                blk(3, vec![], Terminator::Return(None)),
+            ],
+        }
+    }
+
+    /// The whole point of the engine: a property no bounded unrolling
+    /// establishes, proved by induction on the iteration count.
+    #[test]
+    fn k_induction_proves_an_inductive_loop_invariant() {
+        if !have_solver() {
+            return;
+        }
+        let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
+        assert_eq!(
+            engine.try_k_induction(&loop_with_inductive_invariant(), ObligationId(0)),
+            Ok(Some(1)),
+            "x is even at every check: 0 is even and even + 2 is even, which is \
+             an induction of depth 1"
+        );
+    }
+
+    /// The counterpart. The step case is satisfiable — x = 1 survives one
+    /// iteration and fails the next — so no k proves it.
+    #[test]
+    fn k_induction_refuses_a_loop_that_fails_on_the_second_iteration() {
+        if !have_solver() {
+            return;
+        }
+        let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
+        assert_eq!(
+            engine.try_k_induction(&loop_failing_on_second_iteration(), ObligationId(0)),
+            Ok(None),
+            "the base case admits a violation at the second iteration, so there \
+             is nothing to prove at any depth"
+        );
+    }
+
+    /// An obligation outside the loop is out of scope rather than silently
+    /// proved: discharging it needs the loop's exit state.
+    #[test]
+    fn k_induction_declines_an_obligation_outside_the_loop() {
+        if !have_solver() {
+            return;
+        }
+        let mut body = loop_with_inductive_invariant();
+        // Move the check from the loop body to the block after the loop.
+        body.blocks[2].stmts.retain(|s| !matches!(s, Stmt::Check(_)));
+        body.blocks[3].stmts.push(Stmt::Check(ObligationId(0)));
+        let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
+        assert_eq!(
+            engine.try_k_induction(&body, ObligationId(0)),
+            Ok(None),
+        );
     }
 }
 

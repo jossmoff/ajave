@@ -1645,3 +1645,90 @@ had the same stale default. Restored, and three real defects fixed:
   Anything that can start a thread now takes the contradiction-only path, where
   an unobserved violation proves nothing but an observed one against an
   expected TRUE still fails.
+
+## 2026-09-01 — a real k-induction, and a heap for it to reason about
+
+Follows the entry above, which removed the unsound discharge without replacing
+the capability. These two changes are one piece of work: an induction with no
+heap cannot prove anything about an array, and a heap with no induction has no
+consumer, since every looped body was being declined.
+
+### The heap (`smt_encode`)
+
+Reads were fresh unconstrained values and writes were dropped. Sound in the
+direction that matters — an arbitrary value covers whatever is really stored —
+but it made every heap property unprovable, and left the encoder unable to tell
+`ArrayInvariantHoldsForAllElements` from `ArrayInvariantViolated`.
+
+Instance fields use Burstall–Bornat splitting: one SMT array per `FieldKey`,
+indexed by the object reference. Two objects separate for free because their
+references are distinct terms, so no alias analysis is needed to keep `p.f` from
+`q.g`, and `p.f` against `q.f` is decided by the solver on the references
+themselves — which is exactly right.
+
+Java arrays cannot be handled that way. The natural index is the pair
+(reference, element index) and `Solver::fresh_array` fixes the index width at
+32 bits, so the pair does not fit. They are split by allocation site instead,
+which needs a points-to map carried alongside the SSA state and merged at joins:
+sites that disagree across incoming edges collapse to "unknown". A store through
+an unknown reference havocs every array rather than being dropped, because the
+unknown reference may be the array a later load reads.
+
+Allocations get successive constant addresses rather than fresh symbols with
+pairwise disequalities, which would be quadratic. Sound because nothing in Java
+observes an address — only reference equality is visible, and distinct constants
+preserve exactly the disequalities the JLS guarantees between a `new` object and
+every reference that already exists. References the encoder did not allocate stay
+unconstrained and can still alias anything, which costs precision only. Addresses
+start at `0x1000`: `Const::Str` encodes as the literal 1, and an allocation
+sharing that value would alias every string constant in the body.
+
+A call not known pure (via `ajave_models::contract_of`) havocs the whole heap.
+Array lengths survive it — an array's length is immutable in Java.
+
+### The induction (`encode_k_induction`)
+
+`base` asks whether the obligation fails in any of the first k iterations from
+the real entry state; `step` asks whether there is any state at all from which
+it survives k iterations and fails on the next. Both UNSAT proves it for every
+iteration. They are returned as two terms rather than one because a caller that
+conflates them proves nothing: the step case alone is vacuously true of a
+property that never held.
+
+Three pieces made this possible:
+
+- **`walk_region`.** The traversal is now parameterised by a block set and an
+  entry, and treats a successor outside the set *or equal to the entry* as an
+  exit. Making the entry an exit is what turns a loop body into a transition:
+  the back-edge leaves the region and its state becomes the next iteration's
+  input instead of being dropped.
+- **`loop_region`, not the natural loop.** The natural loop is the blocks that
+  reach the back-edge, and in lifted Java the interesting obligation is never
+  among them: `assert c;` compiles to a branch into a block that constructs an
+  `AssertionError` and throws, which has no path back to the header. Measured on
+  `LoopInvariantNeedsInduction`, whose `Check` sits in `bb11` behind a `throw`
+  while the natural loop is `bb4..bb12`. Inducting over a region that cannot
+  contain the property is vacuous, and it reported "0 obligations to induct
+  over" until the region became "one pass from the header, exit and back edges
+  excluded".
+- **No `Bounded` dependency.** The base case is established here, so waiting for
+  `Status::Bounded` only starved the engine — it is published solely when a run
+  finds no violation anywhere. `k_induction_applicable` screens shapes without
+  touching a solver so the wider reach does not cost a process spawn per
+  obligation.
+
+Scope, enforced by declining rather than by assumption: exactly one back-edge,
+no nested loop, the obligation inside the loop, and a prefix the encoder
+describes completely. Depths 1, 2, 3.
+
+### Result
+
+`LoopInvariantNeedsInduction` is proved at k=1 — a property no finite unrolling
+establishes, and one the engine could not previously reach at all. Smoke: 123
+correct, 0 wrong.
+
+`ArrayInvariantHoldsForAllElements` is still UNKNOWN, and will stay that way.
+It has two sequential loops, so there is no single transition relation, and its
+property is `∀i. a[i] == 0` — established by the *first* loop and read by the
+second. That needs a quantified invariant over the array, not an induction at
+fixed depth. The heap is a prerequisite for reaching it; it is not sufficient.
