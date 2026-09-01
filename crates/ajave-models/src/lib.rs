@@ -112,6 +112,18 @@ pub enum Effect {
     Unknown,
 }
 
+impl Effect {
+    /// Position in the lattice `Pure < Receiver < Unknown`, where higher is
+    /// more conservative: assuming a call writes more can only lose precision.
+    pub fn rank(self) -> u8 {
+        match self {
+            Effect::Pure => 0,
+            Effect::Receiver => 1,
+            Effect::Unknown => 2,
+        }
+    }
+}
+
 /// Everything we claim about an external method, in one place.
 ///
 /// Previously this knowledge was spread across `could_throw_runtime_exception`,
@@ -136,6 +148,39 @@ impl Contract {
     pub fn is_total(&self) -> bool {
         self.requires.is_empty()
     }
+
+    /// Is this contract at least as conservative as `other`?
+    ///
+    /// # Why an order exists at all
+    ///
+    /// Contracts are not symmetric under error. One that is **too strong** --
+    /// claiming preconditions the real method does not have, or a broader
+    /// effect -- costs precision: extra obligations, more UNKNOWN. One that is
+    /// **too weak** flips a verdict, because `is_total()` returning true lets
+    /// the BMC treat a havoced call as non-throwing, claim `all_paths_complete`
+    /// and discharge an obligation as TRUE.
+    ///
+    /// So only movement *up* this order is safe, and the two kinds of mistake
+    /// look identical without it. Issue #48 found 22 wrongly-allowlisted
+    /// methods that accumulated precisely because nothing could tell them
+    /// apart.
+    ///
+    /// More preconditions is more conservative; a wider effect is more
+    /// conservative.
+    pub fn at_least_as_conservative_as(&self, other: &Contract) -> bool {
+        let covers = other
+            .requires
+            .iter()
+            .all(|p| self.requires.iter().any(|q| q == p));
+        covers && self.effect.rank() >= other.effect.rank()
+    }
+
+    /// The most conservative contract: assume it can throw for reasons we
+    /// cannot state, and that it writes anything.
+    pub const OPAQUE: Contract = Contract {
+        requires: &[Precondition::Unexpressible],
+        effect: Effect::Unknown,
+    };
 
     /// `true` when every precondition is actually emitted as an obligation by
     /// the lifter.
@@ -163,7 +208,34 @@ impl Contract {
 /// be proved free of runtime exceptions.
 ///
 /// Argument indices include the receiver at 0 for instance methods.
+/// Replace a contract with the most conservative one, for metamorphic testing.
+///
+/// `AJAVE_PERTURB_CONTRACT=java/lang/String:length` makes `contract_of` return
+/// `Contract::OPAQUE` for that signature — a strict move *up* the refinement
+/// order. By the monotonicity property every consumer is supposed to have, that
+/// may turn a TRUE into an UNKNOWN and must never change a verdict to a
+/// different verdict.
+///
+/// This is what makes the order in `at_least_as_conservative_as` checkable
+/// rather than merely stated: `tools/contract_monotonicity.py` perturbs each
+/// contract in turn and looks for a flip. A flip means some consumer is not
+/// monotone, which is the defect class behind #48 -- and one that no amount of
+/// reading the table can reveal.
+fn perturbed(class: &str, name: &str) -> bool {
+    static SPEC: std::sync::OnceLock<Option<(String, String)>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        std::env::var("AJAVE_PERTURB_CONTRACT").ok().and_then(|v| {
+            let (c, n) = v.split_once(':')?;
+            Some((c.to_string(), n.to_string()))
+        })
+    });
+    matches!(spec, Some((c, n)) if c == class && n == name)
+}
+
 pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+    if perturbed(class, name) {
+        return Some(Contract::OPAQUE);
+    }
     // Argument-null preconditions, the single most common shape in the JDK.
     const NN1: &[Precondition] = &[Precondition::NonNull(1)];
     // Index-into-receiver, e.g. `charAt`.
@@ -1086,5 +1158,70 @@ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
         // exception class to look for on replay, which is one reason the
         // no-deadlock property is answered outside the obligation system.
         Deadlock => None,
+    }
+}
+
+#[cfg(test)]
+mod contract_order_tests {
+    use super::*;
+
+    #[test]
+    fn more_preconditions_is_more_conservative() {
+        let weak = Contract { requires: &[], effect: Effect::Pure };
+        let strong = Contract {
+            requires: &[Precondition::NonNull(1)],
+            effect: Effect::Pure,
+        };
+        assert!(strong.at_least_as_conservative_as(&weak));
+        assert!(!weak.at_least_as_conservative_as(&strong));
+    }
+
+    #[test]
+    fn a_wider_effect_is_more_conservative() {
+        let pure = Contract { requires: &[], effect: Effect::Pure };
+        let recv = Contract { requires: &[], effect: Effect::Receiver };
+        let unk = Contract { requires: &[], effect: Effect::Unknown };
+        assert!(recv.at_least_as_conservative_as(&pure));
+        assert!(unk.at_least_as_conservative_as(&recv));
+        assert!(!pure.at_least_as_conservative_as(&recv));
+    }
+
+    #[test]
+    fn opaque_is_the_top_of_the_order() {
+        // Everything the table can express must sit below OPAQUE, or a
+        // perturbation to it would not be a move *up* the order and the
+        // metamorphic test would be checking the wrong thing.
+        for (class, name, desc) in [
+            ("java/lang/String", "length", "()I"),
+            ("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;"),
+            ("java/lang/Object", "<init>", "()V"),
+            ("java/lang/Math", "abs", "(I)I"),
+        ] {
+            if let Some(c) = contract_of(class, name, desc) {
+                assert!(
+                    Contract::OPAQUE.at_least_as_conservative_as(&c),
+                    "{class}.{name} is not below OPAQUE"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_order_is_reflexive_and_transitive_where_it_should_be() {
+        let a = Contract { requires: &[], effect: Effect::Pure };
+        let b = Contract { requires: &[Precondition::NonNull(1)], effect: Effect::Receiver };
+        let c = Contract::OPAQUE;
+        assert!(a.at_least_as_conservative_as(&a));
+        assert!(b.at_least_as_conservative_as(&a));
+        assert!(c.at_least_as_conservative_as(&b) || c.requires.len() >= b.requires.len());
+    }
+
+    #[test]
+    fn a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge() {
+        // `is_total` is the soundness commitment: it lets a havoced call be
+        // treated as non-throwing. It must be exactly the bottom of the order.
+        let total = Contract { requires: &[], effect: Effect::Pure };
+        assert!(total.is_total());
+        assert!(!Contract::OPAQUE.is_total());
     }
 }
