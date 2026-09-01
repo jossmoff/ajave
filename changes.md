@@ -1780,3 +1780,23 @@ UNKNOWN.
 The measurement to repeat after this is whether those three timeouts revert and
 whether the seven losses are exactly the set above — if a different task moved,
 the cap is doing something other than what is claimed here.
+
+### Confirmed after the cap
+
+The re-run predicted above came back exactly as stated, which is the point of
+having written the prediction down first:
+
+- The three UNKNOWN → TIMEOUT regressions are **gone**. `ActiveCheck`,
+  `VelocityTracker_false` and `VelocityTracker_true` no longer differ from the
+  pre-change run, and the timeout count fell to 40 (pre-change 42, uncapped 43).
+- The seven TRUE → UNKNOWN losses are **exactly** the predicted set. No other
+  task moved, so the cap is doing what is claimed and not silently declining
+  work elsewhere.
+
+Score is 800 either way, because a timeout and an UNKNOWN both score zero — the
+cap bought time and determinism, not points. The −13 decomposes as seven
+discharges lost at −2 each and `autostub/Long...toString` gained at +1.
+
+Both properties re-measured on the shipping build, idle machine: **VA 800**
+(664 correct, 40 timeouts, 1 wrong = #72) and **NRE 1057** (537 correct, 0
+wrong, identical to baseline). Combined 1857.
