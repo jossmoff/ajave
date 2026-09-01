@@ -220,3 +220,50 @@ count is what makes the bound meaningful rather than structural.
 4. Any new approximation is classified by *direction of failure* before it lands:
    precision loss is acceptable, verdict flip is not. Refuse instead.
 5. New bounds and constants get a sensitivity sweep, per CLAUDE.md.
+
+---
+
+## Where this leaves us (measured 2026-09-01)
+
+Probing 24 constructs real Java code uses, ajave answers **15 (62%)**. The split
+is not a gradient, it is two populations:
+
+**The classic idiom is complete — 15 of 15.** `synchronized`, `wait`/`notifyAll`,
+`ReentrantLock` + `Condition`, `ReentrantReadWriteLock`, atomics and CAS,
+`CountDownLatch`, `Semaphore`, `CyclicBarrier`, `ExecutorService` + `Future`,
+`BlockingQueue`, `ConcurrentHashMap`, `ThreadLocal`, one-shot
+`CompletableFuture`, `extends Thread`, threads in a loop, and volatile
+publication all answer.
+
+**The modern idiom is absent — 0 of 3**, and from a single cause: every lambda
+form is unanalysable, because `invokedynamic` havocs the Runnable rather than
+resolving the bootstrap to its implementation method (#73). `new Thread(() -> …)`,
+`executor.submit(() -> …)` and `CompletableFuture.supplyAsync(() -> …)` all fail
+the same way.
+
+**Six library classes remain** (#74): `ConcurrentLinkedQueue`,
+`CopyOnWriteArrayList`, `AtomicIntegerArray`, `LockSupport`, `Phaser`,
+`ForkJoinPool`.
+
+### Next phases
+
+| Phase | Work | Why now |
+|---|---|---|
+| 6 | **Lambdas and method references** (#73) | The largest real-world gap, one cause, and not concurrency-specific — modern Java uses lambdas everywhere, so every engine hits it |
+| 7 | **Models as data** (#71) + **the contract order** (#67) | The prerequisite for phase 8: six more hand-written models is six more independent soundness arguments |
+| 8 | **The remaining collections and primitives** (#74) | Nearly free once 7 exists. `LockSupport` first: it is the primitive the others are built from |
+| 9 | `ForkJoinPool` / `RecursiveTask` | Genuinely large, least used; keep refused until the rest is done |
+| 10 | Weak memory beyond one stale value | Research, and it weakens certification |
+
+The ordering is deliberate: 6 unblocks the most code, 7 is what makes 8 cheap and
+checkable, and 9–10 are the two items where the cost is real and the payoff
+narrow.
+
+### What "full" would mean
+
+Worth stating, because 100% is not the target. Two things are permanently out of
+scope for a bounded explorer: the complete JMM (committed executions and the
+causality rules), and any construct whose semantics depend on the platform
+scheduler rather than the language. Everything else on the list above is
+engineering, and phases 6–8 would take the measured figure from 62% to roughly
+21 of 24 — with the remainder being `ForkJoinPool` and the two weak-memory cases.
