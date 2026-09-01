@@ -6,7 +6,7 @@ phases. Phase 1 involves no heap at all and is the go/no-go for phase 2.
 
 ---
 
-# Phase 1 — Unstarve the base case
+# Phase 1 — Unstarve the base case  ❌ ATTEMPTED, REVERTED
 
 ## The problem, exactly
 
@@ -94,6 +94,54 @@ turns into a wrong TRUE (see `heap-modelling.md`). Widen one thing at a time.
 - `Bounded` published for at least some `algorithms` obligations.
 - k-induction is observed attempting a step case where it previously did not.
 - Zero wrong answers on both properties.
+
+## RESULT: attempted, reverted, and it changed the picture
+
+Implemented and measured. **The plan above is wrong in its conclusion**, and the
+measurement says something more important than the change would have.
+
+**The per-obligation change is correct and still does not help.** With it,
+`algorithms` tasks still produce no usable `Bounded` artifact — because those
+obligations are excluded one line below by `violated_oids`. The BMC finds *50*
+violations on `BellmanFord-FunSat01`, which is expected TRUE, so they are
+spurious: manufactured from havoced and tainted values. `Bounded { k }` asserts
+no violation within k steps, which is plainly false there.
+
+So no widening of this branch can give k-induction a base case on these tasks.
+The tasks that need a proof are exactly the tasks where the BMC produces a
+spurious candidate, and the gap is upstream in that imprecision.
+
+**And the change produced two wrong TRUEs.** `BellmanFord-MemUnsat01` and
+`InsertionSort-MemUnsat01` — the same canaries that caught the CHC attempt.
+Obligations *without* their own violation now got a bounded status, k-induction
+took it, and discharged them wrongly.
+
+That is the finding worth keeping:
+
+> **k-induction has a latent soundness bug, masked by its starved base case —
+> exactly as CHC has one masked by `bb.open()` gating.**
+
+`try_step_case` does not implement k-induction. It encodes the body once and
+asks whether the violation term is satisfiable, with no base case, no induction
+hypothesis, and no relation between consecutive states. For a loop-free body
+that is a sound argument; for a body with loops it is not, and nothing checks
+which it was given.
+
+## Revised plan
+
+Phase 2 has no consumer, and phase 1 cannot supply one. Before either:
+
+1. **Audit `try_step_case` against the k-induction it claims to implement.**
+   It consumes `Bounded { k }` but never uses `k`, and never asserts the
+   property at states 1..k. Either implement the induction or stop calling the
+   result a proof.
+2. **Then** revisit the base case, with the canaries as the gate.
+3. Only then consider the heap port.
+
+Two independent over-approximating engines now have latent unsoundness
+discovered the same way: gate them out and they are harmless, gate them in and
+they emit wrong TRUEs. That is the real answer to why they contribute nothing,
+and it is a stronger reason to be careful with them than the encodings are.
 
 ## Expected outcome, honestly
 
