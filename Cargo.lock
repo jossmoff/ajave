@@ -19,6 +19,7 @@ dependencies = [
  "ajave-engines",
  "ajave-frontend",
  "ajave-ir",
+ "ajave-models",
  "clap",
  "env_logger",
  "log",

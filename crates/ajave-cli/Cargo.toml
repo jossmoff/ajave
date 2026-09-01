@@ -14,6 +14,7 @@ ajave-ir = { path = "../ajave-ir" }
 ajave-frontend = { path = "../ajave-frontend" }
 ajave-core = { path = "../ajave-core" }
 ajave-engines = { path = "../ajave-engines" }
+ajave-models = { path = "../ajave-models" }
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true

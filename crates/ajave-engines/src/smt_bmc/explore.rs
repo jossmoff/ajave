@@ -559,7 +559,48 @@ impl<'a> ExploreCtx<'a> {
                     return false;
                 } else {
                     // Call was not resolved — havoced.
-                    self.completeness.all_calls_resolved = false;
+                    if std::env::var("AJAVE_REPORT_UNRESOLVED").is_ok() {
+                        eprintln!("UNRESOLVED\t{}\t{}\t{}\t{}",
+                            target.class, target.name, target.desc, is_virtual);
+                    }
+                    // A call we could not inline is not automatically a gap in
+                    // the analysis. One that cannot throw unnoticed and writes
+                    // nothing we model is *fully* accounted for: its result is
+                    // an unconstrained term, which over-approximates every
+                    // value it could return, and there is no state it could
+                    // have changed behind our back.
+                    //
+                    // `Effect::Pure` is the condition, and it has to be that
+                    // strict here: the BMC models fields as SMT arrays and does
+                    // not clobber them for a havoced call, so a `Receiver`
+                    // effect really could invalidate a value we are still
+                    // holding. `all_calls_resolved` is what stops a discharge
+                    // resting on that, and must keep doing so.
+                    // A call that cannot throw unnoticed leaves exactly one
+                    // question: what did it write? For a `Pure` one, nothing.
+                    // For anything else we do not know, and the honest answer
+                    // is to *forget* the field state rather than to give up on
+                    // the method entirely: dropping the field arrays makes
+                    // every later read unconstrained, which is sound, and lets
+                    // obligations that do not depend on fields still be
+                    // discharged.
+                    //
+                    // Blocking instead -- what `all_calls_resolved = false` did
+                    // for every havoced call -- is strictly weaker. It refuses
+                    // those obligations too, and buys nothing extra: the field
+                    // values it preserves are exactly the ones that might be
+                    // stale.
+                    if could_throw_runtime_exception(target) {
+                        self.completeness.all_calls_resolved = false;
+                    } else {
+                        let pure = ajave_models::contract_of(
+                            &target.class, &target.name, &target.desc)
+                            .map(|c| c.effect == ajave_models::Effect::Pure)
+                            .unwrap_or(false);
+                        if !pure {
+                            self.field_arrays.clear();
+                        }
+                    }
                     // If this block has exception edges, the havoced call
                     // could throw to a handler containing an assertion.
                     if let Some(bid) = self.current_block {

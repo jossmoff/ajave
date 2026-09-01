@@ -188,3 +188,15 @@ sv-comp/securibench/Inter5.yml valid-assert
 # Expected FALSE; UNKNOWN is honest and scores as unproven, TRUE means the
 # completeness claim has come back.
 sv-comp/argv-tasks/Pan_exceptionprone.yml no-runtime-exception
+
+# canaries: the seeded-precondition guard let the BMC treat a call as
+# non-throwing because its preconditions were emitted as obligations -- while
+# under valid-assert those obligations are not consumed at all, so nothing
+# carried the burden. Eight wrong TRUEs. The flag that says whether they are
+# seeded was computed for a decision record and never stored, so it sat at its
+# default for every property.
+sv-comp/securibench/Basic29.yml valid-assert
+sv-comp/securibench/Basic30.yml valid-assert
+sv-comp/securibench/Datastructures5.yml valid-assert
+sv-comp/securibench/Factories3.yml valid-assert
+sv-comp/securibench/Inter4.yml valid-assert

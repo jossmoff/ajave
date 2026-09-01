@@ -592,6 +592,19 @@ fn main() {
             eprintln!("unknown property: {}", cli.property);
             std::process::exit(2);
         });
+    // The lifter and the BMC must agree on whether call preconditions exist:
+    // one decides whether to emit those obligations, the other whether a call
+    // may be treated as non-throwing *because* they were emitted.
+    //
+    // This was computed inside `Plan::for_property` for a decision record and
+    // never actually stored, so the flag sat at its default of `true` for every
+    // property -- including valid-assert, which does not consume NullDeref
+    // obligations at all. The guard then treated a call as non-throwing while
+    // nothing carried its burden, which is a wrong TRUE.
+    ajave_models::SEED_CALL_PRECONDITIONS.store(
+        plan.property.wants_call_preconditions(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if cli.trace {
         eprint!("{}", plan.explain());
     }
