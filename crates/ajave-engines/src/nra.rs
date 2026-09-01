@@ -539,7 +539,7 @@ fn encode_rvalue<'tm>(
 ) -> CvcTerm<'tm> {
     match rvalue {
         Rvalue::Use(operand) => encode_operand(tm, operand, var_terms),
-        Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
+        Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => {
             // Fresh unconstrained real variable.
             tm.mk_const(tm.real_sort(), "_fresh")
         }

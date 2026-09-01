@@ -681,7 +681,7 @@ impl<'a> ExploreCtx<'a> {
         match rv {
             Rvalue::Use(op) | Rvalue::Neg(op) => self.width_of_operand(op),
             Rvalue::Bin(_, a, _) => self.width_of_operand(a),
-            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) | Rvalue::Cast(ty, _, _) => self.width_of_ty(ty),
+            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty, _) | Rvalue::Cast(ty, _, _) => self.width_of_ty(ty),
             Rvalue::Cmp(_, _, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
             Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
@@ -812,7 +812,7 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
             Rvalue::Nondet(..) => false,
-            Rvalue::Havoc(_) => true,
+            Rvalue::Havoc(_, _) => true,
         }
     }
 

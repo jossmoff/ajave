@@ -389,7 +389,7 @@ fn lia_rvalue(
 ) -> String {
     match rv {
         Rvalue::Use(o) => lia_operand(o, var_map),
-        Rvalue::Nondet(..) | Rvalue::Havoc(_) => fresh.fresh(),
+        Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => fresh.fresh(),
         Rvalue::Bin(op, a, b) => {
             let l = lia_operand(a, var_map);
             let r = lia_operand(b, var_map);

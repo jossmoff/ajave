@@ -136,9 +136,21 @@ impl<'a> ExploreCtx<'a> {
                 }
                 t
             }
-            Rvalue::Havoc(ty) => {
+            Rvalue::Havoc(ty, from) => {
                 let w = self.width_of_ty(ty);
-                self.solver.fresh_bv("hv", w)
+                let t = self.solver.fresh_bv("hv", w);
+                // A result the JDK documents as never null is constrained
+                // non-zero, so a later null check on it can be discharged.
+                // The erased call keeps its name precisely so this is possible.
+                if let Some(m) = from {
+                    if ajave_models::returns_nonnull(&m.class, &m.name, &m.desc) {
+                        let zero = self.solver.bv_const(0, w);
+                        let is_zero = self.solver.bveq(t, zero);
+                        let nz = self.solver.not(is_zero);
+                        self.path_constraints.push(nz);
+                    }
+                }
+                t
             }
             Rvalue::Bin(op, a, b) => self.encode_binop(*op, a, b),
             Rvalue::Neg(o) => {

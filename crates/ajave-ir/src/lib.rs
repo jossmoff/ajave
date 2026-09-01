@@ -198,7 +198,18 @@ pub enum Rvalue {
     /// (e.g. `Boolean.booleanValue()`). Semantically identical to `Nondet`
     /// but NOT recorded in witnesses, since these calls are deterministic
     /// on a real JVM and have no `Verifier.nondet*()` counterpart.
-    Havoc(Ty),
+    ///
+    /// The second field names the call the value came from, when the lifter
+    /// knew it.
+    ///
+    /// Erasing a call is meant to drop its *effects* — that is the whole point
+    /// of modelling it as pure. Dropping its *identity* as well was accidental,
+    /// and it is what left `NullDeref` obligations open across the corpus: the
+    /// result of `Collections.singleton` is an unconstrained reference once the
+    /// call is gone, so nothing can say it is never null even though the
+    /// specification does. Keeping the name costs one field and no statements,
+    /// so it cannot bloat the IR the way re-introducing a `Call` would.
+    Havoc(Ty, Option<MethodKey>),
     GetStatic(FieldKey),
     GetField {
         obj: Operand,
@@ -746,7 +757,10 @@ impl fmt::Display for Rvalue {
             Rvalue::Bin(op, a, b) => write!(f, "{a} {} {b}", op.symbol()),
             Rvalue::Neg(a) => write!(f, "-{a}"),
             Rvalue::Nondet(t, _) => write!(f, "nondet<{t:?}>()"),
-            Rvalue::Havoc(t) => write!(f, "havoc<{t:?}>()"),
+            Rvalue::Havoc(t, from) => match from {
+                Some(m) => write!(f, "havoc<{t:?}>() from {}.{}", m.class, m.name),
+                None => write!(f, "havoc<{t:?}>()"),
+            },
             Rvalue::GetStatic(k) => write!(f, "{}.{}", k.class, k.name),
             Rvalue::GetField { obj, field } => write!(f, "{obj}.{}", field.name),
             Rvalue::ArrayLoad { arr, idx } => write!(f, "{arr}[{idx}]"),

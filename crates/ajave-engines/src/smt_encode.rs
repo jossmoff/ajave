@@ -234,7 +234,7 @@ impl<'a> Env<'a> {
     fn encode_rvalue(&mut self, rv: &Rvalue) -> Term {
         match rv {
             Rvalue::Use(o) => self.encode_operand(o),
-            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty) => {
+            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty, _) => {
                 let w = width_of(ty);
                 self.fresh("nd", w)
             }

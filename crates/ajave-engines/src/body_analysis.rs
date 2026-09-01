@@ -16,7 +16,7 @@ pub fn body_uses_havoced_ops(body: &Body) -> bool {
                     | Rvalue::GetField { .. }
                     | Rvalue::InstanceOf { .. }
                     | Rvalue::Call { .. }
-                    | Rvalue::Havoc(_) => return true,
+                    | Rvalue::Havoc(_, _) => return true,
                     _ => {}
                 },
                 Stmt::PutField { .. } => return true,

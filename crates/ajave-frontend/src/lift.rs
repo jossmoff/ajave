@@ -1615,7 +1615,11 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     self.nullcheck(&obj);
                 }
                 if let Some(ty) = t {
-                    let result = self.assign(ty, Rvalue::Havoc(ty));
+                    // The call is erased, but its name is kept: modelling it as
+                    // pure means dropping its effects, not forgetting what it
+                    // was. Downstream that is what lets a result the JDK
+                    // documents as never null be treated as non-null.
+                    let result = self.assign(ty, Rvalue::Havoc(ty, Some(target.clone())));
                     self.stack.push(result);
                 }
             }
@@ -1927,7 +1931,8 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             // Not a lambda we can resolve (string concatenation, a bootstrap we
             // do not model). Unchanged behaviour: havoc the result.
             if let Some(ty) = ret {
-                let result = self.assign(ty, Rvalue::Havoc(ty));
+                // An invokedynamic we could not resolve has no method to name.
+                let result = self.assign(ty, Rvalue::Havoc(ty, None));
                 self.stack.push(result);
             }
             return Ok(None);

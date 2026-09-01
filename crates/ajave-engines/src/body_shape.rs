@@ -77,7 +77,7 @@ fn analyze_rvalue(rvalue: &Rvalue, shape: &mut BodyShape) {
         Rvalue::GetStatic(_)
         | Rvalue::GetField { .. }
         | Rvalue::InstanceOf { .. }
-        | Rvalue::Havoc(_) => {
+        | Rvalue::Havoc(_, _) => {
             shape.has_heap_ops = true;
         }
         Rvalue::ArrayLoad { .. } | Rvalue::ArrayLength(_) | Rvalue::NewArray { .. } => {

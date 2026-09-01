@@ -801,7 +801,7 @@ impl IState {
                     _ => FloatInterval::top(),
                 }
             }
-            Rvalue::Nondet(Ty::Float | Ty::Double, _) | Rvalue::Havoc(Ty::Float | Ty::Double) => {
+            Rvalue::Nondet(Ty::Float | Ty::Double, _) | Rvalue::Havoc(Ty::Float | Ty::Double, _) => {
                 FloatInterval::top()
             }
             // `java.lang.Math` bounds. Without these every call is `top`, and a
@@ -945,6 +945,20 @@ impl IState {
             Rvalue::New(_) => Nullness::NonNull,
             Rvalue::NewArray { .. } => Nullness::NonNull,
             Rvalue::GetStatic(fk) if is_nonnull_static(fk) => Nullness::NonNull,
+            // An erased call whose result the JDK documents as never null.
+            // Exactly the same shape as `is_nonnull_static` one line above:
+            // a specified guarantee, keyed on the full signature.
+            //
+            // This is why `Havoc` keeps the name of the call it replaced.
+            // Without it the value is `Unknown` and every dereference of it
+            // stays unproven, which is what left `Collections.singleton`
+            // results -- and the whole securibench mock API built on them --
+            // permanently open.
+            Rvalue::Havoc(_, Some(m))
+                if ajave_models::returns_nonnull(&m.class, &m.name, &m.desc) =>
+            {
+                Nullness::NonNull
+            }
             // Flat field cells: an absent cell reads as Unknown, so this stays
             // sound when tracking is off or the cell has been invalidated.
             Rvalue::GetStatic(fk) => self.get_field_null(fk),

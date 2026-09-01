@@ -260,7 +260,7 @@ impl Run {
                     }
                 }
             }
-            Rvalue::Nondet(..) | Rvalue::Havoc(_) => {
+            Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => {
                 unreachable!("Nondet/Havoc is handled in run_with_choices")
             }
         }
@@ -559,7 +559,7 @@ impl<'a> ConcreteState<'a> {
     fn eval_assign(&mut self, rv: &Rvalue, store: &mut HashMap<VarId, Value>) -> Result<Value, Outcome> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
-            Rvalue::Havoc(ty) => Ok(self.eval_havoc(ty)),
+            Rvalue::Havoc(ty, _) => Ok(self.eval_havoc(ty)),
             Rvalue::New(cls) => {
                 let aid = self.alloc_id;
                 self.alloc_id += 1;

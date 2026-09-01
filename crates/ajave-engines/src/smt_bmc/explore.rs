@@ -593,7 +593,7 @@ impl<'a> ExploreCtx<'a> {
                 let st = self.nondet_terms.last().and_then(|(_, _, _, _, s)| *s);
                 (bv, st)
             }
-            Rvalue::Havoc(Ty::Str) => {
+            Rvalue::Havoc(Ty::Str, _) => {
                 let bv = self.encode_rvalue(rv);
                 let st = Some(self.solver.fresh_str("hvs"));
                 (bv, st)

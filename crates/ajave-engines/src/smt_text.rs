@@ -72,7 +72,7 @@ pub fn encode_rvalue<T: SmtTheory, V: VarLookup>(
 ) -> String {
     match rvalue {
         Rvalue::Use(o) => encode_operand(theory, o, vars),
-        Rvalue::Nondet(..) | Rvalue::Havoc(_) => theory.encode_fresh(),
+        Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => theory.encode_fresh(),
         Rvalue::Bin(op, a, b) => {
             let left = encode_operand(theory, a, vars);
             let right = encode_operand(theory, b, vars);
