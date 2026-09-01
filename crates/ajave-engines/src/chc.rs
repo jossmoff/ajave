@@ -186,6 +186,19 @@ impl Engine for ChcEngine {
 
 /// Returns true if the body uses array or heap operations that CHC's LIA
 /// encoding cannot model: array load/store/new, field get/put, instanceof.
+/// Seconds Spacer may spend on one query.
+///
+/// CHC runs late in the portfolio, so this is a slice of the remaining budget
+/// rather than the whole of it: a proof needing longer is one the other engines
+/// have already failed to find, and spending the task's whole budget on it
+/// costs the answers they would have produced.
+fn solver_timeout_secs() -> u32 {
+    std::env::var("AJAVE_CHC_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+}
+
 fn body_uses_heap_ops(body: &Body) -> bool {
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -919,7 +932,17 @@ fn run_chc_solver(
     obligations: &[ObligationId],
 ) -> Result<Vec<(ObligationId, bool)>, String> {
     let mut child = Command::new(binary)
-        .args(["-in", "-smt2"])
+        .args([
+            "-in",
+            "-smt2",
+            // A wall-clock bound on the solver, which had none at all.
+            //
+            // Nothing exposed that while the heap guard held, because CHC never
+            // saw a program hard enough to hang on. It is a latent hazard the
+            // guard was hiding, not a consequence of it: any future encoding
+            // work makes it reachable immediately.
+            &format!("-T:{}", solver_timeout_secs()),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

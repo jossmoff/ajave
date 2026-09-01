@@ -1,0 +1,4 @@
+# Programs needing heap reasoning: an invariant over array elements that no
+# bounded unrolling can establish.
+# Format: <glob> <property>
+ajave/heap/*.yml valid-assert
