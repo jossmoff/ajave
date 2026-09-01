@@ -1,0 +1,3 @@
+# Minimal programs isolating why a NullDeref obligation stays open.
+# Format: <glob> <property>
+ajave/nullness/*.yml no-runtime-exception

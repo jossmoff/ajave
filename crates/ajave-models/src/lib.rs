@@ -135,14 +135,31 @@ impl Effect {
 pub struct Contract {
     pub requires: &'static [Precondition],
     pub effect: Effect,
+    /// Can this method return `null`?
+    ///
+    /// A contract described what a method *throws* and what it *writes*, never
+    /// what it returns -- so the result of any unmodelled call was an
+    /// unconstrained reference, and every dereference of one stayed unproven.
+    ///
+    /// That is the single largest source of open NullDeref obligations in the
+    /// corpus, and it is a missing thing to *say* rather than a missing
+    /// analysis. securibench's mock servlet API is ordinary Java whose
+    /// `getHeaderNames()` is `Collections.enumeration(Collections.singleton(x))`;
+    /// both inner calls havoc, so the Enumeration is unconstrained and the null
+    /// check on it cannot be discharged.
+    ///
+    /// `true` is the safe default: assuming a result may be null costs
+    /// precision, while wrongly claiming it cannot is a wrong TRUE. Only a
+    /// documented guarantee justifies `false`.
+    pub may_return_null: bool,
 }
 
 impl Contract {
     /// Total: cannot throw for any input.
-    const TOTAL: Contract = Contract { requires: &[], effect: Effect::Pure };
+    const TOTAL: Contract = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
 
     /// Cannot throw, but mutates its receiver.
-    const TOTAL_MUT: Contract = Contract { requires: &[], effect: Effect::Receiver };
+    const TOTAL_MUT: Contract = Contract { requires: &[], effect: Effect::Receiver, may_return_null: true };
 
     /// `true` when no input can make this call raise a `RuntimeException`.
     pub fn is_total(&self) -> bool {
@@ -180,6 +197,7 @@ impl Contract {
     pub const OPAQUE: Contract = Contract {
         requires: &[Precondition::Unexpressible],
         effect: Effect::Unknown,
+        may_return_null: true,
     };
 
     /// `true` when every precondition is actually emitted as an obligation by
@@ -198,6 +216,19 @@ impl Contract {
     }
 }
 
+
+/// Whether call preconditions are seeded as obligations.
+///
+/// Lives here rather than in the lifter because both sides of one invariant
+/// need it: the lifter decides whether to emit the obligations, and the BMC
+/// decides whether a call may be treated as non-throwing *because* they were
+/// emitted. Those two must agree, and they cannot agree across a crate
+/// boundary only one of them can see.
+///
+/// Set from the property: only `no-runtime-exception` consumes these
+/// obligations, so only it seeds them.
+pub static SEED_CALL_PRECONDITIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// The contract for an external method, if we have one.
 ///
@@ -251,6 +282,49 @@ fn perturbed(class: &str, name: &str) -> bool {
 /// method may throw for reasons we cannot state, and may write anything, can
 /// only cost precision. The unsafe default would be `TOTAL`, which is exactly
 /// the mistake #48 catalogued 22 instances of.
+/// Methods the JDK documents as never returning null.
+///
+/// Each entry is a soundness commitment of the same kind as the totality
+/// allowlist, and justified the same way: from the specification, never from
+/// what a benchmark happened to need. Claiming a method cannot return null when
+/// it can discharges a NullDeref obligation that really can fire -- a wrong
+/// TRUE. Omission only costs precision.
+///
+/// Deliberately absent: anything that returns a *looked-up* value. `Map.get`,
+/// `List.get` on a list of references, `getProperty`, `getHeader` and friends
+/// all return null when the thing is not there, and that is their contract, not
+/// an edge case.
+pub fn returns_nonnull(class: &str, name: &str, desc: &str) -> bool {
+    // A constructor's result is the object; `new` never yields null.
+    if name == "<init>" {
+        return true;
+    }
+    matches!(
+        (class, name),
+        // Factories that construct or return a shared immutable instance.
+        ("java/util/Collections",
+            "singleton" | "singletonList" | "singletonMap" | "emptyList"
+            | "emptySet" | "emptyMap" | "enumeration" | "unmodifiableList"
+            | "unmodifiableSet" | "unmodifiableMap" | "unmodifiableCollection"
+            | "synchronizedList" | "synchronizedSet" | "synchronizedMap"
+            | "nCopies" | "list")
+        // `toString` on these is specified to produce a String.
+        | ("java/lang/StringBuilder" | "java/lang/StringBuffer", "toString" | "append")
+        | ("java/lang/String",
+            "toString" | "trim" | "toUpperCase" | "toLowerCase" | "concat"
+            | "substring" | "replace" | "intern" | "toCharArray" | "valueOf"
+            | "join" | "strip" | "repeat")
+        | ("java/lang/Object", "toString" | "getClass")
+        | ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short"
+            | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double"
+            | "java/lang/Boolean" | "java/lang/Character",
+            "valueOf" | "toString" | "toBinaryString" | "toHexString"
+            | "toOctalString")
+        | ("java/util/Objects", "requireNonNull" | "toString")
+        | ("java/util/Arrays", "asList" | "copyOf" | "copyOfRange" | "toString")
+    ) && !desc.ends_with(")V")
+}
+
 pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
     contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
 }
@@ -264,7 +338,10 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
     // analyser asks about goes through this one function -- which is what makes
     // the refinement order enforceable and the monotonicity test non-vacuous.
     if is_total_jdk_signature(class, name, desc) {
-        return Some(Contract::TOTAL);
+        return Some(Contract {
+            may_return_null: !returns_nonnull(class, name, desc),
+            ..Contract::TOTAL
+        });
     }
     // Argument-null preconditions, the single most common shape in the JDK.
     const NN1: &[Precondition] = &[Precondition::NonNull(1)];
@@ -285,21 +362,22 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         ("java/lang/String", "contains" | "startsWith" | "endsWith" | "concat"
             | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase"
             | "indexOf" | "lastIndexOf" | "replace") => {
-            Contract { requires: NN1, effect: Effect::Pure }
+            Contract { requires: NN1, effect: Effect::Pure, may_return_null: true }
         }
         // Index-bounded accessors.
         ("java/lang/String", "charAt" | "codePointAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure }
+            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
         }
         ("java/lang/String", "substring") => Contract {
             requires: &[Precondition::RangeInBounds { start: 1, end: None, seq: 0 }],
             effect: Effect::Pure,
+            may_return_null: true,
         },
         // PatternSyntaxException / IllegalFormatException are not conditions
         // over the argument values we track.
         ("java/lang/String", "matches" | "split" | "replaceAll" | "replaceFirst"
             | "format" | "join") => {
-            Contract { requires: OPAQUE, effect: Effect::Pure }
+            Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
         }
 
         // ── java.lang.Object ────────────────────────────────────────────
@@ -320,6 +398,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         ("java/lang/Object", "wait" | "notify" | "notifyAll") => Contract {
             requires: &[Precondition::Unexpressible],
             effect: Effect::Unknown,
+            may_return_null: true,
         },
         ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
             Contract::TOTAL
@@ -338,6 +417,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
                 NN1
             },
             effect: Effect::Receiver,
+            may_return_null: true,
         },
         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {
             Contract::TOTAL
@@ -346,7 +426,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // total for the primitive ones.
         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure }
+            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
         }
 
         // ── Boxing ──────────────────────────────────────────────────────
@@ -356,7 +436,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
             if desc.starts_with("(Ljava/lang/String;)") {
                 // Parsing: NumberFormatException is not a condition over a
                 // value we model.
-                Contract { requires: OPAQUE, effect: Effect::Pure }
+                Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
             } else {
                 Contract::TOTAL
             }
@@ -384,15 +464,16 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
                         a: 0, b: 1, op, width,
                     }])),
                     effect: Effect::Pure,
+                    may_return_null: true,
                 });
             } else if matches!(n,
                 "incrementExact" | "decrementExact" | "negateExact" | "absExact"
                     | "toIntExact"
             ) {
                 // Single-operand overflow; not seeded yet.
-                Contract { requires: OPAQUE, effect: Effect::Pure }
+                Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
             } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
-                Contract { requires: &[Precondition::NonZero(2)], effect: Effect::Pure }
+                Contract { requires: &[Precondition::NonZero(2)], effect: Effect::Pure, may_return_null: true }
             } else if matches!(n,
                 "abs" | "min" | "max" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
                     | "asin" | "acos" | "atan" | "atan2" | "exp" | "expm1"
@@ -419,18 +500,18 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // and `hasNext()` is total. We model an iterator as its collection, so
         // emptiness is `$$coll_size == 0`.
         ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
         }
         ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") => {
             Contract::TOTAL
         }
         // Stack/Deque removal on an empty receiver throws.
         ("java/util/Stack", "pop" | "peek") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
         }
         ("java/util/ArrayDeque" | "java/util/LinkedList",
             "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver }
+            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
         }
 
         // ── Collections ─────────────────────────────────────────────────
@@ -438,7 +519,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // an indexed access is expressible, so these stop being dead ends.
         ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
             | "java/util/AbstractList" | "java/util/Vector", "get") => {
-            Contract { requires: IDX1, effect: Effect::Pure }
+            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
         }
         ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
             | "java/util/AbstractList" | "java/util/Vector", "size" | "isEmpty") => {
@@ -449,7 +530,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
             | "java/util/AbstractList" | "java/util/Vector", "add") => {
             if desc.starts_with("(I") {
-                Contract { requires: IDX1, effect: Effect::Receiver }
+                Contract { requires: IDX1, effect: Effect::Receiver, may_return_null: true }
             } else {
                 Contract::TOTAL_MUT
             }
@@ -464,7 +545,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // The constructors throw NPE on a null sink; printing is total and
         // renders null as "null". IOException is checked, so irrelevant here.
         ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => {
-            Contract { requires: NN1, effect: Effect::Receiver }
+            Contract { requires: NN1, effect: Effect::Receiver, may_return_null: true }
         }
         ("java/io/PrintWriter" | "java/io/PrintStream",
             "println" | "print" | "write" | "flush" | "close" | "append") => {
@@ -473,18 +554,18 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
             Contract::TOTAL_MUT
         }
         ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => {
-            Contract { requires: OPAQUE, effect: Effect::Receiver }
+            Contract { requires: OPAQUE, effect: Effect::Receiver, may_return_null: true }
         }
 
         // ── CharSequence ────────────────────────────────────────────────
         ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
         ("java/lang/CharSequence", "charAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure }
+            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
         }
 
         // ── java.util.Objects ───────────────────────────────────────────
         ("java/util/Objects", "requireNonNull") => {
-            Contract { requires: NN1, effect: Effect::Pure }
+            Contract { requires: NN1, effect: Effect::Pure, may_return_null: true }
         }
         ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") => {
             Contract::TOTAL
@@ -501,7 +582,7 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
         // shape as issue #49.
         ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => {
-            Contract { requires: OPAQUE, effect: Effect::Unknown }
+            Contract { requires: OPAQUE, effect: Effect::Unknown, may_return_null: true }
         }
         // Queries that touch no shared state.
         ("java/lang/Thread", "currentThread" | "getName" | "getId" | "isAlive"
@@ -512,7 +593,13 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
 
         _ => return None,
     };
-    Some(c)
+    // Fill in the return-nullness for every path out of here, so a contract
+    // never silently claims a result may be null just because the arm that
+    // built it predates the field.
+    Some(Contract {
+        may_return_null: c.may_return_null && !returns_nonnull(class, name, desc),
+        ..c
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1197,10 +1284,11 @@ mod contract_order_tests {
 
     #[test]
     fn more_preconditions_is_more_conservative() {
-        let weak = Contract { requires: &[], effect: Effect::Pure };
+        let weak = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
         let strong = Contract {
             requires: &[Precondition::NonNull(1)],
             effect: Effect::Pure,
+            may_return_null: true,
         };
         assert!(strong.at_least_as_conservative_as(&weak));
         assert!(!weak.at_least_as_conservative_as(&strong));
@@ -1208,9 +1296,9 @@ mod contract_order_tests {
 
     #[test]
     fn a_wider_effect_is_more_conservative() {
-        let pure = Contract { requires: &[], effect: Effect::Pure };
-        let recv = Contract { requires: &[], effect: Effect::Receiver };
-        let unk = Contract { requires: &[], effect: Effect::Unknown };
+        let pure = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
+        let recv = Contract { requires: &[], effect: Effect::Receiver, may_return_null: true };
+        let unk = Contract { requires: &[], effect: Effect::Unknown, may_return_null: true };
         assert!(recv.at_least_as_conservative_as(&pure));
         assert!(unk.at_least_as_conservative_as(&recv));
         assert!(!pure.at_least_as_conservative_as(&recv));
@@ -1238,8 +1326,8 @@ mod contract_order_tests {
 
     #[test]
     fn the_order_is_reflexive_and_transitive_where_it_should_be() {
-        let a = Contract { requires: &[], effect: Effect::Pure };
-        let b = Contract { requires: &[Precondition::NonNull(1)], effect: Effect::Receiver };
+        let a = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
+        let b = Contract { requires: &[Precondition::NonNull(1)], effect: Effect::Receiver, may_return_null: true };
         let c = Contract::OPAQUE;
         assert!(a.at_least_as_conservative_as(&a));
         assert!(b.at_least_as_conservative_as(&a));
@@ -1250,7 +1338,7 @@ mod contract_order_tests {
     fn a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge() {
         // `is_total` is the soundness commitment: it lets a havoced call be
         // treated as non-throwing. It must be exactly the bottom of the order.
-        let total = Contract { requires: &[], effect: Effect::Pure };
+        let total = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
         assert!(total.is_total());
         assert!(!Contract::OPAQUE.is_total());
     }
@@ -1467,6 +1555,23 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // `hasNext` is total; `next` throws `NoSuchElementException` when
         // exhausted and `remove` throws `IllegalStateException`.
         "java/util/Iterator" => matches!((name, desc), ("hasNext", "()Z")),
+        // `hasMoreElements` is to `Enumeration` what `hasNext` is to
+        // `Iterator`: specified to report whether more elements remain, with no
+        // failure mode. `nextElement` is deliberately absent -- it throws
+        // NoSuchElementException when exhausted, and that is its contract, not
+        // an edge case.
+        "java/util/Enumeration" => matches!((name, desc), ("hasMoreElements", "()Z")),
+        // `Collections` is not allowlisted as a class -- it has throwing
+        // members like `max` on an empty collection. These construct or return
+        // a shared immutable instance and cannot fail.
+        "java/util/Collections" => matches!(
+            (name, desc),
+            ("emptyList", "()Ljava/util/List;")
+                | ("emptySet", "()Ljava/util/Set;")
+                | ("emptyMap", "()Ljava/util/Map;")
+                | ("singleton", "(Ljava/lang/Object;)Ljava/util/Set;")
+                | ("singletonList", "(Ljava/lang/Object;)Ljava/util/List;")
+        ),
 
         _ => false,
     }

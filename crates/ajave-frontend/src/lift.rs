@@ -428,8 +428,7 @@ fn is_wide_operand(op: &Operand, lifter: &Lifter) -> bool {
 /// before any lifting, and threading it through `lift_class` -> `lift_method`
 /// -> `Lifter` -> `BlockLifter` would touch every call site to express a
 /// single global fact.
-pub static SEED_CALL_PRECONDITIONS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+pub use ajave_models::SEED_CALL_PRECONDITIONS;
 
 /// A lambda seen while lifting: the synthetic class standing in for it, the
 /// functional-interface method name, the implementation, and how many values

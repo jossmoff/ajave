@@ -50,7 +50,34 @@ fn str_call_can_throw(target: &MethodKey) -> bool {
 /// A method absent from this list is treated as possibly-throwing, which costs
 /// precision only. When in doubt, leave it out.
 pub(crate) fn could_throw_runtime_exception(target: &MethodKey) -> bool {
-    !is_total_jdk_method(target.class.as_str(), target.name.as_str(), target.desc.as_str())
+    if is_total_jdk_method(target.class.as_str(), target.name.as_str(), target.desc.as_str()) {
+        return false;
+    }
+    // A call whose failure modes are *all* seeded as obligations cannot throw
+    // unnoticed: if it throws, one of those obligations is violated, and that
+    // violation is reported by the ordinary machinery. So it must not also
+    // block completeness -- the obligations carry the burden instead.
+    //
+    // This is the design `Contract::preconditions_all_seeded` was written for,
+    // and its other half was never wired: the guard was simply
+    // `!is_total_jdk_method`, so a method whose only failure mode is a
+    // precondition we seed and can discharge -- `Collections.enumeration`
+    // NPEing on a null argument -- still set `has_potentially_throwing_havoc`
+    // and blocked every discharge on the path.
+    //
+    // Gated on the seeding actually being on. `SEED_CALL_PRECONDITIONS` is set
+    // from the property, and valid-assert does not seed them, so claiming the
+    // obligations carry the burden there would be claiming something untrue.
+    if ajave_models::SEED_CALL_PRECONDITIONS.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(c) = ajave_models::contract_of(
+            target.class.as_str(), target.name.as_str(), target.desc.as_str())
+        {
+            if !c.requires.is_empty() && c.preconditions_all_seeded() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `true` when the given signature cannot raise a `RuntimeException` for any
@@ -310,6 +337,17 @@ impl<'a> ExploreCtx<'a> {
         });
         self.vars.insert(dest_var, ret_t);
         self.var_widths.insert(dest_var, ret_w);
+        // A result the JDK documents as never null is constrained to be
+        // non-zero. Without this the value is wholly unconstrained, so every
+        // dereference of it stays unproven -- which is the largest single
+        // source of open NullDeref obligations in the corpus, and a missing
+        // *statement* rather than a missing analysis.
+        if ajave_models::returns_nonnull(&target.class, &target.name, &target.desc) {
+            let zero = self.solver.bv_const(0, ret_w);
+            let is_zero = self.solver.bveq(ret_t, zero);
+            let nz = self.solver.not(is_zero);
+            self.path_constraints.push(nz);
+        }
         if let Some(st) = self.inline_return_str {
             self.str_vars.insert(dest_var, st);
         } else if Self::returns_string(&target.desc) {
@@ -1438,4 +1476,42 @@ mod jdk_allowlist_tests {
             "()I"
         ));
     }
+    #[test]
+    fn enumeration_has_more_elements_is_total_but_next_element_is_not() {
+        // Exactly the Iterator split: the query is total, the accessor throws
+        // when exhausted and that is its specified contract.
+        assert!(is_total_jdk_method("java/util/Enumeration", "hasMoreElements", "()Z"));
+        assert!(!is_total_jdk_method(
+            "java/util/Enumeration", "nextElement", "()Ljava/lang/Object;"));
+    }
+
+    #[test]
+    fn collections_factories_are_total_but_the_class_is_not() {
+        assert!(is_total_jdk_method("java/util/Collections", "emptyList", "()Ljava/util/List;"));
+        assert!(is_total_jdk_method(
+            "java/util/Collections", "singleton", "(Ljava/lang/Object;)Ljava/util/Set;"));
+        // `max` on an empty collection throws; the class must never be
+        // allowlisted wholesale.
+        assert!(!is_total_jdk_method(
+            "java/util/Collections", "max", "(Ljava/util/Collection;)Ljava/lang/Object;"));
+        // `enumeration` NPEs on a null argument, so it is not total either.
+        assert!(!is_total_jdk_method(
+            "java/util/Collections", "enumeration",
+            "(Ljava/util/Collection;)Ljava/util/Enumeration;"));
+    }
+
+    #[test]
+    fn a_non_null_return_is_claimed_only_where_specified() {
+        // Factories and constructors guarantee it; a lookup does not, and
+        // claiming otherwise would discharge a NullDeref that really can fire.
+        assert!(ajave_models::returns_nonnull(
+            "java/util/Collections", "singleton", "(Ljava/lang/Object;)Ljava/util/Set;"));
+        assert!(ajave_models::returns_nonnull("java/lang/StringBuilder", "toString",
+            "()Ljava/lang/String;"));
+        assert!(!ajave_models::returns_nonnull(
+            "java/util/Map", "get", "(Ljava/lang/Object;)Ljava/lang/Object;"));
+        assert!(!ajave_models::returns_nonnull("mockx/servlet/http/HttpServletRequest",
+            "getHeader", "(Ljava/lang/String;)Ljava/lang/String;"));
+    }
+
 }
