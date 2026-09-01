@@ -71,6 +71,28 @@ that recurring.
 7. **When in doubt, leave it out.** Omission costs precision; a wrong entry
    costs correctness.
 
+### The contract is the only source of truth
+Every statement about an external method lives in `ajave_models::contract_of`.
+There is no second place: the `match class` that used to answer a third of the
+JDK surface inside `smt_bmc/explore.rs` is gone, because an order over library
+models is void while most models are answered somewhere else.
+
+Prefer `contract_for`, which is total and defaults to `Contract::OPAQUE`.
+`Option` conflates "specified to throw" with "we never said anything", and that
+conflation is what let the answers spread out in the first place.
+
+`Contract::at_least_as_conservative_as` states the refinement order: more
+preconditions and a wider effect are more conservative, and only movement *up*
+it is safe. `tools/contract_monotonicity.py` checks that every consumer respects
+it, by perturbing one contract to OPAQUE and requiring that verdicts only weaken
+to UNKNOWN.
+
+That harness runs against `benchmarks/sets/contracts.set`, whose programs each
+rest their verdict on exactly one contract. **Do not point it at ordinary
+benchmarks.** That was tried; their verdicts rarely depend on a single contract,
+so every perturbation was inert and the test passed while proving nothing. The
+harness exits 2 when all perturbations are inert, so this cannot recur silently.
+
 ### Required evidence
 Adding or changing an entry requires **both**:
 - a case in the Rust tests in `smt_bmc/explore.rs` (`jdk_allowlist_tests`), which

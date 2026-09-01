@@ -24,14 +24,16 @@ from procguard import run_guarded
 
 BIN = "./target/release/ajave"
 
-# Signatures worth perturbing: the ones a discharge most often rests on.
+# Signatures the smoke set actually consults, measured with
+# AJAVE_REPORT_UNCONTRACTED rather than guessed. That distinction is the whole
+# reason this list exists: the first version was chosen by plausibility --
+# String.length, StringBuilder.append -- and every one of them was inert,
+# because those are answered by the string encoder and never reach a contract.
+# A metamorphic test over signatures nothing consults proves nothing.
 SIGNATURES = [
-    "java/lang/String:length", "java/lang/String:charAt",
-    "java/lang/String:equals", "java/lang/String:isEmpty",
-    "java/lang/StringBuilder:append", "java/lang/StringBuilder:toString",
-    "java/lang/Integer:valueOf", "java/lang/Integer:intValue",
-    "java/lang/Math:abs", "java/lang/Math:max",
-    "java/lang/Object:<init>", "java/util/ArrayList:add",
+    "java/lang/Math:pow", "java/lang/Math:abs", "java/lang/Math:floor",
+    "java/lang/Double:isNaN", "java/lang/Integer:compare",
+    "java/lang/Character:isDigit",
 ]
 
 
@@ -50,10 +52,12 @@ def main():
     ntasks = int(sys.argv[1]) if len(sys.argv) > 1 else 40
     sigs = SIGNATURES[: int(sys.argv[2])] if len(sys.argv) > 2 else SIGNATURES
 
-    tasks = []
-    for t, prop in bench.load_set("smoke"):
-        tasks.append((t, prop))
-    tasks = tasks[:ntasks]
+    # The `contracts` set, not `smoke`: every task there rests its verdict on
+    # exactly one library contract, so a perturbation is guaranteed to bite.
+    # Sampling ordinary benchmarks was tried first and every perturbation came
+    # out inert -- their verdicts rarely depend on any single contract, so the
+    # test passed while proving nothing.
+    tasks = [(t, prop) for t, prop in bench.load_set("contracts")][:ntasks]
 
     print(f"  baseline over {len(tasks)} task(s)")
     with ThreadPoolExecutor(max_workers=5) as ex:

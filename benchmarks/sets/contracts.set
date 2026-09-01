@@ -1,0 +1,9 @@
+# Programs whose verdict rests on exactly one library contract.
+#
+# Used by tools/contract_monotonicity.py: perturbing that contract upward must
+# weaken TRUE to UNKNOWN and never change it to a different verdict. Sampling
+# ordinary benchmarks does not work, because their verdicts rarely depend on a
+# single contract and every perturbation comes out inert.
+#
+# Format: <glob> <property>
+ajave/contracts/*.yml no-runtime-exception
