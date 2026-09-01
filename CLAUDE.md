@@ -160,6 +160,21 @@ Timings are noisy, and a baseline recorded on a loaded machine is inflated,
 which *masks* future slowdowns. Record baselines on an idle machine for the same
 reason scores are.
 
+### Run BOTH properties before believing a discharge change
+
+A change to what may be discharged must be measured on valid-assert *and*
+no-runtime-exception. They consume different obligation kinds, so a guard that
+is sound for one can be vacuous for the other.
+
+Loosening `all_calls_resolved` scored **NRE 1057 with 0 wrong and VA 680 with 9
+wrong** — eight new wrong TRUEs. The NRE run alone looked like a clean +22.
+
+The cause generalises: a guard that says "something else carries this burden" is
+only as sound as that thing actually running. Here the flag deciding whether the
+obligations were even emitted was computed for a decision record and never
+stored, so it sat at its default for every property — and the dependency crossed
+a crate boundary where nobody checked it.
+
 ### A killed process scores as a wrong-looking verdict, not as a timeout
 
 Contention does not only inflate timeout counts. Under load the harness's own
