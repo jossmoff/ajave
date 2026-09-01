@@ -1,32 +1,65 @@
 //! SSA-based SMT encoder for method bodies.
 //!
-//! Encodes a `Body` as a monolithic SMT formula: all paths through the CFG
-//! become a single conjunction of bitvector constraints with ITE terms at
-//! merge points. Shared by the k-induction and (future) IMC engines.
+//! Encodes a `Body` as a single formula over bitvectors: every path through
+//! the CFG is one disjunct, and reaching definitions are joined at merge
+//! points with `ite`.
 //!
-//! The encoding walks blocks in topological order. Each variable assignment
-//! produces a fresh SSA version. At blocks with multiple predecessors,
-//! reaching definitions are joined via `ite(path_cond, v_then, v_else)`.
+//! # Completeness is part of the result
+//!
+//! An `Encoding` is only a faithful description of the body when
+//! [`Encoding::complete`] is true. The encoder walks each block once, so it
+//! describes **one pass** through any loop, and it does not model exceptional
+//! edges or unlifted instructions. A caller that wants to conclude "no
+//! violation is possible" — as opposed to "no violation on the paths I
+//! encoded" — must check the flag.
+//!
+//! This is not a hypothetical. Both defects below produced a claimed proof for
+//! a program that violates its assertion, and both are pinned by tests in
+//! `kinduction.rs` (#76):
+//!
+//! * **Back-edges.** A back-edge targets a block that has already been
+//!   processed, so it is dropped. The formula covers one iteration, on which
+//!   a property that first fails on the second iteration still holds.
+//! * **Merge points.** Reaching definitions used to be threaded through a
+//!   single map that each block overwrote in turn, so a join read whatever
+//!   the last-processed predecessor assigned rather than an `ite` over both.
+//!   The violating branch was absent from the formula entirely. That one is
+//!   *fixed* here rather than reported; the traversal below merges properly.
+//!
+//! Reads of the heap are fresh unconstrained values. That is sound in the
+//! direction that matters — an arbitrary value covers whatever the real heap
+//! holds — but it means no property that depends on a stored value is
+//! provable. Writes are correspondingly dropped.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ajave_core::smt::{Solver, Term};
 use ajave_ir::*;
 
-/// Result of encoding one method body at a given unrolling depth.
+/// Reaching definitions at a program point, keyed by variable.
+type VarMap = BTreeMap<VarId, Term>;
+
+/// Result of encoding one method body.
 pub struct Encoding {
-    /// For each obligation in the body: the path-condition term that is true
-    /// iff the obligation's safety condition is violated on some feasible path.
-    /// Callers assert this term and check satisfiability.
+    /// For each obligation the encoder reached: the term that is true iff the
+    /// obligation's safety condition is violated on some encoded path.
+    ///
+    /// An obligation that is in the body but missing here was **not encoded**
+    /// — it sits behind an edge this encoder does not follow. Absence is not
+    /// evidence of safety.
     pub violation_terms: HashMap<ObligationId, Term>,
 
-    /// The combined path-reachability term: conjunction of all path conditions.
-    /// Used by k-induction's step case as the transition relation.
+    /// Disjunction of the path conditions of all returning blocks.
     pub reach_term: Term,
 
-    /// SSA variable terms at each block entry, keyed by `(BlockId, VarId)`.
-    /// Used by k-induction to connect consecutive frames.
-    pub block_vars: HashMap<(u32, u32), Term>,
+    /// Whether the encoding covers every execution of the body.
+    ///
+    /// False when the CFG has a back-edge (only one iteration is encoded),
+    /// when a reachable block ends in `Diverge` (an instruction the lifter
+    /// could not model), or when a reachable block has exceptional successors
+    /// (handler code is not encoded). A `false` here forbids concluding
+    /// safety from an UNSAT violation term.
+    pub complete: bool,
 }
 
 /// Width of a type in bits for bitvector encoding.
@@ -54,10 +87,75 @@ fn return_width(desc: &str) -> u32 {
     }
 }
 
-/// Encode a single method body as an SMT formula.
+/// Successors of a block along normal (non-exceptional) control flow.
+fn successors(block: &Block) -> Vec<BlockId> {
+    match &block.term {
+        Terminator::Goto(t) => vec![*t],
+        Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+        Terminator::Switch { cases, default, .. } => {
+            let mut v: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
+            v.push(*default);
+            v
+        }
+        Terminator::Return(_) | Terminator::Halt
+        | Terminator::Throw(_) | Terminator::Diverge(_) => vec![],
+    }
+}
+
+/// Reverse post-order over forward edges, plus the set of back-edges found.
 ///
-/// `frame` is a unique prefix for SSA variable names (allows multiple
-/// instances in the same solver context for k-induction's step case).
+/// An edge to a block that is grey — on the current DFS stack — closes a
+/// cycle. Processing the returned order guarantees every *forward* predecessor
+/// of a block is encoded before the block itself, which is what makes the
+/// merge at a join point well defined.
+fn rpo_and_back_edges(body: &Body) -> (Vec<BlockId>, BTreeSet<(BlockId, BlockId)>) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        White,
+        Grey,
+        Black,
+    }
+    let n = body.blocks.len();
+    let mut colour = vec![Colour::White; n];
+    let mut post = Vec::with_capacity(n);
+    let mut back = BTreeSet::new();
+
+    // Explicit stack: bytecode from a deeply nested method can otherwise
+    // overflow a recursive DFS.
+    let mut stack: Vec<(BlockId, usize)> = vec![(body.entry, 0)];
+    if let Some(c) = colour.get_mut(body.entry.0 as usize) {
+        *c = Colour::Grey;
+    }
+    while let Some((bid, next)) = stack.pop() {
+        let idx = bid.0 as usize;
+        let Some(block) = body.blocks.get(idx) else { continue };
+        let succs = successors(block);
+        if next < succs.len() {
+            stack.push((bid, next + 1));
+            let s = succs[next];
+            match colour.get(s.0 as usize) {
+                Some(Colour::White) => {
+                    colour[s.0 as usize] = Colour::Grey;
+                    stack.push((s, 0));
+                }
+                Some(Colour::Grey) => {
+                    back.insert((bid, s));
+                }
+                _ => {}
+            }
+        } else {
+            colour[idx] = Colour::Black;
+            post.push(bid);
+        }
+    }
+    post.reverse();
+    (post, back)
+}
+
+/// Encode a method body as an SMT formula.
+///
+/// `frame` prefixes every SSA name, so several encodings can share one solver
+/// context without their variables colliding.
 pub fn encode_body(
     solver: &mut dyn Solver,
     body: &Body,
@@ -66,36 +164,53 @@ pub fn encode_body(
     let mut env = Env {
         solver,
         frame: frame.to_string(),
-        vars: HashMap::new(),
-        path_conds: HashMap::new(),
+        vars: VarMap::new(),
         next_ssa: 0,
     };
 
-    // Initialise variables with fresh symbolic values.
+    // Every local starts as an unconstrained symbolic value. Constraining
+    // them is the caller's job; leaving them free over-approximates the
+    // reachable states, which is the safe direction for a safety claim.
+    let mut init = VarMap::new();
     for (i, vi) in body.vars.iter().enumerate() {
         let vid = VarId(i as u32);
         let w = width_of(&vi.ty);
-        let t = env.fresh(&format!("v{}", i), w);
-        env.vars.insert(vid, t);
+        let t = env.fresh(&format!("v{i}"), w);
+        init.insert(vid, t);
     }
 
-    // Mark entry block as reachable (path condition = true).
+    let (order, back_edges) = rpo_and_back_edges(body);
+    let mut complete = back_edges.is_empty();
+
+    // Pending incoming edges per block: (edge path condition, state on entry
+    // along that edge). Merged into a single state when the block is reached.
+    let mut incoming: BTreeMap<BlockId, Vec<(Term, VarMap)>> = BTreeMap::new();
     let tt = env.solver.bool_const(true);
-    env.path_conds.insert(body.entry, tt);
+    incoming.insert(body.entry, vec![(tt, init)]);
 
     let mut violation_terms = HashMap::new();
+    let mut returning: Vec<Term> = Vec::new();
 
-    // Process blocks in ID order (topological for well-structured bytecode).
-    for block in &body.blocks {
-        let block_pc = match env.path_conds.get(&block.id) {
-            Some(&pc) => pc,
-            None => continue, // unreachable block
+    for bid in order {
+        let Some(edges) = incoming.remove(&bid) else {
+            // No encoded edge reaches this block. Either it is genuinely
+            // unreachable, or every path to it is a back-edge — in which case
+            // `complete` is already false.
+            continue;
         };
+        let Some(block) = body.blocks.get(bid.0 as usize) else { continue };
+        let (mut pc, state) = env.merge(edges);
+        env.vars = state;
 
-        // Process statements.
+        // Handler code is not encoded, so a block that can transfer control
+        // into a handler has successors this formula does not describe.
+        if !block.exceptional.is_empty() {
+            complete = false;
+        }
+
         for stmt in &block.stmts {
             match stmt {
-                // Sequential encoding: monitors impose no constraint.
+                // A monitor imposes no constraint on a sequential encoding.
                 Stmt::MonitorEnter(_) | Stmt::MonitorExit(_) => {}
                 Stmt::Assign(vid, rv) => {
                     let t = env.encode_rvalue(rv);
@@ -104,22 +219,22 @@ pub fn encode_body(
                 Stmt::Assume(op) => {
                     let t = env.encode_operand(op);
                     let zero = env.solver.bv_const(0, 32);
-                    let nz = env.solver.bveq(t, zero);
-                    let nz = env.solver.not(nz);
-                    // Narrow the path condition: assume only feasible paths.
-                    let new_pc = env.solver.and(block_pc, nz);
-                    env.path_conds.insert(block.id, new_pc);
+                    let is_zero = env.solver.bveq(t, zero);
+                    let nz = env.solver.not(is_zero);
+                    pc = env.solver.and(pc, nz);
                 }
                 Stmt::Check(oid) => {
                     let ob = body.obligation(*oid);
                     let cond = env.encode_operand(&ob.cond);
                     let zero = env.solver.bv_const(0, 32);
                     let is_zero = env.solver.bveq(cond, zero);
-                    // Violation = path is reachable AND condition is false.
-                    let current_pc = *env.path_conds.get(&block.id).unwrap_or(&block_pc);
-                    let violation = env.solver.and(current_pc, is_zero);
+                    let violation = env.solver.and(pc, is_zero);
+                    // A block can be reached along several edges but is
+                    // encoded once, so each obligation is written once.
                     violation_terms.insert(*oid, violation);
                 }
+                // Heap writes are dropped, matching heap reads being fresh
+                // unconstrained values.
                 Stmt::PutStatic(_, _)
                 | Stmt::PutField { .. }
                 | Stmt::ArrayStore { .. }
@@ -127,59 +242,59 @@ pub fn encode_body(
             }
         }
 
-        // Process terminator — propagate path conditions to successors.
-        let current_pc = *env.path_conds.get(&block.id).unwrap_or(&block_pc);
-        match &block.term {
-            Terminator::Goto(target) => {
-                env.merge_pc(*target, current_pc);
+        let mut send = |env: &mut Env, target: BlockId, edge_pc: Term| {
+            if back_edges.contains(&(bid, target)) {
+                return;
             }
+            incoming
+                .entry(target)
+                .or_default()
+                .push((edge_pc, env.vars.clone()));
+        };
+
+        match &block.term {
+            Terminator::Goto(target) => send(&mut env, *target, pc),
             Terminator::Branch { cond, then_, else_ } => {
                 let ct = env.encode_operand(cond);
                 let zero = env.solver.bv_const(0, 32);
                 let is_zero = env.solver.bveq(ct, zero);
                 let is_nz = env.solver.not(is_zero);
-
-                let then_pc = env.solver.and(current_pc, is_nz);
-                let else_pc = env.solver.and(current_pc, is_zero);
-                env.merge_pc(*then_, then_pc);
-                env.merge_pc(*else_, else_pc);
+                let then_pc = env.solver.and(pc, is_nz);
+                let else_pc = env.solver.and(pc, is_zero);
+                send(&mut env, *then_, then_pc);
+                send(&mut env, *else_, else_pc);
             }
             Terminator::Switch { value, cases, default } => {
                 let vt = env.encode_operand(value);
-                let mut default_pc = current_pc;
+                let mut default_pc = pc;
                 for (val, target) in cases {
                     let cv = env.solver.bv_const(*val as i64, 32);
                     let eq = env.solver.bveq(vt, cv);
-                    let case_pc = env.solver.and(current_pc, eq);
-                    env.merge_pc(*target, case_pc);
+                    let case_pc = env.solver.and(pc, eq);
+                    send(&mut env, *target, case_pc);
                     let neq = env.solver.not(eq);
                     default_pc = env.solver.and(default_pc, neq);
                 }
-                env.merge_pc(*default, default_pc);
+                send(&mut env, *default, default_pc);
             }
-            Terminator::Return(_) | Terminator::Halt
-            | Terminator::Throw(_) | Terminator::Diverge(_) => {}
+            Terminator::Return(_) | Terminator::Halt => returning.push(pc),
+            // An instruction the lifter could not model. Whatever happens
+            // after it is not in this formula.
+            Terminator::Diverge(_) => complete = false,
+            Terminator::Throw(_) => {}
         }
     }
 
-    // Compute overall reachability: disjunction of all terminal block PCs.
     let ff = env.solver.bool_const(false);
     let mut reach = ff;
-    for block in &body.blocks {
-        match &block.term {
-            Terminator::Return(_) | Terminator::Halt => {
-                if let Some(&pc) = env.path_conds.get(&block.id) {
-                    reach = env.solver.or(reach, pc);
-                }
-            }
-            _ => {}
-        }
+    for pc in returning {
+        reach = env.solver.or(reach, pc);
     }
 
     Encoding {
         violation_terms,
         reach_term: reach,
-        block_vars: HashMap::new(),
+        complete,
     }
 }
 
@@ -187,24 +302,51 @@ pub fn encode_body(
 struct Env<'a> {
     solver: &'a mut dyn Solver,
     frame: String,
-    vars: HashMap<VarId, Term>,
-    path_conds: HashMap<BlockId, Term>,
+    vars: VarMap,
     next_ssa: u32,
 }
 
 impl<'a> Env<'a> {
     fn fresh(&mut self, name: &str, width: u32) -> Term {
         self.next_ssa += 1;
-        self.solver.fresh_bv(&format!("{}_{}{}", self.frame, name, self.next_ssa), width)
+        self.solver
+            .fresh_bv(&format!("{}_{}{}", self.frame, name, self.next_ssa), width)
     }
 
-    fn merge_pc(&mut self, target: BlockId, incoming: Term) {
-        let existing = self.path_conds.get(&target).copied();
-        let merged = match existing {
-            Some(pc) => self.solver.or(pc, incoming),
-            None => incoming,
-        };
-        self.path_conds.insert(target, merged);
+    /// Join the states arriving on several edges into one.
+    ///
+    /// The path condition is the disjunction of the edge conditions; each
+    /// variable becomes `ite(edge_pc, value_on_that_edge, rest)`. Folding from
+    /// the last edge backwards makes the first edge the outermost test, so
+    /// the term is determined by edge order rather than by map iteration
+    /// order — the encoder must not depend on a hash seed.
+    fn merge(&mut self, mut edges: Vec<(Term, VarMap)>) -> (Term, VarMap) {
+        if edges.len() == 1 {
+            return edges.pop().expect("length checked");
+        }
+        let mut pc = self.solver.bool_const(false);
+        for (epc, _) in &edges {
+            pc = self.solver.or(pc, *epc);
+        }
+
+        let keys: BTreeSet<VarId> = edges.iter().flat_map(|(_, m)| m.keys().copied()).collect();
+        let mut merged = VarMap::new();
+        for k in keys {
+            // Seed with the last edge's value so the fold has a base case;
+            // its guard is implied by the disjunction of the others.
+            let mut acc = None;
+            for (epc, m) in edges.iter().rev() {
+                let Some(&v) = m.get(&k) else { continue };
+                acc = Some(match acc {
+                    None => v,
+                    Some(rest) => self.solver.ite(*epc, v, rest),
+                });
+            }
+            if let Some(t) = acc {
+                merged.insert(k, t);
+            }
+        }
+        (pc, merged)
     }
 
     fn operand_width(op: &Operand) -> u32 {

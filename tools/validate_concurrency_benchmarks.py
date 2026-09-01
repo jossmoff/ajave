@@ -37,8 +37,8 @@ import tempfile
 import yaml
 from collections import Counter
 
-ROOT = "ajave-benchmarks/concurrency"
-COMMON = "ajave-benchmarks/common"
+ROOT = "benchmarks/ajave/concurrency"
+COMMON = "benchmarks/ajave/common"
 
 
 def load(yml):

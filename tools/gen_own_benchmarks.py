@@ -21,13 +21,13 @@ score well on a one-sided suite.
 
 Layout matches sv-benchmarks so existing tooling works unchanged:
 
-    ajave-benchmarks/
+    benchmarks/ajave/
       properties/{valid-assert,no-runtime-exception}.prp
       common/org/sosy_lab/sv_benchmarks/Verifier.java   (symlinked)
       <category>/<Name>/Main.java
       <category>/<Name>.yml
 
-Usage: python3 tools/gen_own_benchmarks.py [--out ajave-benchmarks]
+Usage: python3 tools/gen_own_benchmarks.py [--out benchmarks/ajave]
 """
 
 import argparse
@@ -563,7 +563,7 @@ def emit(out_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="ajave-benchmarks")
+    ap.add_argument("--out", default="benchmarks/ajave")
     args = ap.parse_args()
     out = args.out
 

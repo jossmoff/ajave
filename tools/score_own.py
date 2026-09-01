@@ -9,7 +9,7 @@ Reports per category, and lists every wrong answer with the feature it names —
 that is the point of the suite. A wrong answer here says which capability broke,
 not merely that some large program changed verdict.
 
-Usage: python3 tools/score_own.py [--dir ajave-benchmarks] [--timeout 30]
+Usage: python3 tools/score_own.py [--dir benchmarks/ajave] [--timeout 30]
 """
 
 import argparse
@@ -81,7 +81,7 @@ RUN_TIMEOUT = 30
 def main():
     global RUN_TIMEOUT
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default="ajave-benchmarks")
+    ap.add_argument("--dir", default="benchmarks/ajave")
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--parallel", type=int, default=4)
     args = ap.parse_args()

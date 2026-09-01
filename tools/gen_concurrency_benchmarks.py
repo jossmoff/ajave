@@ -20,9 +20,9 @@ the ground truth. A JVM run can *refute* an expected-TRUE (if it ever fails, the
 program is not safe) but can never confirm one — which is exactly the asymmetry
 `validate_concurrency_benchmarks.py` enforces.
 
-Layout matches `ajave-benchmarks/` so existing tooling works unchanged.
+Layout matches `benchmarks/ajave/` so existing tooling works unchanged.
 
-Usage: python3 tools/gen_concurrency_benchmarks.py [--out ajave-benchmarks]
+Usage: python3 tools/gen_concurrency_benchmarks.py [--out benchmarks/ajave]
 """
 
 import argparse
@@ -442,7 +442,7 @@ def wrap(text, width=74, prefix="//   "):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="ajave-benchmarks")
+    ap.add_argument("--out", default="benchmarks/ajave")
     args = ap.parse_args()
     cat_dir = os.path.join(args.out, "concurrency")
     os.makedirs(cat_dir, exist_ok=True)

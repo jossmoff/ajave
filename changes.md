@@ -1563,3 +1563,85 @@ Proving engines (k-induction, CHC, IMC, CEGAR) previously skipped methods with h
 ## CPA Substrate
 
 The `roast-core::cpa` module implements a generic Configurable Program Analysis (CPA) framework. Engines like interval AI and CEGAR's predicate abstraction are implemented as CPA instances with domain-specific abstract states and transfer functions, sharing the reachability algorithm.
+
+## 2026-09-01 — k-induction was reporting bounded checks as proofs (#76)
+
+`smt_encode::encode_body` was unsound in two independent ways, and
+`KInduction::try_step_case` published its UNSAT results as `ProofKind::KInduction`.
+
+**Back-edges were dropped.** The encoder walked blocks in ID order and visited
+each once, so a back-edge targeted an already-processed block and was
+discarded. The formula described exactly one pass through any loop.
+`LoopFailsOnSecondIteration` — `x` reaches 1 then 2 against `assert x < 2` —
+is UNSAT on that formula and was "proved".
+
+**Reaching definitions were not joined.** `Env::vars` was one map that each
+block overwrote in turn, and `merge_pc` merged only path conditions, so a join
+read whatever the last-processed predecessor had assigned instead of an `ite`
+over both. The violating branch was absent from the formula altogether. Which
+branch survived depended on block ordering, so the encoder got the right answer
+whenever the stale value happened to be the violating one — which is why it
+went unnoticed. This one is fixed rather than reported: the traversal is now a
+DFS-derived reverse post-order with explicit per-edge states merged at joins.
+
+**Why it was latent.** `Status::Bounded` is published only when a run finds no
+violation anywhere, so k-induction is starved of base cases on exactly the
+programs where it would go wrong. Giving it a base case — the phase-1 heap
+experiment, reverted — produced two wrong TRUEs immediately. This is the same
+shape as CHC, whose LIA encoding is unsound for Java's 32-bit arithmetic and is
+masked by `bb.open()` gating: two over-approximating engines that are harmless
+only because they are gated out.
+
+**`Bounded { k }` cannot supply the base case anyway.** Its `k` is the BMC's
+`max_depth`, a bound on path length, not on loop iterations; loop unrolling is
+bounded separately by `MAX_LOOP_UNROLL = 5`. Consuming it as an iteration count
+is the same category error in a different place. Real k-induction will have to
+establish its own base case.
+
+### What changed
+
+- `Encoding::complete` reports whether the encoding covers every execution.
+  False on a back-edge, on a reachable `Diverge`, or on a reachable block with
+  exceptional successors (handler code is not encoded). `try_step_case` returns
+  inconclusive unless it is true, so a body with loops is now declined.
+- An obligation *missing* from `violation_terms` no longer counts as proved.
+  Absence means the encoder never reached it.
+- Loop-freeness is now transitive over the reachable call graph
+  (`reachable_has_loops`). The old test inspected only the entry body, so a
+  loop-free `main` calling a looping helper was discharged on a search that
+  stopped at five unrollings. A call with no body counts as looping.
+- Four tests in `kinduction.rs` pin all of this, including a positive case —
+  an engine made sound by declining everything would pass the rest.
+
+### Benchmarks
+
+`benchmarks/ajave/kinduction/` (new set): `LoopFailsOnSecondIteration` (FALSE,
+survives one unrolling), `LoopInvariantNeedsInduction` (TRUE, no finite
+unrolling establishes it), `LoopFreeEntryCallsLoopingHelper` (FALSE, loop is
+one frame down).
+
+The third records a measurement worth keeping: before the fix it returned
+UNKNOWN rather than a wrong TRUE, because the BMC cuts the loop off and reports
+a *spurious* violation (witness `n = 6`, which does not fail), JVM replay
+refutes it, and the spurious violation suppresses `Bounded`. The unsound
+discharge was guarded by another engine's imprecision, not by design.
+
+### `tools/validate_own_benchmarks.py` was dead
+
+It defaulted to `ajave-benchmarks/`, renamed to `benchmarks/ajave/` some time
+ago, and exited with "no tasks found". Every generator and scorer in `tools/`
+had the same stale default. Restored, and three real defects fixed:
+
+- A benchmark that hangs crashed the whole run with `TimeoutExpired`. Deadlock
+  benchmarks are *supposed* to hang. Now recorded as an observation, capped at
+  two repeats since a hang is stable.
+- An exception in a spawned thread leaves `main`'s exit status 0 and does not
+  match `thread "main"`, so `ThreadBodyThrows` was reported as a defective
+  benchmark. Now any thread's exception is seen.
+- Racy programs have no `Verifier.nondet` call, so the input-nondeterminism
+  test called them deterministic and ran them **once**. A race is FALSE because
+  the JMM permits a violating execution, not because a JVM will show you one;
+  eight benchmarks were flagged as wrong on a single benignly-interleaved run.
+  Anything that can start a thread now takes the contradiction-only path, where
+  an unobserved violation proves nothing but an observed one against an
+  expected TRUE still fails.

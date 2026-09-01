@@ -1,0 +1,3 @@
+# Programs that separate a bounded check from an inductive proof (#76).
+# Format: <glob> <property>
+ajave/kinduction/*.yml valid-assert
