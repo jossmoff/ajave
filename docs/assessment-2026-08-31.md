@@ -13,8 +13,10 @@ The concurrency engine went from intrinsic monitors to most of
 
 | | before | after |
 |---|---|---|
-| Concurrency benchmarks | 22 | 53 (51 correct, 0 wrong) |
-| Modelled primitives | `Thread`, `synchronized`, `wait`/`notify` | + `ReentrantLock`, `Condition`, atomics incl. `AtomicReference`, `CountDownLatch`, `Semaphore`, `CyclicBarrier`, `ExecutorService`/`Future`, `BlockingQueue`, `ReentrantReadWriteLock`, thread lifecycle |
+| Concurrency benchmarks | 22 | 89 (85 correct, 0 wrong, stable across repeats) |
+| Modelled primitives | `Thread`, `synchronized`, `wait`/`notify` | + `ReentrantLock`, `Condition`, atomics, the synchronizers, `ExecutorService`/`Future`, `BlockingQueue`, `ReentrantReadWriteLock`, `ConcurrentHashMap`, `ThreadLocal`, `CompletableFuture`, thread lifecycle |
+| Nondeterminism modelled | thread interleaving | + timed-wait expiry, spurious wakeups, arbitrary `notify` waiter, spurious weak-CAS failure, `nondetBoolean`, stale reads |
+| Soundness boundary | sequential consistency, unstated | DRF-SC, **checked**: a TRUE is only issued for programs verified race-free |
 | Sequential score (valid-assert) | 816 | 816 |
 | Sequential score (no-runtime-exception) | 1021 | 1021 |
 
@@ -56,7 +58,7 @@ no-runtime-exception across 1,033 task files) — within ~3% of the official
 count, so essentially the same benchmark set. Maximum achievable score on it is
 2,829.
 
-**ajave scores 1,850 on that corpus** (815 + 1035), or 65% of maximum, with **zero wrong answers of its own**.
+**ajave scores ~1,850 on that corpus** (815 + 1035), or 65% of maximum, with **zero wrong answers of its own**.
 
 ### Why that number is not yet a claim
 
