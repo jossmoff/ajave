@@ -263,6 +263,10 @@ struct Lifter<'a> {
     stack_map: HashMap<u16, VarId>,
     obligations: Vec<Obligation>,
     new_classes: HashMap<VarId, String>,
+    /// Lambdas seen while lifting this method: (synthetic class, SAM name,
+    /// implementation, capture count). Bodies for them are synthesised after
+    /// the method is lifted, since they are new methods rather than statements.
+    pending_lambdas: Vec<(String, String, crate::classfile::MemberRef, usize)>,
     lines: Vec<(u16, u16)>,
     handlers: Vec<crate::classfile::Handler>,
 }
@@ -427,7 +431,20 @@ fn is_wide_operand(op: &Operand, lifter: &Lifter) -> bool {
 pub static SEED_CALL_PRECONDITIONS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+/// A lambda seen while lifting: the synthetic class standing in for it, the
+/// functional-interface method name, the implementation, and how many values
+/// it captured.
+pub type PendingLambda = (String, String, crate::classfile::MemberRef, usize);
+
 pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, String> {
+    lift_method_with_lambdas(cf, name, desc).map(|(b, _)| b)
+}
+
+pub fn lift_method_with_lambdas(
+    cf: &ClassFile,
+    name: &str,
+    desc: &str,
+) -> Result<(Body, Vec<PendingLambda>), String> {
     let m = cf
         .method(name, desc)
         .ok_or_else(|| format!("no method {name}{desc}"))?;
@@ -449,6 +466,7 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         stack_map: HashMap::new(),
         obligations: Vec::new(),
         new_classes: HashMap::new(),
+        pending_lambdas: Vec::new(),
         lines: code.lines.clone(),
         handlers: code.handlers.clone(),
     };
@@ -617,6 +635,7 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         })
         .collect();
 
+    let lambdas = std::mem::take(&mut lifter.pending_lambdas);
     let mut body = Body {
         key,
         entry: BlockId(0),
@@ -659,7 +678,7 @@ pub fn lift_method(cf: &ClassFile, name: &str, desc: &str) -> Result<Body, Strin
         }
     }
 
-    Ok(body)
+    Ok((body, lambdas))
 }
 
 fn diverging_block(id: BlockId, off: u16, reason: String) -> Block {
@@ -1874,19 +1893,68 @@ impl<'a, 'b> InsnContext<'a, 'b> {
     }
 
     fn lift_invokedynamic(&mut self) -> Result<LiftOut, String> {
-        // invokedynamic: lambdas, string concatenation, method references.
-        // Model as havoc of return type (sound over-approximation).
-        let (name, desc, _bootstrap_method) = self.lifter.cf.invoke_dynamic(self.insn.imm as u16)?;
+        // invokedynamic: lambdas, method references, string concatenation.
+        //
+        // A lambda used to become `Havoc(Ref)`: a reference with no class. The
+        // body was lifted perfectly well as `lambda$main$0`, but nothing
+        // connected the object to it, so anything that resolves behaviour from
+        // an object's class -- a thread body, an executor task -- found
+        // nothing. `new Thread(() -> ...)` was unanalysable.
+        //
+        // The `LambdaMetafactory` bootstrap names its implementation method in
+        // its second static argument, so instead of havocing we allocate an
+        // object of a synthetic class and give that class a body for the
+        // functional-interface method which forwards to the implementation.
+        // Everything downstream then works unchanged.
+        let (name, desc, bsm) = self.lifter.cf.invoke_dynamic(self.insn.imm as u16)?;
         let (argc, ret) = parse_desc(&desc);
-        // invokedynamic has no receiver — all args come from stack.
+        let impl_ref = self.lifter.cf.lambda_impl(bsm).filter(|m| {
+            // A method reference to an *instance* method binds a receiver we
+            // would have to carry as a capture with the right type; only static
+            // and synthetic-lambda targets are handled here.
+            m.owner == self.lifter.cf.this_class
+        });
+
+        // Captured values are the invokedynamic's operands, popped innermost
+        // last, and become the leading parameters of the implementation.
+        let mut captured: Vec<Operand> = Vec::new();
         for _ in 0..argc {
-            self.pop()?;
+            captured.push(self.pop()?);
         }
+        captured.reverse();
+
         debug!("invokedynamic: {name} {desc}");
-        if let Some(ty) = ret {
-            let result = self.assign(ty, Rvalue::Havoc(ty));
-            self.stack.push(result);
+        let Some(imp) = impl_ref else {
+            // Not a lambda we can resolve (string concatenation, a bootstrap we
+            // do not model). Unchanged behaviour: havoc the result.
+            if let Some(ty) = ret {
+                let result = self.assign(ty, Rvalue::Havoc(ty));
+                self.stack.push(result);
+            }
+            return Ok(None);
+        };
+
+        let synth = format!("$lambda${}${}", imp.owner, imp.name);
+        let t = self.lifter.temp(Ty::Ref);
+        self.stmts.push(Stmt::Assign(t, Rvalue::New(synth.clone())));
+        self.lifter.new_classes.insert(t, synth.clone());
+        // Captured values live on the object, exactly as javac stores them on
+        // the generated class.
+        for (i, c) in captured.iter().enumerate() {
+            self.stmts.push(Stmt::PutField {
+                obj: Operand::Var(t),
+                field: FieldKey {
+                    class: synth.clone(),
+                    name: format!("$cap{i}"),
+                    desc: "I".to_string(),
+                },
+                val: c.clone(),
+            });
         }
+        self.lifter
+            .pending_lambdas
+            .push((synth, name, imp, captured.len()));
+        self.stack.push(Operand::Var(t));
         Ok(None)
     }
 
@@ -2042,6 +2110,76 @@ fn primitive_array_elem(atype: i32) -> &'static str {
     }
 }
 
+/// Build the functional-interface method for a lambda: load the captured
+/// values off the synthetic object and call the implementation with them.
+///
+/// This is what makes a lambda executable. javac generates a class with the
+/// captures as fields and the interface method forwarding to the
+/// implementation; this is that class, built directly rather than read from a
+/// classfile that does not exist.
+///
+/// Only `()V` interface methods are synthesised, which is `Runnable` -- enough
+/// for a thread body or an executor task, and the case that mattered. A lambda
+/// with parameters or a return value keeps its old opaque handling.
+fn lambda_forwarder(
+    synth: &str,
+    sam_key: &MethodKey,
+    imp: &crate::classfile::MemberRef,
+    ncap: usize,
+) -> Option<Body> {
+    // The implementation must take exactly the captured values.
+    let (impl_argc, impl_ret) = parse_desc(&imp.desc);
+    if impl_argc != ncap || impl_ret.is_some() {
+        return None;
+    }
+    let mut vars = vec![VarInfo { kind: VarKind::Local(0), ty: Ty::Ref }];
+    let mut stmts = Vec::new();
+    let mut args = Vec::new();
+    for i in 0..ncap {
+        let v = VarId(vars.len() as u32);
+        vars.push(VarInfo { kind: VarKind::Temp, ty: Ty::Int });
+        stmts.push(Stmt::Assign(
+            v,
+            Rvalue::GetField {
+                obj: Operand::Var(VarId(0)),
+                field: FieldKey {
+                    class: synth.to_string(),
+                    name: format!("$cap{i}"),
+                    desc: "I".to_string(),
+                },
+            },
+        ));
+        args.push(Operand::Var(v));
+    }
+    let dest = VarId(vars.len() as u32);
+    vars.push(VarInfo { kind: VarKind::Temp, ty: Ty::Int });
+    stmts.push(Stmt::Assign(
+        dest,
+        Rvalue::Call {
+            target: MethodKey {
+                class: imp.owner.clone(),
+                name: imp.name.clone(),
+                desc: imp.desc.clone(),
+            },
+            args,
+            is_virtual: false,
+        },
+    ));
+    Some(Body {
+        key: sam_key.clone(),
+        entry: BlockId(0),
+        blocks: vec![Block {
+            id: BlockId(0),
+            bytecode_offset: 0,
+            stmts,
+            term: Terminator::Return(None),
+            exceptional: vec![],
+        }],
+        vars,
+        obligations: vec![],
+    })
+}
+
 /// Lift every method in a class into the program.
 pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
     debug!("lift: processing class {}", cf.this_class);
@@ -2075,10 +2213,24 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
             name: m.name.clone(),
             desc: m.desc.clone(),
         };
-        match lift_method(cf, &m.name, &m.desc) {
-            Ok(body) => {
+        match lift_method_with_lambdas(cf, &m.name, &m.desc) {
+            Ok((body, lambdas)) => {
                 debug!("lift: lifted {}.{}{}", cf.this_class, m.name, m.desc);
                 prog.bodies.insert(body.key.clone(), body);
+                for (synth, sam, imp, ncap) in lambdas {
+                    let sam_key = MethodKey {
+                        class: synth.clone(),
+                        name: sam.clone(),
+                        desc: "()V".to_string(),
+                    };
+                    if prog.bodies.contains_key(&sam_key) {
+                        continue;
+                    }
+                    if let Some(b) = lambda_forwarder(&synth, &sam_key, &imp, ncap) {
+                        debug!("lift: synthesised {synth}.{sam} -> {}.{}", imp.owner, imp.name);
+                        prog.bodies.insert(sam_key, b);
+                    }
+                }
             }
             Err(e) => {
                 // Record the failure as a diverging body rather than dropping

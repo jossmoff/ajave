@@ -75,6 +75,12 @@ pub enum Cp {
     NameAndType(u16, u16),
     /// `invokedynamic`: bootstrap_method_attr_index, name_and_type_index.
     InvokeDynamic(u16, u16),
+    /// `MethodHandle`: reference_kind, reference_index.
+    ///
+    /// The payload used to be discarded. It is what names a lambda's
+    /// implementation method: the `LambdaMetafactory` bootstrap carries one as
+    /// its second static argument, and without it the whole lambda is opaque.
+    MethodHandle(u8, u16),
     Other,
     /// The dead second slot of a Long or Double. Present so that pool indices
     /// line up with the spec's 1-based, gappy numbering.
@@ -201,8 +207,9 @@ impl ClassFile {
                     Cp::NameAndType(a, b)
                 }
                 15 => {
-                    r.skip(3)?;
-                    Cp::Other
+                    let kind = r.u1()?;
+                    let idx = r.u2()?;
+                    Cp::MethodHandle(kind, idx)
                 }
                 16 | 19 | 20 => {
                     r.skip(2)?;
@@ -334,6 +341,21 @@ impl ClassFile {
 
     /// Resolve an `invokedynamic` CP entry.
     /// Returns `(name, desc, bootstrap_method_index, &bootstrap_args)`.
+    /// The implementation method a `LambdaMetafactory` bootstrap points at.
+    ///
+    /// `metafactory` and `altMetafactory` both take the implementation as their
+    /// second static argument, a `MethodHandle`. Resolving it is what turns a
+    /// lambda from an opaque object into a body we can execute.
+    pub fn lambda_impl(&self, bsm: &BootstrapMethod) -> Option<MemberRef> {
+        // args = [samMethodType, implMethod, instantiatedMethodType, ...]
+        let handle = bsm.args.get(1)?;
+        let (_kind, member_idx) = match self.cp.get(*handle as usize) {
+            Some(Cp::MethodHandle(k, i)) => (*k, *i),
+            _ => return None,
+        };
+        self.member_ref(member_idx).ok()
+    }
+
     pub fn invoke_dynamic(&self, idx: u16) -> R<(String, String, &BootstrapMethod)> {
         let (bsm_idx, nat_idx) = match self.cp.get(idx as usize) {
             Some(Cp::InvokeDynamic(a, b)) => (*a, *b),
