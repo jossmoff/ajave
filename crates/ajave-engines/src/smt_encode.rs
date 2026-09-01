@@ -566,6 +566,23 @@ pub fn k_induction_applicable(body: &Body, oid: ObligationId) -> bool {
     checks_in(body, &loop_region(body, header, tail), oid)
 }
 
+/// A rough count of the terms one k-induction attempt will build: the loop
+/// region is encoded `2k + 1` times and each join emits an `ite` per live
+/// variable and per heap map.
+pub fn k_induction_cost(body: &Body, oid: ObligationId, k: u32) -> Option<usize> {
+    let (tail, header) = sole_back_edge(body)?;
+    let region = loop_region(body, header, tail);
+    if !checks_in(body, &region, oid) {
+        return None;
+    }
+    let stmts: usize = region
+        .iter()
+        .filter_map(|b| body.blocks.get(b.0 as usize))
+        .map(|b| b.stmts.len().max(1))
+        .sum();
+    Some((2 * k as usize + 1) * stmts * body.vars.len().max(1))
+}
+
 /// Build the base and step queries for `oid` at depth `k`.
 ///
 /// Returns `None` when the body is not a shape this can handle, which is the

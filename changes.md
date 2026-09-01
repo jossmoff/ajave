@@ -1732,3 +1732,51 @@ It has two sequential loops, so there is no single transition relation, and its
 property is `∀i. a[i] == 0` — established by the *first* loop and read by the
 second. That needs a quantified invariant over the array, not an induction at
 fixed depth. The heap is a prerequisite for reaching it; it is not sufficient.
+
+## 2026-09-01 — measuring the k-induction change: −13 VA, and what it bought
+
+Valid-assert **800** (664 correct, 43 timeouts, 1 wrong), no-runtime-exception
+**1057** (537 correct, 0 wrong). NRE is identical to baseline; VA is down 13
+from 813. The single wrong answer is still `ReverseInterpolator_true`, the
+benchmark defect in #72, unchanged.
+
+### The bug was live, not latent
+
+The earlier entry called it latent, on the grounds that `Status::Bounded` is
+starved. That was wrong, and the corpus diff says so: **seven** valid-assert
+tasks were being discharged by the unsound `try_step_case` and now are not.
+
+`jbmc-regression/array1` is the clearest. Its `main` contains the loop, so the
+loop-free path never applied to it — it was going through `try_step_case`, whose
+one-pass encoding returned UNSAT, and that was published as
+`ProofKind::KInduction`. The same for `aastore_aaload1`, `list1`,
+`jdart-regression/list2`, and `algorithms/{BellmanFord,InsertionSort}-MemSat01`
+and `RedBlackTree-FunSat01`.
+
+All seven expect TRUE, so no wrong answer resulted. That is luck, not design:
+the identical mechanism on a task expecting FALSE is −16. **The 13 points are
+the price of removing a proof rule that was wrong by construction**, and the
+right way to win them back is a quantified invariant over arrays, which is what
+those tasks actually need — `array1` asserts `int_array[7] == 7` after a loop
+writing `a[i] = i`, and its `Check` sits *after* the loop, where an induction at
+fixed depth has nothing to say.
+
+### The cost of the wider reach, and a fitted constant
+
+Dropping the `Bounded` requirement made the engine attempt far more
+obligations, and three tasks went UNKNOWN → TIMEOUT. `argv-tasks/ActiveCheck`
+reproduced standalone: a ~20,900-term encoding whose base-case query z3 did not
+answer in over six minutes.
+
+A solver query timeout (`with_query_timeout(5_000)`, the same treatment `f3`
+already had) did **not** stop it, so the fix does not rely on one:
+`MAX_ENCODING_COST` refuses an attempt whose encoding would exceed ~8,000 terms.
+Recorded as a fitted constant per the overfitting rules above, with the reason
+it is not load-bearing: successful proofs encode at ~10³ terms
+(`LoopInvariantNeedsInduction` is 1,026) and the pathological case is ~2×10⁴, so
+any cap between them behaves identically. ActiveCheck returns to 1.2s and
+UNKNOWN.
+
+The measurement to repeat after this is whether those three timeouts revert and
+whether the seven losses are exactly the set above — if a different task moved,
+the cap is doing something other than what is claimed here.

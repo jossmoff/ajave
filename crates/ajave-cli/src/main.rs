@@ -251,8 +251,16 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(fpa));
         }
         if let Some(f2) = factory2 {
+            // k-induction is a bonus pass: it runs after the BMC and can only
+            // decide what the BMC left open, so an unbounded solver is a
+            // hazard. Since it stopped requiring `Status::Bounded` it attempts
+            // far more obligations, and `argv-tasks/ActiveCheck` went from
+            // UNKNOWN to a timeout because it sat in one query past the whole
+            // task budget -- the same failure `with_query_timeout` was added
+            // for. z3 answers `unknown` at the bound rather than hanging,
+            // which is the yield-and-move-on behaviour wanted here.
             engines.push(Box::new(ajave_engines::kinduction::KInduction::new(
-                Box::new(f2),
+                Box::new(f2.with_query_timeout(5_000)),
             )));
         }
     }

@@ -236,6 +236,24 @@ fn reachable_has_loops(prog: &Program, entry: &MethodKey) -> bool {
 /// programs that need a deeper induction usually need an invariant instead.
 const K_SCHEDULE: [u32; 3] = [1, 2, 3];
 
+/// Largest encoding this engine will attempt, in the rough term count
+/// `smt_encode::k_induction_cost` reports.
+///
+/// k-induction runs after the BMC and can only decide what the BMC left open,
+/// so spending the task budget here loses answers the earlier engines had
+/// already found. `argv-tasks/ActiveCheck` demonstrated it: once the engine
+/// stopped requiring `Status::Bounded` it began attempting a ~20,900-term
+/// encoding whose base-case query z3 did not answer in over six minutes,
+/// turning an UNKNOWN into a TIMEOUT.
+///
+/// This is a fitted constant and is recorded as one. The two measured points
+/// are far apart -- successful proofs encode at ~10^3 terms
+/// (`LoopInvariantNeedsInduction` is 1,026) and the pathological case is
+/// ~2x10^4 -- so any cap between them behaves identically, and the exact
+/// value is not load-bearing. A solver query timeout is set as well, but did
+/// not prevent that hang on its own, so this does not rely on one.
+const MAX_ENCODING_COST: usize = 8_000;
+
 impl KInduction {
     /// Prove an obligation inside a loop by induction on the iteration count.
     ///
@@ -245,6 +263,15 @@ impl KInduction {
     /// to publish as a proof (#76).
     fn try_k_induction(&self, body: &Body, oid: ObligationId) -> Result<Option<u32>, String> {
         for k in K_SCHEDULE {
+            let cost = smt_encode::k_induction_cost(body, oid, k).unwrap_or(usize::MAX);
+            if cost > MAX_ENCODING_COST {
+                debug!(
+                    "k-induction: {oid:?} at k={k} would encode ~{cost} terms, over the \
+                     {MAX_ENCODING_COST} cap; skipping (a larger k is bigger still)"
+                );
+                return Ok(None);
+            }
+            debug!("k-induction: {oid:?} at k={k} costs ~{cost} terms");
             let mut solver = self.factory.create()?;
             let Some(q) = smt_encode::encode_k_induction(solver.as_mut(), body, oid, k) else {
                 // Shape the encoder cannot handle; a larger k will not change
@@ -252,6 +279,7 @@ impl KInduction {
                 return Ok(None);
             };
 
+            debug!("k-induction: {oid:?} k={k} encoded; checking base");
             solver.push();
             solver.assert(q.base);
             let base = solver.check_sat();
@@ -264,6 +292,7 @@ impl KInduction {
                 return Ok(None);
             }
 
+            debug!("k-induction: {oid:?} k={k} base UNSAT; checking step");
             solver.push();
             solver.assert(q.step);
             let step = solver.check_sat();

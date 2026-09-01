@@ -236,3 +236,63 @@ Two consequences:
   *expressible*; finding the loop invariant is a separate problem, and Spacer
   already declined on BellmanFord. Do not treat phase 2 landing as evidence that
   phase 3 will.
+
+---
+
+# RESULT (2026-09-01): phases 1 and 2 are both settled
+
+Phase 1 stays reverted. Phase 2 is **done**, together with the k-induction work
+the revised plan above said had to come first. Commits `bf30be0` and `66f7dfd`.
+
+## What the revised plan got right
+
+"Audit `try_step_case` before giving it a base case" was the correct order, and
+the audit found more than expected. `smt_encode::encode_body` was unsound in two
+independent ways — back-edges dropped, and reaching definitions never joined at
+merge points — so it was not only failing to be an induction, it was not a
+correct encoder of straight-line branching code either. Both are pinned by tests
+in `kinduction.rs`; see the `changes.md` entry for 2026-09-01.
+
+The prediction that phase 1 "cannot supply a consumer" was also right, but for a
+deeper reason than measured. `Status::Bounded { k }` could never have served as
+a base case at all: its `k` is the BMC's `max_depth`, a bound on *path length*,
+while loop unrolling is bounded separately by `MAX_LOOP_UNROLL`. Consuming it as
+an iteration count is a category error. The engine now establishes its own base
+case and does not read the artifact, which removes both the unsoundness and the
+starvation phase 1 was trying to fix.
+
+## What the plan got wrong
+
+It framed phase 2 as "port the BMC's heap". What was actually needed was a
+different design, because the two engines have different constraints:
+
+- **Fields did not need porting.** Splitting one SMT array per `FieldKey`
+  indexed by the object reference makes aliasing a solver question rather than
+  an analysis question, and needs no machinery at all.
+- **Arrays could not be done that way.** `Solver::fresh_array` fixes the index
+  width at 32 bits, so the natural (reference, index) key does not fit. They are
+  split by allocation site, which forced a points-to map into the merge — the
+  one piece of real analysis in the change.
+
+## What is still not reachable, and why it is not a heap problem
+
+`benchmarks/ajave/heap/ArrayInvariantHoldsForAllElements` remains UNKNOWN. Two
+reasons, neither fixable by more heap modelling:
+
+1. It has two sequential loops, so there is no single transition relation.
+2. Its property is `∀i. a[i] == 0`, established by the first loop and read by
+   the second. That is a quantified invariant over the array. k-induction at
+   fixed depth cannot express it, no matter how good the heap is.
+
+This is the honest boundary of the work. The heap was a *prerequisite* for
+reaching the `algorithms` category; it is not sufficient. The next step there is
+invariant inference over arrays — CHC with an array sort and
+`fp.spacer.q3.use_qgen`, which the original heap-modelling plan identified — and
+that now has a heap encoding to build on, which it did not before.
+
+Note before starting it: CHC's LIA encoding is unsound for Java's 32-bit
+arithmetic and is currently masked by `bb.open()` gating (#60). Do not unstarve
+that engine either without fixing the encoding first. The lesson from phase 1
+generalises — **two over-approximating engines in this portfolio are harmless
+only because they are gated out**, and removing a gate is not a safe way to
+gain coverage.
