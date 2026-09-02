@@ -1583,6 +1583,10 @@ impl WideningIntervalCpa {
         int_thresholds.sort();
         int_thresholds.dedup();
 
+        log::debug!(
+            "interval-ai: {} thresholds float={:?} int={:?} headers={:?}",
+            body.key, float_thresholds, int_thresholds, headers.len()
+        );
         WideningIntervalCpa {
             base,
             loop_headers: headers,

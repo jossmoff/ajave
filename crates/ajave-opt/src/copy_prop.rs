@@ -18,6 +18,9 @@ impl Pass for CopyPropagation {
 
     fn run(&self, body: &mut Body, stats: &mut Stats) -> bool {
         let mut changed = false;
+        // Kinds copied out so the per-block loop can consult them while holding
+        // a mutable borrow of the blocks.
+        let body_vars: Vec<VarKind> = body.vars.iter().map(|v| v.kind).collect();
         // Block-local. A copy chain that crosses a block boundary needs to know
         // every predecessor agrees, which is a merge problem -- and merging is
         // where `smt_encode` had its second bug today. Within a block the
@@ -52,9 +55,40 @@ impl Pass for CopyPropagation {
                         // it, and the alias it may itself have had.
                         alias.remove(dst);
                         alias.retain(|_, v| !matches!(v, Operand::Var(x) if x == dst));
-                        // `dst = <operand>` makes dst an alias of that operand.
+                        // `dst = <operand>` makes dst an alias of that operand
+                        // -- but only when that does not move reads *off* a
+                        // named local and onto a lifter temporary.
+                        //
+                        // `x = x + dx` lifts to `v6 = v0 + v1; v0 = v6`, so
+                        // aliasing v0 to v6 rewrites every later read of `x` to
+                        // read the temporary. The two hold the same value, but
+                        // the interval AI narrows whichever variable appears in
+                        // a comparison, so the refinement from `if (x > 3.0)`
+                        // landed on a dead temporary while the loop-carried `x`
+                        // stayed widened at [3.0, inf] -- turning two
+                        // `float_unboundedloop` proofs into UNKNOWN.
+                        //
+                        // That fragility is the analysis's, not this pass's: an
+                        // analysis whose precision depends on *which* of two
+                        // provably equal variables is named will be surprised by
+                        // any rewrite. It is filed separately. Meanwhile the
+                        // rewrite that provokes it earns nothing -- a local and
+                        // a temporary cost the same -- so the pass declines to
+                        // make it.
                         if let Rvalue::Use(src) = rv {
-                            alias.insert(*dst, src.clone());
+                            let dst_is_local =
+                                matches!(body_vars.get(dst.0 as usize), Some(VarKind::Local(_)));
+                            let src_is_temp = matches!(
+                                src,
+                                Operand::Var(sv)
+                                    if !matches!(
+                                        body_vars.get(sv.0 as usize),
+                                        Some(VarKind::Local(_))
+                                    )
+                            );
+                            if !(dst_is_local && src_is_temp) {
+                                alias.insert(*dst, src.clone());
+                            }
                         }
                     }
                     Stmt::Assume(op) | Stmt::MonitorEnter(op) | Stmt::MonitorExit(op) => {
