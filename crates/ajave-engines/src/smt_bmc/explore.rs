@@ -464,6 +464,12 @@ impl<'a> ExploreCtx<'a> {
                     let idx_term = self.encode_operand(idx);
                     let val_term = self.encode_operand(val);
                     self.array_store_update(ref_term, idx_term, val_term);
+                    // Storing a reference records only the reference above.
+                    // If the value is a string we know the contents of, record
+                    // those too, so a later load can still reason about them.
+                    if let Some(val_str) = self.encode_str_operand(val) {
+                        self.str_array_store_update(ref_term, idx_term, val_str);
+                    }
                 }
                 Stmt::Nop => {}
             }
@@ -701,6 +707,24 @@ impl<'a> ExploreCtx<'a> {
                     let obj_term = self.encode_operand(obj);
                     let str_arr = self.get_field_str_array(&k);
                     Some(self.solver.array_select(str_arr, obj_term))
+                } else {
+                    None
+                };
+                (bv, st)
+            }
+            Rvalue::ArrayLoad { arr, idx } => {
+                let bv = self.encode_rvalue(rv);
+                // Only reference-typed elements can be strings. The IR does not
+                // carry the element descriptor, so this cannot distinguish a
+                // `String[]` from an `Object[]`; producing a string view for
+                // both is harmless, since nothing reads it unless a `String`
+                // method is applied, and the value is unconstrained until
+                // something was actually stored.
+                let st = if matches!(self.body.var(v).ty, Ty::Ref | Ty::Str) {
+                    let ref_term = self.encode_operand(arr);
+                    let idx_term = self.encode_operand(idx);
+                    let str_arr = self.str_array_contents_lookup(ref_term);
+                    Some(self.solver.array_select(str_arr, idx_term))
                 } else {
                     None
                 };

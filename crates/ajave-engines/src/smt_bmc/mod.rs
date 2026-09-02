@@ -337,6 +337,7 @@ impl Engine for SmtBmc {
             field_str_arrays: HashMap::new(),
             field_tainted: HashSet::new(),
             array_map: Vec::new(),
+            str_array_map: Vec::new(),
             type_array,
             type_ids: HashMap::new(),
             next_type_id: 1,
@@ -642,6 +643,16 @@ struct ExploreCtx<'a> {
     field_str_arrays: HashMap<FK, Term>,
     field_tainted: HashSet<FK>,
     array_map: Vec<(Term, Term, Term)>,
+    /// String contents of arrays, as `(reference, (Array BV32 String))`.
+    ///
+    /// The bitvector `array_map` above holds a 32-bit element per index, which
+    /// models an `int[]` and the *reference* of a `String[]` element, and says
+    /// nothing about the characters. Strings were tracked through fields
+    /// (`field_str_arrays`) and not through arrays, so `a[0] = s; t = a[0];`
+    /// lost `s`'s contents and every later `String` method on `t` became
+    /// unmodelled -- which taints the path and blocks discharge. Measured as
+    /// the reason 12 of 12 blocked securibench valid-assert tasks were stuck.
+    str_array_map: Vec<(Term, Term)>,
     type_array: Term,
     type_ids: HashMap<String, i64>,
     next_type_id: i64,
@@ -709,6 +720,7 @@ struct SavedState {
     field_str_arrays: HashMap<FK, Term>,
     field_tainted: HashSet<FK>,
     array_map: Vec<(Term, Term, Term)>,
+    str_array_map: Vec<(Term, Term)>,
     type_array: Term,
     loop_visits: HashMap<(String, u32), u32>,
     pc_len: usize,
@@ -857,7 +869,11 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::New(_) => false,
             Rvalue::Call { target, args, is_virtual } => {
                 if ajave_models::STR_OWNERS.contains(&target.class.as_str()) {
-                    return !self.str_call_modelled(target, args);
+                    let unmodelled = !self.str_call_modelled(target, args);
+                    if unmodelled {
+                        log::debug!("smt-bmc: TAINT-SOURCE str {}.{}{}", target.class, target.name, target.desc);
+                    }
+                    return unmodelled;
                 }
                 if self.math_call_modelled(target) {
                     return false;
@@ -865,6 +881,7 @@ impl<'a> ExploreCtx<'a> {
                 if self.can_inline(target, *is_virtual) {
                     return false;
                 }
+                log::debug!("smt-bmc: TAINT-SOURCE call {}.{}{}", target.class, target.name, target.desc);
                 true
             }
             Rvalue::Use(o) => self.operand_tainted(o),

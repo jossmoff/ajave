@@ -1983,3 +1983,67 @@ was still running seven hours later, invisible to `tools/cleanup.sh` because its
 stray patterns match `ajave-*` rather than a bare `java -cp /tmp/... Main`.
 `procguard` exists in this repo for exactly that and the file was not using it.
 Now routed through `run_guarded`.
+
+## 2026-09-02 — string contents through arrays: +21 valid-assert, +5 NRE
+
+**VA 802 -> 823** (681 correct, 1 wrong = the #72 benchmark defect),
+**NRE 1089 -> 1094** (556 correct, 0 wrong). Combined **1917**. Smoke 129, 0 wrong.
+
+Seventeen valid-assert tasks went UNKNOWN to correct, twelve of them FALSE.
+
+### What was missing
+
+String contents were tracked through *fields* — `field_str_arrays`, which the
+`$$coll_last` collection lowering uses — and not through Java arrays. `array_map`
+holds a 32-bit element per index, which models the element *reference* and says
+nothing about its characters, so `a[0] = s; t = a[0];` lost the contents.
+
+The cost was not imprecision, it was **taint**. `rvalue_tainted` taints any call
+that is not a modelled string call, and `str_call_modelled` requires *both*
+operands of `contains` to have tracked strings. With `t`'s contents gone the call
+is unmodelled, the path is tainted, and `has_tainted_paths` blocks discharge for
+the entire run.
+
+`str_array_map: Vec<(Term, Term)>` now mirrors `array_map` over the
+`(Array BV32 String)` sort the `Solver` trait already had — `array_select`
+already mapped `Sort::StrArray` to `Sort::Str`, so no solver work was needed.
+The fresh-per-lookup default is copied deliberately from
+`array_contents_lookup`: a *shared* default would force two unrelated arrays to
+hold equal strings, which can make a guard provably false when it is not.
+
+`Rvalue::ArrayLoad` produces a string view for any reference-typed element,
+because the IR does not carry the element descriptor and cannot distinguish
+`String[]` from `Object[]`. That is harmless — nothing reads the view unless a
+`String` method is applied to it, and it is unconstrained until something was
+stored.
+
+### How it was found, since inference failed three times
+
+1. securibench valid-assert is 11/18 blocked by `has_tainted_paths`. Read as
+   "taint elsewhere in the program", which motivated the per-obligation taint
+   split — **measured inert**, because the taint is on the obligations' own paths.
+2. So the win is producing *less* taint. Assumed unmodelled `String` methods —
+   **wrong**, every method securibench calls is already modelled.
+3. Assumed the collection surface (`LinkedList` x14, `HashMap`, `ArrayList`,
+   `StringTokenizer`) — **wrong again**.
+
+Instrumenting `rvalue_tainted` gave `String.contains` in 12 of 12 blocked tasks;
+instrumenting `str_call_modelled` gave `recv_str=false, arg1_str=true`, so the
+receiver, not the argument, had no string. That is what pointed at arrays.
+
+### On witnesses
+
+Twelve of the gains are FALSE verdicts, each confirmed by JVM replay. Finding
+them requires the solver to produce a string satisfying
+`contains(t, "<bad/>")` — the string theory deciding it, not a constant embedded
+in an engine. That is the distinction that sank the taint-engine experiment of
+2026-08-24, which gained similar benchmarks only by hardcoding the trigger
+string.
+
+### Cost
+
+Two tasks tipped into TIMEOUT: `autostub/Long...toString` went FALSE -> TIMEOUT
+(-1 point) and `jbmc-regression/StringValueOf05` went UNKNOWN -> TIMEOUT on both
+properties. String-array terms are not free on string-heavy programs. Recorded
+rather than absorbed: if more of these appear, the string view on `ArrayLoad`
+should be produced lazily rather than on every reference-typed load.

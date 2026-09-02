@@ -27,6 +27,7 @@ impl<'a> ExploreCtx<'a> {
             field_str_arrays: self.field_str_arrays.clone(),
             field_tainted: self.field_tainted.clone(),
             array_map: self.array_map.clone(),
+            str_array_map: self.str_array_map.clone(),
             type_array: self.type_array,
             loop_visits: self.loop_visits.clone(),
             pc_len: self.path_constraints.len(),
@@ -50,6 +51,7 @@ impl<'a> ExploreCtx<'a> {
         self.field_str_arrays = s.field_str_arrays;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
+        self.str_array_map = s.str_array_map;
         self.type_array = s.type_array;
         self.loop_visits = s.loop_visits;
         self.path_constraints.truncate(s.pc_len);
@@ -160,6 +162,19 @@ impl<'a> ExploreCtx<'a> {
         for entry in &b.array_map {
             if !self.array_map.iter().any(|(r, _, _)| *r == entry.0) {
                 self.array_map.push(entry.clone());
+            }
+        }
+
+        // String-array map: union, same rule as the bitvector one above.
+        let base_str_arr = self.str_array_map.clone();
+        for entry in &a.str_array_map {
+            if !base_str_arr.iter().any(|(r, _)| *r == entry.0) {
+                self.str_array_map.push(entry.clone());
+            }
+        }
+        for entry in &b.str_array_map {
+            if !self.str_array_map.iter().any(|(r, _)| *r == entry.0) {
+                self.str_array_map.push(entry.clone());
             }
         }
 
@@ -324,6 +339,11 @@ impl<'a> ExploreCtx<'a> {
                 acc.array_map.push(entry.clone());
             }
         }
+        for entry in &case.str_array_map {
+            if !acc.str_array_map.iter().any(|(r, _)| *r == entry.0) {
+                acc.str_array_map.push(entry.clone());
+            }
+        }
         // Type array
         if case.type_array != acc.type_array {
             acc.type_array = self.solver.ite(cond, case.type_array, acc.type_array);
@@ -392,6 +412,7 @@ impl<'a> ExploreCtx<'a> {
         self.field_str_arrays = s.field_str_arrays;
         self.field_tainted = s.field_tainted;
         self.array_map = s.array_map;
+        self.str_array_map = s.str_array_map;
         self.type_array = s.type_array;
     }
 

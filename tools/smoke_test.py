@@ -314,6 +314,17 @@ TESTS = [
     ("strings", "benchmarks/ajave/jvm-strings/StringBufferFromUnknownStringIsNotEmpty.yml", "FALSE"),
     ("strings", "benchmarks/ajave/jvm-strings/StringBufferFromCharSequenceIsNotEmpty.yml", "FALSE"),
 
+    # ── strings through arrays ───────────────────────────────────────────
+    # Contents were tracked through fields but not through Java arrays, so a
+    # store-and-load lost them, every later String method was unmodelled, and
+    # the resulting path taint blocked discharge for the whole run. The pair
+    # separates real per-index tracking from a "last stored string" model,
+    # which would pass the first and fail the second.
+    ("strings", "benchmarks/ajave/jvm-strings/StringSurvivesArrayRoundTrip.yml", "FALSE"),
+    ("strings", "benchmarks/ajave/jvm-strings/StringArrayElementsAreSeparate.yml", "TRUE"),
+    ("strings", "benchmarks/sv-comp/securibench/Arrays1.yml", "FALSE"),
+    ("strings", "benchmarks/sv-comp/securibench/Arrays5.yml", "TRUE"),
+
 ]
 
 import yaml

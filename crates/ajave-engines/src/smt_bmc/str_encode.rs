@@ -40,6 +40,13 @@ impl<'a> ExploreCtx<'a> {
             | "toLowerCase" | "toUpperCase" => has_recv_str,
             "contains" | "equals" | "startsWith" | "endsWith" | "concat"
             | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase" => {
+                if !(has_recv_str && has_arg1_str) {
+                    log::debug!(
+                        "smt-bmc: STR-UNMODELLED {}.{} recv_str={} arg1_str={} recv={:?} arg1={:?}",
+                        target.class, target.name, has_recv_str, has_arg1_str,
+                        args.first(), args.get(1)
+                    );
+                }
                 has_recv_str && has_arg1_str
             }
             "charAt" | "substring" | "hashCode" => has_recv_str,

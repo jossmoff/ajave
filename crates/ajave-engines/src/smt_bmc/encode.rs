@@ -340,6 +340,29 @@ impl<'a> ExploreCtx<'a> {
         result
     }
 
+    /// The string contents of the array `ref_term` denotes.
+    ///
+    /// Mirrors `array_contents_lookup`, including its fresh default: two
+    /// references the encoder cannot relate get *different* unconstrained
+    /// arrays, so nothing is claimed about an array never written to. A shared
+    /// default would force unrelated arrays to hold equal strings, which can
+    /// make a guard provably false when it is not.
+    pub(super) fn str_array_contents_lookup(&mut self, ref_term: Term) -> Term {
+        let pairs: Vec<(Term, Term)> = self.str_array_map.clone();
+        let mut result = self.solver.fresh_str_array("strarr_default");
+        for (r, arr) in &pairs {
+            let eq = self.solver.bveq(ref_term, *r);
+            result = self.solver.ite(eq, *arr, result);
+        }
+        result
+    }
+
+    pub(super) fn str_array_store_update(&mut self, ref_term: Term, idx_term: Term, val: Term) {
+        let arr = self.str_array_contents_lookup(ref_term);
+        let new_arr = self.solver.array_store(arr, idx_term, val);
+        self.str_array_map.push((ref_term, new_arr));
+    }
+
     pub(super) fn array_length_lookup(&mut self, ref_term: Term) -> Term {
         let pairs: Vec<(Term, Term, Term)> = self.array_map.clone();
         let mut result = self.solver.fresh_bv("len_default", 32);
