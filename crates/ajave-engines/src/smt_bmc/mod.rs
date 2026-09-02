@@ -18,7 +18,7 @@ mod math_encode;
 mod merge;
 mod str_encode;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use log::{debug, info, warn};
 use ajave_core::artifact::*;
@@ -170,6 +170,119 @@ impl Completeness {
         } else {
             self.all_paths_complete && self.all_calls_resolved
         }
+    }
+}
+
+/// Obligations a truncation at any of `cut_points` could have hidden.
+///
+/// `all_paths_complete` is a whole-run boolean *and* the outer gate on
+/// discharge, so one cut anywhere stops every obligation in the program from
+/// being considered. But a cut cannot hide an obligation it cannot reach, and
+/// the reachable set is usually far smaller than "everything": measured over
+/// tasks stuck at this gate, the share with open obligations in a method that
+/// was never truncated is 24 of 24 in `java-ranger-regression`.
+///
+/// At risk from a cut at `(m, b)`:
+///
+/// * every obligation in `m` in a block reachable from `b`, including `b`
+///   itself — the cut is mid-block, so the rest of that block is unexplored;
+/// * every obligation in any method reachable by a call from those blocks,
+///   transitively, since the cut means those calls never happened;
+///
+/// and the caller frames are already in `cut_points`, recorded at the moment of
+/// truncation, so a cut inside a callee charges each caller's continuation too.
+/// Approximating those by "every method that can call `m`" was tried on paper
+/// and is useless: it collapses to the whole program as soon as `main` calls
+/// the truncated method.
+///
+/// Exceptional successors count as edges. Handler code is reachable from a
+/// block that can throw, and a claim of having covered everything must include
+/// it.
+fn obligations_at_risk(
+    prog: &Program,
+    cut_points: &BTreeSet<(MethodKey, BlockId)>,
+) -> HashSet<(MethodKey, ObligationId)> {
+    let mut at_risk = HashSet::new();
+    // Methods whose obligations are all at risk, because a cut means a call
+    // into them may not have happened.
+    let mut tainted_methods: BTreeSet<MethodKey> = BTreeSet::new();
+
+    for (mk, start) in cut_points {
+        let Some(body) = prog.body(mk) else {
+            continue;
+        };
+        // Blocks reachable from the cut, within this method.
+        let mut seen: BTreeSet<BlockId> = BTreeSet::new();
+        let mut work = vec![*start];
+        while let Some(bid) = work.pop() {
+            if !seen.insert(bid) {
+                continue;
+            }
+            let Some(block) = body.blocks.get(bid.0 as usize) else {
+                continue;
+            };
+            for s in block_successors(block) {
+                work.push(s);
+            }
+            for e in &block.exceptional {
+                work.push(e.target);
+            }
+        }
+        for bid in &seen {
+            let Some(block) = body.blocks.get(bid.0 as usize) else {
+                continue;
+            };
+            for stmt in &block.stmts {
+                match stmt {
+                    Stmt::Check(oid) => {
+                        at_risk.insert((mk.clone(), *oid));
+                    }
+                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
+                        tainted_methods.insert(target.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Everything transitively callable from a cut-reachable call site.
+    let mut work: Vec<MethodKey> = tainted_methods.iter().cloned().collect();
+    let mut seen_m: BTreeSet<MethodKey> = BTreeSet::new();
+    while let Some(mk) = work.pop() {
+        if !seen_m.insert(mk.clone()) {
+            continue;
+        }
+        let Some(body) = prog.body(&mk) else { continue };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    Stmt::Check(oid) => {
+                        at_risk.insert((mk.clone(), *oid));
+                    }
+                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
+                        work.push(target.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    at_risk
+}
+
+/// Normal (non-exceptional) successors of a block.
+fn block_successors(block: &Block) -> Vec<BlockId> {
+    match &block.term {
+        Terminator::Goto(t) => vec![*t],
+        Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+        Terminator::Switch { cases, default, .. } => {
+            let mut v: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
+            v.push(*default);
+            v
+        }
+        Terminator::Return(_) | Terminator::Halt
+        | Terminator::Throw(_) | Terminator::Diverge(_) => vec![],
     }
 }
 
@@ -330,6 +443,8 @@ impl Engine for SmtBmc {
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
+            cut_points: BTreeSet::new(),
+            frames: Vec::new(),
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -506,8 +621,32 @@ impl Engine for SmtBmc {
                 bb.open_or_unconfirmed().len(),
             );
         }
+        // Which obligations a truncation could actually have hidden. Empty when
+        // nothing was cut, in which case this is exactly the old global gate.
+        let at_risk = if ctx.completeness.all_paths_complete {
+            HashSet::new()
+        } else {
+            obligations_at_risk(prog, &ctx.cut_points)
+        };
+        if log::log_enabled!(log::Level::Debug) && !ctx.completeness.all_paths_complete {
+            debug!(
+                "smt-bmc: cut_points={:?} at_risk={} open={}",
+                ctx.cut_points.iter().map(|(m, b)| format!("{}#bb{}", m.name, b.0)).collect::<Vec<_>>(),
+                at_risk.len(),
+                bb.open_or_unconfirmed().len(),
+            );
+        }
         if !ctx.exhausted && ctx.budget_left() {
-            if ctx.completeness.all_paths_complete {
+            // Was: `if all_paths_complete`, a whole-run boolean that stopped
+            // every obligation in the program from being considered as soon as
+            // anything anywhere was cut short. The per-obligation test below
+            // is the same claim made about the obligation actually at hand.
+            //
+            // Safety net: if a cut was recorded but produced no at-risk set,
+            // something is unaccounted for and the old global behaviour stands.
+            let cuts_accounted =
+                ctx.completeness.all_paths_complete || !at_risk.is_empty();
+            if cuts_accounted {
                 // Include obligations whose only status is an unconfirmed
                 // violation: an exhaustive exploration that found nothing is
                 // real evidence, and it should not be discarded merely because
@@ -528,7 +667,9 @@ impl Engine for SmtBmc {
                             }
                         }
                     }
-                    let blocker = if !ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only) {
+                    let blocker = if at_risk.contains(&(oref.method.clone(), oref.id)) {
+                        "all_paths_complete"
+                    } else if !ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only) {
                         ctx.completeness
                             .discharge_blocker(&oref.method, entry, method_explored, assertion_only)
                             .unwrap_or("completeness")
@@ -634,6 +775,17 @@ struct ExploreCtx<'a> {
     skipped_obligations: HashSet<(MethodKey, ObligationId)>,
     /// Methods in which exploration was truncated. See `mark_incomplete`.
     incomplete_methods: HashSet<MethodKey>,
+    /// Program points where exploration was cut short, as (method, block).
+    ///
+    /// A truncation cannot affect an obligation it cannot reach, so recording
+    /// *where* each cut happened is what lets `all_paths_complete` — a
+    /// whole-run boolean, and the outer gate on all discharge — become a
+    /// per-obligation fact. Every frame on the call stack at the time is
+    /// recorded too: a cut deep inside a callee means the caller never
+    /// returned, so its continuation is unexplored as well.
+    cut_points: BTreeSet<(MethodKey, BlockId)>,
+    /// Call sites of the frames currently being explored, innermost last.
+    frames: Vec<(MethodKey, BlockId)>,
 
     // ── Heap model ──────────────────────────────────────────────────────
     statics: HashMap<FK, Term>,

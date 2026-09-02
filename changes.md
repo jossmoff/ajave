@@ -2102,3 +2102,63 @@ our benchmarks against a real JVM with no contradictions.
 | valid-assert | 800 | **823** | 900 |
 | no-runtime-exception | 1057 | **1112** | 1100 ✓ |
 | combined | 1857 | **1935** | 2000 |
+
+## 2026-09-02 — per-obligation completeness: sound, nearly inert, and it exposed a stale-block bug
+
+VA 823 -> **824**, NRE 1112 -> **1114**, 0 wrong. One genuine gain
+(`argv-tasks/HotspotIntegerGenerator_false`, whose *no-runtime-exception*
+verdict is TRUE — the suffix refers to valid-assert); the rest is timeout noise.
+
+`all_paths_complete` is a whole-run boolean **and** the outer gate on discharge,
+so one cut anywhere stopped every obligation in the program from being
+considered. `cut_points` now records where each truncation happened, as
+(method, block), together with every call site on the stack at that moment — a
+cut inside a callee means the caller never returned, so its continuation is
+unexplored too. `obligations_at_risk` walks forward from those points and
+charges only the obligations a cut could actually have hidden.
+
+### Why it buys so little, which is the useful part
+
+Measured on `java-ranger-regression`, its predicted beneficiary:
+
+```
+cut_points=["alarmFunctional#bb65", "main#bb135"]  at_risk=718  open=1
+```
+
+The cut is the loop-unroll cap **in `main`**, so essentially every obligation is
+downstream and the one open obligation genuinely *is* at risk. The accounting was
+never the problem.
+
+The earlier measurement that motivated this — "24 of 24 java-ranger tasks have
+open obligations in a method that was never truncated" — compared *method sets*
+and ignored interprocedural reachability. It was a proxy, and the proxy was
+wrong. Recorded because the same mistake is easy to repeat: a method-level
+measurement cannot answer a question about reachability.
+
+This is the second gate refinement in a row to come back near-zero, after
+per-obligation taint. Both point the same way: **for these pools the cut itself
+has to go, not be accounted for more precisely.** That is loop invariants, and
+it is why `algorithms` (+48 VA, +67 NRE) is gated behind CHC rather than behind
+better bookkeeping.
+
+### The bug it exposed
+
+`explore.rs` restored `self.body` after inlining a callee but not
+`self.current_block`. The statement loop then reached
+
+```rust
+if let Some(bid) = self.current_block {
+    if !self.body.block(bid).exceptional.is_empty() {
+        self.completeness.has_unresolved_in_try = true;
+```
+
+which indexes the **caller's** block list with a **callee's** block id — reading
+some unrelated block's exception edges, or panicking when the callee had more
+blocks. Wrong in either direction, and the permissive one risks a wrong TRUE.
+The same class of defect as the obligation-id collision fixed earlier today:
+an index that is only meaningful relative to one method, used as though it were
+global.
+
+Not separately benchmarked. The effect is a silent misread rather than a verdict
+I could reproduce on a corpus task, and claiming a benchmark that does not
+demonstrate it would be worse than saying so.

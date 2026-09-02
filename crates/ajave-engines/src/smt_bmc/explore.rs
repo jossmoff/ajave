@@ -160,6 +160,10 @@ impl<'a> ExploreCtx<'a> {
             let saved_path_tainted = self.path_tainted;
             let saved_pc_len = self.path_constraints.len();
 
+            if let Some(b) = self.current_block {
+                self.frames.push((self.body.key.clone(), b));
+            }
+            let saved_block = self.current_block;
             self.body = clinit;
             self.call_depth += 1;
             self.vars.clear();
@@ -170,6 +174,12 @@ impl<'a> ExploreCtx<'a> {
             self.explore_block(clinit.entry, 0);
 
             self.call_depth -= 1;
+            if saved_block.is_some() {
+                self.frames.pop();
+            }
+            // Without this the caller's `current_block` stays at whatever block
+            // the callee last visited, for the remainder of the calling block.
+            self.current_block = saved_block;
             self.body = saved_body;
             self.vars = saved_vars;
             self.str_vars = saved_str_vars;
@@ -268,6 +278,12 @@ impl<'a> ExploreCtx<'a> {
             let saved_path_tainted = self.path_tainted;
             let saved_pc_len = self.path_constraints.len();
 
+            // The call site, so a cut inside the callee can charge the
+            // caller's continuation as unexplored.
+            if let Some(b) = self.current_block {
+                self.frames.push((self.body.key.clone(), b));
+            }
+            let saved_block = self.current_block;
             self.body = callee;
             self.call_depth += 1;
             self.vars.clear();
@@ -308,6 +324,12 @@ impl<'a> ExploreCtx<'a> {
             let callee_path_tainted = self.path_tainted;
 
             self.call_depth -= 1;
+            if saved_block.is_some() {
+                self.frames.pop();
+            }
+            // Without this the caller's `current_block` stays at whatever block
+            // the callee last visited, for the rest of the calling block.
+            self.current_block = saved_block;
             self.body = saved_body;
             self.vars = saved_vars;
             self.str_vars = saved_str_vars;
@@ -495,6 +517,15 @@ impl<'a> ExploreCtx<'a> {
             self.body.key
         );
         self.incomplete_methods.insert(self.body.key.clone());
+        // Where the cut happened, and every call site above it: a cut inside a
+        // callee means the caller never returned from this call, so whatever
+        // follows it is unexplored too.
+        if let Some(b) = self.current_block {
+            self.cut_points.insert((self.body.key.clone(), b));
+        }
+        for frame in &self.frames {
+            self.cut_points.insert(frame.clone());
+        }
         self.completeness.all_paths_complete = false;
     }
 
