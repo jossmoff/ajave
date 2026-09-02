@@ -781,6 +781,23 @@ fn encode_chc_interproc(
                     summary_args.push(ret_expr);
 
                     let mut all = constraints.clone();
+                    // The binding equalities, without which the returned value
+                    // is a free variable.
+                    //
+                    // `bind` names each computed value `_fN` and records
+                    // `(= _fN expr)` here; every other clause kind already
+                    // conjoins them and this one did not, so
+                    // `return fib(n-1) + fib(n-2)` produced
+                    // `(=> (m1_b6 ...) (m1_s v0 _f0))` with `_f0` unconstrained
+                    // -- fibonacci returning an arbitrary integer. The base
+                    // cases returned literals and so looked fine, which is why
+                    // the encoding still passed every structural check.
+                    //
+                    // Over-approximating, so it cost precision rather than
+                    // soundness: with the summary free, no property of a return
+                    // value is provable, and CHC could not discharge anything
+                    // recursive at all.
+                    all.extend(bindings.iter().cloned());
                     all.extend(call_constraints.iter().cloned());
                     all.push(block_app_src(block.id.0));
 

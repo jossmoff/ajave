@@ -2348,3 +2348,61 @@ And 35–47% of statements removed yields 20–23% of bytes, which is the stoppi
 condition the plan wrote down in advance — the noise is not mostly where the
 cost is. The verdicts confirm it independently: the blocker on these tasks is
 the overflow guard, and nobody solves that encoding at any size.
+
+## 2026-09-02 — why JayHorn proved these and we did not: two things, one of them ours
+
+Answered by experiment, and the first half is a bug I introduced earlier today.
+
+### The missing measurement
+
+Earlier entries compared *hand-written* clauses (unbounded → `sat`, guarded →
+timeout) against *our* clauses (guarded → timeout) and concluded the guard was
+the blocker. The cell never filled in was **our encoding without the guard** —
+and it does not prove them either. So the guard was never the only difference.
+
+Removing the guard also changed the solver's answer from `timeout` to `unsat`,
+which is a different diagnosis entirely: not "too hard" but "our clauses admit a
+violation the program does not have".
+
+### The bug: an unconstrained return
+
+Dumping the clauses (`AJAVE_CHC_DUMP`, added for this) showed it immediately:
+
+```
+(=> (m1_b1 …) (m1_s v0 0))     base case → 0            ✓
+(=> (m1_b3 …) (m1_s v0 1))     base case → 1            ✓
+(=> (m1_b6 …) (m1_s v0 _f0))   recursive → unconstrained ✗
+```
+
+`fibonacci` returned an **arbitrary integer** on its recursive path, so no
+property of its result was provable and the assertion was trivially violable.
+
+The cause is this session's `bind` optimisation. It names each computed value
+`_fN` and records `(= _fN expr)` in `bindings`; the transition, check and
+overflow clauses all conjoin those, and the **return** clause did not. The base
+cases return literals, so they looked correct, which is why nothing structural
+caught it — `validate` checks well-formedness, not that a clause carries the
+equalities its operands depend on.
+
+Over-approximating, so it cost precision and not soundness: a free return value
+admits more behaviour, never less. But it made CHC unable to discharge anything
+recursive at all, which is most of what CHC is for.
+
+### With it fixed, the gap is exactly the guard
+
+| task | guard on | guard off |
+|---|---|---|
+| `SatFibonacci01` | UNKNOWN | **TRUE** |
+| `SatAckermann01` | UNKNOWN | **TRUE** |
+| `SatMccarthy91` | UNKNOWN | **TRUE** |
+| `SatPrimes01` | UNKNOWN | **TRUE** |
+
+So our encoding is now demonstrably as capable as JayHorn's: given the same
+assumption, it proves the same programs. The whole remaining difference is the
+assumption itself — JayHorn's documented unbounded-integer model, whose
+SV-COMP 2019 failure is `UnsatAddition02`, the same benchmark that caught us.
+
+**We are not behind JayHorn on these. We are strictly stricter.** The
+`AJAVE_CHC_EXPERIMENT_NO_GUARD` switch used for the table was removed rather
+than kept: an environment variable that silently disables a soundness guard is
+the thing this file warns about.
