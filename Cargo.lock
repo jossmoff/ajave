@@ -20,6 +20,7 @@ dependencies = [
  "ajave-frontend",
  "ajave-ir",
  "ajave-models",
+ "ajave-opt",
  "clap",
  "env_logger",
  "log",
@@ -63,6 +64,15 @@ name = "ajave-models"
 version = "0.1.0"
 dependencies = [
  "ajave-ir",
+]
+
+[[package]]
+name = "ajave-opt"
+version = "0.1.0"
+dependencies = [
+ "ajave-ir",
+ "ajave-models",
+ "log",
 ]
 
 [[package]]

@@ -606,6 +606,33 @@ fn main() {
         eprintln!("warning: {e}");
     }
 
+    // Reduce the IR before any engine sees it.
+    //
+    // Deliberately here rather than in an engine: the lifter materialises the
+    // JVM operand stack into temporaries, so 35-47% of assignments are bare
+    // copies and the widest corpus method carries 112 variables. Each is an
+    // argument of every CHC block predicate and an entry in every BMC state,
+    // and doing this per-engine is how the same work -- and the same bug --
+    // gets written seven times.
+    //
+    // `Level::Normalise` only rewrites reads and is always on.
+    // `Level::Optimise` removes statements and variables and is behind
+    // `AJAVE_IR_OPT`, off until the configuration differential is clean on
+    // both properties.
+    {
+        let level = ajave_opt::level_from_env();
+        let stats = ajave_opt::reduce(&mut prog, level);
+        info!(
+            "ir-opt ({:?}): {} copies propagated, {} assignments and {} vars removed \
+             across {} bodies",
+            level,
+            stats.copies_propagated,
+            stats.assignments_removed,
+            stats.vars_removed,
+            stats.bodies
+        );
+    }
+
     if cli.ir {
         let mut keys: Vec<_> = prog.bodies.keys().cloned().collect();
         keys.sort();

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ajave-ir = { path = "../ajave-ir" }
+ajave-opt = { path = "../ajave-opt" }
 ajave-frontend = { path = "../ajave-frontend" }
 ajave-core = { path = "../ajave-core" }
 ajave-engines = { path = "../ajave-engines" }

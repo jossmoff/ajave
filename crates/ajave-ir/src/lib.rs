@@ -860,3 +860,161 @@ impl Body {
         s
     }
 }
+
+// ---------------------------------------------------------------------------
+// Well-formedness
+// ---------------------------------------------------------------------------
+
+/// Check that a `Body` is structurally well formed.
+///
+/// This states what a well-formed body *is*, which is the type's business
+/// rather than any one consumer's — the lifter should be able to call it
+/// without depending on the optimiser, and `ajave-opt` runs it after every
+/// pass under `debug_assertions`.
+///
+/// It converts a pass bug from a wrong verdict into a loud failure. Every
+/// condition here corresponds to a defect that has actually occurred: an
+/// obligation id used as if it were global, a block id from one method used to
+/// index another, an obligation with no `Check` to reach it.
+///
+/// Deliberately structural only. It cannot check that a transformation
+/// preserved *meaning* — that is what the configuration differential in
+/// `tools/metamorphic.py` is for.
+pub fn validate(body: &Body) -> Result<(), String> {
+    let nblocks = body.blocks.len();
+    let nvars = body.vars.len();
+    let nobs = body.obligations.len();
+
+    if body.entry.0 as usize >= nblocks {
+        return Err(format!(
+            "{}: entry bb{} is out of range ({nblocks} blocks)",
+            body.key, body.entry.0
+        ));
+    }
+
+    // Block ids must be their own index: `Body::block` indexes directly, so a
+    // permuted list silently returns the wrong block.
+    for (i, b) in body.blocks.iter().enumerate() {
+        if b.id.0 as usize != i {
+            return Err(format!("{}: block at index {i} has id bb{}", body.key, b.id.0));
+        }
+    }
+
+    // Obligation ids must likewise be their own index.
+    for (i, o) in body.obligations.iter().enumerate() {
+        if o.id.0 as usize != i {
+            return Err(format!(
+                "{}: obligation at index {i} has id #{}",
+                body.key, o.id.0
+            ));
+        }
+    }
+
+    let check_var = |v: VarId, what: &str| -> Result<(), String> {
+        if (v.0 as usize) < nvars {
+            Ok(())
+        } else {
+            Err(format!("{}: {what} refers to v{} of {nvars}", body.key, v.0))
+        }
+    };
+    let check_operand = |op: &Operand, what: &str| -> Result<(), String> {
+        match op {
+            Operand::Var(v) => check_var(*v, what),
+            Operand::Const(_) => Ok(()),
+        }
+    };
+    let check_block = |b: BlockId, what: &str| -> Result<(), String> {
+        if (b.0 as usize) < nblocks {
+            Ok(())
+        } else {
+            Err(format!("{}: {what} targets bb{} of {nblocks}", body.key, b.0))
+        }
+    };
+
+    let mut checked: Vec<usize> = vec![0; nobs];
+    for b in &body.blocks {
+        let at = format!("bb{}", b.id.0);
+        for s in &b.stmts {
+            match s {
+                Stmt::Assign(v, rv) => {
+                    check_var(*v, &format!("{at} assignment target"))?;
+                    for op in rvalue_operands(rv) {
+                        check_operand(op, &format!("{at} rvalue"))?;
+                    }
+                }
+                Stmt::Check(oid) => {
+                    let i = oid.0 as usize;
+                    if i >= nobs {
+                        return Err(format!("{}: {at} checks #{} of {nobs}", body.key, oid.0));
+                    }
+                    checked[i] += 1;
+                }
+                Stmt::Assume(op) | Stmt::MonitorEnter(op) | Stmt::MonitorExit(op) => {
+                    check_operand(op, &format!("{at} statement"))?
+                }
+                Stmt::PutStatic(_, op) => check_operand(op, &format!("{at} putstatic"))?,
+                Stmt::PutField { obj, val, .. } => {
+                    check_operand(obj, &format!("{at} putfield object"))?;
+                    check_operand(val, &format!("{at} putfield value"))?;
+                }
+                Stmt::ArrayStore { arr, idx, val } => {
+                    check_operand(arr, &format!("{at} arraystore array"))?;
+                    check_operand(idx, &format!("{at} arraystore index"))?;
+                    check_operand(val, &format!("{at} arraystore value"))?;
+                }
+                Stmt::Nop => {}
+            }
+        }
+        match &b.term {
+            Terminator::Goto(t) => check_block(*t, &format!("{at} goto"))?,
+            Terminator::Branch { cond, then_, else_ } => {
+                check_operand(cond, &format!("{at} branch condition"))?;
+                check_block(*then_, &format!("{at} branch then"))?;
+                check_block(*else_, &format!("{at} branch else"))?;
+            }
+            Terminator::Switch { value, cases, default } => {
+                check_operand(value, &format!("{at} switch value"))?;
+                for (_, t) in cases {
+                    check_block(*t, &format!("{at} switch case"))?;
+                }
+                check_block(*default, &format!("{at} switch default"))?;
+            }
+            Terminator::Return(Some(op)) => check_operand(op, &format!("{at} return"))?,
+            Terminator::Throw(op) => check_operand(op, &format!("{at} throw"))?,
+            Terminator::Return(None) | Terminator::Halt | Terminator::Diverge(_) => {}
+        }
+        for e in &b.exceptional {
+            check_block(e.target, &format!("{at} exceptional edge"))?;
+        }
+    }
+
+    // An obligation with no `Check` can never be evaluated, so an engine that
+    // discharges it is claiming something about a program point that does not
+    // exist. Two `Check`s for one obligation is equally wrong: the id is the
+    // identity, and duplicating it makes "was this checked" ambiguous.
+    for (i, n) in checked.iter().enumerate() {
+        if *n != 1 {
+            return Err(format!(
+                "{}: obligation #{i} is reached by {n} Check statements, expected 1",
+                body.key
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every operand an rvalue reads. Used by `validate` and by the optimiser's
+/// liveness, so the two cannot disagree about what an rvalue depends on —
+/// a pass that missed a read here would delete a live value.
+pub fn rvalue_operands(rv: &Rvalue) -> Vec<&Operand> {
+    match rv {
+        Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::Cast(_, _, o)
+        | Rvalue::ArrayLength(o) | Rvalue::InstanceOf { obj: o, .. }
+        | Rvalue::GetField { obj: o, .. } => vec![o],
+        Rvalue::Bin(_, a, b) | Rvalue::Cmp(_, a, b) => vec![a, b],
+        Rvalue::ArrayLoad { arr, idx } => vec![arr, idx],
+        Rvalue::NewArray { len, .. } => vec![len],
+        Rvalue::Call { args, .. } => args.iter().collect(),
+        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New(_) => vec![],
+    }
+}

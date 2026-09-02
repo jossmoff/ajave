@@ -1,0 +1,11 @@
+[package]
+name = "ajave-opt"
+description = "IR reduction: normalisation and optimisation between lifting and the portfolio."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ajave-ir = { path = "../ajave-ir" }
+ajave-models = { path = "../ajave-models" }
+log = { workspace = true }

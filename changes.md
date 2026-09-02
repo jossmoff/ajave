@@ -2265,3 +2265,86 @@ Kept in git history rather than in the tree: `HornBackend`, the runner, and
 evidence a second algorithm is what is missing. Today the evidence says
 otherwise, and carrying an engine that demonstrably changes no verdict is
 complexity without justification.
+
+## 2026-09-02 — ajave-opt: IR reduction built, and measured to be unsafe to enable
+
+`ajave-opt` exists, is tested, and is **off by default**. The differential found
+verdict changes at both levels, the transformed IR is verifiably correct in
+every case examined, and that makes this a finding about the engines rather
+than about the passes.
+
+### What was built
+
+A crate between lifting and the portfolio, on SeaHorn's split: `Normalise`
+(copy propagation — rewrites reads, removes nothing) and `Optimise` (adds dead
+assignment elimination and variable compaction). Separate crate because dead
+assignment elimination needs `ajave_models::contract_of` to know a call is pure,
+and `ajave-models` already depends on `ajave-ir`, so a pass module inside the IR
+crate would be a dependency cycle.
+
+`ajave_ir::validate` states what a well-formed `Body` is — ids equal to their
+index, operands in range, every obligation reached by exactly one `Check` — and
+runs after every pass under `debug_assertions`. It belongs with the type, not
+the optimiser, so the lifter can use it too.
+
+### The exclusions are the safety argument, and each has a test that catches it
+
+Dead assignment elimination never removes a `Nondet` (a witness is a *sequence*
+replayed on a real JVM, so removing one renumbers every later value), a `Call`
+that is not `Effect::Pure`, an allocation (observable through `NegArraySize` and
+reference identity), or anything an obligation's condition reads.
+
+Each exclusion was mutation-tested: flipping it to `true` must make its test
+fail. The first attempt reported the allocation exclusion as untested — that
+turned out to be the harness, not the code, because the delimiter in the
+mutation script was `|` and the Rust pattern `New(_) | NewArray` contains one,
+so the replacement silently never applied. All four now verified to fail on
+mutation.
+
+### Measured: correct, and not safe to turn on
+
+`tools/ir_opt_differential.py` compares verdicts across `AJAVE_IR_OPT` levels.
+An IR reduction cannot change what is true of a program, so a changed verdict is
+a defect and needs no expected-verdict label.
+
+| level | effect |
+|---|---|
+| `Normalise` | **2 changes**: `float-widen/Bounded-Reset-Linear-Growth` and `Saturating-Integrator`, TRUE → UNKNOWN |
+| `Optimise` | **7 more**: all securibench — `Aliasing3`, `StrongUpdates1/5`, `Collections1–4` |
+
+The `getWriter` case was examined statement by statement: three dead copies
+removed, the surviving three feeding the constructor with the same values, the
+renumbering consistent. The IR is right. So an engine is sensitive to IR shape
+in a way it should not be — the interval AI's float widening to statement count
+or variable identity, and the BMC's string and collection tracking likewise.
+**That is worth more than the optimisation would have been**, and it is what an
+IR reduction was always going to surface.
+
+### A gap in the harness, found the same way
+
+The differential initially reported `Normalise` clean. It was reading
+`benchmarks/sets/smoke.set`, while `tools/smoke_test.py` has its own hardcoded
+`TESTS` list — two different sets with the same name. `float-widen` is in the
+second and not the first, so the two lost tests were invisible. A harness that
+covers a different set than the gate it is trusted to protect is not protecting
+it.
+
+### CHC, since that was the motivating case
+
+| task | encoding off | `Normalise` | `Optimise` |
+|---|---|---|---|
+| `SatFibonacci01` | 15,947 | 15,947 | **12,762** |
+| `SatAckermann01` | 30,359 | 30,359 | **23,802** |
+| `SatMccarthy91` | 10,368 | 10,368 | **7,974** |
+| `SatPrimes01` | 68,788 | 68,788 | **55,080** |
+
+A consistent 20–23% smaller, and **no verdict moves**. Two things follow.
+
+`Normalise` buys CHC exactly nothing: the encoding's size is set by predicate
+arity and clause count, and copy propagation removes no variables. All of the
+benefit is in compaction, which is the level that changes securibench.
+
+And 35–47% of statements removed yields 20–23% of bytes, which is the stopping
+condition the plan wrote down in advance — the noise is not mostly where the
+cost is. The verdicts confirm it independently: the blocker on these tasks is
+the overflow guard, and nobody solves that encoding at any size.
