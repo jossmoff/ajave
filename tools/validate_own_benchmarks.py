@@ -34,6 +34,9 @@ import subprocess
 import sys
 import tempfile
 import yaml
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from procguard import run_guarded
 from collections import Counter
 
 NONDET = re.compile(r"Verifier\s*\.\s*nondet")
@@ -86,10 +89,15 @@ def compile_and_run(src_dir, common_dir, runs):
 
         outcomes = Counter()
         for _ in range(runs):
-            try:
-                p = subprocess.run(["java", "-ea", "-cp", out, "Main"],
-                                   capture_output=True, text=True, timeout=30)
-            except subprocess.TimeoutExpired:
+            # `run_guarded`, not `subprocess.run`: the latter kills only the
+            # process it spawned, and a JVM that hangs with live threads
+            # outlives it. One leaked from a deadlock benchmark here and was
+            # still running seven hours later, holding memory and invisible to
+            # `tools/cleanup.sh`, whose stray patterns match `ajave-*` rather
+            # than a bare `java -cp /tmp/... Main`. procguard exists for exactly
+            # this and this file was not using it.
+            p = run_guarded(["java", "-ea", "-cp", out, "Main"], timeout=30)
+            if p.timed_out:
                 # Not a harness failure. A deadlock benchmark is *supposed* to
                 # hang, and so is any program whose threads never join, so an
                 # overrun is an observation about the program like any other.

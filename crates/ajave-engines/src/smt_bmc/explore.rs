@@ -148,7 +148,7 @@ impl<'a> ExploreCtx<'a> {
         if let Some(clinit) = self.prog.body(&clinit_key) {
             if self.call_depth >= MAX_CALL_DEPTH || self.budget_exhausted() {
                 // Skipping a static initialiser leaves its writes unmodelled.
-                self.completeness.all_paths_complete = false;
+                self.mark_incomplete("propagate_str_to_aliases");
                 return;
             }
             debug!("smt-bmc: running <clinit> for {class}");
@@ -469,6 +469,27 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         true
+    }
+
+    /// Record that exploration did not cover everything, and where.
+    ///
+    /// `all_paths_complete` is a whole-run flag, and it is the *outer* gate on
+    /// discharge: when it is false no obligation is even considered. Measured
+    /// over 144 blocked tasks it is by far the most common reason a provable
+    /// obligation goes unproven — 73 of them, and nearly every task in
+    /// `algorithms` and `java-ranger-regression`.
+    ///
+    /// A truncation cannot affect an obligation it cannot reach, so the flag
+    /// is more conservative than the fact it records. `incomplete_methods`
+    /// keeps the method each truncation happened in, which is the first step
+    /// to charging the cost only to the obligations actually at risk.
+    fn mark_incomplete(&mut self, why: &'static str) {
+        log::debug!(
+            "smt-bmc: INCOMPLETE ({why}) in {}",
+            self.body.key
+        );
+        self.incomplete_methods.insert(self.body.key.clone());
+        self.completeness.all_paths_complete = false;
     }
 
     fn handle_assign(&mut self, v: VarId, rv: &Rvalue) -> bool {
@@ -885,7 +906,7 @@ impl<'a> ExploreCtx<'a> {
 
         let Some(thrown_class) = thrown_class else {
             // Can't determine type — mark incomplete.
-            self.completeness.all_paths_complete = false;
+            self.mark_incomplete("handle_throw");
             return;
         };
 
@@ -929,7 +950,7 @@ impl<'a> ExploreCtx<'a> {
             debug!("smt-bmc: exception propagating from callee: throw {}", thrown_class);
             self.inline_throw = Some((thrown_term, thrown_class));
         } else {
-            self.completeness.all_paths_complete = false;
+            self.mark_incomplete("handle_throw");
         }
     }
 
@@ -975,7 +996,7 @@ impl<'a> ExploreCtx<'a> {
         if self.call_depth > 0 {
             self.inline_throw = Some((thrown_term, thrown_class.to_string()));
         } else {
-            self.completeness.all_paths_complete = false;
+            self.mark_incomplete("dispatch_exception");
         }
     }
 
@@ -985,11 +1006,7 @@ impl<'a> ExploreCtx<'a> {
             let count = self.loop_visits.entry(loop_key).or_insert(0);
             *count += 1;
             if *count > MAX_LOOP_UNROLL {
-                log::debug!(
-                    "smt-bmc: INCOMPLETE loop-unroll-cap at bb{} in {}",
-                    target.0, self.body.key
-                );
-                self.completeness.all_paths_complete = false;
+                self.mark_incomplete("handle_goto");
             } else {
                 self.explore_block_until(target, 0, stop_at);
             }
@@ -1088,7 +1105,7 @@ impl<'a> ExploreCtx<'a> {
             // so 62 obligations including an unconditional out-of-bounds read
             // were discharged as exhaustively proven.
             if feas == SatResult::Unknown {
-                self.completeness.all_paths_complete = false;
+                self.mark_incomplete("handle_branch_fork");
             }
             if feas != SatResult::Unsat {
                 self.explore_block_until(then_, 0, stop_at);
@@ -1114,7 +1131,7 @@ impl<'a> ExploreCtx<'a> {
         if self.budget_exhausted() {
             log::trace!("smt-bmc: fork-else bb{} in {} SKIPPED: budget exhausted",
                 else_.0, self.body.key);
-            self.completeness.all_paths_complete = false;
+            self.mark_incomplete("handle_branch_fork");
         }
         if !self.budget_exhausted() {
             if cond_tainted { self.path_tainted = true; }
@@ -1124,7 +1141,7 @@ impl<'a> ExploreCtx<'a> {
                 log::trace!("smt-bmc: fork-else bb{} in {} feas={:?}",
                     else_.0, self.body.key, feas);
                 if feas == SatResult::Unknown {
-                    self.completeness.all_paths_complete = false;
+                    self.mark_incomplete("handle_branch_fork");
                 }
                 if feas != SatResult::Unsat {
                     self.explore_block_until(else_, 0, stop_at);
@@ -1368,7 +1385,7 @@ impl<'a> ExploreCtx<'a> {
         self.block_visits += 1;
         if self.depth > self.max_depth || self.budget_exhausted() {
             // Depth limit also truncates, so mark it either way.
-            self.completeness.all_paths_complete = false;
+            self.mark_incomplete("explore_block_until");
             return;
         }
 
@@ -1421,7 +1438,7 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
             Terminator::Diverge(_) => {
-                self.completeness.all_paths_complete = false;
+                self.mark_incomplete("explore_block_until");
             }
         }
         self.depth -= 1;

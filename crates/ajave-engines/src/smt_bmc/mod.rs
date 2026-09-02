@@ -329,6 +329,7 @@ impl Engine for SmtBmc {
             exhausted: false,
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
+            incomplete_methods: HashSet::new(),
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -556,9 +557,20 @@ impl Engine for SmtBmc {
                         advanced = true;
                     }
                 }
-            } else {
+            } else if log::log_enabled!(log::Level::Debug) {
+                let open_methods: std::collections::BTreeSet<String> = bb
+                    .open_or_unconfirmed()
+                    .iter()
+                    .map(|o| o.method.to_string())
+                    .collect();
+                let trunc: std::collections::BTreeSet<String> =
+                    ctx.incomplete_methods.iter().map(|m| m.to_string()).collect();
+                let elsewhere = open_methods.difference(&trunc).count();
                 debug!(
-                    "smt-bmc: BLOCKER all_paths_complete for every obligation (outer gate)"
+                    "smt-bmc: BLOCKER all_paths_complete for every obligation (outer gate); \
+                     open in {} method(s), truncated in {} method(s), {} open method(s) \
+                     were never truncated",
+                    open_methods.len(), trunc.len(), elsewhere
                 );
             }
             if !ctx.completeness.all_paths_complete && violations_empty {
@@ -619,6 +631,8 @@ struct ExploreCtx<'a> {
     /// **(method, id)**. See `violated_oids` for why the method is part of
     /// the key.
     skipped_obligations: HashSet<(MethodKey, ObligationId)>,
+    /// Methods in which exploration was truncated. See `mark_incomplete`.
+    incomplete_methods: HashSet<MethodKey>,
 
     // ── Heap model ──────────────────────────────────────────────────────
     statics: HashMap<FK, Term>,

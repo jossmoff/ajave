@@ -1923,3 +1923,63 @@ answered FALSE correctly.
 **NRE 1089** (553 correct, 0 wrong). Combined **1891**, against 1857 before this
 change and 1870 at the start of the day. Smoke 125 correct, 0 wrong, with
 `Basic15` and both reductions added as canaries.
+
+## 2026-09-02 — per-obligation taint: correct, and measured inert
+
+Reverted. `has_tainted_paths` is a whole-run flag, and on securibench's
+valid-assert tasks it was the refusing condition in 11 of 18 sampled blocks, so
+charging taint to the individual obligations whose checks met it looked like the
+obvious win. It is sound — the same predicate, evaluated per obligation — and it
+changed **nothing**: valid-assert 802 with 0 tasks differing, no-runtime-exception
+1089 with one score-neutral timeout flip.
+
+The reason is worth keeping. On those programs the taint is on the obligations'
+*own* paths, not elsewhere in the program, so the per-obligation record blocks
+exactly what the global flag blocked. Reading "blocked by `has_tainted_paths`" as
+"taint somewhere else in the program" was the error. **The win on securibench is
+producing less taint, not gating it better** — `rvalue_tainted` taints any call
+that is not a modelled string call, not a modelled math call, and not inlinable.
+
+Kept from the attempt, because both earned their keep:
+
+- **`Completeness::discharge_blocker`**, which reports the condition that
+  actually refuses. It sits beside `can_discharge` in the same order so a
+  measurement of where the points are cannot drift from what the code tests.
+  Two orderings this session were wrong before it existed: one counted flags
+  that were *set* rather than conditions that *refused* (`has_tainted_paths` is
+  read only in the assertion-only arm, so on no-runtime-exception a set flag
+  blocks nothing at all), and one sampled "the first 40 unknowns" across two
+  categories when the first sorts before the second and supplies more than 40 —
+  so the sample was entirely one category and said nothing about the other.
+- **`mark_incomplete`**, routing all eleven truncation sites through one place
+  that records which method was truncated. That is the hook for making
+  `all_paths_complete` per-obligation, which the stratified measurement says is
+  the dominant blocker: 73 of 144 sampled tasks, and nearly every task in
+  `algorithms` and `java-ranger-regression`.
+
+### What the stratified measurement changed
+
+| blocker | count / 144 |
+|---|---|
+| `all_paths_complete` | 73 |
+| discharge never attempted | 21 |
+| `violated` | 18 |
+| `skipped_obligation` | 16 |
+| `has_tainted_paths` | 11 (all securibench valid-assert) |
+| `has_potentially_throwing_havoc` | 5 |
+
+And a follow-up that decided what *not* to build: of the tasks blocked at the
+outer `all_paths_complete` gate, the share with open obligations in a method
+that was never truncated is **24 of 24** in `java-ranger-regression` and **2 of
+27** in `algorithms`. So per-obligation completeness targets java-ranger, and
+`algorithms` needs quantified invariants over arrays — which is the same
+boundary the heap and k-induction work hit from the other side.
+
+### Also
+
+`tools/validate_own_benchmarks.py` ran its JVMs through `subprocess.run`, which
+kills only the process it spawned. A deadlock benchmark's JVM outlived it and
+was still running seven hours later, invisible to `tools/cleanup.sh` because its
+stray patterns match `ajave-*` rather than a bare `java -cp /tmp/... Main`.
+`procguard` exists in this repo for exactly that and the file was not using it.
+Now routed through `run_guarded`.
