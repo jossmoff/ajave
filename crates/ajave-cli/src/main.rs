@@ -266,10 +266,28 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     }
     // CHC after BMC: BMC handles falsification; CHC proves safety for
     // recursive programs that BMC can't resolve (unbounded recursion).
-    {
-        let chc = ajave_engines::chc::ChcEngine::new();
+    //
+    // Both Horn backends are registered, rather than one being chosen. Each
+    // engine filters on `bb.open()`, so Eldarica only ever sees obligations
+    // Spacer could not discharge and costs nothing when Spacer succeeds --
+    // selection falls out of the portfolio instead of being predicted. They
+    // are different algorithms, not a fast one and a slow one: Spacer is
+    // IC3/PDR, Eldarica is CEGAR over predicate abstraction, and each finds
+    // invariants the other does not.
+    //
+    // Running both on the same clauses also gives the first cross-check a Horn
+    // encoding has here: if one reports safe and the other produces a
+    // counterexample, our encoding or one of the solvers is wrong, and
+    // `Blackboard::contested` reports that pair.
+    for backend in [
+        ajave_engines::chc::HornBackend::Spacer,
+        ajave_engines::chc::HornBackend::Eldarica,
+    ] {
+        let chc = ajave_engines::chc::ChcEngine::with_backend(backend);
         if chc.available() {
             engines.push(Box::new(chc));
+        } else {
+            debug!("chc: {backend:?} backend not on PATH, skipping");
         }
     }
     {
