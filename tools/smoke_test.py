@@ -325,6 +325,18 @@ TESTS = [
     ("strings", "benchmarks/sv-comp/securibench/Arrays1.yml", "FALSE"),
     ("strings", "benchmarks/sv-comp/securibench/Arrays5.yml", "TRUE"),
 
+    # ── exception handlers are kind-aware ────────────────────────────────
+    # `guarded_at` accepted only Throwable/Exception/RuntimeException and a
+    # catch-all, so `catch (ArithmeticException)` around a division did not
+    # guard the DivByZero obligation. The pair is discriminating: treating any
+    # specific handler as guarding passes the first and gives a wrong TRUE on
+    # the second, which is the dangerous direction -- guarding removes an
+    # obligation from no-runtime-exception seeding.
+    ("exceptions", "benchmarks/ajave/jvm-exceptions/SpecificHandlerCatchesItsOwnException.yml", "TRUE", "no-runtime-exception"),
+    ("exceptions", "benchmarks/ajave/jvm-exceptions/WrongSpecificHandlerDoesNotCatch.yml", "FALSE", "no-runtime-exception"),
+    ("exceptions", "benchmarks/sv-comp/jbmc-regression/ArithmeticException1.yml", "TRUE", "no-runtime-exception"),
+    ("exceptions", "benchmarks/sv-comp/jbmc-regression/ClassCastException1.yml", "TRUE", "no-runtime-exception"),
+
 ]
 
 import yaml

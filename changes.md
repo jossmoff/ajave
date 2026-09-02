@@ -2047,3 +2047,58 @@ Two tasks tipped into TIMEOUT: `autostub/Long...toString` went FALSE -> TIMEOUT
 properties. String-array terms are not free on string-heavy programs. Recorded
 rather than absorbed: if more of these appear, the string view on `ArrayLoad`
 should be produced lazily rather than on every reference-typed load.
+
+## 2026-09-02 — exception guards are kind-aware: NRE 1094 -> 1112
+
+**Target met on no-runtime-exception** (goal 1100). 565 correct, 0 wrong. Nine
+tasks went UNKNOWN -> TRUE. Valid-assert is unchanged at 823, which is the
+expected result rather than a disappointing one: `guarded` is consulted *only*
+when seeding no-runtime-exception, so a change to it must not move valid-assert
+at all, and it did not.
+
+### The bug
+
+`guarded_at(off)` did not take the obligation's kind. It accepted a handler only
+for `Throwable`, `Exception`, `RuntimeException`, or a catch-all — so
+
+```java
+try { int j = 10 / i; } catch (ArithmeticException e) { }
+```
+
+did not guard the `DivByZero` obligation, which was then seeded as escaping. The
+BMC found `i == 0`, published a violation, JVM replay refuted it (the JVM
+catches it and exits 0), and the task sat UNKNOWN with an unconfirmed violation
+that nothing could discharge. `jbmc-regression` is built out of that shape, and
+this was the blocker on 8 of 20 sampled tasks there.
+
+`guarded_at` now takes the kind and tests the JLS-fixed hierarchy exactly:
+`DivByZero` is an `ArithmeticException`, `ArrayBounds` an
+`ArrayIndexOutOfBoundsException` (so `IndexOutOfBoundsException` also catches
+it), and so on.
+
+### Direction of risk, stated in the code
+
+Marking an obligation guarded **removes** it from no-runtime-exception seeding,
+so an over-eager guard loses a real violation and yields a wrong TRUE at −16.
+The subtype test is therefore exact and drawn from the JLS, never from which
+handlers look close enough. `AssertionError` is handled separately because it is
+an `Error`: `catch (Exception)` and `catch (RuntimeException)` do **not** catch
+it, which the old code got wrong in the permissive direction.
+
+The paired benchmarks are discriminating rather than illustrative:
+`SpecificHandlerCatchesItsOwnException` catches `ArithmeticException` around a
+division and must be TRUE; `WrongSpecificHandlerDoesNotCatch` catches
+`NullPointerException` around the same division and must be FALSE — they are
+siblings under `RuntimeException`, so treating any specific handler as guarding
+passes the first and produces a wrong TRUE on the second.
+
+Smoke 129 -> 133, 0 wrong. `tools/validate_own_benchmarks.py` checks all 153 of
+our benchmarks against a real JVM with no contradictions.
+
+### Score
+
+| property | before today | now | target |
+|---|---|---|---|
+| valid-assert | 800 | **823** | 900 |
+| no-runtime-exception | 1057 | **1112** | 1100 ✓ |
+| combined | 1857 | **1935** | 2000 |

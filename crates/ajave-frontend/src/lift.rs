@@ -317,12 +317,28 @@ impl<'a> Lifter<'a> {
             .map(|(_, l)| *l)
     }
 
-    /// Could a *runtime* exception raised here be caught inside this method?
+    /// Could the exception this obligation raises be caught inside this method?
     ///
-    /// Only handlers that can actually catch `RuntimeException` (or a
-    /// supertype like `Exception`/`Throwable`) count.  A handler for a
-    /// checked exception (e.g. `IOException`) does *not* catch NPE/AIOOBE/etc.
-    fn guarded_at(&self, off: u16) -> bool {
+    /// Kind-aware, because a handler catches a *specific* class. This used to
+    /// test only for `Throwable`/`Exception`/`RuntimeException` and a
+    /// catch-all, so a `catch (ArithmeticException)` around a division did not
+    /// count and the obligation was seeded as escaping. The BMC then found the
+    /// division by zero, published it, JVM replay refuted it — the JVM catches
+    /// it, so nothing escapes — and the task was stuck UNKNOWN with an
+    /// unconfirmed violation nothing could discharge.
+    ///
+    /// Measured as the blocker on 8 of 20 sampled no-runtime-exception tasks in
+    /// `jbmc-regression`, whose whole point is exceptions caught by their own
+    /// specific handler: `ArithmeticException1`,
+    /// `ArrayIndexOutOfBoundsException1`, `ClassCastException1`,
+    /// `NegativeArraySizeException1`.
+    ///
+    /// Direction of risk: marking an obligation guarded *removes* it from
+    /// no-runtime-exception seeding, so a wrong `true` here loses a real
+    /// violation and can produce a wrong TRUE. The subtype test is therefore
+    /// exact and drawn from the JLS-fixed hierarchy, never from a guess about
+    /// which handlers look close enough.
+    fn guarded_at(&self, off: u16, kind: ObligationKind) -> bool {
         self.handlers.iter().any(|h| {
             if off < h.start || off >= h.end {
                 return false;
@@ -331,21 +347,16 @@ impl<'a> Lifter<'a> {
                 return true; // catch-all / finally
             }
             let Ok(name) = self.cf.class_name(h.catch_type) else {
-                return false; // unresolvable → assume checked
+                return false; // unresolvable → assume it does not catch
             };
-            matches!(
-                name.as_str(),
-                "java/lang/Throwable"
-                    | "java/lang/Exception"
-                    | "java/lang/RuntimeException"
-            )
+            catches(&name, kind)
         })
     }
 
     fn obligation(&mut self, kind: ObligationKind, cond: Operand, off: u16) -> ObligationId {
         let id = ObligationId(self.obligations.len() as u32);
         let line = self.line_at(off);
-        let guarded = self.guarded_at(off);
+        let guarded = self.guarded_at(off, kind);
         self.obligations.push(Obligation {
             id,
             kind,
@@ -2293,5 +2304,51 @@ mod volatile_tests {
         let plain = ajave_ir::FieldKey { class: "C".into(), name: "plain".into(), desc: "I".into() };
         assert!(prog.volatile_fields.contains(&vol));
         assert!(!prog.volatile_fields.contains(&plain));
+    }
+}
+
+/// The JVM class of the exception a given obligation raises, where the kind
+/// determines it. `ExplicitThrow` does not: the kind records that an `athrow`
+/// of *some* `RuntimeException` subclass is reachable, not which one.
+fn thrown_class_of(kind: ObligationKind) -> Option<&'static str> {
+    Some(match kind {
+        ObligationKind::DivByZero => "java/lang/ArithmeticException",
+        ObligationKind::NullDeref => "java/lang/NullPointerException",
+        ObligationKind::ArrayBounds => "java/lang/ArrayIndexOutOfBoundsException",
+        ObligationKind::NegArraySize => "java/lang/NegativeArraySizeException",
+        ObligationKind::ClassCast => "java/lang/ClassCastException",
+        ObligationKind::Assertion => "java/lang/AssertionError",
+        _ => return None,
+    })
+}
+
+/// Does a handler for `handler_class` catch what `kind` raises?
+///
+/// The hierarchy is fixed by the JLS, so this is a statement about Java rather
+/// than about our modelling. Note `AssertionError` is an `Error`: `catch
+/// (Exception)` and `catch (RuntimeException)` do **not** catch it, which is
+/// why the assertion case cannot share the runtime-exception branch.
+fn catches(handler_class: &str, kind: ObligationKind) -> bool {
+    let Some(thrown) = thrown_class_of(kind) else {
+        // Unknown thrown class: only a handler that catches everything a
+        // `RuntimeException` could be counts.
+        return matches!(
+            handler_class,
+            "java/lang/Throwable" | "java/lang/Exception" | "java/lang/RuntimeException"
+        );
+    };
+    if handler_class == thrown || handler_class == "java/lang/Throwable" {
+        return true;
+    }
+    if thrown == "java/lang/AssertionError" {
+        return handler_class == "java/lang/Error";
+    }
+    match handler_class {
+        "java/lang/Exception" | "java/lang/RuntimeException" => true,
+        // The only intermediate class among the kinds above.
+        "java/lang/IndexOutOfBoundsException" => {
+            thrown == "java/lang/ArrayIndexOutOfBoundsException"
+        }
+        _ => false,
     }
 }
