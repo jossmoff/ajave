@@ -344,7 +344,23 @@ impl<'a> Lifter<'a> {
                 return false;
             }
             if h.catch_type == 0 {
-                return true; // catch-all / finally
+                // `catch_type == 0` is a **finally** handler, not a catch-all.
+                // A real catch-all -- `catch (Throwable t)` -- has catch_type
+                // pointing at Throwable; entry 0 is what javac emits for
+                // `finally`, and for the synthetic cleanup of `synchronized`
+                // and try-with-resources.
+                //
+                // All of those run their cleanup and then **rethrow**: JLS
+                // 14.20.2, if the try block completes abruptly for reason R and
+                // the finally block completes normally, the try statement
+                // completes abruptly for reason R. So the exception still
+                // escapes, and treating it as caught removed the obligation
+                // from no-runtime-exception seeding entirely -- a wrong TRUE on
+                // `benchmarks/ajave/jvm-exceptions/FinallyDoesNotCatch`.
+                //
+                // Guarding can only ever lose violations, so being wrong here
+                // is wrong in the expensive direction.
+                return false;
             }
             let Ok(name) = self.cf.class_name(h.catch_type) else {
                 return false; // unresolvable → assume it does not catch
@@ -646,7 +662,12 @@ pub fn lift_method_with_lambdas(
         .collect();
 
     let lambdas = std::mem::take(&mut lifter.pending_lambdas);
+    // ACC_STATIC. Recorded rather than dropped: without it a consumer has to
+    // guess whether local slot 0 holds `this`, and CHC guessed wrong for every
+    // instance method.
+    let is_static = m.access & 0x0008 != 0;
     let mut body = Body {
+        is_static,
         key,
         entry: BlockId(0),
         blocks,
@@ -2181,6 +2202,7 @@ fn lambda_forwarder(
         },
     ));
     Some(Body {
+        is_static: true,
         key: sam_key.clone(),
         entry: BlockId(0),
         blocks: vec![Block {
@@ -2259,6 +2281,7 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
                 prog.bodies.insert(
                     key.clone(),
                     Body {
+                        is_static: true,
                         key,
                         entry: BlockId(0),
                         blocks: vec![diverging_block(BlockId(0), 0, e)],

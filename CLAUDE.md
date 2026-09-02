@@ -245,6 +245,70 @@ finding that stays in a 60-line benchmark is a finding that gets rediscovered.
 lines, ground truth argued from IEEE-754 and the `dcmpg` bytecode, and a header
 that states what ajave did wrong and why it did not produce a wrong answer.
 
+## Faults Between Engines — MANDATORY checks
+
+Most defects found on 2026-09-02 were not inside an engine. They were in the
+seams, and no benchmark could see them because a benchmark exercises one program
+at a time. The recurring shapes:
+
+- **A context-relative identifier used as a global key.** `ObligationId` and
+  `BlockId` index into *one* `Body`. `skipped_obligations` and `violated_oids`
+  were keyed by id alone, so a violation in one method blocked discharge of an
+  unrelated obligation in another — worth 32 points once fixed. `current_block`
+  was not restored after inlining, so `self.body.block(bid)` indexed the
+  caller's blocks with a callee's id. **Never key a collection by `ObligationId`
+  or `BlockId` alone if it outlives one `Body`.** Use `(MethodKey, _)`.
+- **Producer and consumer disagreeing about an artifact.** `Bounded { k }` means
+  the BMC's `max_depth`, a *path-length* bound; k-induction consumed it as an
+  *iteration* count, and never read it. **Every artifact must document what a
+  consumer may conclude from it.**
+- **A local modelling gap becoming a global failure.** One missing string-array
+  model tainted paths, and taint is a whole-run discharge gate, so it blocked
+  everything on 12 securibench tasks. Prefer per-obligation facts to whole-run
+  flags; `Completeness::discharge_blocker` exists because "which flag is set" and
+  "which condition refuses" are different questions.
+- **Comments asserting invariants the code does not maintain.** CHC described
+  overflow-to-error guards in three places, with `INT_MIN`/`INT_MAX` declared and
+  never read. An auditor found a correct soundness argument and no sign its
+  premise was unmet. **A comment stating a soundness argument must have a test
+  named after it.**
+- **Unsoundness masked by an unrelated conservative gate.** k-induction, CHC and
+  the StringBuffer model were each harmless only because something starved them.
+  Removing a gate does not create these; it reveals them. **Every engine
+  publishing `Over` needs a test that would fail if its encoding were unsound,
+  independent of blackboard gating** — see
+  `interprocedural_encoding_does_not_prove_an_overflowing_property` and
+  `step_case_rejects_property_that_fails_after_one_unrolling`.
+
+### The two harnesses that look between engines
+
+Both are stronger oracles than the corpus because neither uses an
+expected-verdict label, so they hold on programs no benchmark covers.
+
+```
+python3 tools/metamorphic.py      --set smoke   # meaning-preserving edits
+python3 tools/engine_ablation.py  --set smoke   # AJAVE_DISABLE=<engine>
+```
+
+- **`metamorphic.py`** applies edits that cannot change what is true of a
+  program — adding a reachable, always-safe method (which occupies overlapping
+  obligation ids, the exact precondition for the collision above), and renaming
+  `private static` helpers. A verdict that *flips* is a defect. A verdict that
+  merely weakens to UNKNOWN may be a cost effect and is reported, not failed.
+  Only `private static` methods are renamed: the first version renamed `run()`
+  on a `Runnable`, so the thread body stopped executing and the harness reported
+  its own edit as a bug in ajave. **A transformation must preserve meaning, and
+  proving that is part of writing one.**
+- **`engine_ablation.py`** removes one engine at a time. Removing an engine can
+  only remove evidence, so an answer may be lost — but a flip between TRUE and
+  FALSE means two engines disagree about the program and one is unsound.
+
+The blackboard also checks itself: `Blackboard::contested()` reports obligations
+an Over engine proved *and* an Under engine flagged. That pair is legitimate
+until JVM replay confirms the violation, which is why the report fires after
+certification rather than at publish — before that, a witness is only a
+candidate, which is exactly what `proved_safe` exists to record.
+
 ## Guarding Against Benchmark Overfitting
 
 Every entry above was added while looking at `sv-benchmarks/`, which is also

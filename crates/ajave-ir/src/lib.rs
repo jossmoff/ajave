@@ -400,6 +400,16 @@ pub struct Body {
     pub blocks: Vec<Block>,
     pub vars: Vec<VarInfo>,
     pub obligations: Vec<Obligation>,
+    /// Whether the method is `static`, i.e. has no `this` in local slot 0.
+    ///
+    /// The lifter knows this from `ACC_STATIC` and used to drop it, leaving
+    /// consumers to guess. CHC's `find_param_var_indices` guessed with "For
+    /// now, assume all methods are static (jayhorn benchmarks are static)", so
+    /// for an instance method every parameter bound one slot early and the
+    /// summary relation related the wrong variables. A benchmark-shaped
+    /// assumption compiled into an engine is what the overfitting rules forbid,
+    /// and the information to avoid it was available all along.
+    pub is_static: bool,
 }
 
 impl Body {

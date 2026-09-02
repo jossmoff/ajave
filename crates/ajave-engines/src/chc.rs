@@ -12,6 +12,7 @@
 //! because Spacer's fixpoint engine works best with integers. Falls back to
 //! BV for the single-method encoding when there are no inter-procedural calls.
 
+use crate::body_analysis::body_uses_float_types;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::process::{Command, Stdio};
@@ -87,6 +88,19 @@ impl Engine for ChcEngine {
         });
         if uses_heap {
             info!("chc: skipping — reachable methods use heap/array operations");
+            return Progress::Stalled;
+        }
+        // Floats have no integer encoding. `lia_operand` turns a float constant
+        // into its raw bit pattern and the arithmetic below then treats it as
+        // an integer, which computes something that is not floating-point
+        // addition at all -- the same defect recorded for the BMC in
+        // `smt_bmc/encode.rs`. Overflow guards do not help: the values were
+        // never integers to begin with.
+        let uses_float = reachable_methods
+            .iter()
+            .any(|mk| prog.body(mk).is_some_and(body_uses_float_types));
+        if uses_float {
+            info!("chc: skipping — reachable methods use float/double arithmetic");
             return Progress::Stalled;
         }
         // Skip if any reachable method has calls to non-Verifier library methods
@@ -282,16 +296,16 @@ fn param_slot_count(desc: &str) -> usize {
 /// Find which VarIds correspond to method parameters (by Local slot).
 /// Returns (var_index, slot) pairs in slot order.
 fn find_param_var_indices(body: &Body, mk: &MethodKey) -> Vec<usize> {
-    let is_static = mk.name == "<clinit>" || {
-        // Check if any var occupies slot 0 with Ref type (this pointer)
-        // Static methods don't have `this`, so first param is at slot 0.
-        // Heuristic: if the method is static, param slots start at 0.
-        // For now, assume all methods are static (jayhorn benchmarks are static).
-        // TODO: handle instance methods properly
-        true
-    };
+    // From ACC_STATIC, recorded by the lifter. This used to be hardcoded
+    // `true` with "assume all methods are static (jayhorn benchmarks are
+    // static)", so for an instance method -- where slot 0 holds `this` and
+    // parameters start at slot 1 -- every parameter bound one slot early and
+    // the summary relation related the wrong variables. An assumption shaped by
+    // one benchmark family, compiled into an engine, is what the overfitting
+    // rules forbid.
+    let is_static = body.is_static;
     let total_param_slots = param_slot_count(&mk.desc);
-    let first_slot: u16 = 0; // static methods start at slot 0
+    let first_slot: u16 = if is_static { 0 } else { 1 };
 
     let mut params: Vec<(usize, u16)> = Vec::new();
     for (i, vi) in body.vars.iter().enumerate() {
@@ -352,21 +366,47 @@ fn lia_operand(op: &Operand, var_map: &HashMap<usize, String>) -> String {
     }
 }
 
+/// Operators LIA cannot model faithfully, which must therefore say nothing.
+///
+/// `div`/`mod` are Euclidean and Java's `/`/`%` truncate toward zero, so they
+/// differ on negative operands; the bitwise and shift operators have no LIA
+/// form at all. All of these used to be encoded as the **constant 0**, which is
+/// not a conservative unknown but a specific wrong value, and a proof resting
+/// on it is worth nothing. An unconstrained variable is sound: it covers
+/// whatever the operation really produces.
+fn lia_unmodellable(op: &BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Div
+            | BinOp::Rem
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Xor
+            | BinOp::Shl
+            | BinOp::Shr
+            | BinOp::UShr
+    )
+}
+
+/// Does this operator's result need an overflow guard?
+fn lia_can_overflow(op: &BinOp) -> bool {
+    matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+}
+
 fn lia_binop(op: &BinOp, l: &str, r: &str) -> String {
     match op {
         BinOp::Add => format!("(+ {} {})", l, r),
         BinOp::Sub => format!("(- {} {})", l, r),
         BinOp::Mul => format!("(* {} {})", l, r),
-        BinOp::Div => format!("(div {} {})", l, r),
-        BinOp::Rem => format!("(mod {} {})", l, r),
         BinOp::Eq => format!("(ite (= {} {}) 1 0)", l, r),
         BinOp::Ne => format!("(ite (not (= {} {})) 1 0)", l, r),
         BinOp::Lt => format!("(ite (< {} {}) 1 0)", l, r),
         BinOp::Le => format!("(ite (<= {} {}) 1 0)", l, r),
         BinOp::Gt => format!("(ite (> {} {}) 1 0)", l, r),
         BinOp::Ge => format!("(ite (>= {} {}) 1 0)", l, r),
-        // Bitwise: not available in LIA
-        _ => "0".to_string(),
+        // Div/Rem and the bitwise operators are handled before this point by
+        // `lia_unmodellable`, which replaces them with a fresh variable.
+        _ => unreachable!("unmodellable operator reached lia_binop: {op:?}"),
     }
 }
 
@@ -395,24 +435,60 @@ impl FreshGen {
     }
 }
 
+/// `(or (> e MAX) (< e MIN))` for the width `e` is computed at.
+///
+/// Asserting this as a disjunct of `error` is what makes the LIA encoding
+/// sound for Java: proving `error` unreachable then proves *both* that no
+/// operation overflowed *and* that the property holds, and on an
+/// overflow-free path the two arithmetics agree. Without it `x + 1 > x` is
+/// valid here and false on a JVM (#77).
+fn lia_overflow_cond(expr: &str, wide: bool) -> String {
+    let (min, max) = if wide {
+        ("(- 9223372036854775808)", "9223372036854775807")
+    } else {
+        ("(- 2147483648)", "2147483647")
+    };
+    format!("(or (> {expr} {max}) (< {expr} {min}))")
+}
+
 fn lia_rvalue(
     rv: &Rvalue,
     var_map: &HashMap<usize, String>,
     fresh: &mut FreshGen,
+    is_wide: &dyn Fn(&Operand) -> bool,
+    overflow: &mut Vec<String>,
 ) -> String {
     match rv {
         Rvalue::Use(o) => lia_operand(o, var_map),
         Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => fresh.fresh(),
         Rvalue::Bin(op, a, b) => {
+            if lia_unmodellable(op) {
+                return fresh.fresh();
+            }
             let l = lia_operand(a, var_map);
             let r = lia_operand(b, var_map);
-            lia_binop(op, &l, &r)
+            let e = lia_binop(op, &l, &r);
+            if lia_can_overflow(op) {
+                overflow.push(lia_overflow_cond(&e, is_wide(a) || is_wide(b)));
+            }
+            e
         }
         Rvalue::Neg(o) => {
             let v = lia_operand(o, var_map);
-            format!("(- 0 {})", v)
+            let e = format!("(- 0 {})", v);
+            // Negating INT_MIN overflows.
+            overflow.push(lia_overflow_cond(&e, is_wide(o)));
+            e
         }
-        Rvalue::Cast(_, _, o) => lia_operand(o, var_map),
+        // A widening cast is the identity on the value; a narrowing one
+        // truncates, which LIA cannot express, so it must say nothing.
+        Rvalue::Cast(to, from, o) => {
+            if width_of(to) >= width_of(from) {
+                lia_operand(o, var_map)
+            } else {
+                fresh.fresh()
+            }
+        }
         Rvalue::Cmp(_, a, b) => {
             let l = lia_operand(a, var_map);
             let r = lia_operand(b, var_map);
@@ -542,6 +618,20 @@ fn encode_chc_interproc(
         for block in &body.blocks {
             let mut fresh = FreshGen::new();
             let mut constraints: Vec<String> = Vec::new();
+            // Overflow conditions from this block's arithmetic; any one of them
+            // makes `error` reachable.
+            let mut overflow: Vec<String> = Vec::new();
+            let is_wide = |op: &Operand| -> bool {
+                match op {
+                    Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
+                    Operand::Var(v) => body
+                        .vars
+                        .get(v.0 as usize)
+                        .map(|vi| vi.ty.is_wide())
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            };
             let mut var_map: HashMap<usize, String> = HashMap::new();
             let mut call_constraints: Vec<String> = Vec::new();
 
@@ -585,7 +675,8 @@ fn encode_chc_interproc(
                             }
                         }
                         _ => {
-                            let expr = lia_rvalue(rv, &var_map, &mut fresh);
+                            let expr =
+                                lia_rvalue(rv, &var_map, &mut fresh, &is_wide, &mut overflow);
                             var_map.insert(vid.0 as usize, expr);
                         }
                     },
@@ -612,6 +703,28 @@ fn encode_chc_interproc(
                     }
                     _ => {}
                 }
+            }
+
+            // Any overflow on a reachable path makes `error` reachable, so
+            // proving `error` unreachable proves the program does not overflow
+            // *and* satisfies its obligations. On an overflow-free path LIA and
+            // Java's wrapping arithmetic agree, which is what makes the whole
+            // encoding sound (#77).
+            if !overflow.is_empty() {
+                let mut conds = constraints.clone();
+                conds.extend(call_constraints.iter().cloned());
+                conds.push(if overflow.len() == 1 {
+                    overflow[0].clone()
+                } else {
+                    format!("(or {})", overflow.join(" "))
+                });
+                conds.push(block_app_src(block.id.0));
+                let body_expr = and_expr(&conds);
+                let q = add_extra_forall_lia(&forall_src, &fresh);
+                out.push_str(&format!(
+                    "; overflow guard for {} bb{}\n(assert (forall ({}) (=> {} error)))\n",
+                    mk, block.id.0, q, body_expr
+                ));
             }
 
             let mut assign_conds: Vec<String> = Vec::new();
@@ -972,5 +1085,136 @@ fn run_chc_solver(
     match result_line {
         "sat" => Ok(obligations.iter().map(|oid| (*oid, true)).collect()),
         _ => Ok(vec![]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(name: &str, desc: &str) -> MethodKey {
+        MethodKey { class: "Main".into(), name: name.into(), desc: desc.into() }
+    }
+
+    fn int_var(slot: u16) -> VarInfo {
+        VarInfo { kind: VarKind::Local(slot), ty: Ty::Int }
+    }
+
+    /// ```text
+    /// static int inc(int x) { return x + 1; }
+    /// static void main()    { int n = nondet(); assert inc(n) > n; }
+    /// ```
+    ///
+    /// `x + 1 > x` is **valid** in linear integer arithmetic and **false** in
+    /// Java at `Integer.MAX_VALUE`. The call is what matters: it selects
+    /// `encode_chc_interproc`, which used unbounded `Int`.
+    fn overflow_program() -> (Program, MethodKey) {
+        let inc = mk("inc", "(I)I");
+        let main = mk("main", "([Ljava/lang/String;)V");
+        let mut prog = Program::default();
+
+        let (x, t) = (VarId(0), VarId(1));
+        prog.bodies.insert(
+            inc.clone(),
+            Body {
+                is_static: true,
+                key: inc.clone(),
+                entry: BlockId(0),
+                vars: vec![int_var(0), int_var(1)],
+                obligations: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![Stmt::Assign(
+                        t,
+                        Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(1)),
+                    )],
+                    term: Terminator::Return(Some(Operand::Var(t))),
+                    exceptional: vec![],
+                }],
+            },
+        );
+
+        let (n, r, c) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![int_var(0), int_var(1), int_var(2)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(c),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(n, Rvalue::Nondet(Ty::Int, None)),
+                        Stmt::Assign(
+                            r,
+                            Rvalue::Call {
+                                target: inc.clone(),
+                                args: vec![Operand::Var(n)],
+                                is_virtual: false,
+                            },
+                        ),
+                        Stmt::Assign(
+                            c,
+                            Rvalue::Bin(BinOp::Gt, Operand::Var(r), Operand::Var(n)),
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+        (prog, main)
+    }
+
+    fn z3_available() -> bool {
+        Command::new("which")
+            .arg("z3")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The regression this file's bitvector port exists for (#77).
+    ///
+    /// The engine cannot demonstrate it end to end: `bb.open()` only offers CHC
+    /// what earlier engines left open, and the BMC finds this overflow
+    /// immediately, so CHC never sees the obligation. The gating is the only
+    /// reason the wrong answer was never emitted. Testing the encoder directly
+    /// is the only way to hold the line.
+    #[test]
+    fn interprocedural_encoding_does_not_prove_an_overflowing_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, main) = overflow_program();
+        let smt2 = encode_chc_interproc(&prog, &main, &[ObligationId(0)]);
+        assert!(
+            smt2.contains("; overflow"),
+            "the inter-procedural encoding must route 32-bit overflow to \
+             `error`; without that, unbounded Int makes `x + 1 > x` valid, \
+             which it is not in Java"
+        );
+        let proved = run_chc_solver("z3", &smt2, &[ObligationId(0)]).unwrap_or_default();
+        assert!(
+            proved.is_empty(),
+            "CHC proved `inc(n) > n`, which fails at Integer.MAX_VALUE. That is \
+             valid in linear integer arithmetic and false in Java (#77)."
+        );
     }
 }

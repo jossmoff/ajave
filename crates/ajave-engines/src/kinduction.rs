@@ -388,6 +388,7 @@ mod tests {
     fn loop_failing_on_second_iteration() -> Body {
         let (x, i, t) = (VarId(0), VarId(1), VarId(2));
         Body {
+            is_static: true,
             key: key(),
             entry: BlockId(0),
             vars: vec![int_var(0), int_var(1), int_var(2)],
@@ -517,6 +518,7 @@ mod tests {
             exceptional: vec![],
         };
         Body {
+            is_static: true,
             key: key(),
             entry: BlockId(0),
             vars: vec![int_var(0), int_var(1)],
@@ -637,6 +639,7 @@ mod tests {
     /// A single straight-line block ending in `check`, over `nvars` locals.
     fn straight_line(stmts: Vec<Stmt>, nvars: usize, cond: VarId) -> Body {
         Body {
+            is_static: true,
             key: key(),
             entry: BlockId(0),
             vars: (0..nvars).map(|i| int_var(i as u16)).collect(),
@@ -874,6 +877,7 @@ mod tests {
             exceptional: vec![],
         };
         Body {
+            is_static: true,
             key: key(),
             entry: BlockId(0),
             vars: vec![int_var(0), int_var(1), int_var(2), int_var(3)],

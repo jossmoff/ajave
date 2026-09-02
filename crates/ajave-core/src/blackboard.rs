@@ -359,6 +359,31 @@ impl Blackboard {
 
     /// The whole-task verdict. One violation is enough to say FALSE; TRUE
     /// requires every obligation discharged.
+    /// Obligations that an Over engine proved *and* an Under engine flagged.
+    ///
+    /// Not a contradiction on its own: a violation is a candidate until JVM
+    /// replay confirms it, and the two coexisting is exactly what
+    /// `proved_safe` exists to record. It becomes one once the violation is
+    /// **confirmed**, because then two engines disagree about a fact of the
+    /// program and one of them is wrong.
+    ///
+    /// The blackboard is the only place that sees both, and checking them
+    /// against each other needs no expected-verdict label -- which makes it a
+    /// stronger oracle than the corpus, and one that looks *between* engines
+    /// rather than inside one. That is where most of the defects found on
+    /// 2026-09-02 lived.
+    pub fn contested(&self) -> Vec<(ObligationRef, &'static str)> {
+        self.statuses
+            .iter()
+            .filter_map(|(oref, st)| match st {
+                Status::Violated { by, .. } if self.proved_safe.contains(oref) => {
+                    Some((oref.clone(), by.0))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn verdict(&self) -> Verdict {
         if self.statuses.is_empty() {
             if self.assertion_only && self.total_assertions > 0 {

@@ -1240,6 +1240,7 @@ mod tests {
 
     fn body_named(key: MethodKey, stmts: Vec<Stmt>, nvars: usize) -> Body {
         Body {
+            is_static: true,
             key,
             vars: (0..nvars)
                 .map(|i| VarInfo {

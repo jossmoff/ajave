@@ -284,6 +284,31 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(cegar));
         }
     }
+
+    // `AJAVE_DISABLE=chc,imc` removes engines by id.
+    //
+    // For the ablation differential (`tools/engine_ablation.py`): dropping an
+    // engine may lose answers, but it must never turn a TRUE into a FALSE or
+    // the reverse. Two engines disagreeing about the same obligation means one
+    // of them is wrong, and the portfolio can check that against itself without
+    // any expected-verdict label -- which is a stronger oracle than the corpus,
+    // and the one thing that looks *between* engines rather than inside one.
+    if let Ok(list) = std::env::var("AJAVE_DISABLE") {
+        let disabled: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !disabled.is_empty() {
+            engines.retain(|e| {
+                let keep = !disabled.iter().any(|d| d == e.id().0);
+                if !keep {
+                    info!("engine {} disabled by AJAVE_DISABLE", e.id().0);
+                }
+                keep
+            });
+        }
+    }
     engines
 }
 
@@ -328,6 +353,7 @@ fn confirm_violations(
     classpath: &str,
     program: &Program,
     trace: bool,
+    contested: &[(ajave_core::artifact::ObligationRef, &'static str)],
 ) -> Option<(ajave_core::artifact::ObligationRef, verdict::Witness)> {
     let replay = ajave_core::certify::JvmReplay::new(classpath.to_string());
     let mut any_confirmed = false;
@@ -370,6 +396,23 @@ fn confirm_violations(
         match ajave_core::certify::Certifier::certify(&replay, &violation.tagged, program) {
             ajave_core::certify::CertResult::Confirmed => {
                 any_confirmed = true;
+                // A violation the JVM reproduced, on an obligation some Over
+                // engine proved safe, means two engines disagree about a fact
+                // of this program and one of them is wrong. Before replay the
+                // pair is legitimate -- a witness is a candidate, which is what
+                // `proved_safe` exists to record -- so this is the first point
+                // at which it is a contradiction rather than a race.
+                //
+                // Always reported, never silent: it needs no expected-verdict
+                // label, so it holds on programs no benchmark covers.
+                if contested.iter().any(|(o, _)| o == &violation.obligation_ref) {
+                    eprintln!(
+                        "CONTRADICTION: {} was proved safe by an over-approximating \
+                         engine and violated by a witness that reproduced on a real \
+                         JVM. One of those engines is unsound.",
+                        violation.obligation_ref
+                    );
+                }
                 if confirmed.is_none() {
                     confirmed = Some((
                         violation.obligation_ref.clone(),
@@ -754,11 +797,12 @@ fn main() {
     }
 
     // Confirm violations via JVM replay.
+    let contested = orchestrator.bb.contested();
     let violations = collect_violations(&orchestrator);
     let confirmed_witness = if cli.no_replay {
         violations.first().map(|v| (v.obligation_ref.clone(), v.witness.clone()))
     } else if !violations.is_empty() && verdict == verdict::Verdict::False {
-        confirm_violations(&violations, &classpath, &prog, cli.trace)
+        confirm_violations(&violations, &classpath, &prog, cli.trace, &contested)
     } else {
         None
     };

@@ -337,6 +337,8 @@ TESTS = [
     ("exceptions", "benchmarks/sv-comp/jbmc-regression/ArithmeticException1.yml", "TRUE", "no-runtime-exception"),
     ("exceptions", "benchmarks/sv-comp/jbmc-regression/ClassCastException1.yml", "TRUE", "no-runtime-exception"),
 
+    ("exceptions", "benchmarks/ajave/jvm-exceptions/FinallyDoesNotCatch.yml", "FALSE", "no-runtime-exception"),
+
 ]
 
 import yaml
