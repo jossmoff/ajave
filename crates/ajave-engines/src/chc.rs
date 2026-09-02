@@ -24,122 +24,33 @@ use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::*;
 
-/// A Horn solver, and how to drive it.
-///
-/// Two solvers rather than one chooser. Which is better for a given program is
-/// not something to predict: the portfolio already filters each engine on
-/// `bb.open()`, so a second backend only ever sees obligations the first could
-/// not discharge, and costs nothing when the first succeeds. Selection is
-/// emergent, and adding a third backend is registering an engine rather than
-/// editing a heuristic.
-///
-/// An engine may decline a program it cannot *encode* -- CHC declines heap and
-/// float bodies today -- but never on the grounds that another backend looks
-/// better at this shape. That would be a performance guess fitted to our
-/// corpus, which is what the overfitting rules forbid; the portfolio measures
-/// it instead.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum HornBackend {
-    /// z3's Spacer: IC3/PDR generalised to Horn clauses.
-    Spacer,
-    /// Eldarica: CEGAR over predicate abstraction.
-    ///
-    /// A different algorithm, not a faster one. On `SatFibonacci01` Eldarica
-    /// discovers `ret >= n - 1` with a case split on small `n` in 11
-    /// refinements, where Spacer times out on the same shape in bitvectors.
-    /// Neither can discharge our overflow guard on that program, so this does
-    /// not recover it -- the value is on the programs where the guard *is*
-    /// dischargeable and the invariant needs case analysis.
-    Eldarica,
-}
-
-impl HornBackend {
-    fn binary(self) -> String {
-        match self {
-            HornBackend::Spacer => {
-                std::env::var("ROAST_CHC_SOLVER").unwrap_or_else(|_| "z3".to_string())
-            }
-            HornBackend::Eldarica => eldarica_binary(),
-        }
-    }
-
-    fn engine_id(self) -> EngineId {
-        match self {
-            HornBackend::Spacer => EngineId("chc-spacer"),
-            HornBackend::Eldarica => EngineId("chc-eldarica"),
-        }
-    }
-}
-
-/// Where to find Eldarica: an explicit override, then PATH, then the location
-/// `tools/install_eldarica.sh` uses.
-///
-/// The installer deliberately does not touch PATH -- it puts a native build in
-/// one directory that can be deleted to uninstall -- so the default location
-/// has to be looked for, or the engine would silently never run.
-fn eldarica_binary() -> String {
-    if let Ok(explicit) = std::env::var("ROAST_ELDARICA") {
-        return explicit;
-    }
-    if Command::new("which")
-        .arg("eld")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return "eld".to_string();
-    }
-    let default = std::env::var("HOME")
-        .map(|h| format!("{h}/.local/share/ajave/eldarica/eldarica"))
-        .unwrap_or_default();
-    default
-}
-
 pub struct ChcEngine {
-    backend: HornBackend,
     solver_binary: String,
     done: bool,
 }
 
 impl ChcEngine {
     pub fn new() -> Self {
-        Self::with_backend(HornBackend::Spacer)
-    }
-
-    pub fn with_backend(backend: HornBackend) -> Self {
+        let binary = std::env::var("ROAST_CHC_SOLVER").unwrap_or_else(|_| "z3".to_string());
         ChcEngine {
-            backend,
-            solver_binary: backend.binary(),
+            solver_binary: binary,
             done: false,
         }
     }
 
-    /// Is the backend's binary present?
-    ///
-    /// Presence is tested rather than the binary run: `--version` is not a
-    /// recognised flag on every Eldarica release, and a wrong flag would look
-    /// like an absent solver. An absolute path is checked directly, since
-    /// `which` searches PATH and Eldarica is installed outside it by
-    /// `tools/install_eldarica.sh`.
     pub fn available(&self) -> bool {
-        if self.solver_binary.contains('/') {
-            return std::fs::metadata(&self.solver_binary).is_ok();
-        }
-        Command::new("which")
-            .arg(&self.solver_binary)
+        Command::new(&self.solver_binary)
+            .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok()
     }
 }
 
 impl Engine for ChcEngine {
     fn id(&self) -> EngineId {
-        self.backend.engine_id()
+        EngineId("chc")
     }
 
     fn direction(&self) -> Direction {
@@ -247,7 +158,7 @@ impl Engine for ChcEngine {
         trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(4000)]);
 
         let mut advanced = false;
-        match run_chc_solver(self.backend, &self.solver_binary, &smt2, &obs) {
+        match run_chc_solver(&self.solver_binary, &smt2, &obs) {
             Ok(results) => {
                 for (oid, safe) in results {
                     if safe {
@@ -1126,70 +1037,11 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 // Solver interaction
 // ---------------------------------------------------------------------------
 
-/// Run Eldarica on the same clauses z3 would get.
-///
-/// Two differences from the z3 path, both mechanical:
-///
-/// * Eldarica reads a **file**, not stdin, so the clauses go to a `ScratchDir`
-///   — unique per run and self-deleting, because a temp directory named after
-///   a pid gets adopted by a later run with a recycled pid.
-/// * Its timeout flag is `-t:` in **seconds**, where z3's `-T:` is also
-///   seconds but its `-t:` is milliseconds. Getting that wrong is a
-///   thousand-fold error in either direction, so it is not shared.
-///
-/// The answer convention is the same: for a Horn problem `sat` means the
-/// clauses are satisfiable, i.e. `error` is unreachable and the program is
-/// safe. Anything else — `unsat`, `unknown`, a timeout, a parse error — proves
-/// nothing and discharges nothing.
-fn run_eldarica(
-    binary: &str,
-    smt2: &str,
-    obligations: &[ObligationId],
-) -> Result<Vec<(ObligationId, bool)>, String> {
-    let dir = ajave_core::scratch::ScratchDir::new("ajave-chc")
-        .map_err(|e| format!("scratch dir: {e}"))?;
-    let path = dir.path().join("horn.smt2");
-    std::fs::write(&path, smt2).map_err(|e| format!("write clauses: {e}"))?;
-
-    let out = Command::new(binary)
-        // `-t:` is seconds for Eldarica. z3's `-t:` is milliseconds and its
-        // `-T:` is seconds, so the two are not interchangeable and this is not
-        // shared with the Spacer path.
-        .arg(format!("-t:{}", solver_timeout_secs()))
-        // Our clauses are Horn SMT-LIB; saying so avoids a format guess.
-        .arg("-hsmt")
-        .arg(&path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("failed to spawn {binary}: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let verdict = stdout
-        .lines()
-        .map(str::trim)
-        .find(|l| matches!(*l, "sat" | "unsat" | "unknown"))
-        .unwrap_or("");
-    debug!("chc: eldarica returned: {verdict:?}");
-    if verdict.is_empty() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        debug!("chc: eldarica stderr: {}", &err[..err.len().min(400)]);
-    }
-    match verdict {
-        "sat" => Ok(obligations.iter().map(|oid| (*oid, true)).collect()),
-        _ => Ok(vec![]),
-    }
-}
-
 fn run_chc_solver(
-    backend: HornBackend,
     binary: &str,
     smt2: &str,
     obligations: &[ObligationId],
 ) -> Result<Vec<(ObligationId, bool)>, String> {
-    if backend == HornBackend::Eldarica {
-        return run_eldarica(binary, smt2, obligations);
-    }
     let mut child = Command::new(binary)
         .args([
             "-in",
@@ -1356,75 +1208,11 @@ mod tests {
              `error`; without that, unbounded Int makes `x + 1 > x` valid, \
              which it is not in Java"
         );
-        let proved = run_chc_solver(HornBackend::Spacer, "z3", &smt2, &[ObligationId(0)])
-            .unwrap_or_default();
+        let proved = run_chc_solver("z3", &smt2, &[ObligationId(0)]).unwrap_or_default();
         assert!(
             proved.is_empty(),
             "CHC proved `inc(n) > n`, which fails at Integer.MAX_VALUE. That is \
              valid in linear integer arithmetic and false in Java (#77)."
         );
     }
-
-    /// A stub standing in for a solver binary, so the Eldarica plumbing is
-    /// tested without requiring Eldarica.
-    ///
-    /// The parts that can be wrong here are all mechanical and all silent if
-    /// untested: Eldarica reads a *file* where z3 reads stdin, its timeout flag
-    /// is `-t:` in seconds where z3's `-t:` is milliseconds, and its answer
-    /// must be read from stdout rather than assumed. A stub exercises every one
-    /// of those.
-    fn stub_solver(answer: &str) -> (ajave_core::scratch::ScratchDir, String) {
-        let dir = ajave_core::scratch::ScratchDir::new("ajave-stub").expect("scratch");
-        let path = dir.path().join("eld");
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\n# echoes the clauses' path so the test can check a file was passed\necho \"{answer}\"\n"),
-        )
-        .expect("write stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
-        }
-        let s = path.to_string_lossy().to_string();
-        (dir, s)
-    }
-
-    #[test]
-    fn eldarica_sat_is_a_proof_and_anything_else_is_not() {
-        let (_dir, stub) = stub_solver("sat");
-        let proved = run_eldarica(&stub, "(set-logic HORN)\n", &[ObligationId(7)])
-            .expect("stub runs");
-        assert_eq!(
-            proved,
-            vec![(ObligationId(7), true)],
-            "for a Horn problem `sat` means the clauses are satisfiable, so \
-             `error` is unreachable and the obligation is discharged"
-        );
-
-        for answer in ["unsat", "unknown", "", "Segmentation fault"] {
-            let (_dir, stub) = stub_solver(answer);
-            let proved = run_eldarica(&stub, "(set-logic HORN)\n", &[ObligationId(7)])
-                .expect("stub runs");
-            assert!(
-                proved.is_empty(),
-                "{answer:?} is not a proof; only `sat` discharges"
-            );
-        }
-    }
-
-    #[test]
-    fn backends_are_distinct_engines() {
-        // Selection is emergent: each is registered separately and filters on
-        // `bb.open()`, so they must not share an id or the blackboard cannot
-        // tell which one published, and `AJAVE_DISABLE` cannot name them.
-        let spacer = ChcEngine::with_backend(HornBackend::Spacer);
-        let eldarica = ChcEngine::with_backend(HornBackend::Eldarica);
-        assert_ne!(spacer.id().0, eldarica.id().0);
-        assert_eq!(spacer.id().0, "chc-spacer");
-        assert_eq!(eldarica.id().0, "chc-eldarica");
-        assert_eq!(spacer.direction(), eldarica.direction());
-    }
 }
-

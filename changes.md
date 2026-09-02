@@ -2227,78 +2227,41 @@ slot early and the summary related the wrong variables.
 
 Smoke 131, 0 wrong.
 
-## 2026-09-02 — Eldarica as a second Horn backend
+## 2026-09-02 — Eldarica removed; the blocker was never the solver
 
-`chc-spacer` and `chc-eldarica` are now separate engines rather than one engine
-with a solver setting.
+Reverted. The integration worked — native build, 14 ms startup, `chc-eldarica`
+registered beside `chc-spacer` and selected by the portfolio rather than by a
+heuristic — and it changed nothing: valid-assert 809 with it and 809 without,
+`jayhorn-recursive` identical at 4 FALSE / 1 TRUE / 1 TIMEOUT / 17 UNKNOWN.
 
-### Why two engines and not a chooser
+The experiment that settles why, on hand-written Fibonacci clauses:
 
-Which Horn solver suits a program is not something to predict. Every engine
-already filters on `bb.open()`, so `chc-eldarica` only ever sees obligations
-`chc-spacer` could not discharge, and costs nothing when Spacer succeeds.
-Selection falls out of the portfolio; adding a third backend is registering an
-engine, not editing a heuristic.
+| encoding | z3-spacer | z3-bmc | eldarica |
+|---|---|---|---|
+| unbounded integers | **sat** | timeout | **sat** |
+| overflow routed to `error` | timeout | timeout | unknown |
+| exact 32-bit wrapping | timeout | timeout | no verdict |
 
-The line to hold: an engine may decline a program it cannot **encode** — CHC
-declines heap and float bodies today — but never on the grounds that another
-backend looks better at this shape. That would be a performance guess fitted to
-our corpus. `body_shape.rs` sits right on this line: its fields describe what a
-body *contains*, which is a legitimate precondition, but its doc calls that
-"selecting the most effective solver for each benchmark", which is the framing
-to avoid extending.
+Three things follow, and the second is the important one.
 
-### They are different algorithms, not a fast one and a slow one
+**No solver discharges the overflow obligation.** So a second backend cannot
+recover the seven tasks soundness cost us, and neither can exact wrapping —
+which is worth knowing, because wrapping is the semantically correct model and
+the obvious next thing to try. It is still worth doing eventually (the guard
+wrongly rejects every `hashCode`-style method that overflows harmlessly) but it
+adds a variable and two inequalities per operation, and that is the wrong
+direction while formulas are already too large.
 
-Spacer is IC3/PDR generalised to Horn clauses; Eldarica is CEGAR over predicate
-abstraction. On `SatFibonacci01` JayHorn's own trace shows Eldarica discovering
-`ret >= n - 1` with a case split on small `n` in 11 refinements and 2.3s, where
-Spacer times out on the same shape in bitvectors.
+**Spacer proves the unbounded version instantly.** An earlier entry claimed
+Spacer could not find `ret >= n-1`. It finds it immediately on a clean
+encoding. The failure was never the algorithm — it is **our encoding**, which
+is why a different algorithm changed nothing.
 
-Also worth recording from that trace, because it settles what these tools do:
-JayHorn's summary for `fibonacci` is `_5 - _0 >= -1 & _5 >= 0`, i.e.
-`ret >= n-1` with **no upper bound on `ret`**, while the *input* is constrained
-to `-2147483648 <= i0 <= 2147483647`. Inputs are range-constrained; arithmetic
-is not. That is the documented unbounded-integer assumption, and the SV-COMP
-2019 example of it going wrong is `UnsatAddition02` — the same benchmark that
-produced a wrong TRUE here when CHC's input was widened.
+**JayHorn preprocesses; we do not.** Its own trace reduces 93 clauses over 76
+relations to 14 over 6 before solving. We hand the solver everything.
 
-### Measured: no gain yet, and the reason
-
-Eldarica answers `SatFibonacci01` in **41 ms** with `unsat` — the overflow guard
-firing, exactly as predicted. The whole `jayhorn-recursive` category is
-unchanged: 4 FALSE, 1 TRUE, 1 TIMEOUT, 17 UNKNOWN, the same as with Spacer
-alone. **The binding constraint is the guard, not the solver**, so a second
-solver cannot move it, and this is not a fix for the seven tasks that soundness
-cost us.
-
-Its value is elsewhere: a genuinely different algorithm available to future
-encodings, and the first cross-check a Horn encoding has here — two independent
-solvers on the same clauses, where one reporting safe and the other producing a
-counterexample means our encoding or one of them is wrong.
-
-### Executing it
-
-`tools/install_eldarica.sh` installs a **native** build (arm64 macOS, static
-x86 Linux), falling back to the JVM distribution elsewhere. Native matters:
-startup is 14 ms against a 10 s solver budget, where a JVM boot would be a
-10–20% tax per task. The installer touches one directory and does not modify
-PATH, so `eldarica_binary()` looks for `$ROAST_ELDARICA`, then `eld` on PATH,
-then the install location — otherwise the engine would silently never run.
-
-The runner is tested against a stub rather than requiring the solver, because
-the things that can be wrong are mechanical and silent: Eldarica reads a *file*
-where z3 reads stdin, and its `-t:` is seconds where z3's `-t:` is
-milliseconds — a thousand-fold error in either direction.
-
-### Golem, considered and deferred
-
-Golem is the other candidate. Its distinctive engines, TPA and split-TPA, are
-for **linear** CHC systems, and our interprocedural encoding is non-linear —
-a call site emits two uninterpreted predicates in one body. For non-linear
-systems Golem falls back to its own re-implementation of Spacer, so it would
-add an implementation rather than an idea. It is also LIA/LRA only, so it
-cannot consume `encode_chc_single`, which is our bitvector encoder.
-
-Worth adding later pointed at a *linear* encoding, where split-TPA is
-distinctive. With `HornBackend` in place that is one enum arm and a runner.
+Kept in git history rather than in the tree: `HornBackend`, the runner, and
+`tools/install_eldarica.sh`. Re-adding a backend is worth doing once there is
+evidence a second algorithm is what is missing. Today the evidence says
+otherwise, and carrying an engine that demonstrably changes no verdict is
+complexity without justification.

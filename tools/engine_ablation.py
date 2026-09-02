@@ -38,8 +38,7 @@ AJAVE = os.path.join(ROOT, "target", "release", "ajave")
 
 ENGINES = [
     "presolve", "concurrency", "concrete", "nra", "float-search",
-    "interval-ai", "smt-bmc", "k-induction", "chc-spacer", "chc-eldarica",
-    "imc", "cegar",
+    "interval-ai", "smt-bmc", "k-induction", "chc", "imc", "cegar",
 ]
 DECIDED = {"TRUE", "FALSE"}
 
