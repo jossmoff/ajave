@@ -263,16 +263,34 @@ pub fn encode_body_lia(
         // Track whether this block is the entry block.
         let _is_entry = block.id == body.entry;
 
+        // One encoder per block. It owns naming, records the binders it
+        // introduces, and collects overflow side conditions -- which this
+        // encoder previously did not collect at all, so its proofs held only
+        // for unbounded integers and not for Java's 32-bit arithmetic.
+        let mut enc = smt_text::Encoder::new(&theory, &format!("{prefix}e{}_", block.id.0));
+        let is_wide = |op: &Operand| -> bool {
+            match op {
+                Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
+                Operand::Var(v) => body
+                    .vars
+                    .get(v.0 as usize)
+                    .map(|vi| vi.ty.is_wide())
+                    .unwrap_or(false),
+                _ => false,
+            }
+        };
+
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
-                    let expr = smt_text::encode_rvalue(&theory, rv, &var_exprs);
+                    let expr = enc.rvalue(rv, &var_exprs, &is_wide);
                     var_exprs[vid.0 as usize] = expr;
                 }
                 Stmt::Assume(op) => {
                     let expr = smt_text::encode_operand(&theory, op, &var_exprs);
                     path_conds.push(theory.encode_nonzero(&expr));
                 }
+
                 Stmt::Check(oid) => {
                     if obligations.contains(oid) {
                         let ob = body.obligation(*oid);
@@ -290,6 +308,30 @@ pub fn encode_body_lia(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Overflow on a reachable path makes the program unsafe, so it belongs
+        // in `error` alongside the obligation's own condition. Without this the
+        // fixpoint proves the property only for unbounded integers, and Java's
+        // are 32- and 64-bit: `x + 1 > x` holds in the encoding and fails on a
+        // JVM. The conditions come from `Encoder`, shared with CHC so the two
+        // cannot drift (#77).
+        if !enc.side_conditions.is_empty() {
+            let ovf = if enc.side_conditions.len() == 1 {
+                enc.side_conditions[0].clone()
+            } else {
+                format!("(or {})", enc.side_conditions.join(" "))
+            };
+            let mut conds = path_conds.clone();
+            conds.push(ovf);
+            let cond = if conds.len() == 1 {
+                conds[0].clone()
+            } else {
+                format!("(and {})", conds.join(" "))
+            };
+            for oid in obligations {
+                error_clauses.push((*oid, cond.clone()));
             }
         }
 

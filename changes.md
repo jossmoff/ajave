@@ -2162,3 +2162,67 @@ global.
 Not separately benchmarked. The effect is a silent misread rather than a verdict
 I could reproduce on a corpus task, and claiming a benchmark that does not
 demonstrate it would be worse than saying so.
+
+## 2026-09-02 — one encoder for the text-SMT engines, and IMC's missing guards
+
+The CHC work turned up the same defects in a second engine, which is the
+argument for centralising rather than patching twice.
+
+### IMC had three of CHC's five defects
+
+`imc` is `Direction::Over`, discharges `ProofKind::Exhaustive`, and encodes via
+`encode_body_lia` over unbounded `Int`. So its proofs held for mathematical
+integers and not for Java's: no overflow handling at all, `div`/`mod` Euclidean
+where Java truncates toward zero, and `encode_cast` the identity so `l2i` never
+truncated. Like k-induction it also consumes `Status::Bounded { k }` and ignores
+`k`, and like CHC it is harmless mainly because that starves it.
+
+It had a fourth of its own. `try_imc` selected the error formula with `find`,
+taking the **first** clause for an obligation and dropping the rest — so an
+obligation checked in more than one block was proved on whichever path came
+first. Now every clause is disjoined.
+
+### `Encoder`: naming, side conditions and sharing in one place
+
+The theories were pure string functions, which left each consumer to solve the
+same three problems differently:
+
+- **Naming.** `SmtTheory::encode_fresh` minted names from a process-global
+  counter that the theory could not declare, so consumers recovered them by
+  *string prefix* — `expr.starts_with("bv_fresh")` in one, `"chc_fresh"` in the
+  other. A theory that allocates a name it cannot bind is an interface to be
+  worked around. `encode_fresh` is gone; theories now answer `models_binop`,
+  `models_cast`, `sort_of` and `needs_overflow_guard`, and `Encoder` allocates.
+- **Side conditions.** Overflow has to reach the consumer's `error` and there
+  was nowhere to put it, so CHC collected it out of band and IMC did not collect
+  it at all. `Encoder::side_conditions` carries it, from
+  `smt_text::lia_overflow_cond`, shared so the two cannot drift.
+- **Sharing.** Both consumers substituted expression *text* per variable, so
+  `x = a + b; y = x * x;` became `(* (+ a b) (+ a b))` and a chain of
+  assignments duplicated whole subtrees.
+
+### The encoding was exponential in assignment depth
+
+That last point was not cosmetic. Measured on the programs CHC exists for:
+
+| task | before | after |
+|---|---|---|
+| `SatFibonacci01` | 24,364 bytes | **15,947** |
+| `SatAckermann01` | 48,643 bytes | **30,359** |
+
+A formula shaped by textual sharing rather than by the program. `Encoder::bind`
+names each computed value, making the encoding linear in statements.
+
+It does **not** recover the seven tasks lost to soundness, and that is the
+useful part: their blocker is that proving the property now also requires
+proving no overflow, which needs a bound on `fib(46)` that Spacer cannot infer.
+Size was never the obstacle, so the smaller encoding does not move them — which
+is worth recording, because "make the formula smaller" is the obvious next guess
+and it is wrong here.
+
+`Body::is_static` is now carried from `ACC_STATIC` rather than assumed. CHC's
+`find_param_var_indices` hardcoded "assume all methods are static (jayhorn
+benchmarks are static)", so for an instance method every parameter bound one
+slot early and the summary related the wrong variables.
+
+Smoke 131, 0 wrong.

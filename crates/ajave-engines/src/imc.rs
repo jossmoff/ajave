@@ -148,16 +148,27 @@ fn try_imc(
 ) -> Result<bool, String> {
     let encoding = encode_body_lia(body, &[oid], "");
 
-    // Find the error formula for this obligation.
-    let error_formula = encoding
+    // *Every* error formula for this obligation, not just the first.
+    //
+    // An obligation checked in more than one block has one clause per block,
+    // and the encoder now adds a clause per block for arithmetic overflow as
+    // well. `find` took whichever came first and silently dropped the rest, so
+    // a proof could rest on one path while another was never considered.
+    let parts: Vec<String> = encoding
         .error_formulas
         .iter()
-        .find(|(id, _)| *id == oid)
-        .map(|(_, f)| f.clone());
+        .filter(|(id, _)| *id == oid)
+        .map(|(_, f)| f.clone())
+        .collect();
 
-    let Some(error_formula) = error_formula else {
+    if parts.is_empty() {
         // Obligation not in this body → trivially safe.
         return Ok(true);
+    }
+    let error_formula = if parts.len() == 1 {
+        parts[0].clone()
+    } else {
+        format!("(or {})", parts.join(" "))
     };
 
     // Declare nondeterministic/havoc variables that appear in the encoding.

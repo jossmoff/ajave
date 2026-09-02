@@ -13,6 +13,7 @@
 //! BV for the single-method encoding when there are no inter-procedural calls.
 
 use crate::body_analysis::body_uses_float_types;
+use crate::smt_text::{self, LiaTheory, SmtTheory};
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::process::{Command, Stdio};
@@ -320,6 +321,53 @@ fn find_param_var_indices(body: &Body, mk: &MethodKey) -> Vec<usize> {
     params.iter().map(|&(i, _)| i).collect()
 }
 
+/// Is this already a name or literal, so naming it again would only add noise?
+fn is_atom(expr: &str) -> bool {
+    !expr.starts_with('(')
+}
+
+/// Universally quantified helper variables introduced by the encoding.
+struct FreshGen {
+    counter: u32,
+    extra_forall: Vec<String>,
+}
+
+impl FreshGen {
+    fn new() -> Self {
+        FreshGen { counter: 0, extra_forall: Vec::new() }
+    }
+
+    /// A fresh binder. LIA declares everything `Int`.
+    fn fresh(&mut self) -> String {
+        let name = format!("_f{}", self.counter);
+        self.counter += 1;
+        self.extra_forall.push(format!("({} Int)", name));
+        name
+    }
+
+    /// Record a binder for a fresh value the shared theory produced.
+    ///
+    /// `LiaTheory::encode_fresh` names unconstrained values from a
+    /// process-wide counter, so they never collide, but nothing declares them.
+    /// Each has to become a binder or the clause is ill-sorted -- and they are
+    /// how div/rem, narrowing casts and the bitwise operators are represented,
+    /// so they are not rare.
+    fn note(&mut self, expr: &str) {
+        if !expr.starts_with("chc_fresh") {
+            return;
+        }
+        let binder = format!("({} Int)", expr);
+        if !self.extra_forall.contains(&binder) {
+            self.extra_forall.push(binder);
+        }
+    }
+
+    fn forall_str(&self) -> String {
+        self.extra_forall.join(" ")
+    }
+}
+
+
 /// Return type descriptor character from method descriptor.
 fn return_type_char(desc: &str) -> char {
     let after = desc.split(')').nth(1).unwrap_or("V");
@@ -365,129 +413,39 @@ fn lia_operand(op: &Operand, var_map: &HashMap<usize, String>) -> String {
         Operand::Const(_) => "0".to_string(),
     }
 }
-
-/// Operators LIA cannot model faithfully, which must therefore say nothing.
-///
-/// `div`/`mod` are Euclidean and Java's `/`/`%` truncate toward zero, so they
-/// differ on negative operands; the bitwise and shift operators have no LIA
-/// form at all. All of these used to be encoded as the **constant 0**, which is
-/// not a conservative unknown but a specific wrong value, and a proof resting
-/// on it is worth nothing. An unconstrained variable is sound: it covers
-/// whatever the operation really produces.
-fn lia_unmodellable(op: &BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Div
-            | BinOp::Rem
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::Xor
-            | BinOp::Shl
-            | BinOp::Shr
-            | BinOp::UShr
-    )
-}
-
-/// Does this operator's result need an overflow guard?
-fn lia_can_overflow(op: &BinOp) -> bool {
-    matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
-}
-
-fn lia_binop(op: &BinOp, l: &str, r: &str) -> String {
-    match op {
-        BinOp::Add => format!("(+ {} {})", l, r),
-        BinOp::Sub => format!("(- {} {})", l, r),
-        BinOp::Mul => format!("(* {} {})", l, r),
-        BinOp::Eq => format!("(ite (= {} {}) 1 0)", l, r),
-        BinOp::Ne => format!("(ite (not (= {} {})) 1 0)", l, r),
-        BinOp::Lt => format!("(ite (< {} {}) 1 0)", l, r),
-        BinOp::Le => format!("(ite (<= {} {}) 1 0)", l, r),
-        BinOp::Gt => format!("(ite (> {} {}) 1 0)", l, r),
-        BinOp::Ge => format!("(ite (>= {} {}) 1 0)", l, r),
-        // Div/Rem and the bitwise operators are handled before this point by
-        // `lia_unmodellable`, which replaces them with a fresh variable.
-        _ => unreachable!("unmodellable operator reached lia_binop: {op:?}"),
-    }
-}
-
-struct FreshGen {
-    counter: u32,
-    extra_forall: Vec<String>,
-}
-
-impl FreshGen {
-    fn new() -> Self {
-        FreshGen {
-            counter: 0,
-            extra_forall: Vec::new(),
-        }
-    }
-
-    fn fresh(&mut self) -> String {
-        let name = format!("_f{}", self.counter);
-        self.counter += 1;
-        self.extra_forall.push(format!("({} Int)", name));
-        name
-    }
-
-    fn forall_str(&self) -> String {
-        self.extra_forall.join(" ")
-    }
-}
-
-/// `(or (> e MAX) (< e MIN))` for the width `e` is computed at.
-///
-/// Asserting this as a disjunct of `error` is what makes the LIA encoding
-/// sound for Java: proving `error` unreachable then proves *both* that no
-/// operation overflowed *and* that the property holds, and on an
-/// overflow-free path the two arithmetics agree. Without it `x + 1 > x` is
-/// valid here and false on a JVM (#77).
-fn lia_overflow_cond(expr: &str, wide: bool) -> String {
-    let (min, max) = if wide {
-        ("(- 9223372036854775808)", "9223372036854775807")
-    } else {
-        ("(- 2147483648)", "2147483647")
-    };
-    format!("(or (> {expr} {max}) (< {expr} {min}))")
-}
-
 fn lia_rvalue(
     rv: &Rvalue,
     var_map: &HashMap<usize, String>,
     fresh: &mut FreshGen,
     is_wide: &dyn Fn(&Operand) -> bool,
     overflow: &mut Vec<String>,
+    theory: &LiaTheory,
 ) -> String {
     match rv {
         Rvalue::Use(o) => lia_operand(o, var_map),
         Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => fresh.fresh(),
         Rvalue::Bin(op, a, b) => {
-            if lia_unmodellable(op) {
-                return fresh.fresh();
-            }
             let l = lia_operand(a, var_map);
             let r = lia_operand(b, var_map);
-            let e = lia_binop(op, &l, &r);
-            if lia_can_overflow(op) {
-                overflow.push(lia_overflow_cond(&e, is_wide(a) || is_wide(b)));
+            let e = theory.encode_binop(op, &l, &r);
+            if smt_text::overflowing(op) {
+                overflow.push(smt_text::lia_overflow_cond(
+                    &e,
+                    is_wide(a) || is_wide(b),
+                ));
             }
             e
         }
         Rvalue::Neg(o) => {
             let v = lia_operand(o, var_map);
-            let e = format!("(- 0 {})", v);
+            let e = theory.encode_neg(&v);
             // Negating INT_MIN overflows.
-            overflow.push(lia_overflow_cond(&e, is_wide(o)));
+            overflow.push(smt_text::lia_overflow_cond(&e, is_wide(o)));
             e
         }
-        // A widening cast is the identity on the value; a narrowing one
-        // truncates, which LIA cannot express, so it must say nothing.
         Rvalue::Cast(to, from, o) => {
-            if width_of(to) >= width_of(from) {
-                lia_operand(o, var_map)
-            } else {
-                fresh.fresh()
-            }
+            let v = lia_operand(o, var_map);
+            theory.encode_cast(to, from, &v)
         }
         Rvalue::Cmp(_, a, b) => {
             let l = lia_operand(a, var_map);
@@ -515,6 +473,10 @@ fn encode_chc_interproc(
 ) -> String {
     let mut out = String::new();
     out.push_str("(set-logic HORN)\n\n");
+    // The same theory the IMC encoder uses. Sharing it is what keeps the two
+    // from drifting: div/rem and narrowing casts are unconstrained in one place,
+    // and the overflow condition below comes from one place too.
+    let theory = LiaTheory::new("chc_");
 
     let reachable: Vec<MethodKey> = prog
         .reachable_from_entry()
@@ -621,6 +583,8 @@ fn encode_chc_interproc(
             // Overflow conditions from this block's arithmetic; any one of them
             // makes `error` reachable.
             let mut overflow: Vec<String> = Vec::new();
+            // `(= name expr)` for each named intermediate value.
+            let mut bindings: Vec<String> = Vec::new();
             let is_wide = |op: &Operand| -> bool {
                 match op {
                     Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
@@ -675,8 +639,26 @@ fn encode_chc_interproc(
                             }
                         }
                         _ => {
-                            let expr =
-                                lia_rvalue(rv, &var_map, &mut fresh, &is_wide, &mut overflow);
+                            let expr = lia_rvalue(
+                                rv, &var_map, &mut fresh, &is_wide, &mut overflow, &theory,
+                            );
+                            fresh.note(&expr);
+                            // Name the value instead of substituting its text.
+                            //
+                            // `var_map` used to hold the *expression* for each
+                            // variable, so `x = a + b; y = x * x;` became
+                            // `(* (+ a b) (+ a b))` and a chain of assignments
+                            // duplicated whole subtrees. Fibonacci encoded to
+                            // 24 KB and Ackermann to 48 KB, which is a formula
+                            // shaped by textual sharing rather than by the
+                            // program. Binding makes it linear in statements.
+                            let expr = if is_atom(&expr) {
+                                expr
+                            } else {
+                                let name = fresh.fresh();
+                                bindings.push(format!("(= {} {})", name, expr));
+                                name
+                            };
                             var_map.insert(vid.0 as usize, expr);
                         }
                     },
@@ -712,6 +694,7 @@ fn encode_chc_interproc(
             // encoding sound (#77).
             if !overflow.is_empty() {
                 let mut conds = constraints.clone();
+                conds.extend(bindings.iter().cloned());
                 conds.extend(call_constraints.iter().cloned());
                 conds.push(if overflow.len() == 1 {
                     overflow[0].clone()
@@ -745,6 +728,7 @@ fn encode_chc_interproc(
 
             let mk_trans = |target_bid: u32, extra: &[String], out: &mut String| {
                 let mut all = constraints.clone();
+                all.extend(bindings.iter().cloned());
                 all.extend(call_constraints.iter().cloned());
                 all.extend_from_slice(extra);
                 all.extend(assign_conds.iter().cloned());
@@ -922,15 +906,29 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for i in 0..n_vars {
             var_map.insert(i, format!("v{}", i));
         }
+        let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
+        let is_wide = |op: &Operand| -> bool {
+            match op {
+                Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
+                Operand::Var(v) => body
+                    .vars
+                    .get(v.0 as usize)
+                    .map(|vi| vi.ty.is_wide())
+                    .unwrap_or(false),
+                _ => false,
+            }
+        };
 
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
-                    let expr = smt_text::encode_rvalue(&BitvectorTheory, rv, &var_map);
-                    if expr.starts_with("bv_fresh") {
+                    // The encoder reports its own binders, so the old
+                    // recover-by-string-prefix on "bv_fresh" is gone.
+                    let expr = enc.rvalue(rv, &var_map, &is_wide);
+                    for (name, _) in enc.binders.drain(..) {
                         let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);
-                        if !fresh_decls.iter().any(|(n, _)| n == &expr) {
-                            fresh_decls.push((expr.clone(), w));
+                        if !fresh_decls.iter().any(|(n, _)| n == &name) {
+                            fresh_decls.push((name, w));
                         }
                     }
                     var_map.insert(vid.0 as usize, expr);
