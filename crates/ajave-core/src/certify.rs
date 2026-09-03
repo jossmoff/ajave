@@ -216,7 +216,25 @@ impl Certifier for JvmReplay {
             .collect();
 
         let mut cmd = std::process::Command::new(&self.java);
-        cmd.args(["-ea", "-cp", &cp]);
+        // Assertions on **only** when certifying an assertion.
+        //
+        // `assert e;` evaluates `e` only with `-ea`. For no-runtime-exception
+        // the property is evaluated with assertions disabled, so running the
+        // replay with `-ea` executes code the property does not include — and
+        // an exception thrown while evaluating an assert expression is then
+        // read as a runtime exception the program can throw.
+        //
+        // That is exactly how `apachecli_eqchk` became a wrong FALSE (#86):
+        // its harness ends `assert outSPF.equals(outJR);`, `outSPF` is null
+        // when parsing fails, and evaluating the condition throws NPE. With
+        // assertions disabled the condition is never evaluated and nothing is
+        // thrown, which is why the task's expected verdict is true.
+        if matches!(ob.kind, ObligationKind::Assertion) {
+            cmd.arg("-ea");
+        } else {
+            cmd.arg("-da");
+        }
+        cmd.args(["-cp", &cp]);
         cmd.arg(format!("-Dajave.seq={}", seq.join(",")));
 
         // Pass string nondet values as individual system properties so the
@@ -308,6 +326,25 @@ impl Certifier for JvmReplay {
         } else {
             CertResult::Refuted
         };
+        if result == CertResult::Confirmed {
+            // Log the evidence for a *confirmation* too, not just a refusal.
+            // A confirmation is what publishes FALSE and is therefore the one
+            // that can cost -32; having diagnostics only for the harmless half
+            // is backwards.
+            let tail: String = stderr
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("at "))
+                .take(12)
+                .collect::<Vec<_>>()
+                .join(" ⏎ ");
+            debug!(
+                "jvm-replay: CONFIRMED kind={:?} exit={:?} MATCHED={:?} stderr={}",
+                ob.kind,
+                out.status.code(),
+                accepted.iter().find(|e| stderr.contains(**e)),
+                if tail.is_empty() { "(empty)" } else { &tail }
+            );
+        }
         if result == CertResult::Refuted {
             // What the JVM actually did, not merely that we disagreed with it.
             // Without this a refutation is indistinguishable from a bad
