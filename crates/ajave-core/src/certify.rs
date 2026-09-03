@@ -308,6 +308,28 @@ impl Certifier for JvmReplay {
         } else {
             CertResult::Refuted
         };
+        if result == CertResult::Refuted {
+            // What the JVM actually did, not merely that we disagreed with it.
+            // Without this a refutation is indistinguishable from a bad
+            // witness, a too-strict matcher, and a genuinely spurious
+            // violation -- and those want three different fixes.
+            let tail: String = stderr
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            debug!(
+                "jvm-replay: REFUTED kind={:?} exit={:?} seq=[{}] strs={} entries={} \
+                 stderr={}",
+                ob.kind,
+                out.status.code(),
+                seq.join(","),
+                str_idx,
+                witness.entries.len(),
+                if tail.is_empty() { "(empty)" } else { &tail }
+            );
+        }
         debug!("jvm-replay: {oref:?} -> {result:?}");
         result
     }
