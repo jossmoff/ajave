@@ -127,6 +127,24 @@ impl<'a> ExploreCtx<'a> {
                     self.solver.assert(c);
                 }
                 let str_term = if *ty == Ty::Str {
+                    // No character-range constraint here, deliberately.
+                    //
+                    // SMT-LIB strings are sequences of code points and Java's
+                    // are UTF-16 code units, so index-returning operations
+                    // disagree on any supplementary character and such a
+                    // witness cannot replay. Constraining solver-chosen strings
+                    // to the BMP fixes that and is sound (a smaller search
+                    // space loses witnesses, never creates wrong ones) — but
+                    // measured over all 244 `autostub` tasks it was worth
+                    // **exactly zero**: +4 from `indexOf`-family tasks it
+                    // repaired, -4 from `Long.toHexString`, `toBinaryString`,
+                    // `String.length` and `compareToIgnoreCase`, which the
+                    // extra `str.in_re` pushed into timeout or out of reach.
+                    //
+                    // The string witness is still base64-encoded in transport
+                    // (`certify::b64_encode`), which is a pure fix with no such
+                    // cost. Re-adding the constraint needs a cheaper encoding
+                    // of the range, not a different bound.
                     Some(self.solver.fresh_str(&format!("nds_{idx}")))
                 } else {
                     None

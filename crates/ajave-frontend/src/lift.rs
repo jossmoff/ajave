@@ -1748,6 +1748,28 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 );
                 self.stack.push(result);
             }
+            CallModel::ReturnArg(idx, box_as) => {
+                let val = args.get(idx).cloned().unwrap_or(Operand::int(0));
+                match box_as {
+                    // The default is a primitive; the method returns a box.
+                    Some(ty) => {
+                        let obj = self.lifter.temp(Ty::Ref);
+                        self.stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                        self.stmts.push(Stmt::PutField {
+                            obj: Operand::Var(obj),
+                            field: FieldKey {
+                                class: target.class.clone(),
+                                name: models::BOX_VALUE_FIELD.into(),
+                                desc: ty.descriptor().into(),
+                            },
+                            val,
+                        });
+                        self.stack.push(Operand::Var(obj));
+                    }
+                    // Already the right type: pass it straight through.
+                    None => self.stack.push(val),
+                }
+            }
             CallModel::BoxStore(ty) => {
                 // T.valueOf(primitive): allocate a new ref and store the
                 // argument into a synthetic $$value field.

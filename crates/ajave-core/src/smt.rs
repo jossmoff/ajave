@@ -143,6 +143,17 @@ pub trait Solver {
     fn str_to_code(&mut self, s: Term) -> Term;
     /// `(str.from_code i)` — single-char string from code point.
     fn str_from_code(&mut self, i: Term) -> Term;
+    /// Constrain `s` to contain only characters in `[lo, hi]` (inclusive,
+    /// as code points).
+    ///
+    /// Exists so a solver-chosen string can be held to a character range where
+    /// SMT-LIB and Java agree. SMT-LIB strings are sequences of **code
+    /// points**; Java strings are sequences of **UTF-16 code units**. A
+    /// supplementary character is one SMT character and two Java `char`s, so
+    /// every index-returning operation disagrees on any string containing one
+    /// — `str.indexof` gives a code-point index where `String.indexOf` gives a
+    /// UTF-16 index.
+    fn str_chars_within(&mut self, s: Term, lo: u32, hi: u32) -> Term;
     /// `(str.replace_all s t1 t2)` — replace all occurrences of t1 with t2.
     fn str_replace_all(&mut self, s: Term, from: Term, to: Term) -> Term;
     /// `(str.< a b)` — lexicographic less-than.

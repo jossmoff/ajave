@@ -40,6 +40,25 @@ pub trait Certifier {
 /// Supports `Int`/`Long`/`Boolean`/`Float`/`Double` nondet via bit-pattern
 /// reinterpretation (`intBitsToFloat`, `longBitsToDouble`). String nondet
 /// uses system properties (`ajave.str.N`).
+/// Base64 (RFC 4648) of `data`, so a witness string survives being passed to
+/// the replay JVM as a system property.
+///
+/// Hand-rolled to avoid a dependency for twenty lines; the shadow `Verifier`
+/// decodes with `java.util.Base64`.
+fn b64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 pub struct JvmReplay {
     pub java: String,
     pub javac: String,
@@ -89,7 +108,18 @@ public final class Verifier {
     public static String nondetString() {
         String val = System.getProperty("ajave.str." + strIdx, "");
         strIdx++;
-        return val;
+        // Base64 of UTF-8. A system property passed on the command line is
+        // decoded by the JVM using sun.jnu.encoding, which mangles anything
+        // outside the platform charset -- so a witness string containing any
+        // non-ASCII character arrived as something else and the replay took a
+        // different path. Encoding it makes the value survive verbatim.
+        if (val.isEmpty()) return "";
+        try {
+            return new String(java.util.Base64.getDecoder().decode(val),
+                              java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return val;
+        }
     }
     public static <T> T nondetObject(Class<T> type, ObjectFactory<T> factory) {
         // Try the factory; if null, try again with different nondet values.
@@ -242,7 +272,7 @@ impl Certifier for JvmReplay {
         let mut str_idx = 0usize;
         for entry in &witness.entries {
             if let ajave_ir::verdict::NondetValue::Str(s) = &entry.value {
-                cmd.arg(format!("-Dajave.str.{str_idx}={s}"));
+                cmd.arg(format!("-Dajave.str.{str_idx}={}", b64_encode(s.as_bytes())));
                 str_idx += 1;
             }
         }
@@ -352,7 +382,7 @@ impl Certifier for JvmReplay {
             let strict = accepted.iter().any(|e| terminating.contains(*e));
             debug!(
                 "REPLAY_CENSUS result={:?} kind={:?} exit={:?} thrown={} \
-                 loose={} strict={} entries={} strs={} method={}",
+                 loose={} strict={} entries={} strs={} seq=[{}] strvals={:?} method={}",
                 result,
                 ob.kind,
                 out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
@@ -361,6 +391,15 @@ impl Certifier for JvmReplay {
                 strict,
                 witness.entries.len(),
                 str_idx,
+                seq.join(","),
+                witness
+                    .entries
+                    .iter()
+                    .filter_map(|e| match &e.value {
+                        ajave_ir::verdict::NondetValue::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
                 oref.method.class.clone() + "." + &oref.method.name,
             );
         }

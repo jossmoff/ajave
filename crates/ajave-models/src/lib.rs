@@ -620,6 +620,13 @@ pub enum CallModel {
     /// String/StringBuilder/CharSequence method: keep as Rvalue::Call so the
     /// concrete engine can evaluate it against a tracked string value.
     StrCall(Option<Ty>),
+    /// Return the call's `n`th argument unchanged, boxing it into a synthetic
+    /// `$$value` field first when `Some(ty)`.
+    ///
+    /// For library methods whose result *is* one of their inputs under the
+    /// conditions that hold here — `Integer.getInteger(name, default)` returns
+    /// `default` when the named system property is absent, which it always is.
+    ReturnArg(usize, Option<Ty>),
     /// `Enum.<init>(String, int)` — store the ordinal to a synthetic field.
     EnumInit,
     /// `Enum.ordinal()` — read the ordinal from a synthetic field.
@@ -847,9 +854,36 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     if matches!(name,
         "parseInt" | "parseLong" | "parseShort" | "parseByte"
         | "parseFloat" | "parseDouble" | "parseUnsignedInt" | "parseUnsignedLong"
-        | "decode" | "getInteger" | "getLong"
+        | "decode"
     ) {
         return CallModel::Unmodelled;
+    }
+
+    // `Integer.getInteger(name, default)` / `Long.getLong(name, default)` read
+    // a *system property* and return `default` when it is absent, empty, or
+    // not numeric — they do not throw, unlike `parseInt`, which is why they
+    // were wrong to sit in the list above.
+    //
+    // No benchmark sets a system property (it would have to call
+    // `System.setProperty`, which would be in the code), and the replay JVM is
+    // launched without `-D` for arbitrary names. So the property is absent and
+    // the method returns its default argument *exactly*. That makes this a
+    // precise model rather than an approximation, and — the point — it makes
+    // the witness replayable: the real JVM takes the same branch.
+    if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+        && matches!(name, "getInteger" | "getLong")
+    {
+        return match desc {
+            // (String, int) -> Integer / (String, long) -> Long: box the default.
+            "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+            "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
+            // (String, Integer) -> Integer: the default is already boxed.
+            "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => CallModel::ReturnArg(1, None),
+            // The one-argument forms return null when the property is absent,
+            // which is a different fact and not modelled here.
+            _ => CallModel::Unmodelled,
+        };
     }
 
     // Members of `PURE_OWNERS` classes that are *not* total. `Pure` erases the

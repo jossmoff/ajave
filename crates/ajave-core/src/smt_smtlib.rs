@@ -633,6 +633,14 @@ impl Solver for SmtLib {
         self.define_term("t", &expr, Sort::Str)
     }
 
+    fn str_chars_within(&mut self, s: Term, lo: u32, hi: u32) -> Term {
+        let sn = self.name(s).to_string();
+        let expr = format!(
+            "(str.in_re {sn} (re.* (re.range (_ char #x{lo:04X}) (_ char #x{hi:04X}))))"
+        );
+        self.define_term("b", &expr, Sort::Bool)
+    }
+
     fn str_replace_all(&mut self, s: Term, from: Term, to: Term) -> Term {
         let sn = self.name(s).to_string();
         let fn_ = self.name(from).to_string();
