@@ -17,6 +17,8 @@ impl<'a> ExploreCtx<'a> {
                 "abs" | "min" | "max" | "addExact" | "subtractExact"
                     | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
                     | "getExponent"
+                    // Only the exactly-specified cases are encoded; see the arm.
+                    | "round"
             ),
             "java/lang/Integer" => matches!(
                 target.name.as_str(),
@@ -119,6 +121,87 @@ impl<'a> ExploreCtx<'a> {
         let _arg1_w = Self::arg_width_from_desc(&target.desc, 1);
         match (class, name) {
             // ── Math / StrictMath ────────────────────────────────────────
+            // `Math.round` / `StrictMath.round`: the exactly-specified cases
+            // only, everything else left unconstrained.
+            //
+            // The general case is "closest int, ties toward positive infinity",
+            // which is *not* `floor(x + 0.5)` — Java 7 changed it precisely
+            // because that formula rounds `0.49999999999999994` up. Encoding
+            // the general case wrongly would be a wrong answer, so it is not
+            // encoded at all; the cases below are pinned by the Javadoc and the
+            // remainder falls through to a fresh value, which over-approximates.
+            //
+            // This is enough to be useful: an exact-equality assertion can only
+            // be satisfied where the function is exactly specified, which is
+            // where the witnesses live.
+            ("java/lang/Math" | "java/lang/StrictMath", "round") => {
+                let wide = target.desc.starts_with("(D");
+                let (fw, iw) = if wide { (64, 64) } else { (32, 32) };
+                let bits = self.encode_operand(&args[0]);
+                let f = self.solver.fp_from_bits(bits, fw);
+
+                let (max_i, min_i, max_f, min_f) = if wide {
+                    (i64::MAX, i64::MIN, 9.223372036854776e18_f64, -9.223372036854776e18_f64)
+                } else {
+                    (i32::MAX as i64, i32::MIN as i64, 2147483648.0_f64, -2147483648.0_f64)
+                };
+
+                let zero_i = self.solver.bv_const(0, iw);
+                let max_t = self.solver.bv_const(max_i, iw);
+                let min_t = self.solver.bv_const(min_i, iw);
+
+                // Fall-through. Not left free: an unconstrained result is a
+                // havoc, and the solver simply picks the branch where it can
+                // claim whatever the assertion wants — which is how this first
+                // failed, returning `MAX_VALUE` for an input of 2.0000019.
+                //
+                // Constrain it by the defining property instead:
+                // |x - round(x)| <= 0.5. That pins the result for every input
+                // except an exact tie, where both neighbours satisfy it and
+                // Java takes the upper. Admitting the extra value at ties is an
+                // over-approximation of one point, and JVM replay is what
+                // rejects a witness that lands there.
+                let fresh = self.solver.fresh_bv("round", iw);
+
+                // -0.5 <= x < 0.5  =>  0. Both bounds are exactly
+                // representable, and round(-0.5) is 0 while round(0.5) is 1.
+                let nh = self.solver.fp_const(-0.5, fw);
+                let ph = self.solver.fp_const(0.5, fw);
+                let ge_nh = self.solver.fp_ge(f, nh);
+                let lt_ph = self.solver.fp_lt(f, ph);
+                let in_zero = self.solver.and(ge_nh, lt_ph);
+                let r = self.solver.ite(in_zero, zero_i, fresh);
+
+                // Clamping at the integral type's limits.
+                let maxf_t = self.solver.fp_const(max_f, fw);
+                let ge_max = self.solver.fp_ge(f, maxf_t);
+                let r = self.solver.ite(ge_max, max_t, r);
+                let minf_t = self.solver.fp_const(min_f, fw);
+                let le_min = self.solver.fp_le(f, minf_t);
+                let r = self.solver.ite(le_min, min_t, r);
+
+                // NaN => 0, and it must win over the comparisons above, all of
+                // which are false for NaN anyway.
+                let is_nan = self.solver.fp_is_nan(f);
+                let result = self.solver.ite(is_nan, zero_i, r);
+
+                // |x - fresh| <= 0.5, asserted only where `fresh` is the answer.
+                let rf = self.solver.fp_from_sbv(fresh, fw);
+                let half = self.solver.fp_const(0.5, fw);
+                let lo = self.solver.fp_sub(rf, half);
+                let hi = self.solver.fp_add(rf, half);
+                let c1 = self.solver.fp_le(lo, f);
+                let c2 = self.solver.fp_le(f, hi);
+                let within = self.solver.and(c1, c2);
+                let handled = self.solver.or(is_nan, ge_max);
+                let handled = self.solver.or(handled, le_min);
+                let handled = self.solver.or(handled, in_zero);
+                // `handled || within`: in the pinned cases the constraint is
+                // vacuous, elsewhere it defines the result.
+                let guarded = self.solver.or(handled, within);
+                self.solver.assert(guarded);
+                result
+            }
             ("java/lang/Math" | "java/lang/StrictMath", "abs") => {
                 let a = self.encode_operand(&args[0]);
                 let w = arg0_w;
@@ -1346,13 +1429,19 @@ impl<'a> ExploreCtx<'a> {
     }
 
     /// Encode l2f: signed BV64 long → BV32 IEEE 754 float.
-    /// Approximate: truncates mantissa for |val| > 2^24.
+    ///
+    /// Exactly the JVM's `l2f` (JLS 5.1.2): the nearest representable float,
+    /// ties to even. SMT-LIB expresses this directly as
+    /// `((_ to_fp 8 24) RNE bv)`, so no bit-level construction is needed.
+    ///
+    /// This used to return `fresh_bv`, which is not an approximation but a
+    /// havoc: the result was unconstrained, so the solver could claim any
+    /// value and the witness never reproduced. `Long.floatValue()` needs
+    /// `(float) Long.MAX_VALUE == 9.223372E18`, which is a fact about the
+    /// conversion — unconstrained, it is unprovable and unfalsifiable alike.
     pub(super) fn encode_l2f(&mut self, long_val: Term) -> Term {
-        // Convert long→double→float would be complex.
-        // For autostub benchmarks with small values, use fresh_bv as fallback.
-        // TODO: implement precisely if needed
-        let _this = long_val; // suppress unused
-        self.solver.fresh_bv("l2f", 32)
+        let f = self.solver.fp_from_sbv(long_val, 32);
+        self.solver.fp_to_bits(f, 32)
     }
 
     /// Encode f2i: BV32 IEEE 754 float → signed BV32 integer.

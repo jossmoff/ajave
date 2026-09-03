@@ -479,6 +479,13 @@ impl Solver for SmtLib {
         self.convert(&format!("(_ fp.to_sbv {width})"), f, Sort::Bv(width), true)
     }
 
+    fn fp_from_sbv(&mut self, bv: Term, to_width: u32) -> Term {
+        let (eb, sb) = if to_width == 64 { (11, 53) } else { (8, 24) };
+        let n = self.name(bv).to_string();
+        let expr = format!("((_ to_fp {eb} {sb}) RNE {n})");
+        self.define_term("f", &expr, Sort::Fp(to_width))
+    }
+
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term {
         let sort = self.sort(then_);
         let id = self.next_id;

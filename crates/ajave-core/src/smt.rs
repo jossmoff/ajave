@@ -112,6 +112,12 @@ pub trait Solver {
     fn sbv_to_fp(&mut self, bv: Term, width: u32) -> Term;
     /// Float to signed integer, truncating toward zero (`d2i`, `f2l`).
     fn fp_to_sbv(&mut self, f: Term, width: u32) -> Term;
+    /// Signed bitvector -> float, round-to-nearest-even.
+    ///
+    /// This is the JVM's `l2f`/`i2d`/`l2d` widening conversion (JLS 5.1.2):
+    /// the value is converted to the nearest representable float, ties to even.
+    /// `to_width` is the float width, 32 or 64.
+    fn fp_from_sbv(&mut self, bv: Term, to_width: u32) -> Term;
 
     fn ite(&mut self, cond: Term, then_: Term, else_: Term) -> Term;
     fn not(&mut self, t: Term) -> Term;
