@@ -326,45 +326,42 @@ impl Certifier for JvmReplay {
         } else {
             CertResult::Refuted
         };
-        if result == CertResult::Confirmed {
-            // Log the evidence for a *confirmation* too, not just a refusal.
-            // A confirmation is what publishes FALSE and is therefore the one
-            // that can cost -32; having diagnostics only for the harmless half
-            // is backwards.
-            let tail: String = stderr
+        {
+            // One machine-readable line per certification attempt. The census
+            // in #85 needs to bucket *why* a witness failed, and the three
+            // causes want three different fixes: a bad witness, a matcher that
+            // is too strict, and a violation that was never real.
+            let terminating = stderr
                 .lines()
-                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("at "))
-                .take(12)
-                .collect::<Vec<_>>()
-                .join(" ⏎ ");
+                .find(|l| l.starts_with("Exception in thread"))
+                .unwrap_or("");
+            // `Exception in thread "main" java.lang.AssertionError: msg`
+            // — the class name follows the quoted thread name. Scanning for a
+            // token ending in "Exception" finds the literal prefix word first.
+            let thrown = terminating
+                .split('"')
+                .nth(2)
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|t| t.trim_end_matches(':'))
+                .unwrap_or("-");
+            // Would the old whole-stderr search have accepted this? True means
+            // an exception of the right *kind* occurred somewhere the program
+            // handled, or in a different method — a wrong site, not a wrong
+            // witness.
+            let loose = accepted.iter().any(|e| stderr.contains(*e));
+            let strict = accepted.iter().any(|e| terminating.contains(*e));
             debug!(
-                "jvm-replay: CONFIRMED kind={:?} exit={:?} MATCHED={:?} stderr={}",
+                "REPLAY_CENSUS result={:?} kind={:?} exit={:?} thrown={} \
+                 loose={} strict={} entries={} strs={} method={}",
+                result,
                 ob.kind,
-                out.status.code(),
-                accepted.iter().find(|e| stderr.contains(**e)),
-                if tail.is_empty() { "(empty)" } else { &tail }
-            );
-        }
-        if result == CertResult::Refuted {
-            // What the JVM actually did, not merely that we disagreed with it.
-            // Without this a refutation is indistinguishable from a bad
-            // witness, a too-strict matcher, and a genuinely spurious
-            // violation -- and those want three different fixes.
-            let tail: String = stderr
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(" | ");
-            debug!(
-                "jvm-replay: REFUTED kind={:?} exit={:?} seq=[{}] strs={} entries={} \
-                 stderr={}",
-                ob.kind,
-                out.status.code(),
-                seq.join(","),
-                str_idx,
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                thrown,
+                loose,
+                strict,
                 witness.entries.len(),
-                if tail.is_empty() { "(empty)" } else { &tail }
+                str_idx,
+                oref.method.class.clone() + "." + &oref.method.name,
             );
         }
         debug!("jvm-replay: {oref:?} -> {result:?}");

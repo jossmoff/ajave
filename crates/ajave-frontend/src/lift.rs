@@ -2039,7 +2039,28 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     let id = self.lifter.obligation(ObligationKind::NegArraySize, nonneg, off);
                     self.stmts.push(Stmt::Check(id));
                 }
-                let result = self.assign(Ty::Ref, Rvalue::Nondet(Ty::Ref, None));
+                // `Havoc`, not `Nondet`. The distinction is load-bearing.
+                //
+                // `Nondet` means a value the *program* chose — a
+                // `Verifier.nondet*` input, which an engine may legitimately
+                // solve for and hand to a witness. `Havoc` means a value *we*
+                // invented because we do not model the construct.
+                //
+                // The BMC keys its taint on exactly that: `Rvalue::Nondet(..)
+                // => false`, `Rvalue::Havoc(..) => true`, and it declines to
+                // publish a violation whose condition is tainted. Calling this
+                // `Nondet` told it the multi-dimensional array was a value the
+                // program picked, so `some_a.length == 4` on
+                // `new int[4][3][2]` was reported as violable — a claimed
+                // violation on a deterministic program with no inputs, whose
+                // witness is necessarily empty.
+                //
+                // Measured: 8 such tasks, all expected TRUE, all with empty
+                // witnesses, each a latent -32 held back only by JVM replay
+                // (#88). `Nondet` now always carries `Some(jvm_byte)` because
+                // it is always a real `Verifier` call; anything unmodelled is
+                // `Havoc`.
+                let result = self.assign(Ty::Ref, Rvalue::Havoc(Ty::Ref, None));
                 self.stack.push(result);
             }
             // arraylength
