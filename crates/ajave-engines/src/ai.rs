@@ -575,7 +575,15 @@ impl Engine for AiEngine {
         // For assert, only analyze the entry method (callee analysis with
         // assumed-NonNull params is unsound for assert: the caller might pass
         // null to trigger an assertion failure).
-        let open = bb.open();
+        // `open_or_unconfirmed`, not `open`: a violation from an
+        // under-approximating engine is a *candidate* until JVM replay
+        // confirms it, and `open()` hides those obligations from every
+        // over-approximating engine. Whichever engine published first then
+        // won outright, so a spurious candidate permanently blocked the
+        // proof that would have refuted it. `proved_safe` records the
+        // discharge either way, and `verdict_excluding` turns it into a
+        // TRUE only once the violation is actually refuted.
+        let open = bb.open_or_unconfirmed();
         let mut methods_to_analyze: Vec<ajave_ir::MethodKey> = Vec::new();
         methods_to_analyze.push(entry.clone());
         if !bb.is_assertion_only() {

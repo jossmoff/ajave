@@ -59,7 +59,15 @@ impl Engine for KInduction {
         self.done = true;
 
         // Collect open obligations that have a Bounded base case.
-        let open = bb.open();
+        // `open_or_unconfirmed`, not `open`: a violation from an
+        // under-approximating engine is a *candidate* until JVM replay
+        // confirms it, and `open()` hides those obligations from every
+        // over-approximating engine. Whichever engine published first then
+        // won outright, so a spurious candidate permanently blocked the
+        // proof that would have refuted it. `proved_safe` records the
+        // discharge either way, and `verdict_excluding` turns it into a
+        // TRUE only once the violation is actually refuted.
+        let open = bb.open_or_unconfirmed();
         if open.is_empty() {
             return Progress::Exhausted;
         }

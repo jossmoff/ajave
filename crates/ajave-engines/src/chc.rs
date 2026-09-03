@@ -63,10 +63,20 @@ impl Engine for ChcEngine {
         }
         self.done = true;
 
-        let open = bb.open();
+        // `open_or_unconfirmed`, not `open`: a violation from an
+        // under-approximating engine is a *candidate* until JVM replay
+        // confirms it, and `open()` hides those obligations from every
+        // over-approximating engine. Whichever engine published first then
+        // won outright, so a spurious candidate permanently blocked the
+        // proof that would have refuted it. `proved_safe` records the
+        // discharge either way, and `verdict_excluding` turns it into a
+        // TRUE only once the violation is actually refuted.
+        let open = bb.open_or_unconfirmed();
         if open.is_empty() {
+            debug!("chc: nothing open; nothing to prove");
             return Progress::Exhausted;
         }
+        debug!("chc: reached with {} open obligation(s)", open.len());
 
         let Some(entry) = &prog.entry else {
             return Progress::Exhausted;
@@ -425,6 +435,21 @@ fn lia_rvalue(
         Rvalue::Use(o) => lia_operand(o, var_map),
         Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => fresh.fresh(),
         Rvalue::Bin(op, a, b) => {
+            // LIA has no bitwise or shift operators, and its `div`/`mod` are
+            // Euclidean where Java's truncate toward zero. `encode_binop`
+            // treats being asked for one of those as unreachable, because
+            // `Encoder` filters them first -- and this function does not go
+            // through `Encoder`.
+            //
+            // That invariant held only because an unrelated gate kept these
+            // bodies away from CHC entirely. Widening which obligations CHC
+            // sees (open_or_unconfirmed) reached a body containing `%` and
+            // panicked. An unconstrained value is the sound answer for an
+            // over-approximating engine: it contains the real one, so any
+            // proof over it holds of the program.
+            if !theory.models_binop(op) {
+                return fresh.fresh();
+            }
             let l = lia_operand(a, var_map);
             let r = lia_operand(b, var_map);
             let e = theory.encode_binop(op, &l, &r);
@@ -444,6 +469,11 @@ fn lia_rvalue(
             e
         }
         Rvalue::Cast(to, from, o) => {
+            // Narrowing truncates, which LIA cannot express; same reasoning as
+            // the operators above.
+            if !theory.models_cast(to, from) {
+                return fresh.fresh();
+            }
             let v = lia_operand(o, var_map);
             theory.encode_cast(to, from, &v)
         }
@@ -1231,5 +1261,57 @@ mod tests {
             "CHC proved `inc(n) > n`, which fails at Integer.MAX_VALUE. That is \
              valid in linear integer arithmetic and false in Java (#77)."
         );
+    }
+}
+
+#[cfg(test)]
+mod lia_unmodelled_operator_tests {
+    use super::*;
+    use ajave_ir::{BinOp, Operand, Rvalue, Ty, VarId};
+
+    fn encode(rv: &Rvalue) -> String {
+        let theory = LiaTheory::new("t_");
+        let mut fresh = FreshGen::new();
+        let var_map: HashMap<usize, String> = HashMap::new();
+        let is_wide = |_: &Operand| false;
+        let mut overflow = Vec::new();
+        lia_rvalue(rv, &var_map, &mut fresh, &is_wide, &mut overflow, &theory)
+    }
+
+    /// LIA has no bitwise or shift operators, and its `div`/`mod` are Euclidean
+    /// where Java's truncate toward zero. `LiaTheory::encode_binop` treats
+    /// being asked for one as unreachable, because `Encoder` filters them
+    /// first — and `lia_rvalue` does not go through `Encoder`.
+    ///
+    /// That invariant held only because an unrelated gate kept such bodies away
+    /// from CHC. Widening which obligations CHC sees (`open_or_unconfirmed`)
+    /// reached a body containing `%` and panicked on `UnsatEvenOdd01`.
+    /// Havocing is the sound answer for an over-approximating engine: an
+    /// unconstrained value contains the real one, so a proof over it holds of
+    /// the program.
+    #[test]
+    fn an_operator_lia_cannot_model_is_havoced_not_encoded() {
+        for op in [
+            BinOp::Div, BinOp::Rem, BinOp::And, BinOp::Or,
+            BinOp::Xor, BinOp::Shl, BinOp::Shr, BinOp::UShr,
+        ] {
+            let e = encode(&Rvalue::Bin(op, Operand::int(7), Operand::int(3)));
+            assert!(e.starts_with("_f"), "{op:?} must be havoced, got {e}");
+        }
+    }
+
+    /// Narrowing truncates, which LIA cannot express either.
+    #[test]
+    fn a_narrowing_cast_is_havoced_not_encoded() {
+        let e = encode(&Rvalue::Cast(Ty::Int, Ty::Long, Operand::Var(VarId(0))));
+        assert!(e.starts_with("_f"), "narrowing cast must be havoced, got {e}");
+    }
+
+    /// The operators LIA *does* model must still be encoded, or the fix would
+    /// have turned the engine into a havoc machine.
+    #[test]
+    fn operators_lia_does_model_are_still_encoded() {
+        let e = encode(&Rvalue::Bin(BinOp::Add, Operand::int(2), Operand::int(3)));
+        assert!(e.contains('+'), "addition must still be encoded, got {e}");
     }
 }

@@ -46,10 +46,10 @@ impl Engine for Presolve {
         }
         self.done = true;
 
-        info!("presolve: scanning {} open obligations", bb.open().len());
+        info!("presolve: scanning {} open obligations", bb.open_or_unconfirmed().len());
         let mut advanced = false;
         let mut discharged = 0usize;
-        for oref in bb.open() {
+        for oref in bb.open_or_unconfirmed() {
             let Some(body) = prog.body(&oref.method) else {
                 continue;
             };

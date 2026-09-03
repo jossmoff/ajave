@@ -90,7 +90,7 @@ impl Engine for CegarEngine {
         }
 
         let open: Vec<ObligationRef> = bb
-            .open()
+            .open_or_unconfirmed()
             .iter()
             .filter(|oref| oref.method == *entry)
             .cloned()
