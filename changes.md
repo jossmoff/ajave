@@ -2406,3 +2406,73 @@ SV-COMP 2019 failure is `UnsatAddition02`, the same benchmark that caught us.
 `AJAVE_CHC_EXPERIMENT_NO_GUARD` switch used for the table was removed rather
 than kept: an environment variable that silently disables a soundness guard is
 the thing this file warns about.
+
+## 2026-09-04 — Baseline re-established: VA 823 / NRE 1112 at a 180s budget
+
+### The number that was being over-claimed
+
+The standing figure was VA 809 / NRE 1114 with "0 wrong", measured at a **60s**
+task budget. Raising the budget to 180s — closer to SV-COMP's 900s — showed
+NRE at 1082 with **one wrong answer**: `apachecli_eqchk` said FALSE on a task
+expecting TRUE, costing -32. At 60s it timed out, so the clock had been acting
+as a soundness gate and the "0 wrong" described the timeout, not the analysis.
+
+Two certifier defects caused it (#86), both found by instrumenting refutations
+rather than reasoning about them:
+
+- The replay ran `java -ea` for **every** obligation kind. `assert e;` evaluates
+  `e` only with assertions enabled, so for no-runtime-exception — a property
+  evaluated with them off — the replay executed code the property excludes. The
+  harness ends `assert outSPF.equals(outJR)`, `outSPF` is null when parsing
+  fails, and *evaluating the condition* threw the NPE we then reported.
+- Confirmation matched an accepted exception name **anywhere in stderr**,
+  including one the program caught and printed. This task prints two
+  `UnrecognizedOptionException` traces from a catch block before dying of
+  something else.
+
+Fixing both moved NRE from 1082 to **1112 with 0 wrong**: +32 for the removed
+wrong answer, -2 for two legitimate FALSEs the stricter match now refuses.
+
+So the position is the same score at three times the budget, without a latent
+-32 — which is a real improvement over the number it replaces, not a regression
+from it.
+
+### Valid-assert: 812 -> 823
+
+Every gain came from replacing a havoc with real semantics. The recurring shape
+is that **`fresh_bv` is not a model**: an unconstrained result is not an
+approximation, it is a licence for the solver to claim whatever an assertion
+wants, and the witness then cannot replay.
+
+- `encode_l2f` was `fresh_bv` with a `TODO`. SMT-LIB expresses long-to-float
+  directly as `((_ to_fp 8 24) RNE bv)`, exactly the JVM's `l2f`.
+- `Math.round` had an encoder arm that was **dead**: a second allowlist,
+  `math_call_modelled`, gates entry to `encode_math_call`, and its own comment
+  warns that a method missing from it silently gets `fresh_bv`.
+- `Integer.getInteger`/`Long.getLong` were grouped with `parseInt` as throwing
+  and lifted to `Unmodelled`. They do not throw; they return their default when
+  the named system property is absent, which it always is here.
+- `multianewarray` lifted to `Rvalue::Nondet`, which the BMC reads as a value
+  the *program* chose rather than one *we* invented, so its taint gate never
+  fired (#88).
+
+Two gains were unplanned: `jpf-regression/ExSymExeComplexMath_true` became
+**provable**, because an exact `l2f` helps the over-approximating side too.
+
+Measured cost elsewhere: none. `float-nonlinear` 0 of 87 changed,
+`float_unboundedloop` 0 of 30, despite the new FP terms landing in the BMC's
+default path.
+
+### A partial model with a free fall-through is still a havoc
+
+Worth stating on its own, because the first `Math.round` attempt failed exactly
+this way. Encoding only the exactly-specified cases — NaN to 0, clamping,
+`[-0.5, 0.5)` to 0 — bought nothing: the solver went straight to the
+unconstrained branch and claimed `MAX_VALUE` for an input of 2.0000019.
+
+The general case is now stated as a *relation*, `|x - round(x)| <= 0.5`, rather
+than as `floor(x + 0.5)` — the pre-Java-7 formula, changed by JDK-6430675
+because it rounds `0.49999999999999994` up. Committing to that identity would
+have been a wrong model producing wrong answers.
+`benchmarks/ajave/jvm-floats/RoundIsNotFloorOfPlusHalf` pins it, and ajave
+proves it.
