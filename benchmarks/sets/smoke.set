@@ -155,6 +155,10 @@ sv-comp/float-nonlinear-calculation/coral29.yml valid-assert
 # so they cross a block boundary on the stack (#26)
 sv-comp/float-nonlinear-calculation/coral17.yml valid-assert
 sv-comp/float-nonlinear-calculation/coral13.yml valid-assert
+# CHC must not prove a program safe by never reaching the obligation
+# inside a catch block — the encoding follows normal control flow only,
+# so an unmodelled throw makes the handler look unreachable
+sv-comp/argv-tasks/HttpTransport_false.yml valid-assert
 # encoding provenance: the bitvector pass must not close this against
 # the FPA pass that can actually decide it (#27)
 ajave/jvm-floats/SpilledDoubleKeepsItsType.yml valid-assert

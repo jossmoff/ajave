@@ -94,6 +94,40 @@ impl Engine for ChcEngine {
         // calls to library methods — proving those safe requires heap/string
         // modeling that LIA doesn't have.
         let reachable_methods = prog.reachable_from_entry();
+        // Exception handlers are a reason to decline, and this is the guard
+        // that makes the two unlocks below sound.
+        //
+        // The CHC encoding follows normal control flow only: it does not model
+        // the exceptional edge out of a throwing operation. For an obligation
+        // on the *normal* path that is harmless — not throwing means reaching
+        // more assertions and having to prove more of them, which is strictly
+        // harder.
+        //
+        // For an obligation inside a *handler* it is exactly backwards. If the
+        // real call throws, the handler runs and its assertion is checked; our
+        // model never throws, so the handler is unreachable, the obligation is
+        // never examined, and the program is declared safe. That is a wrong
+        // TRUE at -16, and `argv-tasks/HttpTransport_false` is one:
+        //
+        //     try  { assert (object != null); }
+        //     catch (Exception e) { assert (e.getMessage().equals("FAKE...")); }
+        //
+        // The heap and unresolved-call declines below used to hide this, by
+        // refusing every program that could throw from those sources. Removing
+        // them without this guard turned a precision limit into a soundness
+        // bug — a correct guard overridden by a wrong argument about which
+        // direction the approximation ran.
+        let has_handlers = reachable_methods.iter().any(|mk| {
+            prog.body(mk).is_some_and(|b| {
+                b.blocks.iter().any(|blk| !blk.exceptional.is_empty())
+            })
+        });
+        if has_handlers {
+            info!("chc: skipping — reachable methods have exception handlers, \
+                   whose obligations this encoding cannot reach");
+            return Progress::Stalled;
+        }
+
         // Heap reads are *not* a reason to decline.
         //
         // `lia_rvalue` already sends `GetField`, `GetStatic`, `ArrayLoad`,
