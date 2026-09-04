@@ -385,8 +385,15 @@ impl Engine for SmtBmc {
         // re-publishes discharges the first pass already made — which cost the
         // whole float category on no-runtime-exception (166 -> 114) while
         // changing no verdict.
-        if self.fp_arith && bb.open().is_empty() {
-            debug!("smt-bmc-fpa: nothing open, skipping the escalation pass");
+        // The FPA pass exists to decide what the bitvector pass could not —
+        // and, crucially, to revisit what the bitvector pass decided *wrongly*.
+        // Asking `open()` misses the second case entirely: a violation derived
+        // from `bvmul` on two IEEE-754 bit patterns closes the obligation, so
+        // the pass that models the multiply properly skips the one task that
+        // needed it. `open_for` returns those obligations too, because this
+        // pass models exactly what the other one approximated.
+        if self.fp_arith && bb.open_for(Approximations::FLOAT_ARITH).is_empty() {
+            debug!("smt-bmc-fpa: nothing open or float-approximated, skipping the escalation pass");
             return Progress::Exhausted;
         }
 
@@ -445,6 +452,7 @@ impl Engine for SmtBmc {
             incomplete_methods: HashSet::new(),
             cut_points: BTreeSet::new(),
             frames: Vec::new(),
+            approximated: Approximations::EXACT,
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -579,6 +587,10 @@ impl Engine for SmtBmc {
             ctx.skipped_obligations.len(),
         );
 
+        // What this exploration failed to model. Rides out on every artifact
+        // below, so a more faithful engine can ask for these obligations back.
+        let approximated = ctx.approximated;
+
         let mut advanced = false;
         for (method, oid, witness) in violations {
             let oref = ObligationRef {
@@ -589,9 +601,10 @@ impl Engine for SmtBmc {
                 "smt-bmc: publishing violation at {oref:?}, witness={:?}",
                 witness.nondet_sequence
             );
-            let published = bb.publish(
+            let published = bb.publish_with(
                 self.id(),
                 self.direction(),
+                approximated,
                 Artifact::Status(
                     oref,
                     Status::Violated {
@@ -685,9 +698,10 @@ impl Engine for SmtBmc {
                     }
                     if blocker.is_empty() {
                         debug!("smt-bmc: discharging {oref:?} (exhaustive exploration)");
-                        let _ = bb.publish(
+                        let _ = bb.publish_with(
                             self.id(),
                             Direction::Over,
+                            approximated,
                             Artifact::Status(
                                 oref,
                                 Status::Discharged {
@@ -725,9 +739,10 @@ impl Engine for SmtBmc {
                     if &oref.method == entry
                         && !ctx.skipped_obligations.contains(&(oref.method.clone(), oref.id))
                     {
-                        let _ = bb.publish(
+                        let _ = bb.publish_with(
                             self.id(),
                             self.direction(),
+                            approximated,
                             Artifact::Status(oref, Status::Bounded { k: self.max_depth }),
                         );
                         advanced = true;
@@ -786,6 +801,13 @@ struct ExploreCtx<'a> {
     cut_points: BTreeSet<(MethodKey, BlockId)>,
     /// Call sites of the frames currently being explored, innermost last.
     frames: Vec<(MethodKey, BlockId)>,
+    /// What this exploration did not model faithfully.
+    ///
+    /// Set by `encode_binop` when it encodes a float arithmetic operator on
+    /// the bitvector path — which is what the cheap pass does by default. Rides
+    /// out on every artifact this exploration publishes, so the FPA pass can
+    /// ask for exactly those obligations back. See `Approximations`.
+    approximated: Approximations,
 
     // ── Heap model ──────────────────────────────────────────────────────
     statics: HashMap<FK, Term>,

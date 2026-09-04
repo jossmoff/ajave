@@ -133,9 +133,16 @@ impl Engine for NraEngine {
                     }
                     info!("nra: found violation for {}", oref);
                     debug!("nra: witness seq={:?} entries={:?}", witness.nondet_sequence, witness.entries);
-                    let published = bb.publish(
+                    let published = bb.publish_with(
                         self.id(),
                         Direction::Under,
+                        // cvc5 solves this over the reals. ℝ has no NaN, no
+                        // infinities, no signed zero and no rounding, so a
+                        // model of the encoding is not automatically a model
+                        // of the program — which is exactly why the witness is
+                        // run through the concrete interpreter above before it
+                        // is published at all.
+                        Approximations::REAL_ARITH,
                         Artifact::Status(
                             oref.clone(),
                             Status::Violated {

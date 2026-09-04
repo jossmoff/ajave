@@ -334,6 +334,7 @@ fn collect_violations(orchestrator: &Orchestrator) -> Vec<ViolationInfo> {
                     seq: 0,
                     producer: *by,
                     direction: ajave_core::artifact::Direction::Under,
+                    approximated: orchestrator.bb.status_approximations(obligation_ref),
                     artifact: ajave_core::artifact::Artifact::Status(
                         obligation_ref.clone(),
                         ajave_core::artifact::Status::Violated {

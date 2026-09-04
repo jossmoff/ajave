@@ -165,6 +165,9 @@ impl Engine for ChcEngine {
         };
 
         debug!("chc: generated {} bytes of CHC encoding", smt2.len());
+        if let Ok(path) = std::env::var("AJAVE_CHC_DUMP") {
+            let _ = std::fs::write(&path, &smt2);
+        }
         trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(4000)]);
 
         let mut advanced = false;
@@ -177,9 +180,19 @@ impl Engine for ChcEngine {
                             id: oid,
                         };
                         debug!("chc: discharged {}", oref);
-                        let _ = bb.publish(
+                        let _ = bb.publish_with(
                             self.id(),
                             self.direction(),
+                            // The inter-procedural encoding declares every
+                            // variable an unbounded `Int`, so nothing wraps.
+                            // That is a sound over-approximation for a program
+                            // whose property does not depend on overflow, and
+                            // simply a different program for one that does.
+                            if has_interproc_calls {
+                                Approximations::INT_WRAPPING
+                            } else {
+                                Approximations::EXACT
+                            },
                             Artifact::Status(
                                 oref,
                                 Status::Discharged {

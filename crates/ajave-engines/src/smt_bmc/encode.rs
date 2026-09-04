@@ -5,6 +5,7 @@
 //! - `char_encode` — Character utility methods
 //! - `str_encode` — toString / string-producing methods
 
+use ajave_core::artifact::Approximations;
 use ajave_core::smt::Term;
 use ajave_ir::*;
 
@@ -530,6 +531,16 @@ impl<'a> ExploreCtx<'a> {
                     return t;
                 }
             }
+        }
+        // Falling through to the bitvector path with float operands and an
+        // arithmetic operator means this is `bvmul` on two IEEE-754 bit
+        // patterns. Sound as an under-approximation of *something*, but not of
+        // this program, so say so: the FPA pass asks for exactly the
+        // obligations closed under this approximation.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
+            && (self.fp_width_of_operand(a).is_some() || self.fp_width_of_operand(b).is_some())
+        {
+            self.approximated = self.approximated.union(Approximations::FLOAT_ARITH);
         }
         let at = self.encode_operand(a);
         let bt = self.encode_operand(b);

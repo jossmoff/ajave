@@ -55,6 +55,12 @@ pub struct Blackboard {
     /// Interval bounds from abstract interpretation, keyed by (method, block, var).
     /// Only populated when AI analysis is complete (sound over-approximation).
     interval_hints: HashMap<(MethodKey, BlockId, VarId), IntervalHint>,
+    /// What the producer of each obligation's *current* status approximated.
+    ///
+    /// Kept beside `statuses` rather than inside `Status` because it is a fact
+    /// about how the status was derived, not about the obligation, and every
+    /// existing match on `Status` would otherwise have to be touched.
+    status_approx: BTreeMap<ObligationRef, Approximations>,
 }
 
 impl Blackboard {
@@ -130,10 +136,25 @@ impl Blackboard {
     /// rule in the type system for engines that use those traits, but engines
     /// are allowed to be hand-written state machines, so the runtime check
     /// stays. This is the one place where a slip becomes a -32.
+    /// Publish an artifact the producer modelled faithfully.
+    ///
+    /// Engines whose encoding approximates part of the JVM's semantics must use
+    /// `publish_with` and say so, or a more faithful engine will never be
+    /// offered the obligation they closed.
     pub fn publish(
         &mut self,
         producer: EngineId,
         direction: Direction,
+        artifact: Artifact,
+    ) -> Result<u64, Rejected> {
+        self.publish_with(producer, direction, Approximations::EXACT, artifact)
+    }
+
+    pub fn publish_with(
+        &mut self,
+        producer: EngineId,
+        direction: Direction,
+        approximated: Approximations,
         artifact: Artifact,
     ) -> Result<u64, Rejected> {
         if let Artifact::Status(oref, st) = &artifact {
@@ -207,6 +228,7 @@ impl Blackboard {
                         !matches!(self.statuses.get(oref), Some(existing) if existing.is_final());
                     if keep {
                         self.statuses.insert(oref.clone(), st.clone());
+                        self.status_approx.insert(oref.clone(), approximated);
                     }
                 }
             }
@@ -219,6 +241,7 @@ impl Blackboard {
             seq,
             producer,
             direction,
+            approximated,
             artifact,
         });
         Ok(seq)
@@ -280,6 +303,47 @@ impl Blackboard {
             .filter(|(_, s)| !s.is_final() || matches!(s, Status::Violated { .. }))
             .map(|(k, _)| k.clone())
             .collect()
+    }
+
+    /// Obligations this engine should be offered, given what it models
+    /// faithfully that others do not.
+    ///
+    /// `models_faithfully` is what the *caller* gets right. An obligation whose
+    /// status was derived under an approximation the caller does not make is
+    /// still that engine's business: the answer on the board was computed about
+    /// a program that is not quite ours, and this engine can do better.
+    ///
+    /// This is the general form of `open_or_unconfirmed`, which hard-codes one
+    /// instance of the same idea (an Under engine's witness is a candidate
+    /// until replay confirms it). Both are cases of "a status is only as good
+    /// as the model it came from".
+    ///
+    /// Note the deliberate asymmetry with soundness: this *widens* what an
+    /// engine looks at, so a wrong answer here costs time, never correctness.
+    /// It never lets anything be discharged that could not be already.
+    pub fn open_for(&self, models_faithfully: Approximations) -> Vec<ObligationRef> {
+        self.statuses
+            .iter()
+            .filter(|(oref, s)| {
+                if !s.is_final() {
+                    return true;
+                }
+                self.status_approx
+                    .get(*oref)
+                    .copied()
+                    .unwrap_or(Approximations::EXACT)
+                    .intersects(models_faithfully)
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// What the producer of this obligation's current status approximated.
+    pub fn status_approximations(&self, oref: &ObligationRef) -> Approximations {
+        self.status_approx
+            .get(oref)
+            .copied()
+            .unwrap_or(Approximations::EXACT)
     }
 
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {
@@ -505,6 +569,95 @@ mod tests {
             ),
         );
         assert!(r.is_err());
+    }
+
+    /// `publish` only records a status for an obligation that was seeded, and
+    /// seeding needs a whole `Program`. These tests are about the bookkeeping,
+    /// not about seeding, so they put the obligation on the board directly.
+    fn seeded() -> Blackboard {
+        let mut bb = Blackboard::new();
+        bb.statuses.insert(oref(), Status::Open);
+        bb
+    }
+
+    fn violate(bb: &mut Blackboard, approx: Approximations) {
+        bb.publish_with(
+            EngineId("smt-bmc"),
+            Direction::Under,
+            approx,
+            Artifact::Status(
+                oref(),
+                Status::Violated {
+                    by: EngineId("smt-bmc"),
+                    witness: Default::default(),
+                },
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The regression this whole mechanism exists for.
+    ///
+    /// The cheap BMC pass encodes `dmul` as a bitvector multiply, "finds" a
+    /// violation and closes the obligation. The FPA pass, which models the
+    /// multiply properly, then skipped the task because `open()` was empty —
+    /// and JVM replay refuted the witness with nothing left to reopen it.
+    #[test]
+    fn a_float_approximated_violation_stays_open_to_an_engine_that_models_floats() {
+        let mut bb = seeded();
+        violate(&mut bb, Approximations::FLOAT_ARITH);
+
+        assert!(bb.open().is_empty(), "the violation closes it for open()");
+        assert_eq!(
+            bb.open_for(Approximations::FLOAT_ARITH),
+            vec![oref()],
+            "but an engine that models float arithmetic must still be offered it"
+        );
+    }
+
+    #[test]
+    fn a_faithfully_derived_violation_closes_the_obligation_for_everyone() {
+        let mut bb = seeded();
+        violate(&mut bb, Approximations::EXACT);
+
+        assert!(bb.open().is_empty());
+        assert!(
+            bb.open_for(Approximations::FLOAT_ARITH).is_empty(),
+            "nothing was approximated, so there is nothing to do better"
+        );
+    }
+
+    /// Reopening is targeted, not blanket. An engine only gets an obligation
+    /// back when it models something the closer actually got wrong — otherwise
+    /// every precise pass would re-explore every task, which measured as a
+    /// large regression when the FPA pass did exactly that.
+    #[test]
+    fn an_unrelated_approximation_does_not_reopen_the_obligation() {
+        let mut bb = seeded();
+        violate(&mut bb, Approximations::INT_WRAPPING);
+
+        assert!(bb.open_for(Approximations::FLOAT_ARITH).is_empty());
+        assert_eq!(bb.open_for(Approximations::INT_WRAPPING), vec![oref()]);
+    }
+
+    #[test]
+    fn open_obligations_are_offered_to_everyone_regardless() {
+        let bb = seeded();
+        assert_eq!(bb.open_for(Approximations::EXACT), vec![oref()]);
+        assert_eq!(bb.open_for(Approximations::FLOAT_ARITH), vec![oref()]);
+    }
+
+    #[test]
+    fn approximation_sets_compose() {
+        let both = Approximations::FLOAT_ARITH.union(Approximations::REAL_ARITH);
+        assert!(both.contains(Approximations::FLOAT_ARITH));
+        assert!(both.contains(Approximations::REAL_ARITH));
+        assert!(!both.contains(Approximations::INT_WRAPPING));
+        assert!(both.intersects(Approximations::FLOAT_ARITH));
+        assert!(!both.intersects(Approximations::INT_WRAPPING));
+        assert!(Approximations::EXACT.is_exact());
+        assert_eq!(format!("{:?}", both), "float-arith+real-arith");
+        assert_eq!(format!("{:?}", Approximations::EXACT), "exact");
     }
 
     #[test]

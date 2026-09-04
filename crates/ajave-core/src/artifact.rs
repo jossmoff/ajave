@@ -19,6 +19,93 @@ pub enum Direction {
     Exact,
 }
 
+/// Which parts of the JVM's semantics an artifact's producer did *not* model
+/// faithfully.
+///
+/// `Direction` says what a consumer may conclude from an artifact. It does not
+/// say whether the producer's encoding was a model of *this* program, and those
+/// are different questions. An engine that encodes `dmul` as a bitvector
+/// multiply is still honestly under-approximating — it just under-approximates
+/// a program that is not ours.
+///
+/// Both defects found on 2026-09-04 sit in that gap. The cheap BMC pass encodes
+/// float arithmetic as bitvector arithmetic by default, published a violation
+/// derived from it, and thereby closed the obligation — so the FPA pass, which
+/// exists precisely to decide those, skipped the task because nothing was
+/// `open()`. Replay refuted the witness and nothing reopened it.
+///
+/// Recording what was approximated turns that into a condition a consumer can
+/// test: an engine asks for the obligations *it* can do better on, rather than
+/// only the ones nobody has touched. See `Blackboard::open_for`.
+///
+/// A bitset rather than a `BTreeSet`, so it stays `Copy` and rides along in
+/// `Tagged` without allocating on every publish.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, PartialOrd, Ord)]
+pub struct Approximations(u16);
+
+impl Approximations {
+    /// The producer modelled everything it touched.
+    pub const EXACT: Approximations = Approximations(0);
+
+    /// IEEE-754 arithmetic encoded as bitvector arithmetic on the bit
+    /// patterns. Comparisons survive this — `dcmpg`/`dcmpl` are a total order
+    /// on the patterns — but `dadd`/`dmul` and friends do not.
+    pub const FLOAT_ARITH: Approximations = Approximations(1 << 0);
+
+    /// Floats encoded as mathematical reals. Sound over ℝ, and ℝ is not
+    /// IEEE-754: no NaN, no infinities, no rounding, no signed zero.
+    pub const REAL_ARITH: Approximations = Approximations(1 << 1);
+
+    /// Machine integers encoded as unbounded `Int`, so nothing wraps.
+    pub const INT_WRAPPING: Approximations = Approximations(1 << 2);
+
+    /// The heap modelled per-variable rather than through an addressable
+    /// store, so a write through one alias is invisible to another name.
+    pub const HEAP_ALIASING: Approximations = Approximations(1 << 3);
+
+    pub const fn union(self, other: Approximations) -> Approximations {
+        Approximations(self.0 | other.0)
+    }
+
+    /// Does this set include everything in `other`?
+    pub const fn contains(self, other: Approximations) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Do the two sets overlap at all?
+    pub const fn intersects(self, other: Approximations) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub const fn is_exact(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Debug for Approximations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_exact() {
+            return f.write_str("exact");
+        }
+        let mut first = true;
+        for (bit, name) in [
+            (Self::FLOAT_ARITH, "float-arith"),
+            (Self::REAL_ARITH, "real-arith"),
+            (Self::INT_WRAPPING, "int-wrapping"),
+            (Self::HEAP_ALIASING, "heap-aliasing"),
+        ] {
+            if self.contains(bit) {
+                if !first {
+                    f.write_str("+")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct EngineId(pub &'static str);
 
@@ -145,6 +232,8 @@ pub struct Tagged {
     pub seq: u64,
     pub producer: EngineId,
     pub direction: Direction,
+    /// What the producer did not model faithfully while deriving this.
+    pub approximated: Approximations,
     pub artifact: Artifact,
 }
 

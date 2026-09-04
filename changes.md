@@ -2,6 +2,130 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-04 — the operand stack had no types, and that was hiding the float gap
+
+`float-nonlinear-calculation` scored 40 of a possible 99 and looked like a
+search problem: 87 tasks built from `Math.sin`/`cos`/`pow`/`sqrt`, which no SMT
+theory can express. The obvious reading was that our Alternating-Variable-Method
+searcher was not strong enough, and the obvious next step was to import more of
+the Concolic Walk algorithm.
+
+That reading was wrong. The searcher was finding the answers and then being
+handed a broken program to evaluate them on.
+
+### The defect
+
+`Lifter::stack_slot(depth)` allocated **one `VarId` per operand-stack depth,
+with a hardcoded `Ty::Int`**, and `spill()` — which materialises the abstract
+stack whenever control leaves a block — built its temps the same way. So any
+value that crossed a basic-block boundary on the operand stack was recorded in
+`body.vars` as an int, whatever it actually was. A call ends a block, so
+`Math.f(..) op Math.g(..)` hits this every single time.
+
+Nothing then reports an error. Every consumer that asks the IR for an operand's
+type simply gets the wrong answer:
+
+- `concrete::is_float_operand` chooses between real `f64` arithmetic and the
+  integer path, so `dmul` became an **i64 multiply of the two bit patterns**;
+- `smt_bmc::fp_width_of_operand` decides whether to emit `fp.mul`, so the BMC
+  encoded the same multiply as a bitvector multiply;
+- `smt_encode::width_of` sizes the SMT variable, giving a 64-bit double a
+  32-bit sort.
+
+On `coral17` — `asin(x)*acos(x) < atan(x)` — the search proposed `x = 1000`,
+because `asin(0.001)` bits times `acos(0.001)` bits, wrapped to `i64` and read
+back as a double, is `-1.36e169`, which is comfortably less than `-999`. JVM
+replay refused the witness, so the verdict was never wrong; the task was simply
+lost to UNKNOWN, along with 38 others.
+
+The fix keys stack slots by `(depth, ty)` and propagates entry stack *types*
+along the worklist rather than just heights — which is what the bytecode
+verifier's own `StackMapTable` records, and is therefore as well-defined as the
+height propagation it replaces. A type mismatch at a merge point diverges the
+block, exactly as a height mismatch already did.
+
+`benchmarks/ajave/jvm-floats/SpilledDoubleKeepsItsType` is the minimal case:
+six lines, ground truth `2.0 * 3.0 == 6.0` argued from JLS 15.17.1 and confirmed
+on a real JVM, which ajave could not verify.
+
+### What it was hiding
+
+This is the interesting part. Fixing the types made
+`AbstractSerializationStreamReader_false` go from 0.8s to a timeout, and the
+trace says why:
+
+```
+check ObligationId(2) in Main.fromDouble(D)J  tainted=false path_tainted=true
+INCOMPLETE (handle_branch_fork)   x infinity
+```
+
+The BMC's first pass encodes float arithmetic as *bitvector* arithmetic by
+default (`AJAVE_FP_ARITH=0`), and the taint machinery is what knows the result
+is meaningless — but taint only fires once `operand_is_float` can see that the
+operands are floats. With the types wrong, it never fired: the engine imposed
+guards computed from nonsense and got small, fast, confidently-wrong constraint
+systems. With the types right, it correctly refuses to impose those guards, and
+then forks on every branch it cannot decide.
+
+**The mistyping and the FPA-off default were compensating errors.** The recorded
+measurement that FPA-by-default costs -69 on no-runtime-exception was taken on
+an IR in which most float operands were not recognised as floats, so it does not
+transfer and has to be redone. More generally: a guard that says "this value is
+meaningless, do not trust it" is only as good as the type information it
+consults, and ours was silently absent for every value on the operand stack.
+
+### Measured
+
+`float-nonlinear-calculation`, valid-assert, 180s budget: **40 -> 57**
+(38 -> 55 correct, 0 wrong), from the lifter change alone.
+
+Full corpus, 180s: **valid-assert 825 -> 843** (689 -> 706 correct, still the
+one known-defective `ReverseInterpolator` wrong answer), **no-runtime-exception
+1112 -> 1112, 0 wrong**. Cost is one task, `AbstractSerializationStreamReader`,
+which goes from 0.8s to a timeout and does not come back with FPA on — the body
+is dense double arithmetic with division and `d2i` casts, so this is the engine
+correctly declining to impose guards it cannot decide, not a new defect.
+
+The three `jayhorn-recursive` failures the smoke gate reported are **not** from
+this change — the pre-change binary reproduces them, so the baseline is stale.
+
+## 2026-09-04 — encoding provenance: what an engine did not model
+
+`Direction` says what a consumer may conclude from an artifact. It says nothing
+about whether the producer's encoding was a model of *this* program, and those
+turn out to be different questions.
+
+The bitvector BMC pass encodes float arithmetic as bitvector arithmetic by
+default. That is honest under-approximation — of a program that is not ours. It
+published a violation derived from `bvmul` on two IEEE-754 bit patterns, which
+*closed* the obligation, so the FPA pass — whose entire purpose is deciding
+exactly those — skipped the task because `bb.open()` was empty. JVM replay then
+refuted the witness, and nothing reopened it.
+
+Artifacts now carry `Approximations` beside `Direction`: a `Copy` bitset of what
+the producer did not model faithfully (`FLOAT_ARITH`, `REAL_ARITH`,
+`INT_WRAPPING`, `HEAP_ALIASING`). `Blackboard::open_for(models_faithfully)`
+returns the open obligations *plus* those whose status was derived under an
+approximation the caller does not make.
+
+Two properties make this cheap to adopt:
+
+- It only ever **widens** what an engine looks at, so a wrong entry costs time,
+  never correctness. Nothing can be discharged that could not be already.
+- It is the general form of `open_or_unconfirmed`, which hard-codes one instance
+  of the same idea (an Under engine's witness is a candidate until replay
+  confirms it). Both say: *a status is only as good as the model it came from.*
+
+Reopening is deliberately targeted rather than blanket. An engine is offered an
+obligation back only when it models something the closer actually got wrong —
+otherwise every precise pass re-explores every task, which is the regression
+that got the FPA pass gated on `open()` in the first place (float NRE 166 ->
+114).
+
+`benchmarks/ajave/jvm-floats/SpilledDoubleKeepsItsType` — six lines asserting
+`2.0 * 3.0 == 6.0` — goes unverifiable -> refuted-FALSE -> **TRUE** across the
+two changes together.
+
 ## 2026-09-01 — the concurrency completeness plan, phases 1-5
 
 Thirty-odd unsupported features turned out to be five missing *mechanisms*.
