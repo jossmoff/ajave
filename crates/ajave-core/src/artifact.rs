@@ -4,6 +4,7 @@
 //! verdicts. A portfolio that only exchanges verdicts discards everything each
 //! engine learned on the way, which is most of the value.
 
+use crate::term::Expr;
 use ajave_ir::verdict::Witness;
 use ajave_ir::{BlockId, MethodKey, ObligationId, VarId};
 
@@ -63,6 +64,13 @@ impl Approximations {
     /// store, so a write through one alias is invisible to another name.
     pub const HEAP_ALIASING: Approximations = Approximations(1 << 3);
 
+    /// A call whose behaviour we do not model at all, replaced by a fresh
+    /// unconstrained value. No encoding fixes this — only a model of the
+    /// callee does — which is what makes it worth distinguishing from the
+    /// others. An engine offering a more faithful *encoding* cannot improve on
+    /// an obligation that failed for this reason.
+    pub const UNMODELLED_CALL: Approximations = Approximations(1 << 4);
+
     pub const fn union(self, other: Approximations) -> Approximations {
         Approximations(self.0 | other.0)
     }
@@ -75,6 +83,11 @@ impl Approximations {
     /// Do the two sets overlap at all?
     pub const fn intersects(self, other: Approximations) -> bool {
         self.0 & other.0 != 0
+    }
+
+    /// What is in `self` but not in `other`.
+    pub const fn difference(self, other: Approximations) -> Approximations {
+        Approximations(self.0 & !other.0)
     }
 
     pub const fn is_exact(self) -> bool {
@@ -93,6 +106,7 @@ impl std::fmt::Debug for Approximations {
             (Self::REAL_ARITH, "real-arith"),
             (Self::INT_WRAPPING, "int-wrapping"),
             (Self::HEAP_ALIASING, "heap-aliasing"),
+            (Self::UNMODELLED_CALL, "unmodelled-call"),
         ] {
             if self.contains(bit) {
                 if !first {
@@ -161,16 +175,17 @@ pub enum InvStatus {
 pub struct Invariant {
     pub id: u32,
     pub at: ProgramPoint,
-    /// Placeholder for a real term IR. A string is fine while the consumers are
-    /// stubs, and deliberately painful enough that it will get replaced before
-    /// anything depends on it structurally.
-    pub formula: String,
+    /// What holds at `at`, on every execution that reaches it.
+    ///
+    /// `VarId` is relative to `at.method`'s body, so a consumer looking at a
+    /// different body must not read this — see `Expr::vars`.
+    pub formula: Expr,
     pub status: InvStatus,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Precision {
-    pub predicates: Vec<String>,
+    pub predicates: Vec<Expr>,
     pub tracked: Vec<VarId>,
 }
 
@@ -218,6 +233,85 @@ impl Status {
     }
 }
 
+/// What kind of answer would help.
+///
+/// Separate from the question itself because the same term admits different
+/// useful answers, and because *who may answer* depends on which is wanted:
+/// a universal claim needs an over-approximating engine, an existential one
+/// needs an under-approximating engine. That is the same discipline
+/// `Direction` already enforces on `Status`, applied one level down.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Want {
+    /// Numeric bounds on the term. Universal: needs Over.
+    Bounds,
+    /// Does the predicate hold on every reaching execution? Universal.
+    Valid,
+    /// Is there an assignment making it true? Existential: needs Under.
+    Satisfiable,
+}
+
+/// A question one engine wants another to answer.
+///
+/// The point of the whole mechanism. Without it a stuck engine has exactly one
+/// move — give up on the obligation, conservatively — and everything it had
+/// established on the way is discarded. When the BMC meets `Math.sin(x)` it
+/// knows `x` is constrained and the path is feasible, and throws all of it away
+/// because there is nobody to ask.
+///
+/// It also changes what a specialised engine *is*. Today one is an alternative
+/// to the others, so an engine that understood transcendentals would have to
+/// reimplement heaps, strings and inlining before it could help. As an answerer
+/// it only has to answer the question it is good at.
+#[derive(Clone, Debug)]
+pub struct Query {
+    pub id: u32,
+    pub asked_by: EngineId,
+    /// Where the question arose. Fixes what the `VarId`s in `about` and
+    /// `given` mean; a `VarId` indexes exactly one `Body`.
+    pub at: ProgramPoint,
+    pub about: Expr,
+    pub want: Want,
+    /// What the asker already knows and the answerer may assume. An answer
+    /// derived from these is only as good as they are, so the asker must
+    /// supply facts it is itself entitled to.
+    pub given: Vec<Expr>,
+}
+
+/// What an answerer found.
+#[derive(Clone, Debug)]
+pub enum Answer {
+    /// `lo <= about <= hi` on every reaching execution.
+    Bounds { lo: Expr, hi: Expr },
+    /// The predicate holds on every reaching execution.
+    Holds,
+    /// It does not hold, and here is a reaching assignment that shows it.
+    RefutedBy(Vec<(VarId, i64)>),
+    /// An assignment satisfying it.
+    SatisfiedBy(Vec<(VarId, i64)>),
+    /// Asked and could not say. Worth publishing: it stops the scheduler
+    /// asking the same engine the same question again.
+    Unknown,
+}
+
+impl Answer {
+    /// Does asserting this require a claim about *every* execution?
+    ///
+    /// The publish rule turns on exactly this: a universal answer from an
+    /// under-approximating engine would be a proof from an engine that has
+    /// only ever looked at some of the paths.
+    pub fn is_universal(&self) -> bool {
+        matches!(self, Answer::Bounds { .. } | Answer::Holds)
+    }
+}
+
+/// An answer to a `Query`.
+#[derive(Clone, Debug)]
+pub struct Lemma {
+    pub query: u32,
+    pub by: EngineId,
+    pub answer: Answer,
+}
+
 #[derive(Clone, Debug)]
 pub enum Artifact {
     Status(ObligationRef, Status),
@@ -225,6 +319,10 @@ pub enum Artifact {
     Precision(ProgramPoint, Precision),
     Trace(AbstractTrace),
     Residual(Condition),
+    /// A question. Publishing one costs nothing and commits to nothing.
+    Query(Query),
+    /// An answer. Governed by `Direction` exactly as a `Status` is.
+    Lemma(Lemma),
 }
 
 #[derive(Clone, Debug)]

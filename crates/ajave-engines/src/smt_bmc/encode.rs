@@ -156,6 +156,11 @@ impl<'a> ExploreCtx<'a> {
                 t
             }
             Rvalue::Havoc(ty, from) => {
+                // We do not model this call. No change of *encoding* recovers
+                // it, so record it separately from the approximations that a
+                // more faithful theory would fix.
+                self.approximated =
+                    self.approximated.union(Approximations::UNMODELLED_CALL);
                 let w = self.width_of_ty(ty);
                 let t = self.solver.fresh_bv("hv", w);
                 // A result the JDK documents as never null is constrained

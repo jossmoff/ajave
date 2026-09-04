@@ -82,12 +82,14 @@ flowchart LR
     end
 
     subgraph BB["Blackboard"]
-        S["Obligation statuses"]
+        S["Obligation statuses<br/>+ Direction + Approximations"]
         I["Invariants"]
         P["Precisions"]
         T["Abstract traces"]
         W["Witnesses"]
         K["Bounds"]
+        Q["Queries"]
+        L["Lemmas"]
     end
 
     ORC["Orchestrator<br/>budget scheduler"] -->|step| ENG
@@ -101,6 +103,10 @@ flowchart LR
     T -.->|infeasible trace<br/>yields predicates| E4
     P -.->|refined precision| E1
     K -.->|depth reached| E3
+    E2 -.->|asks: bounds on sin\(x\)?| Q
+    Q -.->|a question it can answer| E1
+    E1 -.->|answers| L
+    L -.->|assume, if direction permits| E2
 
     style BB fill:#d9a441,stroke:#5c4a1e,color:#1a1a1a
     style ORC fill:#8a9a5b,stroke:#3e4726,color:#1a1a1a
@@ -111,6 +117,108 @@ blackboard refuses, at runtime, to accept a `Discharged` status from an
 under-approximating producer or a `Violated` from an over-approximating one.
 That is the same rule `verdict.rs` enforces in the type system; belt and braces,
 because this is the single place a soundness bug turns into a −32.
+
+### 3.1 Two tags, not one
+
+`Direction` says what a consumer may **conclude** from an artifact. It says
+nothing about whether the producer's encoding was a model of *this program*,
+and those are different questions. An engine that encodes `dmul` as a bitvector
+multiply is still honestly under-approximating — it just under-approximates a
+program that is not ours.
+
+So every artifact also carries `Approximations`: a set naming what its producer
+did *not* model faithfully (`FLOAT_ARITH`, `REAL_ARITH`, `INT_WRAPPING`,
+`HEAP_ALIASING`, `UNMODELLED_CALL`).
+
+The rule that makes it matter is `Blackboard::open_for(models_faithfully)`,
+which returns the open obligations **plus** those whose status was derived
+under an approximation the caller does not make:
+
+```rust
+approx.intersects(models_faithfully)          // something to fix
+    && approx.difference(models_faithfully).is_exact()   // and nothing left over
+```
+
+Both halves are load-bearing. Without the first, an engine reclaims work
+nobody got wrong. Without the second, an engine reclaims work it cannot
+actually improve — a better float encoding does not conjure a model of
+`Math.sin`, and offering it those obligations is pure cost.
+
+This only ever *widens* what an engine looks at relative to `open()`, so a
+wrong entry costs time and never correctness. It is the general form of
+`open_or_unconfirmed`, which hard-codes one instance of the same idea: a status
+is only as good as the model it came from.
+
+### 3.2 Engines that ask
+
+Every artifact above is an **answer**. An engine that gets stuck therefore had
+exactly one move: give up on the obligation, conservatively, discarding
+everything it had established on the way. When the BMC meets `Math.sin(x)` it
+knows `x` is constrained and the path feasible, and throws all of it away —
+not because the information is unavailable, but because there was nobody to ask.
+
+`Artifact::Query` and `Artifact::Lemma` close that gap:
+
+```rust
+// smt-bmc, stuck at bb7, x already constrained
+let q = bb.ask(self.id(), at, sin_x, Want::Bounds, given);
+
+// answers, from whoever can
+interval → Lemma { Bounds { -1.0, 1.0 },      Over,  exact     }
+fdlibm   → Lemma { Bounds { 0.0, 0.99749 },   Over,  ±1 ulp    }
+nra      → Lemma { SatisfiedBy(..),            Under            }
+```
+
+This changes what a specialised engine *is*. Today one is an **alternative** to
+the others, so an engine that understood transcendentals would have to
+reimplement heaps, strings and inlining before it could help on a real program.
+As an answerer it only has to answer the question it is good at.
+
+The discipline is the same one that governs statuses, one level down:
+
+| answer | claim | who may publish it |
+|---|---|---|
+| `Bounds`, `Holds` | about **every** execution | `Over` or `Exact` |
+| `SatisfiedBy`, `RefutedBy` | about **one** execution | `Under` or `Exact` |
+| `Unknown` | none | anyone |
+
+An `Under` engine publishing `Holds` would be a proof resting on a partial
+search, which is the wrong-TRUE shape the direction rule exists to prevent —
+so the blackboard rejects it. Approximations ride along on lemmas exactly as
+they do on statuses, because assuming a lemma derived under an approximation
+you do not make is assuming a fact about a different program.
+
+Identical questions are deduplicated: an engine re-deriving the same subgoal on
+twenty unrolled paths asks once.
+
+### 3.3 The term language
+
+Claims are exchanged as `core::term::Expr` — variables, literals, arithmetic,
+comparison, boolean structure, and applications of named library methods keyed
+on the full `(class, name, desc)` signature (the same rule `CLAUDE.md` states
+for `contract_of`, and for the same reason: a lemma about `Integer.valueOf(int)`
+is not a lemma about `Integer.valueOf(String)`).
+
+It is deliberately small. Anything an engine cannot express in it, it must
+decline to claim — a claim nobody can read is worse than no claim.
+
+Doubles are held as bit patterns, not `f64`, because `f64` has neither `Eq` nor
+`Hash`: `NaN != NaN` would make two identical claims compare unequal and defeat
+query deduplication, and `-0.0 == 0.0` would make two different ones compare
+equal.
+
+`Expr` is not a second program IR and not an SMT term. `ajave_ir::Rvalue`
+describes what a *statement does*; `Expr` describes a *claim about values*,
+which is why it has conjunction and negation and no side effects. `smt::Term`
+is a solver-owned handle that cannot outlive the solver that made it, and the
+blackboard outlives every solver.
+
+This type is why three of the four unused artifact kinds were unused.
+`Invariant` and `Precision` were both stubbed on `String`, and the interval
+engine's bounds reached the BMC through a bespoke `HashMap` that bypassed the
+artifact log — so CHC, for which they are candidate invariants and the most
+valuable hint a Horn solver can be given, could not see them at all. That
+side channel is gone; the bounds are `Artifact::Invariant` now.
 
 ## 4. Orchestrator schedule (state machine)
 

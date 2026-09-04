@@ -17,6 +17,7 @@ use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::cpa::{reachability, HasLocation};
 use ajave_core::engine::{Budget, Engine, Progress};
+use ajave_core::term::{Expr, Op};
 use ajave_ir::{BlockId, Const, FieldKey, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt, Terminator, VarId};
 
 /// Analyze constructors to find fields guaranteed non-null after construction.
@@ -383,7 +384,34 @@ impl AiEngine {
         for ((block, vid), iv) in &block_vars {
             // Only publish if narrower than Top (i.e., actually informative).
             if iv.lo > NEG_INF || iv.hi < POS_INF {
-                bb.publish_interval_hint(entry.clone(), *block, *vid, iv.lo, iv.hi);
+                // A claim any engine can read, rather than one only the BMC
+                // knew how to look up. CHC in particular wants these as
+                // candidate invariants — the most valuable hint a Horn solver
+                // can be given — and could not see them at all while they
+                // lived in a bespoke `HashMap` beside the artifact log.
+                //
+                // Published as `Over` because that is what the interval
+                // analysis is; `Candidate` because nothing has checked it
+                // inductively, and `Blackboard::inductive_invariants` filters
+                // on exactly that.
+                let at = ProgramPoint {
+                    method: entry.clone(),
+                    block: *block,
+                    index: 0,
+                };
+                let lo = Expr::bin(Op::Le, Expr::Int(iv.lo), Expr::Var(*vid));
+                let hi = Expr::bin(Op::Le, Expr::Var(*vid), Expr::Int(iv.hi));
+                let id = bb.fresh_invariant_id();
+                let _ = bb.publish(
+                    self.id(),
+                    Direction::Over,
+                    Artifact::Invariant(Invariant {
+                        id,
+                        at,
+                        formula: Expr::bin(Op::And, lo, hi),
+                        status: InvStatus::Candidate,
+                    }),
+                );
                 hint_count += 1;
             }
         }

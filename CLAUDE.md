@@ -329,6 +329,64 @@ suspect:
 See issue #47 for the planned metamorphic-testing harness, held-out split, and
 constant-sensitivity sweep.
 
+## Artifacts: what engines say to each other — MANDATORY
+
+The blackboard is the whole architecture, and it was being used as a mailbox.
+Four of its five artifact kinds had **zero producers**, `Blackboard::since` —
+the delta-pull mechanism `engine.rs` documents as what makes an engine removable
+without the others noticing — had **zero consumers**, and ten of eleven engines
+took `_budget` and ignored it. The rules below exist so that does not recur.
+
+### Every artifact kind must have a producer and a consumer
+Adding a variant to `Artifact` with neither is not design, it is a comment with
+a type. If you cannot name the consumer, the artifact is not ready. `Invariant`,
+`Precision`, `Trace` and `Residual` sat unused for months precisely because
+nobody had to.
+
+### Every artifact must document what a consumer may conclude from it
+Already learned once, expensively: `Bounded { k }` means the BMC's *path-length*
+bound, k-induction consumed it as an *iteration* count, and never read it. A
+producer and a consumer that disagree about an artifact are worse than no
+artifact.
+
+### Two tags, and they answer different questions
+- `Direction` — what a consumer may **conclude**. Over may discharge, Under may
+  violate. Enforced at publish.
+- `Approximations` — what the producer did **not model faithfully**. An engine
+  encoding `dmul` as a bitvector multiply is honestly under-approximating a
+  program that is not ours.
+
+`open_for(models_faithfully)` returns open obligations plus those closed under
+an approximation the caller does not make — and the caller must fix
+**everything** that went wrong, not merely something. A better float encoding
+does not conjure a model of `Math.sin`; offering it those obligations is pure
+cost, and that cost is measurable (see `tools/engine_census.py`).
+
+Declare approximations honestly. Under-declaring means a more faithful engine
+never gets the obligation back; over-declaring only wastes time, so when in
+doubt, declare.
+
+### Questions are artifacts too
+An engine that cannot proceed should `ask` rather than give up. A `Query` costs
+nothing and commits to nothing; a `Lemma` answering it is governed by exactly
+the discipline that governs a `Status`:
+
+- `Bounds`/`Holds` are claims about **every** execution — `Over` or `Exact` only.
+- `SatisfiedBy`/`RefutedBy` are claims about **one** — `Under` or `Exact` only.
+- `Unknown` is worth publishing: it stops the scheduler re-asking.
+
+This is what makes a specialised engine a *resource* rather than an
+*alternative*. An engine that models transcendentals does not have to
+reimplement heaps and inlining to be useful; it answers `sin` queries.
+
+### Claims travel as `core::term::Expr`, never as strings
+Keyed on the full `(class, name, desc)` signature for library applications, for
+the same reason `contract_of` is. Doubles are bit patterns, because `f64` is
+neither `Eq` nor `Hash` and query deduplication depends on both.
+
+If an engine cannot express a claim in `Expr`, it must decline to make it. A
+claim nobody can read is worse than no claim.
+
 ## Design Rules
 - **No hardcoded nondet patterns in concrete engine.** Single all-zero probe only. Finding specific input values is the SMT engine's job.
 - **No hardcoded witness values anywhere.** Engines must discover witness values through formal reasoning (SMT solving, abstract interpretation, symbolic execution), never by embedding benchmark-specific constants (e.g. known trigger strings). If an engine cannot construct a witness through its own analysis, it must not publish a violation.

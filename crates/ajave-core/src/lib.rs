@@ -20,5 +20,6 @@ pub mod orchestrator;
 pub mod plan;
 pub mod scratch;
 pub mod smt;
+pub mod term;
 pub mod smt_smtlib;
 pub mod witness;

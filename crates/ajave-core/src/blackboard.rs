@@ -15,13 +15,6 @@ pub struct Rejected {
     pub reason: String,
 }
 
-/// An interval bound [lo, hi] discovered by abstract interpretation.
-#[derive(Clone, Debug)]
-pub struct IntervalHint {
-    pub lo: i64,
-    pub hi: i64,
-}
-
 #[derive(Default)]
 pub struct Blackboard {
     log: Vec<Tagged>,
@@ -52,9 +45,13 @@ pub struct Blackboard {
     /// Whether we are checking only assertions (valid-assert property).
     /// When false (no-runtime-exception), the vacuous-TRUE guard is skipped.
     assertion_only: bool,
-    /// Interval bounds from abstract interpretation, keyed by (method, block, var).
-    /// Only populated when AI analysis is complete (sound over-approximation).
-    interval_hints: HashMap<(MethodKey, BlockId, VarId), IntervalHint>,
+    /// Open questions, and the answers they have attracted.
+    ///
+    /// Kept beside the log rather than only in it, because the point of a
+    /// query is that someone can find it without replaying history.
+    queries: Vec<Query>,
+    lemmas: Vec<(Lemma, Approximations)>,
+    next_query: u32,
     /// What the producer of each obligation's *current* status approximated.
     ///
     /// Kept beside `statuses` rather than inside `Status` because it is a fact
@@ -206,6 +203,32 @@ impl Blackboard {
             // is provisional; certification is what makes a FALSE final.
         }
 
+        // A lemma is a claim, and the same discipline governs it as governs a
+        // status: an engine that has looked at only some executions may not
+        // make a statement about all of them. Without this, an Under engine
+        // could publish `Holds` and a prover could assume it — a proof resting
+        // on a partial search, which is the wrong-TRUE shape the direction
+        // rule exists to prevent.
+        if let Artifact::Lemma(l) = &artifact {
+            if l.answer.is_universal() && direction == Direction::Under {
+                return self.reject(format!(
+                    "{producer} is under-approximating and may not answer \
+                     query {} with a claim about every execution",
+                    l.query
+                ));
+            }
+            if !l.answer.is_universal()
+                && !matches!(l.answer, Answer::Unknown)
+                && direction == Direction::Over
+            {
+                return self.reject(format!(
+                    "{producer} is over-approximating and may not answer \
+                     query {} with a witness",
+                    l.query
+                ));
+            }
+        }
+
         let seq = self.next_seq;
         self.next_seq += 1;
 
@@ -234,6 +257,8 @@ impl Blackboard {
             }
             Artifact::Invariant(inv) => self.invariants.push(inv.clone()),
             Artifact::Trace(t) => self.traces.push(t.clone()),
+            Artifact::Query(q) => self.queries.push(q.clone()),
+            Artifact::Lemma(l) => self.lemmas.push((l.clone(), approximated)),
             _ => {}
         }
 
@@ -313,14 +338,25 @@ impl Blackboard {
     /// still that engine's business: the answer on the board was computed about
     /// a program that is not quite ours, and this engine can do better.
     ///
+    /// The caller must fix **everything** the closer got wrong, not merely
+    /// something. An engine that models float arithmetic faithfully cannot
+    /// improve on an obligation that also failed because a call was left
+    /// unmodelled — a better float encoding does not conjure a model of
+    /// `Math.sin`. Reclaiming it anyway is pure cost, and the first engine
+    /// census measured exactly that: the FPA escalation pass consumed 63% of
+    /// all engine wall time and decided one task in 142, with 36 of its 51
+    /// seconds spent on transcendental programs where SMT-LIB's FloatingPoint
+    /// theory has nothing to say.
+    ///
     /// This is the general form of `open_or_unconfirmed`, which hard-codes one
     /// instance of the same idea (an Under engine's witness is a candidate
     /// until replay confirms it). Both are cases of "a status is only as good
     /// as the model it came from".
     ///
-    /// Note the deliberate asymmetry with soundness: this *widens* what an
-    /// engine looks at, so a wrong answer here costs time, never correctness.
-    /// It never lets anything be discharged that could not be already.
+    /// Note the deliberate asymmetry with soundness: this only ever *widens*
+    /// what an engine looks at relative to `open()`, so a wrong answer here
+    /// costs time, never correctness. Nothing can be discharged that could not
+    /// be already.
     pub fn open_for(&self, models_faithfully: Approximations) -> Vec<ObligationRef> {
         self.statuses
             .iter()
@@ -328,11 +364,15 @@ impl Blackboard {
                 if !s.is_final() {
                     return true;
                 }
-                self.status_approx
+                let approx = self
+                    .status_approx
                     .get(*oref)
                     .copied()
-                    .unwrap_or(Approximations::EXACT)
-                    .intersects(models_faithfully)
+                    .unwrap_or(Approximations::EXACT);
+                // Something to fix, and nothing left over that this engine
+                // would not fix.
+                approx.intersects(models_faithfully)
+                    && approx.difference(models_faithfully).is_exact()
             })
             .map(|(k, _)| k.clone())
             .collect()
@@ -346,58 +386,114 @@ impl Blackboard {
             .unwrap_or(Approximations::EXACT)
     }
 
+    /// Register a question. Returns its id, which the answers refer to.
+    pub fn ask(
+        &mut self,
+        asked_by: EngineId,
+        at: ProgramPoint,
+        about: crate::term::Expr,
+        want: Want,
+        given: Vec<crate::term::Expr>,
+    ) -> u32 {
+        // Identical questions are one question. An engine re-deriving the same
+        // subgoal on twenty paths should not make twenty engines answer it
+        // twenty times, and the answer is the same either way.
+        if let Some(q) = self.queries.iter().find(|q| {
+            q.at == at && q.about == about && q.want == want && q.given == given
+        }) {
+            return q.id;
+        }
+        let id = self.next_query;
+        self.next_query += 1;
+        let q = Query { id, asked_by, at, about, want, given };
+        debug!("blackboard: query {id} from {asked_by}: {} ({want:?})", q.about);
+        let _ = self.publish(asked_by, Direction::Exact, Artifact::Query(q));
+        id
+    }
+
+    /// Questions nobody has answered yet.
+    pub fn unanswered(&self) -> Vec<&Query> {
+        self.queries
+            .iter()
+            .filter(|q| !self.lemmas.iter().any(|(l, _)| l.query == q.id))
+            .collect()
+    }
+
+    /// Answers to a question, with what each answerer approximated.
+    ///
+    /// The approximations travel with the answer for the same reason they
+    /// travel with a status: assuming a lemma derived under an approximation
+    /// you do not make is assuming a fact about a different program.
+    pub fn answers(&self, query: u32) -> Vec<(&Lemma, Approximations)> {
+        self.lemmas
+            .iter()
+            .filter(|(l, _)| l.query == query)
+            .map(|(l, a)| (l, *a))
+            .collect()
+    }
+
+    pub fn query(&self, id: u32) -> Option<&Query> {
+        self.queries.iter().find(|q| q.id == id)
+    }
+
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {
         self.invariants
             .iter()
             .filter(|i| i.status == InvStatus::Inductive)
     }
 
+    /// Every invariant claimed at a point in this method, checked or not.
+    ///
+    /// Deliberately *not* filtered to `Inductive`. A candidate is not a proof
+    /// and must never discharge anything — but it is exactly what a Horn
+    /// solver wants as a hint, and what a bounded engine wants for pruning.
+    /// The consumer decides what it is entitled to do with it, which is the
+    /// same split `Status::Bounded { k }` makes.
+    pub fn invariants_for(&self, method: &MethodKey) -> Vec<&Invariant> {
+        self.invariants
+            .iter()
+            .filter(|i| &i.at.method == method)
+            .collect()
+    }
+
     pub fn pending_traces(&self) -> impl Iterator<Item = &AbstractTrace> {
         self.traces.iter().filter(|t| t.feasible != Some(true))
     }
 
-    /// Publish an interval bound discovered by abstract interpretation.
-    /// Only call this when the analysis was complete (sound over-approximation).
-    pub fn publish_interval_hint(
-        &mut self,
-        method: MethodKey,
-        block: BlockId,
-        var: VarId,
-        lo: i64,
-        hi: i64,
-    ) {
-        self.interval_hints
-            .insert((method, block, var), IntervalHint { lo, hi });
-    }
-
-    /// Retrieve all interval hints for a given method and block.
-    pub fn interval_hints_for(
-        &self,
-        method: &MethodKey,
-        block: BlockId,
-    ) -> Vec<(VarId, i64, i64)> {
-        self.interval_hints
-            .iter()
-            .filter(|((m, b, _), _)| m == method && *b == block)
-            .map(|((_, _, v), h)| (*v, h.lo, h.hi))
-            .collect()
-    }
-
-    /// Whether any interval hints have been published.
+    /// Whether any interval bounds have been published.
     pub fn has_interval_hints(&self) -> bool {
-        !self.interval_hints.is_empty()
+        self.invariants.iter().any(|i| i.status == InvStatus::Candidate)
     }
 
-    /// Retrieve all interval hints for a given method, as (block, var) → (lo, hi).
+    /// Interval bounds for a method, read off the **artifact log**.
+    ///
+    /// This used to read a bespoke `HashMap` that only the BMC knew about, so
+    /// the interval engine's most useful output was invisible to every other
+    /// engine — including CHC, for which bounds are candidate invariants and
+    /// the most valuable hint a Horn solver can be given. The facts now travel
+    /// as `Artifact::Invariant` and anything can read them.
+    ///
+    /// Recognises the shape the interval engine publishes, `lo <= v && v <= hi`,
+    /// and ignores anything else. A consumer that cannot read a claim must
+    /// skip it, never guess at it.
     pub fn interval_hints_for_method(
         &self,
         method: &MethodKey,
     ) -> HashMap<(BlockId, VarId), (i64, i64)> {
-        self.interval_hints
-            .iter()
-            .filter(|((m, _, _), _)| m == method)
-            .map(|((_, b, v), h)| ((*b, *v), (h.lo, h.hi)))
-            .collect()
+        use crate::term::{Expr, Op};
+        let mut out = HashMap::new();
+        for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
+            let Expr::Bin(Op::And, lo_e, hi_e) = &inv.formula else { continue };
+            let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) =
+                (lo_e.as_ref(), hi_e.as_ref()) else { continue };
+            let (Expr::Int(lo), Expr::Var(v1), Expr::Var(v2), Expr::Int(hi)) =
+                (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref()) else { continue };
+            if v1 != v2 {
+                continue;
+            }
+            out.insert((inv.at.block, *v1), (*lo, *hi));
+        }
+        out
     }
 
     pub fn statuses(&self) -> impl Iterator<Item = (&ObligationRef, &Status)> {
@@ -638,6 +734,205 @@ mod tests {
 
         assert!(bb.open_for(Approximations::FLOAT_ARITH).is_empty());
         assert_eq!(bb.open_for(Approximations::INT_WRAPPING), vec![oref()]);
+    }
+
+    /// The census finding, as a rule. A better float encoding does not conjure
+    /// a model of `Math.sin`, so an obligation that failed for both reasons is
+    /// not worth reclaiming — and reclaiming it was 63% of all engine time.
+    #[test]
+    fn an_engine_must_fix_everything_that_went_wrong_not_merely_something() {
+        let mut bb = seeded();
+        violate(
+            &mut bb,
+            Approximations::FLOAT_ARITH.union(Approximations::UNMODELLED_CALL),
+        );
+
+        assert!(
+            bb.open_for(Approximations::FLOAT_ARITH).is_empty(),
+            "fixing the float encoding leaves the unmodelled call unfixed"
+        );
+        assert_eq!(
+            bb.open_for(
+                Approximations::FLOAT_ARITH.union(Approximations::UNMODELLED_CALL)
+            ),
+            vec![oref()],
+            "an engine that fixes both should still be offered it"
+        );
+    }
+
+    /// The reader and the writer of an interval bound must agree on its shape.
+    ///
+    /// This is the `Bounded { k }` lesson as a test: `ai.rs` writes
+    /// `lo <= v && v <= hi` and `interval_hints_for_method` pattern-matches it
+    /// back. Nothing in the type system connects the two, so a change to
+    /// either silently drops every hint — and losing them costs precision in
+    /// the BMC with no error anywhere.
+    #[test]
+    fn an_interval_bound_survives_the_round_trip() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(7);
+
+        // Exactly what `AiEngine::publish_interval_hints` writes.
+        let lo = Expr::bin(Op::Le, Expr::Int(-3), Expr::Var(v));
+        let hi = Expr::bin(Op::Le, Expr::Var(v), Expr::Int(42));
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                formula: Expr::bin(Op::And, lo, hi),
+                status: InvStatus::Candidate,
+            }),
+        )
+        .unwrap();
+
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(hints.get(&(at.block, v)), Some(&(-3, 42)));
+        assert!(bb.has_interval_hints());
+    }
+
+    /// A claim the reader cannot parse must be skipped, never guessed at.
+    #[test]
+    fn an_unrecognised_claim_is_ignored_rather_than_misread() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("cegar"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                // A different shape entirely: v0 != v1.
+                formula: Expr::bin(
+                    Op::Ne,
+                    Expr::Var(ajave_ir::VarId(0)),
+                    Expr::Var(ajave_ir::VarId(1)),
+                ),
+                status: InvStatus::Candidate,
+            }),
+        )
+        .unwrap();
+        assert!(bb.interval_hints_for_method(&at.method).is_empty());
+    }
+
+    // ── the query/lemma channel ────────────────────────────────────────
+
+    fn point() -> ProgramPoint {
+        ProgramPoint { method: oref().method, block: ajave_ir::BlockId(0), index: 0 }
+    }
+
+    fn sin_x() -> crate::term::Expr {
+        crate::term::Expr::call(
+            "java/lang/Math", "sin", "(D)D",
+            vec![crate::term::Expr::Var(ajave_ir::VarId(0))],
+        )
+    }
+
+    /// The same subgoal reached on twenty paths is one question, not twenty.
+    /// Without this an engine re-deriving `sin(x)` in a loop would make every
+    /// answerer re-answer it for each unrolling.
+    #[test]
+    fn identical_questions_are_one_question() {
+        let mut bb = Blackboard::new();
+        let a = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Bounds, vec![]);
+        let b = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Bounds, vec![]);
+        assert_eq!(a, b);
+        assert_eq!(bb.unanswered().len(), 1);
+    }
+
+    /// An engine that has looked at only some executions may not make a claim
+    /// about all of them. This is the `Direction` rule that governs `Status`,
+    /// applied one level down — without it an Under engine could publish
+    /// `Holds` and a prover could assume it, resting a proof on a partial
+    /// search.
+    #[test]
+    fn an_under_approximating_engine_may_not_answer_universally() {
+        let mut bb = Blackboard::new();
+        let q = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Bounds, vec![]);
+        let r = bb.publish(
+            EngineId("float-search"),
+            Direction::Under,
+            Artifact::Lemma(Lemma {
+                query: q,
+                by: EngineId("float-search"),
+                answer: Answer::Bounds {
+                    lo: crate::term::Expr::double(-1.0),
+                    hi: crate::term::Expr::double(1.0),
+                },
+            }),
+        );
+        assert!(r.is_err());
+        assert!(bb.answers(q).is_empty());
+    }
+
+    #[test]
+    fn an_over_approximating_engine_may_not_answer_with_a_witness() {
+        let mut bb = Blackboard::new();
+        let q = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Satisfiable, vec![]);
+        let r = bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Lemma(Lemma {
+                query: q,
+                by: EngineId("interval-ai"),
+                answer: Answer::SatisfiedBy(vec![(ajave_ir::VarId(0), 3)]),
+            }),
+        );
+        assert!(r.is_err());
+    }
+
+    /// A bound on `sin` is sound from an over-approximating engine, and the
+    /// approximations it was derived under travel with it — assuming a lemma
+    /// derived under an approximation you do not make is assuming a fact about
+    /// a different program.
+    #[test]
+    fn an_answer_carries_what_its_author_approximated() {
+        let mut bb = Blackboard::new();
+        let q = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Bounds, vec![]);
+        bb.publish_with(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Approximations::REAL_ARITH,
+            Artifact::Lemma(Lemma {
+                query: q,
+                by: EngineId("interval-ai"),
+                answer: Answer::Bounds {
+                    lo: crate::term::Expr::double(-1.0),
+                    hi: crate::term::Expr::double(1.0),
+                },
+            }),
+        )
+        .unwrap();
+
+        let answers = bb.answers(q);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].1, Approximations::REAL_ARITH);
+        assert!(bb.unanswered().is_empty());
+    }
+
+    /// "I looked and cannot say" is worth publishing: it stops the scheduler
+    /// asking the same engine the same question again.
+    #[test]
+    fn declining_to_answer_is_still_an_answer() {
+        let mut bb = Blackboard::new();
+        let q = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Bounds, vec![]);
+        bb.publish(
+            EngineId("nra"),
+            Direction::Under,
+            Artifact::Lemma(Lemma {
+                query: q,
+                by: EngineId("nra"),
+                answer: Answer::Unknown,
+            }),
+        )
+        .unwrap();
+        assert!(bb.unanswered().is_empty());
     }
 
     #[test]

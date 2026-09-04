@@ -322,6 +322,53 @@ struct ViolationInfo {
     tagged: ajave_core::artifact::Tagged,
 }
 
+/// One `PROGRAM_SHAPE` line per run, summarising the entry body and the whole
+/// reachable program. Paired with the orchestrator's existing
+/// `timing step <engine> <ms>ms discharged=N violated=M` lines, this is enough
+/// to answer "what does each engine cost, and pay, on programs like this one".
+fn emit_program_shape(prog: &ajave_ir::Program, plan: &ajave_core::plan::Plan) {
+    use ajave_engines::body_shape;
+    let Some(entry) = &prog.entry else { return };
+    let Some(entry_body) = prog.body(entry) else { return };
+    let entry_shape = body_shape::analyze(entry_body);
+
+    // Whole-program rollup: an engine's cost is driven by everything it may be
+    // asked to inline, not only by the entry body's own shape.
+    let reachable = prog.reachable_from_entry();
+    let mut blocks = 0usize;
+    let mut any_loops = false;
+    let mut any_float = false;
+    let mut any_heap = false;
+    let mut any_string = false;
+    let mut any_transcendental = false;
+    for key in &reachable {
+        let Some(b) = prog.body(key) else { continue };
+        let s = body_shape::analyze(b);
+        blocks += s.num_blocks;
+        any_loops |= s.has_loops;
+        any_float |= s.has_float_types;
+        any_heap |= s.has_heap_ops;
+        any_string |= s.has_string_ops;
+        any_transcendental |= s.has_transcendental_math;
+    }
+
+    info!(
+        "PROGRAM_SHAPE property={:?} methods={} blocks={} entry_blocks={} entry_vars={} \
+         loops={} float={} heap={} string={} transcendental={} nonlinear_int={}",
+        plan.property,
+        reachable.len(),
+        blocks,
+        entry_shape.num_blocks,
+        entry_shape.num_vars,
+        any_loops,
+        any_float,
+        any_heap,
+        any_string,
+        any_transcendental,
+        entry_shape.has_nonlinear_int,
+    );
+}
+
 fn collect_violations(orchestrator: &Orchestrator) -> Vec<ViolationInfo> {
     orchestrator
         .bb
@@ -810,6 +857,16 @@ fn main() {
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
     orchestrator.assertion_only = assertion_only;
+    // Phase 0 of the cooperative-scheduling work: a machine-readable record of
+    // what the portfolio was asked to solve, so per-engine cost and payoff can
+    // be aggregated *by program shape* rather than by task name.
+    //
+    // Keyed on features rather than identity on purpose. A cost model fitted to
+    // the corpus we score against is the overfitting CLAUDE.md warns about,
+    // moved from the engines into the scheduler; one keyed on "bodies with
+    // loops and floats and no heap" is a claim that can be checked on a program
+    // nobody has seen. `tools/engine_census.py` does the aggregation.
+    emit_program_shape(&prog, &plan);
     let verdict = orchestrator.run(&prog, 16);
 
     if cli.trace {

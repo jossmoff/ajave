@@ -68,6 +68,31 @@ const MAX_BLOCK_VISITS: u64 = 50_000;
 /// doubles the work at each fork. This limit prevents exponential blowup.
 const MAX_FORKS: u32 = 500;
 
+/// Multiplier on the *resource* caps above — solver calls, block visits,
+/// forks. Not on `MAX_CALL_DEPTH` or `MAX_LOOP_UNROLL`, which are semantic
+/// bounds that change what `Bounded { k }` means to its consumers.
+///
+/// This exists to measure a number the blocker census cannot: **what fraction
+/// of budget-truncated tasks a bigger budget actually decides.** The census
+/// says `all_paths_complete` is the single commonest reason a task does not
+/// score (27.9% of unproven valid-assert, 34.3% of no-runtime-exception), but
+/// "more effort could decide this" is not "more effort will" — an exploration
+/// can be exponentially large, and doubling changes nothing.
+///
+/// Sweeping this answers that directly, and the answer decides whether
+/// iterative deepening is worth building. `CLAUDE.md` asks for exactly this
+/// check on every fitted constant; these have never had one.
+fn budget_scale() -> u64 {
+    static SCALE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("AJAVE_BMC_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(1)
+    })
+}
+
 /// Tracks why exploration may be incomplete, replacing ad-hoc boolean flags.
 /// Each field records a specific reason the engine cannot fully discharge.
 #[derive(Clone, Debug, Default)]
@@ -903,11 +928,12 @@ struct SavedState {
 /// Small utility methods on ExploreCtx: budget, width, taint, field helpers.
 impl<'a> ExploreCtx<'a> {
     fn budget_left(&self) -> bool {
+        let k = budget_scale();
         !self.exhausted
-            && self.solver_calls < MAX_SOLVER_CALLS
+            && (self.solver_calls as u64) < MAX_SOLVER_CALLS as u64 * k
             && self.violations.len() < MAX_VIOLATIONS
-            && self.block_visits < MAX_BLOCK_VISITS
-            && self.fork_count < MAX_FORKS
+            && self.block_visits < MAX_BLOCK_VISITS * k
+            && (self.fork_count as u64) < MAX_FORKS as u64 * k
     }
 
     /// Budget check that **records** the resulting truncation.
@@ -1347,7 +1373,7 @@ impl<'a> ExploreCtx<'a> {
 
     fn check_sat_with_path(&mut self) -> SatResult {
         self.solver_calls += 1;
-        if self.solver_calls > MAX_SOLVER_CALLS {
+        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * budget_scale() {
             self.exhausted = true;
             return SatResult::Unknown;
         }
@@ -1365,7 +1391,7 @@ impl<'a> ExploreCtx<'a> {
     /// Returns (result, optional witness).
     fn check_sat_with_path_and_witness(&mut self, extra: Term) -> (SatResult, Option<Witness>) {
         self.solver_calls += 1;
-        if self.solver_calls > MAX_SOLVER_CALLS {
+        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * budget_scale() {
             self.exhausted = true;
             return (SatResult::Unknown, None);
         }

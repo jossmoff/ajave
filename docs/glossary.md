@@ -411,6 +411,40 @@ an `Under` producer and a violation from an `Over` one, at runtime, in addition
 to the type-level rule in `ajave-ir/src/verdict.rs`.
 **In ajave.** The single most safety-critical line of code in the system.
 
+### Approximations tag
+**ELI5.** A second label saying which bits of Java the engine *fudged* to get
+its answer — so a fussier engine knows there is something left to fix.
+**Actually.** `FLOAT_ARITH`, `REAL_ARITH`, `INT_WRAPPING`, `HEAP_ALIASING`,
+`UNMODELLED_CALL`. `Direction` says what you may conclude; this says whether the
+encoding was a model of *this* program at all. Different questions: an engine
+encoding `dmul` as a bitvector multiply is honestly under-approximating a
+program that is not ours.
+**In ajave.** `open_for(models_faithfully)` hands an obligation back to an
+engine that fixes **everything** the closer got wrong. Fixing only some of it
+buys nothing — a better float encoding does not conjure a model of `Math.sin`.
+
+### Query / Lemma
+**ELI5.** Engines can ask each other questions instead of just announcing
+answers. "What can anyone tell me about `sin(x)` if `x` is between 0 and 1.5?"
+**Actually.** `Artifact::Query { about, want, given }` and
+`Artifact::Lemma { answer }`. The publish rule mirrors `Direction` one level
+down: `Bounds`/`Holds` are claims about every execution and need `Over`;
+`SatisfiedBy`/`RefutedBy` are about one and need `Under`. `Unknown` is worth
+saying — it stops the scheduler re-asking.
+**In ajave.** What turns a specialised engine from an *alternative* to the
+others into a *resource* for them. An engine that models transcendentals need
+not reimplement heaps and inlining to be useful.
+
+### Expr (the term language)
+**ELI5.** A tiny shared language for saying things about values, so one engine's
+claim is readable by another.
+**Actually.** `core::term::Expr` — variables, literals, arithmetic, comparison,
+boolean structure, and library calls keyed on the full `(class, name, desc)`.
+Doubles are bit patterns because `f64` is neither `Eq` nor `Hash`.
+**In ajave.** Its absence is why three of the four unused artifact kinds were
+unused: `Invariant` and `Precision` were stubbed on `String`, and interval
+bounds travelled through a side channel only the BMC could read.
+
 ### Engine
 **ELI5.** One strategy, doing a small slice of work each time it's called, so
 the scheduler can share time out fairly.
