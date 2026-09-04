@@ -29,6 +29,25 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
+    /// `c` lies in any of the inclusive ranges.
+    ///
+    /// The tables these encode were enumerated from a real JVM over 0..127
+    /// rather than reasoned about: the identifier predicates include the
+    /// *identifier-ignorable* control characters, which no amount of thinking
+    /// about "letters and digits" would suggest.
+    fn char_in_ranges(&mut self, c: Term, ranges: &[(i64, i64)]) -> Term {
+        let mut acc = self.solver.bool_const(false);
+        for (lo, hi) in ranges {
+            let lo_t = self.solver.bv_const(*lo, 32);
+            let hi_t = self.solver.bv_const(*hi, 32);
+            let ge = self.solver.bvsge(c, lo_t);
+            let le = self.solver.bvsle(c, hi_t);
+            let inr = self.solver.and(ge, le);
+            acc = self.solver.or(acc, inr);
+        }
+        acc
+    }
+
     pub(super) fn encode_char_wrapper_call(&mut self, class: &str, name: &str, args: &[Operand]) -> Term {
         let one = self.solver.bv_const(1, 32);
         let zero = self.solver.bv_const(0, 32);
@@ -205,22 +224,20 @@ impl<'a> ExploreCtx<'a> {
                 self.solver.ite(result, one, zero)
             }
             ("java/lang/Character", "isJavaLetterOrDigit" | "isJavaIdentifierPart") => {
+                // Enumerated from a real JVM over 0..127. `isJavaIdentifierPart`
+                // is true for the identifier-ignorable controls as well as the
+                // obvious letters/digits/$/_ — omitting them made
+                // `isJavaIdentifierPart(0)` false where the JVM says true, so
+                // every witness built on that value was refuted.
+                //
+                // `isJavaLetterOrDigit` is the deprecated alias and shares the
+                // table.
                 let c = self.encode_operand(&args[0]);
-                let alpha = self.encode_is_alpha(c, one, zero);
-                let alpha_b = self.solver.bveq(alpha, one);
-                let lo_d = self.solver.bv_const(0x30, 32);
-                let hi_d = self.solver.bv_const(0x39, 32);
-                let ge_d = self.solver.bvsge(c, lo_d);
-                let le_d = self.solver.bvsle(c, hi_d);
-                let digit = self.solver.and(ge_d, le_d);
-                let dollar = self.solver.bv_const(0x24, 32);
-                let is_dollar = self.solver.bveq(c, dollar);
-                let underscore = self.solver.bv_const(0x5F, 32);
-                let is_under = self.solver.bveq(c, underscore);
-                let r1 = self.solver.or(alpha_b, digit);
-                let r2 = self.solver.or(r1, is_dollar);
-                let result = self.solver.or(r2, is_under);
-                self.solver.ite(result, one, zero)
+                let r = self.char_in_ranges(c, &[
+                    (0x00, 0x08), (0x0E, 0x1B), (0x24, 0x24), (0x30, 0x39),
+                    (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A), (0x7F, 0x7F),
+                ]);
+                self.solver.ite(r, one, zero)
             }
             ("java/lang/Character", "toCodePoint") => {
                 let high = self.encode_operand(&args[0]);
@@ -333,30 +350,51 @@ impl<'a> ExploreCtx<'a> {
                 self.encode_get_type(&args[0])
             }
             ("java/lang/Character", "isDefined") => {
-                // Defined: 0x0000-0xFFFD (BMP minus surrogates/nonchars)
-                // Undefined: negative, surrogates (0xD800-0xDFFF), nonchars (0xFFFE-0xFFFF), > 0x10FFFF
+                // Only what is *certain*, because `isDefined` is a Unicode
+                // table and most of the code-point space is not derivable from
+                // ranges.
+                //
+                // The previous model said "defined = [0, 0x10FFFF] minus
+                // surrogates minus 0xFFFE/0xFFFF", which is wrong in both
+                // directions, checked against a real JVM:
+                //   - surrogates U+D800..U+DFFF **are** defined (category Cs);
+                //     the model called them undefined.
+                //   - unassigned points such as U+0378 and U+05FF are **not**
+                //     defined; the model called them defined.
+                // Only 288,767 of 1,114,112 code points are defined — 74% of
+                // the space is undefined, and the old model claimed nearly all
+                // of it was. That is a wrong answer waiting to happen in either
+                // direction, not a precision loss.
+                //
+                // So: pin the two ends that are certain and leave the rest
+                // unconstrained. A witness can then be built entirely out of
+                // values the JVM agrees with, which is what makes it replay.
                 let c = self.encode_operand(&args[0]);
+                let unconstrained = self.solver.fresh_bv("isDefined", 32);
+                let one_bit = self.solver.bvand(unconstrained, one);
+
+                // Certainly NOT defined: outside the code-point range.
                 let ge0 = self.solver.bvsge(c, zero);
                 let max_cp = self.solver.bv_const(0x10FFFF, 32);
                 let le_max = self.solver.bvsle(c, max_cp);
-                let valid_range = self.solver.and(ge0, le_max);
-                // Exclude surrogates
+                let in_range = self.solver.and(ge0, le_max);
+
+                // Certainly defined: printable ASCII is wholly assigned, and so
+                // are the surrogates.
+                let sp = self.solver.bv_const(0x20, 32);
+                let tilde = self.solver.bv_const(0x7E, 32);
+                let ge_sp = self.solver.bvsge(c, sp);
+                let le_tilde = self.solver.bvsle(c, tilde);
+                let printable = self.solver.and(ge_sp, le_tilde);
                 let surr_lo = self.solver.bv_const(0xD800, 32);
                 let surr_hi = self.solver.bv_const(0xDFFF, 32);
                 let ge_surr = self.solver.bvsge(c, surr_lo);
                 let le_surr = self.solver.bvsle(c, surr_hi);
                 let is_surr = self.solver.and(ge_surr, le_surr);
-                let not_surr = self.solver.not(is_surr);
-                // Exclude 0xFFFE-0xFFFF
-                let nc_lo = self.solver.bv_const(0xFFFE, 32);
-                let nc_hi = self.solver.bv_const(0xFFFF, 32);
-                let ge_nc = self.solver.bvsge(c, nc_lo);
-                let le_nc = self.solver.bvsle(c, nc_hi);
-                let is_nc = self.solver.and(ge_nc, le_nc);
-                let not_nc = self.solver.not(is_nc);
-                let defined = self.solver.and(valid_range, not_surr);
-                let defined = self.solver.and(defined, not_nc);
-                self.solver.ite(defined, one, zero)
+                let certainly_defined = self.solver.or(printable, is_surr);
+
+                let r = self.solver.ite(certainly_defined, one, one_bit);
+                self.solver.ite(in_range, r, zero)
             }
             ("java/lang/Character", "isMirrored") => {
                 let c = self.encode_operand(&args[0]);
