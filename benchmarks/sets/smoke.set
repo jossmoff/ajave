@@ -151,6 +151,13 @@ sv-comp/MinePump/spec1-5_product24.yml valid-assert
 
 # nra
 sv-comp/float-nonlinear-calculation/coral29.yml valid-assert
+# operand-stack typing: both operands of the multiply are call results,
+# so they cross a block boundary on the stack (#26)
+sv-comp/float-nonlinear-calculation/coral17.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral13.yml valid-assert
+# encoding provenance: the bitvector pass must not close this against
+# the FPA pass that can actually decide it (#27)
+ajave/jvm-floats/SpilledDoubleKeepsItsType.yml valid-assert
 sv-comp/float-nonlinear-calculation/coral48.yml valid-assert
 sv-comp/float-nonlinear-calculation/Optimization1.yml valid-assert
 

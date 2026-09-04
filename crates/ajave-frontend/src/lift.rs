@@ -260,7 +260,10 @@ struct Lifter<'a> {
     cf: &'a ClassFile,
     vars: Vec<VarInfo>,
     local_map: HashMap<u16, VarId>,
-    stack_map: HashMap<u16, VarId>,
+    stack_map: HashMap<(u16, Ty), VarId>,
+    /// Types of the operand stack as `spill` last materialised it. The block
+    /// being lifted hands these to its successors as their entry stack types.
+    out_stack_types: Vec<Ty>,
     obligations: Vec<Obligation>,
     new_classes: HashMap<VarId, String>,
     /// Lambdas seen while lifting this method: (synthetic class, SAM name,
@@ -285,12 +288,25 @@ impl<'a> Lifter<'a> {
         self.local_map.insert(slot, v);
         v
     }
-    fn stack_slot(&mut self, depth: u16) -> VarId {
-        if let Some(v) = self.stack_map.get(&depth) {
+    /// The canonical variable for operand-stack depth `depth` holding a value
+    /// of type `ty`.
+    ///
+    /// Keyed by type as well as depth. A single variable per depth cannot
+    /// work: the JVM reuses a stack depth for whatever type the code puts
+    /// there, so one `VarInfo.ty` would have to describe a double in one block
+    /// and a reference in another. Every consumer that asks the IR what type a
+    /// variable has — `concrete::is_float_operand`,
+    /// `smt_bmc::fp_width_of_operand`, `smt_encode::width_of` — then gets a
+    /// wrong answer, and float arithmetic gets encoded as integer arithmetic
+    /// on the bit patterns. See
+    /// `benchmarks/ajave/jvm-floats/SpilledDoubleKeepsItsType`.
+    fn stack_slot(&mut self, depth: u16, ty: Ty) -> VarId {
+        let ty = stack_ty(ty);
+        if let Some(v) = self.stack_map.get(&(depth, ty)) {
             return *v;
         }
-        let v = self.fresh(VarKind::Stack(depth), Ty::Int);
-        self.stack_map.insert(depth, v);
+        let v = self.fresh(VarKind::Stack(depth), ty);
+        self.stack_map.insert((depth, ty), v);
         v
     }
     fn temp(&mut self, ty: Ty) -> VarId {
@@ -490,6 +506,7 @@ pub fn lift_method_with_lambdas(
         vars: Vec::new(),
         local_map: HashMap::new(),
         stack_map: HashMap::new(),
+        out_stack_types: Vec::new(),
         obligations: Vec::new(),
         new_classes: HashMap::new(),
         pending_lambdas: Vec::new(),
@@ -530,36 +547,44 @@ pub fn lift_method_with_lambdas(
     let mut blocks: Vec<Option<Block>> = vec![None; leaders.len()];
 
     // Handler blocks are entered with the exception object on the stack.
-    let mut work: Vec<(usize, u16)> = vec![(0usize, 0u16)];
+    // Entry stack *types*, not just heights. A successor has to name the same
+    // variables its predecessor spilled into, and those are keyed by type.
+    let mut work: Vec<(usize, Vec<Ty>)> = vec![(0usize, Vec::new())];
     for h in &code.handlers {
         if let Some(b) = block_of.get(&(h.target as usize)) {
-            work.push((b.0 as usize, 1));
+            work.push((b.0 as usize, vec![Ty::Ref]));
         }
     }
-    let mut seen: HashMap<usize, u16> = HashMap::new();
+    let mut seen: HashMap<usize, Vec<Ty>> = HashMap::new();
 
-    while let Some((bi, entry_h)) = work.pop() {
+    while let Some((bi, entry_tys)) = work.pop() {
         if bi >= leaders.len() {
             continue;
         }
         if let Some(prev) = seen.get(&bi) {
-            if *prev != entry_h {
+            // The bytecode verifier guarantees every path into a block agrees
+            // on the stack's height and types, so a disagreement means our own
+            // reconstruction is wrong. Diverging is sound: it costs the block's
+            // precision, never an answer.
+            if *prev != entry_tys {
                 blocks[bi] = Some(diverging_block(
                     BlockId(bi as u32),
                     leaders[bi] as u16,
-                    format!("inconsistent stack height at bb{bi}: {prev} vs {entry_h}"),
+                    format!("inconsistent entry stack at bb{bi}: {prev:?} vs {entry_tys:?}"),
                 ));
             }
             continue;
         }
-        seen.insert(bi, entry_h);
+        seen.insert(bi, entry_tys.clone());
 
         let start = leaders[bi];
         let end = leaders.get(bi + 1).copied().unwrap_or(code.bytes.len());
 
         let mut stmts: Vec<Stmt> = Vec::new();
-        let mut stack: Vec<Operand> = (0..entry_h)
-            .map(|d| Operand::Var(lifter.stack_slot(d)))
+        let mut stack: Vec<Operand> = entry_tys
+            .iter()
+            .enumerate()
+            .map(|(d, ty)| Operand::Var(lifter.stack_slot(d as u16, *ty)))
             .collect();
         let mut term: Option<Terminator> = None;
         let mut succs: Vec<(usize, u16)> = Vec::new();
@@ -614,6 +639,7 @@ pub fn lift_method_with_lambdas(
         // Exceptional successors: every handler covering any instruction in
         // this block.
         let mut exceptional = Vec::new();
+        let mut exc_succs: Vec<usize> = Vec::new();
         for h in &lifter.handlers.clone() {
             let covers = (h.start as usize) < end && start < (h.end as usize);
             if !covers {
@@ -631,7 +657,10 @@ pub fn lift_method_with_lambdas(
                 class,
                 target: *target,
             });
-            succs.push((target.0 as usize, 1));
+            // A handler is entered with just the exception object on the
+            // stack, so its entry types are fixed and unrelated to whatever
+            // this block was carrying.
+            exc_succs.push(target.0 as usize);
         }
 
         blocks[bi] = Some(Block {
@@ -642,7 +671,22 @@ pub fn lift_method_with_lambdas(
             exceptional,
         });
 
-        work.extend(succs);
+        // Normal successors inherit the stack as `spill` just materialised it.
+        let out_tys = lifter.out_stack_types.clone();
+        for (b, h) in succs {
+            let tys = if h as usize == out_tys.len() {
+                out_tys.clone()
+            } else {
+                // Unreachable for well-formed bytecode: every terminator with
+                // successors spills the whole stack first. Fall back rather
+                // than panic.
+                vec![Ty::Int; h as usize]
+            };
+            work.push((b, tys));
+        }
+        for b in exc_succs {
+            work.push((b, vec![Ty::Ref]));
+        }
     }
 
     let blocks: Vec<Block> = blocks
@@ -722,25 +766,58 @@ fn diverging_block(id: BlockId, off: u16, reason: String) -> Block {
     }
 }
 
+/// The type a stack depth is keyed by.
+///
+/// `Str` is a refinement of `Ref` that only some producers can establish, so
+/// two predecessors can disagree about it at the same depth. Collapsing it
+/// keeps the merge check about JVM computational types, which the bytecode
+/// verifier already guarantees agree.
+fn stack_ty(ty: Ty) -> Ty {
+    if ty == Ty::Str {
+        Ty::Ref
+    } else {
+        ty
+    }
+}
+
+/// The declared type of an operand.
+fn operand_ty(op: &Operand, lifter: &Lifter) -> Ty {
+    match op {
+        Operand::Var(v) => lifter.vars[v.0 as usize].ty,
+        Operand::Const(Const::Int(_)) => Ty::Int,
+        Operand::Const(Const::Long(_)) => Ty::Long,
+        Operand::Const(Const::Float(_)) => Ty::Float,
+        Operand::Const(Const::Double(_)) => Ty::Double,
+        // Null, string and class literals are all references.
+        Operand::Const(_) => Ty::Ref,
+    }
+}
+
 fn spill(lifter: &mut Lifter, stmts: &mut Vec<Stmt>, stack: &[Operand]) {
-    let mut temps: Vec<(u16, Operand)> = Vec::new();
+    let types: Vec<Ty> = stack.iter().map(|op| stack_ty(operand_ty(op, lifter))).collect();
+    let mut temps: Vec<(u16, Ty, Operand)> = Vec::new();
     for (d, op) in stack.iter().enumerate() {
-        let canonical = lifter.stack_slot(d as u16);
+        let ty = types[d];
+        let canonical = lifter.stack_slot(d as u16, ty);
         if let Operand::Var(v) = op {
             if *v == canonical {
                 continue;
             }
         }
-        let t = lifter.temp(Ty::Int);
+        // The temp carries the value's own type, not `Int`. It is read by the
+        // assignment below, and a consumer asking for its type has to get the
+        // same answer the value had before it was spilled.
+        let t = lifter.temp(ty);
         lifter.copy_class(t, op);
         stmts.push(Stmt::Assign(t, Rvalue::Use(op.clone())));
-        temps.push((d as u16, Operand::Var(t)));
+        temps.push((d as u16, ty, Operand::Var(t)));
     }
-    for (d, t) in temps {
-        let canonical = lifter.stack_slot(d);
+    for (d, ty, t) in temps {
+        let canonical = lifter.stack_slot(d, ty);
         lifter.copy_class(canonical, &t);
         stmts.push(Stmt::Assign(canonical, Rvalue::Use(t)));
     }
+    lifter.out_stack_types = types;
 }
 
 type LiftOut = Option<(Terminator, Vec<(usize, u16)>)>;
