@@ -844,10 +844,31 @@ impl Engine for SmtBmc {
                 // Also skip obligations that had a tainted-path violation
                 // suppressed — their bounded status is unsound because the
                 // solver DID find a satisfying assignment for the error path.
+                // Was `&oref.method == entry`, which is both too narrow and
+                // too loose.
+                //
+                // Too narrow: the BMC inlines callees and checks their
+                // obligations, so a bounded result exists for them too — and
+                // withholding it is why `k-induction` and `imc` report "nothing
+                // to work on" on tasks where the BMC plainly did bounded work.
+                // A 125-task sample found 13 such tasks, 8 of them expected
+                // TRUE.
+                //
+                // Too loose: it published for *every* open entry obligation
+                // whenever the run truncated anywhere, including obligations
+                // the truncation could have hidden. `Bounded { k }` says the
+                // search covered this obligation to depth k, and a consumer
+                // acts on that — `k-induction` discharges outright when the
+                // reachable code is loop-free. An obligation on a path we never
+                // explored has no bounded result to report, and saying it does
+                // is the producer/consumer disagreement `CLAUDE.md` records for
+                // this exact artifact.
+                //
+                // `at_risk` is already computed above and answers precisely
+                // that question, per obligation rather than per run.
                 for oref in bb.open() {
-                    if &oref.method == entry
-                        && !ctx.skipped_obligations.contains(&(oref.method.clone(), oref.id))
-                    {
+                    let key = (oref.method.clone(), oref.id);
+                    if !ctx.skipped_obligations.contains(&key) && !at_risk.contains(&key) {
                         let _ = bb.publish_with(
                             self.id(),
                             self.direction(),
@@ -1563,5 +1584,117 @@ impl<'a> ExploreCtx<'a> {
             schedule: Vec::new(),
                 choices: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_publish_tests {
+    use super::*;
+    use ajave_ir::{Block, Body, Obligation, ObligationKind, Terminator, VarInfo, VarKind};
+
+    fn key(name: &str) -> MethodKey {
+        MethodKey { class: "Main".into(), name: name.into(), desc: "()V".into() }
+    }
+
+    /// Two blocks in sequence, with the obligation in the second.
+    ///
+    ///     bb0 -> bb1
+    ///             check #0
+    ///
+    /// A cut at bb0 can reach bb1, so the obligation is at risk. A cut at bb1
+    /// is *after* nothing, but the obligation lives in bb1 itself, so it is
+    /// still at risk. The interesting case is a cut in a block that cannot
+    /// reach the obligation at all.
+    fn two_blocks(extra_block: bool) -> (Program, MethodKey) {
+        let mk = key("main");
+        let mut blocks = vec![
+            Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts: vec![],
+                term: Terminator::Goto(BlockId(1)),
+                exceptional: vec![],
+            },
+            Block {
+                id: BlockId(1),
+                bytecode_offset: 1,
+                stmts: vec![Stmt::Check(ObligationId(0))],
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            },
+        ];
+        if extra_block {
+            // bb2 is a dead end reachable from nothing that reaches bb1.
+            blocks.push(Block {
+                id: BlockId(2),
+                bytecode_offset: 2,
+                stmts: vec![],
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            });
+        }
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            mk.clone(),
+            Body {
+                is_static: true,
+                key: mk.clone(),
+                entry: BlockId(0),
+                vars: vec![VarInfo { kind: VarKind::Local(0), ty: Ty::Int }],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Const(Const::Int(0)),
+                    guarded: false,
+                    bytecode_offset: 1,
+                    line: None,
+                }],
+                blocks,
+            },
+        );
+        prog.entry = Some(mk.clone());
+        (prog, mk)
+    }
+
+    /// The soundness argument behind the `Bounded { k }` publish rule.
+    ///
+    /// `Bounded { k }` says the search covered *this obligation* to depth k,
+    /// and `k-induction` acts on that — it discharges outright when the
+    /// reachable code is loop-free. An obligation sitting past a point where
+    /// exploration stopped has no bounded result to report, and claiming one
+    /// is the producer/consumer disagreement `CLAUDE.md` records for this
+    /// artifact.
+    ///
+    /// The rule this replaced published for every open obligation in the entry
+    /// method whenever the run truncated *anywhere*, which is exactly the
+    /// claim this test says must not be made.
+    #[test]
+    fn an_obligation_past_a_cut_has_no_bounded_result_to_report() {
+        let (prog, mk) = two_blocks(false);
+        let mut cuts = BTreeSet::new();
+        cuts.insert((mk.clone(), BlockId(0)));
+
+        let at_risk = obligations_at_risk(&prog, &cuts);
+        assert!(
+            at_risk.contains(&(mk.clone(), ObligationId(0))),
+            "exploration stopped at bb0, which reaches the obligation in bb1"
+        );
+    }
+
+    /// The other half: a truncation somewhere that cannot reach the obligation
+    /// does not taint it. Without this the rule would be sound and useless —
+    /// any cut anywhere would suppress every bounded result, which is what the
+    /// whole-run `all_paths_complete` gate used to do.
+    #[test]
+    fn a_cut_that_cannot_reach_the_obligation_leaves_it_reportable() {
+        let (prog, mk) = two_blocks(true);
+        let mut cuts = BTreeSet::new();
+        cuts.insert((mk.clone(), BlockId(2)));
+
+        let at_risk = obligations_at_risk(&prog, &cuts);
+        assert!(
+            !at_risk.contains(&(mk.clone(), ObligationId(0))),
+            "bb2 is a dead end; nothing it could have explored reaches bb1"
+        );
     }
 }

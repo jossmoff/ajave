@@ -2,6 +2,84 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-04 — finding cooperation candidates, and what they turned out to be
+
+The portfolio is eleven engines that mostly do not talk. When a task fails, two
+engines usually failed on it for different reasons — and sometimes the reason
+one failed is a fact the other one had. `tools/pairing_census.py` finds those,
+by reading what each engine already logs when it declines:
+
+```
+k-induction: step case inconclusive     the hypothesis is too weak
+interval-ai: published N interval hints ...and bounds are what strengthen it
+
+imc: no bounded obligations to work on  nothing published `Bounded { k }`
+chc: skipping — heap/array operations   declines a body the BMC partly covered
+```
+
+On 125 valid-assert tasks (37 unproven):
+
+| pair | tasks | expected TRUE | technique |
+|---|---|---|---|
+| ai -> chc | 18 | 9 | interval bounds as candidate invariants |
+| bmc -> kind | 13 | 8 | widen the `Bounded { k }` channel |
+| bmc -> chc | 11 | 8 | conditional model checking (residual) |
+| (none) | 9 | 0 | needs a model, not a pair |
+| ai -> kind | 1 | 1 | k-induction with auxiliary invariants |
+
+Two results worth keeping. `ai -> kind` — the textbook combination (Beyer et
+al., CAV 2015) and the one predicted to dominate — is **one task**, because
+k-induction rarely reaches the step case; it far more often has nothing to work
+on at all. And the nine tasks with no pairing are **all expected FALSE**, which
+is what cooperation cannot help with: a second engine can contribute a proof,
+never a replayable witness.
+
+### `bmc -> kind`, built and measured: verdict-neutral
+
+The `Bounded { k }` publish rule was `&oref.method == entry`, which is both too
+narrow and too loose.
+
+*Too narrow*: the BMC inlines callees and checks their obligations, so a bounded
+result exists for them too, and withholding it is why the provers report
+"nothing to work on" on tasks where the BMC plainly did bounded work.
+
+*Too loose*: it published for every open **entry** obligation whenever the run
+truncated **anywhere**, including obligations the truncation could have hidden.
+`Bounded { k }` says the search covered *this obligation* to depth k, and
+k-induction acts on it — discharging outright when the reachable code is
+loop-free. An obligation past a point where exploration stopped has no bounded
+result to report, and saying it does is the producer/consumer disagreement
+`CLAUDE.md` records for this exact artifact.
+
+`obligations_at_risk` was already computed a few lines above and answers that
+question per obligation rather than per run, so the rule became
+`!skipped && !at_risk`. Two tests are named after the argument.
+
+**Measured: 0 of 260 valid-assert tasks change verdict.** Smoke unchanged at
+153. The channel does open — `HPack` moved from "nothing to work on" to "1
+obligation inside a loop this can induct over" — and then k-induction fails to
+prove it. Handing a prover a base case does not make the proof succeed.
+
+Kept anyway, on soundness grounds only: it removes a class of unsound publish
+and costs nothing measurable. Recorded as a soundness fix, not a scoring one.
+
+### The census inferred a wire where the problem was a fact
+
+`Base64` and `InsertionSort-FunSat01` still report "nothing to work on", and
+correctly: their blocker is `all_paths_complete` for *every* obligation, so
+everything is at risk and there is genuinely no bounded result to share. The
+census counted "prover had nothing to work on" as a cooperation gap; it is
+mostly a truncation gap. A missing wire and a missing fact look identical from
+the decline message.
+
+### A note on measurement
+
+The first comparison showed 214 -> 213 on a 260-task sample with identical
+correct (173) and unproven (81) counts. A per-task differential found **0 tasks
+differing**, and `--repeat 2` reported every verdict stable. The gap was
+contention between two separate invocations — the effect `CLAUDE.md` names as
+the largest term in the score. A one-point delta on a sample is not a result.
+
 ## 2026-09-04 — engines that ask, and what asking is actually good for
 
 The blackboard was being used as a mailbox. Four of five artifact kinds had zero
