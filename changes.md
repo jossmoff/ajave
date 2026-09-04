@@ -126,6 +126,30 @@ that got the FPA pass gated on `open()` in the first place (float NRE 166 ->
 `2.0 * 3.0 == 6.0` — goes unverifiable -> refuted-FALSE -> **TRUE** across the
 two changes together.
 
+### Measured
+
+Full corpus, 180s: **valid-assert 843 -> 847**, **no-runtime-exception 1112 ->
+1112**, no new wrong answers. Session total 825 -> 847 on valid-assert.
+
+The mechanism is visible end to end on `PartitionEx`, which the change turns
+from UNKNOWN into TRUE:
+
+```
+before:  smt-bmc violated=1 (9ms) -> "nothing open, skipping the escalation pass"
+after:   smt-bmc violated=1 (8ms) -> smt-bmc-fpa discharged=1 (220ms)
+```
+
+The bitvector pass finds a float "violation" in 9ms and closes the obligation.
+Previously the FPA pass skipped and replay refuted the witness, leaving nothing
+behind. Now the FPA pass is offered the obligation back and proves it.
+
+Cost: the float category runs 2.5x slower (78s -> 195s back-to-back on the same
+machine), because the FPA pass now runs where it used to skip. That did **not**
+translate into corpus timeouts — 41 against 39, with total wall time up 13% —
+so the trade is positive at the current budget. It is worth re-checking if the
+FPA pass ever gets cheaper to enter, because this is the shape of cost that
+becomes a regression only once something else moves.
+
 ## 2026-09-01 — the concurrency completeness plan, phases 1-5
 
 Thirty-odd unsupported features turned out to be five missing *mechanisms*.
