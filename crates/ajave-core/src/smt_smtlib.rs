@@ -806,29 +806,134 @@ fn parse_bv_value(resp: &str) -> Option<i64> {
 /// Parse a string value from an SMT-LIB2 `(get-value ...)` response.
 /// Response format: `((name "value"))`.
 fn parse_string_value(resp: &str) -> Option<String> {
-    // Parse SMT-LIB2 string literal from `(get-value ...)` response.
-    // Response format: `((name "content"))`.  In SMT-LIB2 `""` inside a
-    // string literal represents a single `"`, so naive rfind-based parsing
-    // breaks on strings containing quotes.
-    let bytes = resp.as_bytes();
-    // Find the first `"` — this opens the string literal value.
-    let open = bytes.iter().position(|&b| b == b'"')?;
+    // Parse an SMT-LIB 2.6 string literal from a `(get-value ...)` response,
+    // whose shape is `((name "content"))`.
+    //
+    // Two things the obvious version gets wrong, and both produced witnesses
+    // that could not replay:
+    //
+    // 1. `""` inside a literal is a single `"`, so rfind-based parsing breaks
+    //    on any string containing a quote.
+    //
+    // 2. **Non-ASCII characters arrive escaped.** SMT-LIB 2.6 encodes them as
+    //    `\u{H...}` (1-5 hex digits) or `\uHHHH`, and Z3 emits that form. The
+    //    previous version copied those seven-plus characters through verbatim,
+    //    so a witness for `"DF" + U+1B92E` was delivered to the JVM as the
+    //    literal text `DF\u{1b92e}` — thirteen ASCII characters. The replay
+    //    then took a different path and refuted a witness that was correct.
+    //
+    //    Reading byte-by-byte and casting to `char` compounded it: that is
+    //    Latin-1, so any real multi-byte UTF-8 from the solver was mangled too.
+    //
+    // These are the *only* escapes SMT-LIB 2.6 defines inside string literals —
+    // there is deliberately no `\n` or `\t` — so anything else is literal
+    // text, including a lone backslash.
+    let chars: Vec<char> = resp.chars().collect();
+    let open = chars.iter().position(|&c| c == '"')?;
     let mut result = String::new();
     let mut i = open + 1;
-    while i < bytes.len() {
-        if bytes[i] == b'"' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                result.push('"');
-                i += 2;
-            } else {
-                break; // closing quote
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                if chars.get(i + 1) == Some(&'"') {
+                    result.push('"');
+                    i += 2;
+                } else {
+                    break; // closing quote
+                }
             }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            '\\' if chars.get(i + 1) == Some(&'u') => {
+                if let Some((c, next)) = parse_unicode_escape(&chars, i) {
+                    result.push(c);
+                    i = next;
+                } else {
+                    // Not a well-formed escape: it is ordinary text.
+                    result.push('\\');
+                    i += 1;
+                }
+            }
+            c => {
+                result.push(c);
+                i += 1;
+            }
         }
     }
     Some(result)
+}
+
+/// `\u{H...}` or `\uHHHH` at `i`, returning the character and the index after it.
+///
+/// Returns `None` for anything malformed or outside the Unicode range, so the
+/// caller can treat it as literal text rather than silently dropping input.
+fn parse_unicode_escape(chars: &[char], i: usize) -> Option<(char, usize)> {
+    // chars[i] == '\\', chars[i+1] == 'u'
+    if chars.get(i + 2) == Some(&'{') {
+        let mut j = i + 3;
+        let mut hex = String::new();
+        while j < chars.len() && chars[j] != '}' {
+            hex.push(chars[j]);
+            j += 1;
+        }
+        if j >= chars.len() || hex.is_empty() || hex.len() > 5 {
+            return None;
+        }
+        let cp = u32::from_str_radix(&hex, 16).ok()?;
+        Some((char::from_u32(cp)?, j + 1))
+    } else {
+        // Exactly four hex digits, no braces.
+        let hex: String = chars.get(i + 2..i + 6)?.iter().collect();
+        if hex.len() != 4 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let cp = u32::from_str_radix(&hex, 16).ok()?;
+        Some((char::from_u32(cp)?, i + 6))
+    }
+}
+
+#[cfg(test)]
+mod string_value_tests {
+    use super::parse_string_value;
+
+    /// The bug that cost the whole `String.*` family of autostub tasks.
+    ///
+    /// Z3 escapes any non-ASCII character in a model value, and the escape was
+    /// copied through verbatim — so a witness for `"DF" + U+1B92E` reached the
+    /// JVM as the thirteen ASCII characters `DF\u{1b92e}`, took a different
+    /// path, and was refuted. The witness had been correct all along; the
+    /// transport was not.
+    #[test]
+    fn a_braced_unicode_escape_becomes_the_character_it_names() {
+        let v = parse_string_value(r#"((s "DF\u{1b92e}"))"#).unwrap();
+        assert_eq!(v.chars().count(), 3);
+        assert_eq!(v, "DF\u{1b92e}");
+    }
+
+    #[test]
+    fn the_four_digit_form_is_understood_too() {
+        assert_eq!(parse_string_value(r#"((s "\u00e9"))"#).unwrap(), "é");
+        assert_eq!(parse_string_value(r#"((s "a\u0041b"))"#).unwrap(), "aAb");
+    }
+
+    /// SMT-LIB 2.6 defines no other escapes inside a string literal — there is
+    /// deliberately no `\n` — so a backslash that does not open a `\u` is
+    /// ordinary text and must survive.
+    #[test]
+    fn a_lone_backslash_is_literal_text() {
+        assert_eq!(parse_string_value(r#"((s "a\b"))"#).unwrap(), r"a\b");
+        assert_eq!(parse_string_value(r#"((s "\uZZZZ"))"#).unwrap(), r"\uZZZZ");
+    }
+
+    /// `""` is one quote, which is why this cannot be parsed by finding the
+    /// last `"`.
+    #[test]
+    fn a_doubled_quote_is_one_quote() {
+        assert_eq!(parse_string_value(r#"((s "a""b"))"#).unwrap(), "a\"b");
+    }
+
+    #[test]
+    fn an_empty_string_stays_empty() {
+        assert_eq!(parse_string_value(r#"((s ""))"#).unwrap(), "");
+    }
 }
 
 fn sign_extend_to_i64(val: u64, width: usize) -> i64 {

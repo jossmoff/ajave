@@ -155,12 +155,27 @@ impl<'a> ExploreCtx<'a> {
                 // claim whatever the assertion wants — which is how this first
                 // failed, returning `MAX_VALUE` for an input of 2.0000019.
                 //
-                // Constrain it by the defining property instead:
-                // |x - round(x)| <= 0.5. That pins the result for every input
-                // except an exact tie, where both neighbours satisfy it and
-                // Java takes the upper. Admitting the extra value at ties is an
-                // over-approximation of one point, and JVM replay is what
-                // rejects a witness that lands there.
+                // Constrain it by the defining property instead. The Javadoc
+                // is "the closest int to the argument, with ties rounding to
+                // positive infinity", which is exactly
+                //
+                //     r - 0.5 <= x < r + 0.5
+                //
+                // and that has a *unique* solution for every x, ties included:
+                // at x = 585552.5 only r = 585553 satisfies it.
+                //
+                // This was `|x - r| <= 0.5`, inclusive at both ends, which
+                // admits both neighbours at a tie. That is not a harmless
+                // over-approximation of one point — the solver is looking for
+                // the value that violates the assertion, so it picks the wrong
+                // neighbour *on purpose*, and the witness dies at replay. It
+                // cost every autostub round task exactly this way.
+                //
+                // Note this is not `floor(x + 0.5)`: computing that in
+                // floating point rounds 0.49999999999999994 up to 1.0, which
+                // is JDK-6430675 and why Java 7 changed the implementation.
+                // The relation above gets that case right because it never
+                // forms `x + 0.5`.
                 let fresh = self.solver.fresh_bv("round", iw);
 
                 // -0.5 <= x < 0.5  =>  0. Both bounds are exactly
@@ -185,13 +200,16 @@ impl<'a> ExploreCtx<'a> {
                 let is_nan = self.solver.fp_is_nan(f);
                 let result = self.solver.ite(is_nan, zero_i, r);
 
-                // |x - fresh| <= 0.5, asserted only where `fresh` is the answer.
+                // `fresh - 0.5 <= x < fresh + 0.5`, asserted only where
+                // `fresh` is the answer. The upper bound is *strict*: that is
+                // the whole difference between "closest int" and "closest int,
+                // ties toward positive infinity".
                 let rf = self.solver.fp_from_sbv(fresh, fw);
                 let half = self.solver.fp_const(0.5, fw);
                 let lo = self.solver.fp_sub(rf, half);
                 let hi = self.solver.fp_add(rf, half);
                 let c1 = self.solver.fp_le(lo, f);
-                let c2 = self.solver.fp_le(f, hi);
+                let c2 = self.solver.fp_lt(f, hi);
                 let within = self.solver.and(c1, c2);
                 let handled = self.solver.or(is_nan, ge_max);
                 let handled = self.solver.or(handled, le_min);

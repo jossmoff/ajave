@@ -278,6 +278,9 @@ impl Certifier for JvmReplay {
         }
 
         cmd.arg("Main");
+        if std::env::var("AJAVE_REPLAY_CMD").is_ok() {
+            eprintln!("REPLAY_CMD {:?}", cmd);
+        }
         let out = cmd.output();
 
         let out = match out {
