@@ -142,7 +142,20 @@ impl Orchestrator {
             debug!("orchestrator: {msg}");
             self.trace.push(msg);
 
-            self.phase = self.next_phase(open, violated, advanced, retired.iter().all(|r| *r));
+            // A question nobody has answered is unfinished business, even if
+            // every obligation is closed. The BMC routinely *closes* an
+            // obligation with a violation derived from an unconstrained
+            // `Math.sin`, and the answer that would settle it arrives a round
+            // later — so terminating on `open == 0` alone ended the run in
+            // exactly the case that motivated asking.
+            let outstanding = !self.bb.unanswered().is_empty();
+            self.phase = self.next_phase(
+                open,
+                violated,
+                advanced,
+                retired.iter().all(|r| *r),
+                outstanding,
+            );
         }
 
         for (id, ms) in &init_ms {
@@ -170,8 +183,18 @@ impl Orchestrator {
     }
 
     /// The schedule state machine from ARCHITECTURE.md section 4.
-    fn next_phase(&self, open: usize, _violated: bool, advanced: bool, all_retired: bool) -> Phase {
-        if open == 0 || all_retired {
+    fn next_phase(
+        &self,
+        open: usize,
+        _violated: bool,
+        advanced: bool,
+        all_retired: bool,
+        questions_outstanding: bool,
+    ) -> Phase {
+        if all_retired {
+            return Phase::Report;
+        }
+        if open == 0 && !questions_outstanding {
             return Phase::Report;
         }
         match self.phase {

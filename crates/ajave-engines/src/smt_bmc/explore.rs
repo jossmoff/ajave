@@ -8,6 +8,7 @@ use ajave_ir::*;
 use ajave_models;
 
 use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
+use ajave_core::artifact::{Approximations, ProgramPoint};
 
 /// Whether a havoced method call could throw a RuntimeException.
 /// Conservative: returns true for any call to a class whose methods are known
@@ -687,6 +688,34 @@ impl<'a> ExploreCtx<'a> {
                         self.completeness.has_potentially_throwing_havoc = true;
                     }
                     let bv = self.encode_rvalue(rv);
+                    // We could not model this call — but "could not model" is
+                    // not "know nothing". Ask.
+                    //
+                    // Without this the fresh value above is entirely
+                    // unconstrained, so the solver is free to claim
+                    // `Math.sin(x) == 5000` and every path reachable only
+                    // through such a claim is explored for nothing. Nobody has
+                    // to model `sin` to rule that out; its range is specified.
+                    //
+                    // Phrased as a question about the destination *variable*,
+                    // with the binding in `given`, so the answer comes back in
+                    // terms of a term we already hold.
+                    // A call we do not model. Declared here rather than at
+                    // `Rvalue::Havoc` — which is where it was first put, and
+                    // never fired, because `Math.sin` lifts to a `Call` and
+                    // reaches this path instead. That is why the first attempt
+                    // at this measured no change at all.
+                    self.approximated =
+                        self.approximated.union(Approximations::UNMODELLED_CALL);
+                    // If an earlier pass already asked about this call and
+                    // got an answer, use it now rather than asking again.
+                    if let Some((lo, hi)) =
+                        self.known_bounds.get(&(self.body.key.clone(), v)).copied()
+                    {
+                        self.assume_known_bound(v, lo, hi);
+                    } else {
+                        self.ask_about_call(v, target, args);
+                    }
                     // If the return type is String, create a fresh string
                     // term so downstream string operations (contains, equals,
                     // etc.) can be constrained by Z3's string solver.
@@ -1141,7 +1170,10 @@ impl<'a> ExploreCtx<'a> {
 
         let mut then_explored = false;
         if cond_tainted { self.path_tainted = true; }
-        if !cond_tainted {
+        if cond_tainted && self.tainted_branch_is_infeasible(cond_nz) {
+            log::trace!("smt-bmc: fork-then bb{} in {} pruned by a supplied bound",
+                then_.0, self.body.key);
+        } else if !cond_tainted {
             self.path_constraints.push(cond_nz);
             let feas = self.check_sat_with_path();
             log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
@@ -1190,7 +1222,10 @@ impl<'a> ExploreCtx<'a> {
         }
         if !self.budget_exhausted() {
             if cond_tainted { self.path_tainted = true; }
-            if !cond_tainted {
+            if cond_tainted && self.tainted_branch_is_infeasible(cond_bool) {
+                log::trace!("smt-bmc: fork-else bb{} in {} pruned by a supplied bound",
+                    else_.0, self.body.key);
+            } else if !cond_tainted {
                 self.path_constraints.push(cond_bool);
                 let feas = self.check_sat_with_path();
                 log::trace!("smt-bmc: fork-else bb{} in {} feas={:?}",
@@ -1428,6 +1463,109 @@ impl<'a> ExploreCtx<'a> {
     }
 
     // ── Main exploration entry points ───────────────────────────────────
+
+    /// Is this branch provably unreachable, using only claims we are entitled
+    /// to believe?
+    ///
+    /// For an *untainted* condition the constraint is imposed permanently and
+    /// this is not needed. For a tainted one it is: the condition depends on a
+    /// value we do not model, so it may not be imposed — a witness derived
+    /// from it would be about a different program.
+    ///
+    /// But refusing to impose it and refusing to *ask* about it are different
+    /// things. If the condition is unsatisfiable given only sound facts — the
+    /// bounds another engine established, and the untainted constraints
+    /// already on the path — then no execution takes this branch, whatever the
+    /// unmodelled value turns out to be. Skipping it is then pruning, not
+    /// guessing.
+    ///
+    /// Asked and immediately retracted, so nothing downstream inherits a
+    /// constraint over a value we do not trust.
+    fn tainted_branch_is_infeasible(&mut self, cond: ajave_core::smt::Term) -> bool {
+        // Only worth the solver call when something sound could decide it.
+        if self.known_bounds.is_empty() {
+            return false;
+        }
+        self.path_constraints.push(cond);
+        let feas = self.check_sat_with_path();
+        self.path_constraints.pop();
+        feas == SatResult::Unsat
+    }
+
+    /// Post a question about the result of a call we could not model.
+    ///
+    /// Only for calls whose arguments we can name. An argument we cannot
+    /// express in `Expr` would make the binding a lie, and a claim nobody can
+    /// read is worse than no claim.
+    fn ask_about_call(&mut self, dest: VarId, target: &MethodKey, args: &[Operand]) {
+        let Some(block) = self.current_block else { return };
+        let mut arg_exprs = Vec::new();
+        for a in args {
+            match a {
+                Operand::Var(v) => arg_exprs.push(ajave_core::term::Expr::Var(*v)),
+                Operand::Const(Const::Int(n)) => {
+                    arg_exprs.push(ajave_core::term::Expr::Int(*n as i64))
+                }
+                Operand::Const(Const::Long(n)) => {
+                    arg_exprs.push(ajave_core::term::Expr::Int(*n))
+                }
+                Operand::Const(Const::Double(d)) => {
+                    arg_exprs.push(ajave_core::term::Expr::double(*d))
+                }
+                // Anything else: do not pretend to describe it.
+                _ => return,
+            }
+        }
+        let about = ajave_core::term::Expr::Var(dest);
+        let call = ajave_core::term::Expr::call(
+            &target.class, &target.name, &target.desc, arg_exprs,
+        );
+        let given = vec![ajave_core::term::Expr::bin(
+            ajave_core::term::Op::Eq,
+            about.clone(),
+            call,
+        )];
+        let at = ProgramPoint {
+            method: self.body.key.clone(),
+            block,
+            index: 0,
+        };
+        self.pending_queries.push((at, about, given));
+    }
+
+    /// Constrain a variable to a bound another engine established.
+    ///
+    /// The bound is `NaN, or within [lo, hi]`, which is what makes it true for
+    /// every input including the out-of-domain ones — `sqrt(-1)` and
+    /// `asin(2)` are NaN, and NaN is outside every range. Asserting the
+    /// unguarded form would remove real executions, and an exhaustive claim
+    /// over a state space we had shrunk is a wrong TRUE.
+    pub(super) fn assume_known_bound(&mut self, vid: VarId, lo_bits: u64, hi_bits: u64) {
+        let w = self.width_of_var(vid);
+        if w != 64 {
+            return;
+        }
+        let t = self.get_var(vid);
+        let fp = self.solver.fp_from_bits(t, 64);
+        let is_nan = self.solver.fp_is_nan(fp);
+        let mut in_range: Option<ajave_core::smt::Term> = None;
+        if f64::from_bits(lo_bits).is_finite() {
+            let lo = self.solver.fp_const(f64::from_bits(lo_bits), 64);
+            in_range = Some(self.solver.fp_le(lo, fp));
+        }
+        if f64::from_bits(hi_bits).is_finite() {
+            let hi = self.solver.fp_const(f64::from_bits(hi_bits), 64);
+            let le = self.solver.fp_le(fp, hi);
+            in_range = Some(match in_range {
+                Some(g) => self.solver.and(g, le),
+                None => le,
+            });
+        }
+        if let Some(r) = in_range {
+            let guarded = self.solver.or(is_nan, r);
+            self.path_constraints.push(guarded);
+        }
+    }
 
     pub(super) fn explore_block(&mut self, block_id: BlockId, stmt_idx: usize) {
         self.explore_block_until(block_id, stmt_idx, None);

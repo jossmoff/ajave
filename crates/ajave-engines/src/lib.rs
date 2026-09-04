@@ -30,6 +30,7 @@ pub mod math_interval;
 pub mod kinduction;
 pub mod nra;
 pub mod predicate;
+pub mod ranges;
 pub mod presolve;
 pub mod smt_bmc;
 pub mod smt_encode;

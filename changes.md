@@ -2,6 +2,83 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-04 — engines that ask, and what asking is actually good for
+
+The blackboard was being used as a mailbox. Four of five artifact kinds had zero
+producers, `Blackboard::since` had zero consumers, and ten of eleven engines
+took `_budget` and ignored it. Every artifact was an *answer*, so an engine that
+got stuck had exactly one move: give up on the obligation, conservatively, and
+discard everything it had established. When the BMC meets `Math.sin(x)` it knows
+`x` is constrained and the path feasible, and throws all of it away — not
+because the information is unavailable, but because there was nobody to ask.
+
+`Artifact::Query` and `Artifact::Lemma` close that, on top of a shared term
+language (`core::term::Expr`) whose absence explains three of the four dead
+artifact kinds. The publish rule mirrors `Direction` one level down:
+`Bounds`/`Holds` are claims about every execution and need `Over`;
+`SatisfiedBy`/`RefutedBy` are about one and need `Under`.
+
+### Three blockers, all the same mistake
+
+Closing the loop end to end needed three fixes, and each was a component
+declaring itself finished while work remained:
+
+1. **The answerer retired in round 0.** `ranges` returned `Exhausted` when
+   nobody had asked yet, and the orchestrator retires an engine that says it is
+   finished. "Nothing to do yet" and "nothing to do ever" are different answers,
+   and only the engine knows which it means.
+2. **The asker would not re-enter.** Gated on `bb.open()` — but an
+   unconstrained `Math.sin` lets the solver claim `sin(x) > 2`, so the pass had
+   *closed* the very obligation the answer would settle. The same trap the FPA
+   pass fell into, fixed the same way: gate on
+   `open_for(UNMODELLED_CALL)`.
+3. **The orchestrator ended the run.** `open == 0` meant Report, so a pending
+   question could not survive to the next round.
+
+Fixing (2) also repaired something from earlier the same day: `UNMODELLED_CALL`
+had been declared on `Rvalue::Havoc` and never fired, because `Math.sin` lifts
+to a `Call` and reaches a different path. That is why the first attempt at it
+measured no change at all.
+
+### The negative result, which is the valuable part
+
+The loop works. It does not pay.
+
+```
+smoke           121 correct / 153  ->  120 correct / 152
+float category   56 correct /  59  ->   56 correct /  59
+```
+
+`MathHelper_true`, dense in `Math` calls, went from 7.6s to a 60s timeout: many
+queries, so a full second exploration, for nothing.
+
+The reason is worth stating precisely, because it says where the channel *does*
+pay. A range does not make a path through an unmodelled call **trusted**. The
+obligation is still refused with `skipped_obligation` because the path is
+tainted, and taint blocks the check independently of whether a branch was
+pruned. Bounding a value you cannot model leaves it unmodelled.
+
+**So the query channel pays when an answerer can supply a *value*, not when it
+can only bound one.** Lifting `FdLibm` — where `Math.sin` becomes ordinary
+double arithmetic — would qualify. A range table does not. The channel is right;
+`ranges` was the wrong first answerer.
+
+Asking is therefore behind `AJAVE_ASK=1`, default off, so the next answerer has
+somewhere to plug in and the measurement can be repeated rather than re-argued.
+That leaves `Query`/`Lemma` with no default producer, which contradicts the rule
+added to `CLAUDE.md` the same day. The rule stands and gains a clause: an
+artifact kind no engine produces by default is **unfinished**, and must be
+recorded as such rather than left to look complete.
+
+### Also landed
+
+A sound pruning rule that survives independently of the above. A tainted branch
+condition may not be *imposed* — a witness derived from it would be about a
+different program — but it can be *asked about*. If it is unsatisfiable given
+only sound facts, no execution takes it, whatever the unmodelled value turns out
+to be. Asked and immediately retracted, so nothing downstream inherits a
+constraint over an untrusted value.
+
 ## 2026-09-04 — the operand stack had no types, and that was hiding the float gap
 
 `float-nonlinear-calculation` scored 40 of a possible 99 and looked like a

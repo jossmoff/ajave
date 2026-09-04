@@ -224,6 +224,20 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
     // this. For non-float bodies, AI only publishes hints during init (no
     // discharge), so BMC is unaffected.
     engines.push(Box::new(ajave_engines::ai::AiEngine::new()));
+    // Answers questions rather than deciding obligations. Placed before the
+    // BMC so a question asked in one round is answered by the time the BMC
+    // returns for it — the BMC posts queries, reports `Stalled`, and the
+    // orchestrator's round loop brings it back once.
+    //
+    // This engine could not verify a program if its life depended on it. That
+    // is the point: a specialised engine should be a resource the others can
+    // use, not an alternative to them.
+    // Only when asking is on. An answerer with nobody to answer reports
+    // `Stalled` forever, which also stops `all_retired` ever becoming true and
+    // keeps the round loop turning for nothing.
+    if ajave_engines::smt_bmc::asking_enabled() {
+        engines.push(Box::new(ajave_engines::ranges::Ranges::new()));
+    }
     if let Some(factory) = ajave_core::smt_smtlib::SmtLibFactory::from_env() {
         let factory2 = ajave_core::smt_smtlib::SmtLibFactory::from_env();
         let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);

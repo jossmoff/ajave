@@ -82,6 +82,30 @@ const MAX_FORKS: u32 = 500;
 /// Sweeping this answers that directly, and the answer decides whether
 /// iterative deepening is worth building. `CLAUDE.md` asks for exactly this
 /// check on every fitted constant; these have never had one.
+/// Whether the BMC posts questions to the blackboard and returns for the
+/// answers. **Off by default, because it was measured and it does not pay.**
+///
+/// The mechanism works end to end: the BMC asks for bounds on a call it cannot
+/// model, `ranges` answers from the Javadoc, and the second pass assumes the
+/// bound. What it does not do is decide anything. A range does not make a path
+/// through an unmodelled call *trusted* — the obligation is still refused with
+/// `skipped_obligation` because the path is tainted, and taint blocks the check
+/// independently of whether a branch was pruned.
+///
+/// Meanwhile the second pass costs a full re-exploration. On `MathHelper_true`,
+/// which is dense in `Math` calls, that took the task from 7.6s to a 60s
+/// timeout — one task lost, none gained.
+///
+/// The negative result is worth more than the feature: the query channel pays
+/// when an answerer can supply a *value*, not when it can only bound one.
+/// Lifting `FdLibm` would qualify; a range table does not. Kept behind this
+/// flag so the next answerer has somewhere to plug in, and so the measurement
+/// can be repeated rather than re-argued.
+pub fn asking_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_ASK").map(|v| v == "1").unwrap_or(false))
+}
+
 fn budget_scale() -> u64 {
     static SCALE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *SCALE.get_or_init(|| {
@@ -360,6 +384,14 @@ pub struct SmtBmc {
     /// non-ASCII chars that our Character method encodings can't model,
     /// but limits falsification to the ASCII subset.
     pub ascii_only: bool,
+    /// Queries this engine posted and has not yet consumed answers for.
+    asked: Vec<u32>,
+    /// Whether a further pass is permitted once questions have been answered.
+    ///
+    /// Bounded at one. The point is to act on something learned, not to
+    /// iterate — and the budget sweep settled that more of the same effort
+    /// converts nothing, so an unbounded loop would buy only wall time.
+    may_reenter: bool,
 }
 
 impl SmtBmc {
@@ -370,6 +402,8 @@ impl SmtBmc {
             max_depth,
             done: false,
             ascii_only: false,
+            asked: Vec::new(),
+            may_reenter: true,
         }
     }
 }
@@ -455,6 +489,38 @@ impl Engine for SmtBmc {
             self.max_depth
         );
 
+        // Answers to questions an earlier pass asked. This is the point of
+        // the whole mechanism: a bound on `Math.sin(x)` cannot be *derived*
+        // here — SMT-LIB has no `fp.sin` — but it can be *assumed*, and
+        // assuming it prunes every path that only exists because the solver
+        // was free to claim `sin(x) == 5000`.
+        //
+        // Only bounds from an over-approximating answerer are usable; the
+        // blackboard has already refused anything else at publish, so reaching
+        // here means the claim is about every execution.
+        let mut known_bounds: HashMap<(MethodKey, VarId), (u64, u64)> = HashMap::new();
+        for qid in std::mem::take(&mut self.asked) {
+            let Some(q) = bb.query(qid) else { continue };
+            let (method, about) = (q.at.method.clone(), q.about.clone());
+            for (lemma, approx) in bb.answers(qid) {
+                // A lemma derived under an approximation this engine does not
+                // make is a fact about a different program — the same rule
+                // `open_for` applies to statuses.
+                if !approx.is_exact() {
+                    continue;
+                }
+                if let Answer::Bounds { lo, hi } = &lemma.answer {
+                    if let (ajave_core::term::Expr::Var(v),
+                            ajave_core::term::Expr::Double(l),
+                            ajave_core::term::Expr::Double(h)) = (&about, lo, hi) {
+                        debug!("smt-bmc: assuming bound on v{} from {}", v.0, lemma.by);
+                        known_bounds.insert((method.clone(), *v), (*l, *h));
+                    }
+                }
+            }
+        }
+        let learned = known_bounds.len();
+
         let type_array = solver.fresh_array("type", 32);
         let mut ctx = ExploreCtx {
             solver: solver.as_mut(),
@@ -478,6 +544,8 @@ impl Engine for SmtBmc {
             cut_points: BTreeSet::new(),
             frames: Vec::new(),
             approximated: Approximations::EXACT,
+            pending_queries: Vec::new(),
+            known_bounds,
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -615,6 +683,22 @@ impl Engine for SmtBmc {
         // What this exploration failed to model. Rides out on every artifact
         // below, so a more faithful engine can ask for these obligations back.
         let approximated = ctx.approximated;
+
+        // Post the questions raised on the way. A query costs nothing and
+        // commits to nothing, so there is no reason to be sparing — but an
+        // engine that asks and never returns has wasted the answer, which is
+        // why `may_reenter` exists below.
+        let pending = std::mem::take(&mut ctx.pending_queries);
+        let asked_now = !pending.is_empty() && asking_enabled();
+        if asked_now {
+            for (at, about, given) in pending {
+                let id = bb.ask(self.id(), at, about, Want::Bounds, given);
+                self.asked.push(id);
+            }
+        }
+        if learned > 0 {
+            info!("smt-bmc: assumed {learned} bound(s) supplied by another engine");
+        }
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
@@ -776,6 +860,27 @@ impl Engine for SmtBmc {
             }
         }
 
+        // Having asked something, come back once to act on the answer. This is
+        // the one place the portfolio is re-entrant, and it is re-entrancy for
+        // *learning* rather than for more effort — the budget sweep settled
+        // that a bigger budget alone converts nothing.
+        // `open_for`, not `open`. An unconstrained `Math.sin` lets the solver
+        // claim `sin(x) > 2`, so this pass may have *closed* the very
+        // obligation the answers would settle — which is the same trap the FPA
+        // pass fell into, and the reason `open_for` exists. Gating on `open()`
+        // here meant the engine never returned in exactly the case that
+        // motivated asking.
+        if asked_now
+            && self.may_reenter
+            && !bb.open_for(Approximations::UNMODELLED_CALL).is_empty()
+        {
+            self.may_reenter = false;
+            self.done = false;
+            debug!("smt-bmc: asked {} question(s); will return for the answers",
+                   self.asked.len());
+            return Progress::Stalled;
+        }
+
         if advanced {
             Progress::Advanced
         } else {
@@ -826,6 +931,19 @@ struct ExploreCtx<'a> {
     cut_points: BTreeSet<(MethodKey, BlockId)>,
     /// Call sites of the frames currently being explored, innermost last.
     frames: Vec<(MethodKey, BlockId)>,
+    /// Questions raised during exploration, posted to the blackboard once it
+    /// finishes.
+    ///
+    /// Collected rather than published inline because `ExploreCtx` does not
+    /// hold the blackboard — the same reason `violations` is a field. Each is
+    /// `(program point, about, given)`.
+    pending_queries: Vec<(ProgramPoint, ajave_core::term::Expr, Vec<ajave_core::term::Expr>)>,
+    /// Bounds another engine has already established for a variable, as
+    /// `(method, var) -> (lo bits, hi bits)`.
+    ///
+    /// Read from lemmas at the start of a pass and asserted as the variable is
+    /// created, which is what turns an answer into pruning.
+    known_bounds: HashMap<(MethodKey, VarId), (u64, u64)>,
     /// What this exploration did not model faithfully.
     ///
     /// Set by `encode_binop` when it encodes a float arithmetic operator on

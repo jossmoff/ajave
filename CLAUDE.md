@@ -343,6 +343,12 @@ a type. If you cannot name the consumer, the artifact is not ready. `Invariant`,
 `Precision`, `Trace` and `Residual` sat unused for months precisely because
 nobody had to.
 
+A producer that is **off by default is not a producer**. `Query`/`Lemma` are in
+exactly that state: the loop works end to end behind `AJAVE_ASK=1` and is
+disabled because it was measured and costs a task without gaining one. That is a
+legitimate place to leave a mechanism — but it is *unfinished*, and saying so is
+the condition for leaving it there.
+
 ### Every artifact must document what a consumer may conclude from it
 Already learned once, expensively: `Bounded { k }` means the BMC's *path-length*
 bound, k-induction consumed it as an *iteration* count, and never read it. A
