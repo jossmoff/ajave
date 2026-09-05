@@ -963,11 +963,12 @@ impl<'a> ExploreCtx<'a> {
             self.field_tainted.remove(&k);
         }
         // Track string terms through instance fields (per-object via string arrays)
-        if let Some(st) = match val {
+        let val_str = match val {
             Operand::Var(v) => self.str_vars.get(v).copied(),
             Operand::Const(Const::Str(s)) => Some(self.solver.str_const(s)),
             _ => None,
-        } {
+        };
+        if let Some(st) = val_str {
             let str_arr = self.get_field_str_array(&k);
             let new_str_arr = self.solver.array_store(str_arr, obj_term, st);
             self.field_str_arrays.insert(k, new_str_arr);

@@ -2026,6 +2026,138 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         Ok(None)
     }
 
+    /// Rebuild `a + b + "text"` from a `StringConcatFactory` recipe.
+    ///
+    /// Emitted as left-to-right `String.concat` calls, which the SMT encoder
+    /// already models exactly, so the taint chain survives without any new
+    /// machinery. A non-String argument is converted with `String.valueOf`
+    /// first — `"n=" + count` is a concatenation of an int.
+    fn lift_string_concat(
+        &mut self,
+        recipe: &str,
+        captured: &[Operand],
+        bsm: &crate::classfile::BootstrapMethod,
+    ) -> Result<LiftOut, String> {
+        const ARG: char = '\u{1}';
+        const CONST: char = '\u{2}';
+
+        // Pieces of the result, in order.
+        let mut pieces: Vec<Operand> = Vec::new();
+        let mut literal = String::new();
+        let mut next_arg = 0usize;
+        // Constant slots are filled from the static arguments after the recipe.
+        let mut next_const = 1usize;
+
+        for ch in recipe.chars() {
+            match ch {
+                ARG => {
+                    if !literal.is_empty() {
+                        pieces.push(Operand::Const(Const::Str(std::mem::take(&mut literal))));
+                    }
+                    match captured.get(next_arg) {
+                        Some(a) => pieces.push(a.clone()),
+                        // Recipe and arguments disagree: say nothing rather
+                        // than build a string that is not the program's.
+                        None => return Ok(None),
+                    }
+                    next_arg += 1;
+                }
+                CONST => {
+                    match self.lifter.cf.bootstrap_string_arg(bsm, next_const) {
+                        Some(c) => literal.push_str(&c),
+                        None => return Ok(None),
+                    }
+                    next_const += 1;
+                }
+                c => literal.push(c),
+            }
+        }
+        if !literal.is_empty() {
+            pieces.push(Operand::Const(Const::Str(literal)));
+        }
+        if pieces.is_empty() {
+            pieces.push(Operand::Const(Const::Str(String::new())));
+        }
+
+        // Build it with a `StringBuilder` chain, which is precisely what javac
+        // emitted for this same source before Java 9 moved to
+        // `invokedynamic` — so it is a faithful lowering rather than an
+        // approximation, and the SMT encoder already models it.
+        //
+        // Deliberately *not* `String.concat`. That was the first attempt and it
+        // invented an exception the real operation cannot raise: `"x" + null`
+        // yields the text `"xnull"`, while `"x".concat(null)` throws NPE.
+        // `String.concat`'s contract carries that precondition, so every
+        // concatenation in the program became a possible NPE — measured as
+        // no-runtime-exception 1112 -> 1098 against valid-assert 846 -> 856.
+        // `StringBuilder.append` is `Contract::TOTAL_MUT`: total, and
+        // `append(null)` appends "null" exactly as concatenation does.
+        let sb = self.lifter.temp(Ty::Ref);
+        self.stmts.push(Stmt::Assign(sb, Rvalue::New("java/lang/StringBuilder".into())));
+        self.lifter.new_classes.insert(sb, "java/lang/StringBuilder".to_string());
+        let sbt = self.lifter.temp(Ty::Ref);
+        self.stmts.push(Stmt::Assign(sbt, Rvalue::Call {
+            target: MethodKey {
+                class: "java/lang/StringBuilder".into(),
+                name: "<init>".into(),
+                desc: "()V".into(),
+            },
+            args: vec![Operand::Var(sb)],
+            is_virtual: false,
+        }));
+        for p in pieces {
+            let (p, desc) = self.append_overload(p);
+            let t = self.lifter.temp(Ty::Ref);
+            self.stmts.push(Stmt::Assign(t, Rvalue::Call {
+                target: MethodKey {
+                    class: "java/lang/StringBuilder".into(),
+                    name: "append".into(),
+                    desc: desc.into(),
+                },
+                args: vec![Operand::Var(sb), p],
+                is_virtual: false,
+            }));
+        }
+        let out = self.lifter.temp(Ty::Str);
+        self.stmts.push(Stmt::Assign(out, Rvalue::Call {
+            target: MethodKey {
+                class: "java/lang/StringBuilder".into(),
+                name: "toString".into(),
+                desc: "()Ljava/lang/String;".into(),
+            },
+            args: vec![Operand::Var(sb)],
+            is_virtual: false,
+        }));
+        self.stack.push(Operand::Var(out));
+        debug!("invokedynamic: lowered string concat, recipe {recipe:?}");
+        Ok(None)
+    }
+
+    /// Which `StringBuilder.append` overload this operand wants.
+    ///
+    /// `append` is typed, so a primitive needs no conversion — the overload
+    /// does it, exactly as javac's own lowering did. That also keeps the
+    /// operand count and types honest for anything reading the IR.
+    fn append_overload(&mut self, op: Operand) -> (Operand, &'static str) {
+        let desc = match &op {
+            Operand::Const(Const::Str(_)) => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            Operand::Const(Const::Int(_)) => "(I)Ljava/lang/StringBuilder;",
+            Operand::Const(Const::Long(_)) => "(J)Ljava/lang/StringBuilder;",
+            Operand::Const(Const::Float(_)) => "(F)Ljava/lang/StringBuilder;",
+            Operand::Const(Const::Double(_)) => "(D)Ljava/lang/StringBuilder;",
+            Operand::Var(v) => match self.lifter.vars[v.0 as usize].ty {
+                Ty::Int => "(I)Ljava/lang/StringBuilder;",
+                Ty::Long => "(J)Ljava/lang/StringBuilder;",
+                Ty::Float => "(F)Ljava/lang/StringBuilder;",
+                Ty::Double => "(D)Ljava/lang/StringBuilder;",
+                Ty::Str => "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+                _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+            },
+            _ => "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+        };
+        (op, desc)
+    }
+
     fn lift_invokedynamic(&mut self) -> Result<LiftOut, String> {
         // invokedynamic: lambdas, method references, string concatenation.
         //
@@ -2058,6 +2190,41 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         captured.reverse();
 
         debug!("invokedynamic: {name} {desc}");
+
+        // String concatenation.
+        //
+        // In Java 9+ `a + b` on strings does not compile to a StringBuilder
+        // chain any more — javac emits an `invokedynamic` to
+        // `StringConcatFactory.makeConcatWithConstants`. Havocing it, which is
+        // what happened below, makes *every string concatenation in the
+        // program* an unconstrained value.
+        //
+        // That is why securibench's taint chain died. The tainted string
+        // reaches the sink through `"select ... name=" + name`, so the
+        // concatenation is precisely the step that carries it; with the result
+        // unconstrained, the solver satisfies `s.contains("<bad/>")` with a
+        // free `s` and leaves the actual input empty. The witness is then
+        // refuted, and a whole category of genuinely-FALSE tasks scores zero.
+        //
+        // The recipe in the bootstrap's first static argument says how to
+        // rebuild the string: `\u0001` is an argument slot, `\u0002` a
+        // constant slot, everything else literal text. Lowering it to a chain
+        // of `String.concat` reuses the model the SMT encoder already has, so
+        // nothing downstream needs to know this happened.
+        if let Some((owner, bname)) = self.lifter.cf.bootstrap_owner_name(bsm) {
+            if owner == "java/lang/invoke/StringConcatFactory" {
+                let recipe = if bname == "makeConcatWithConstants" {
+                    self.lifter.cf.bootstrap_string_arg(bsm, 0)
+                } else {
+                    // `makeConcat` takes no recipe: every argument in order.
+                    Some("\u{1}".repeat(captured.len()))
+                };
+                if let Some(recipe) = recipe {
+                    return self.lift_string_concat(&recipe, &captured, bsm);
+                }
+            }
+        }
+
         let Some(imp) = impl_ref else {
             // Not a lambda we can resolve (string concatenation, a bootstrap we
             // do not model). Unchanged behaviour: havoc the result.

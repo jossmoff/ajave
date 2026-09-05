@@ -356,6 +356,34 @@ impl ClassFile {
         self.member_ref(member_idx).ok()
     }
 
+    /// The bootstrap's own method, as `owner.name`.
+    ///
+    /// What distinguishes a lambda from a string concatenation: the former
+    /// bootstraps through `LambdaMetafactory`, the latter through
+    /// `StringConcatFactory`.
+    pub fn bootstrap_owner_name(&self, bsm: &BootstrapMethod) -> Option<(String, String)> {
+        let (_, member_idx) = match self.cp.get(bsm.method_ref as usize) {
+            Some(Cp::MethodHandle(k, i)) => (*k, *i),
+            _ => return None,
+        };
+        let m = self.member_ref(member_idx).ok()?;
+        Some((m.owner, m.name))
+    }
+
+    /// A `String` constant among the bootstrap's static arguments.
+    ///
+    /// `StringConcatFactory.makeConcatWithConstants` carries the *recipe* here:
+    /// `\u0001` marks an argument slot, `\u0002` a constant slot, and every
+    /// other character is literal text.
+    pub fn bootstrap_string_arg(&self, bsm: &BootstrapMethod, i: usize) -> Option<String> {
+        let idx = *bsm.args.get(i)?;
+        match self.cp.get(idx as usize) {
+            Some(Cp::Str(u)) => cp_utf8(&self.cp, *u).ok(),
+            Some(Cp::Utf8(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
     pub fn invoke_dynamic(&self, idx: u16) -> R<(String, String, &BootstrapMethod)> {
         let (bsm_idx, nat_idx) = match self.cp.get(idx as usize) {
             Some(Cp::InvokeDynamic(a, b)) => (*a, *b),
