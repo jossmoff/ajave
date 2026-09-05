@@ -143,6 +143,69 @@ public interface ObjectFactory<T> { T createObject(); }
     /// Compile the shadow class into a temp directory, returning its path for
     /// use as the front of the classpath. Cached per-process would be nicer;
     /// kept simple since replay runs are few and this is a one-off tool.
+    /// Stand-ins for environment classes that make replay depend on the
+    /// machine rather than on the witness.
+    ///
+    /// `juliet-java` was 0 of 9 because of this. Those tasks read their input
+    /// through a Verifier-controlled mock `BufferedReader`, so the *data* is
+    /// ours — but they reach it through a real `java.net.Socket`:
+    ///
+    ///     socket = new Socket("host.example.org", 39544);
+    ///
+    /// On any machine that resolves DNS honestly that throws
+    /// `UnknownHostException`, the task's own `catch (IOException)` swallows
+    /// it, and the sink is never reached. Replay reported "refuted" for every
+    /// witness, however good, because it was testing the network.
+    ///
+    /// Replay exists to check the *witness*, under the same environmental
+    /// assumptions the analysis made. The BMC models `new Socket(..)` as
+    /// succeeding, so a faithful re-execution has to as well; otherwise the two
+    /// are not running the same program and a disagreement says nothing.
+    ///
+    /// These are deliberately minimal and non-behavioural: the connection
+    /// succeeds, the stream is empty, close does nothing. **No input comes from
+    /// here.** The data still arrives through `Verifier`, so the witness is
+    /// still what decides, and a wrong witness still fails.
+    const ENV_MOCKS: &[(&str, &str)] = &[
+        (
+            "java/net/Socket.java",
+            r#"package java.net;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+public class Socket implements java.io.Closeable {
+    public Socket() {}
+    public Socket(String host, int port) {}
+    public Socket(java.net.InetAddress a, int port) {}
+    public InputStream getInputStream() { return new ByteArrayInputStream(new byte[0]); }
+    public OutputStream getOutputStream() { return new ByteArrayOutputStream(); }
+    public void close() {}
+    public boolean isConnected() { return true; }
+}
+"#,
+        ),
+    ];
+
+    /// Does the program reach any class we have a stand-in for?
+    ///
+    /// Patching `java.base` is not free and not something to do speculatively,
+    /// so it happens only for programs that would otherwise be testing the
+    /// environment.
+    fn needs_env_mocks(prog: &Program) -> bool {
+        prog.bodies.values().any(|b| {
+            b.blocks.iter().any(|blk| {
+                blk.stmts.iter().any(|st| match st {
+                    ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::Call { target, .. }) => {
+                        target.class == "java/net/Socket"
+                    }
+                    ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::New(c)) => c == "java/net/Socket",
+                    _ => false,
+                })
+            })
+        })
+    }
+
     fn build_shadow(
         &self,
     ) -> Result<(std::path::PathBuf, crate::scratch::ScratchDir), String> {
@@ -173,6 +236,40 @@ public interface ObjectFactory<T> { T createObject(); }
                 "shadow Verifier failed to compile: {}",
                 String::from_utf8_lossy(&out.stderr)
             ));
+        }
+
+        // Environment stand-ins go in their own directory: they are patched
+        // into `java.base` rather than placed on the classpath, because the
+        // bootstrap loader refuses a `java.*` class from anywhere else.
+        let patch = dir.join("__patch");
+        std::fs::create_dir_all(&patch).map_err(|e| e.to_string())?;
+        let mut mock_srcs = Vec::new();
+        for (rel, body) in Self::ENV_MOCKS {
+            let f = patch.join(rel);
+            if let Some(parent) = f.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&f, body).map_err(|e| e.to_string())?;
+            mock_srcs.push(f);
+        }
+        if !mock_srcs.is_empty() {
+            let out = std::process::Command::new(&self.javac)
+                .arg("--patch-module")
+                .arg(format!("java.base={}", patch.display()))
+                .arg("-d")
+                .arg(&patch)
+                .args(&mock_srcs)
+                .output()
+                .map_err(|e| format!("failed to run {}: {e}", self.javac))?;
+            if !out.status.success() {
+                // Not fatal: without the stand-ins replay simply stays
+                // environment-dependent, which is where it was before.
+                warn!(
+                    "jvm-replay: environment stand-ins failed to compile, \
+                     replay will depend on the machine: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
         }
         // The caller uses this as a classpath entry, so the guard has to
         // outlive the function; leaking it here would reinstate the bug.
@@ -246,6 +343,12 @@ impl Certifier for JvmReplay {
             .collect();
 
         let mut cmd = std::process::Command::new(&self.java);
+        if Self::needs_env_mocks(prog) {
+            let patch = shadow_dir.join("__patch");
+            debug!("jvm-replay: patching java.base with environment stand-ins");
+            cmd.arg("--patch-module")
+                .arg(format!("java.base={}", patch.display()));
+        }
         // Assertions on **only** when certifying an assertion.
         //
         // `assert e;` evaluates `e` only with `-ea`. For no-runtime-exception
