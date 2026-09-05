@@ -2,6 +2,95 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-05 — replay can patch java.base, and why str.to_int cannot model parseInt
+
+Two attempts at the same target — `juliet-java`, stuck at 0/9 — with opposite
+outcomes. Both blockers had to fall for the category to move; one did.
+
+### Replay could not run programs that touch the environment
+
+JVM replay executes a witness against a real JDK, so a task that opens a socket
+really tries to connect. Those tasks produced a witness, failed certification
+for a reason that had nothing to do with the witness, and scored zero. The
+verdict was thrown away by the *harness*, not by the analysis.
+
+`--patch-module java.base=<dir>` substitutes a stand-in `java.net.Socket` into
+the boot module at replay time, compiled into `<shadow>/__patch` only when
+`needs_env_mocks(prog)` says the program references it.
+
+It converts zero tasks. That is the honest result and it is worth recording:
+the mock reaches exactly 6 files, all in `juliet-java`, which stayed 0/9 —
+because the *second* blocker is still there.
+
+### `Integer.parseInt(s)` is a fresh bitvector unrelated to `s`
+
+So the solver may pick `n == 7` while leaving the string free, and the witness
+it prints is whatever the string solver produced — typically `"A"`, which the
+JVM rejects with `NumberFormatException` before the assertion is reached. We
+find a real violation and then publish an assignment that cannot reproduce it.
+
+The obvious fix is `fresh = str.to_int(s)` with a well-formedness precondition.
+Measured head-to-head on the six-line program that isolates it:
+
+| build | time | verdict |
+|---|---|---|
+| without the model | 1.0s | UNKNOWN |
+| with the model | >90s | **TIMEOUT** |
+
+`str.to_int` is cheap to *evaluate* and expensive to *invert*. Asking Z3 for a
+string whose `str.to_int` is 7 sends it searching over digit strings of
+unbounded length. The constraint is correct; it is not solvable at this cost.
+It also leaked a z3 at 100% CPU that outlived the run, which is its own signal
+about what the solver was doing.
+
+Reverted. The path forward (#90) is a **bounded-length digit encoding**: fix a
+small max length L, constrain each `str.at(s, i)` to a digit range, and build
+the value as a Horner sum. L character constraints and L multiply-adds —
+linear and finite instead of an unbounded search. It is incomplete, missing
+integers longer than L digits, which costs precision and not soundness. The
+same construction gives `parseFloat`, which SMT-LIB cannot express at all
+because there is no `str.to_real`.
+
+`benchmarks/ajave/jvm-strings/ParseIntResultIsUnconstrained` isolates the gap.
+Ground truth from a real JVM: `"7"` reaches the assert, `"A"` throws — and
+`"A"` is exactly the witness ajave emits, so it reproduces the mechanism rather
+than describing it.
+
+### A five-day-old baseline earned its keep
+
+The smoke gate flagged four tasks regressed since 2026-08-31: three
+`jayhorn-recursive` proofs and one `argv-tasks` timeout (#91). Two of the three
+return UNKNOWN in under a second — an engine *declining*, not running out of
+budget, which is the shape that rules out contention.
+
+Both plausible culprits were exonerated by head-to-head: the replay mock
+(identical to the millisecond) and the CHC exception-handler decline (all three
+still UNKNOWN with it reverted — and it is confirmed still doing its job, since
+`HttpTransport_false` goes TRUE -> UNKNOWN with it present).
+
+Deliberately **not** re-baselined. Re-recording now would bake the loss in as
+the new normal and destroy the only record that those tasks ever worked. A task
+going from proved to UNKNOWN changes no score line anyone reads directly — it
+just quietly stops contributing, which is why the stale baseline is the only
+thing that could have caught it. It should keep failing until #91 is attributed.
+
+### Scores
+
+| property | this run | previous | correct |
+|---|---|---|---|
+| valid-assert | 849 | 854 | 712 vs 716 |
+| no-runtime-exception | **1114** | 1114 | 565 vs 565 |
+
+NRE is identical task-for-task and smoke is identical at 153/0 WRONG. The VA
+gap is timeout variance, not a regression: timeouts went 43 -> 52 because this
+run was pushed harder — 1066s at load 11.5 against 1981s at load 6.2. The env
+mock reaches 6 files in one category that scored 0 both times, so it has no
+mechanism by which to have caused it.
+
+Recorded as measured rather than re-run to a nicer number, per the rule that a
+score drop needs reproducing before it is explained — and this one is not even
+claimed as a drop.
+
 ## 2026-09-04 — finding cooperation candidates, and what they turned out to be
 
 The portfolio is eleven engines that mostly do not talk. When a task fails, two
