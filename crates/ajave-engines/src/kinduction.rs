@@ -979,6 +979,54 @@ mod tests {
         );
     }
 
+    /// Two back-edges to the same header are one loop, not two.
+    ///
+    /// Named after the claim in `sole_loop`. Java's `assert c;` lifts to two
+    /// passing paths -- the `$assertionsDisabled` short-circuit and the branch
+    /// where `c` holds -- and when the assert ends a `while` body both jump
+    /// straight back to the header. Demanding literally one back-edge rejected
+    /// that shape, so `while (nondet()) { ...; assert p; }` reported "nothing
+    /// to work on" despite being exactly what this engine is for.
+    ///
+    /// Here block 2 branches back to the header on the passing path and block
+    /// 4 does the same after the check, giving two latches and one header. The
+    /// invariant is the same even-`x` one, so a correct multi-latch region
+    /// still proves it at k = 1.
+    #[test]
+    fn k_induction_handles_a_loop_with_two_latches() {
+        if !have_solver() {
+            return;
+        }
+        let mut body = loop_with_inductive_invariant();
+        let t = VarId(3);
+        // Split block 2 so the check sits behind a branch, and let *both* the
+        // taken and the fall-through path return to the header.
+        let tail = body.blocks[2].stmts.split_off(3);
+        body.blocks[2].term = Terminator::Branch {
+            cond: Operand::Var(t),
+            then_: BlockId(1),
+            else_: BlockId(4),
+        };
+        body.blocks.push(Block {
+            id: BlockId(4),
+            bytecode_offset: 4,
+            stmts: tail,
+            term: Terminator::Goto(BlockId(1)),
+        exceptional: vec![],
+        });
+        assert_eq!(
+            super::super::smt_encode::k_induction_applicable(&body, ObligationId(0)),
+            true,
+            "two latches sharing one header is a single loop and must not be refused"
+        );
+        let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
+        assert_eq!(
+            engine.try_k_induction(&body, ObligationId(0)),
+            Ok(Some(1)),
+            "the invariant is unchanged, so a correct region still closes at k = 1"
+        );
+    }
+
     /// An obligation outside the loop is out of scope rather than silently
     /// proved: discharging it needs the loop's exit state.
     #[test]

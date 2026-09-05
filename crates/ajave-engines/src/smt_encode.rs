@@ -464,9 +464,9 @@ pub struct KInductionQueries {
     pub k: u32,
 }
 
-/// The blocks of the natural loop with the given header and back-edge tail:
-/// everything that reaches `tail` without passing through `header`.
-fn natural_loop(body: &Body, header: BlockId, tail: BlockId) -> BTreeSet<BlockId> {
+/// The blocks of the natural loop with the given header and back-edge tails:
+/// everything that reaches any `tail` without passing through `header`.
+fn natural_loop(body: &Body, header: BlockId, tails: &[BlockId]) -> BTreeSet<BlockId> {
     let mut preds: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
     for block in &body.blocks {
         for t in successors(block) {
@@ -475,7 +475,7 @@ fn natural_loop(body: &Body, header: BlockId, tail: BlockId) -> BTreeSet<BlockId
     }
     let mut set = BTreeSet::new();
     set.insert(header);
-    let mut work = vec![tail];
+    let mut work = tails.to_vec();
     while let Some(b) = work.pop() {
         if b == header || !set.insert(b) {
             continue;
@@ -500,8 +500,8 @@ fn natural_loop(body: &Body, header: BlockId, tail: BlockId) -> BTreeSet<BlockId
 /// Instead: everything reachable from the header without taking the loop's
 /// exit edge or the back-edge. That is one pass, including the passes that
 /// end by throwing.
-fn loop_region(body: &Body, header: BlockId, tail: BlockId) -> BTreeSet<BlockId> {
-    let nat = natural_loop(body, header, tail);
+fn loop_region(body: &Body, header: BlockId, tails: &[BlockId]) -> BTreeSet<BlockId> {
+    let nat = natural_loop(body, header, tails);
     // Successors of the header that leave the loop: the `i < n` test failing.
     let exit_targets: BTreeSet<BlockId> = body
         .blocks
@@ -532,15 +532,31 @@ fn loop_region(body: &Body, header: BlockId, tail: BlockId) -> BTreeSet<BlockId>
     region
 }
 
-/// The single back-edge of `body`, if it has exactly one.
-fn sole_back_edge(body: &Body) -> Option<(BlockId, BlockId)> {
+/// The one loop of `body`, if it has exactly one, as `(latches, header)`.
+///
+/// A natural loop is defined by its header together with the set of edges
+/// returning to it, so several *latches* are still one loop: they all re-enter
+/// the same transition relation at the same point, and `natural_loop` unions
+/// them into one region.
+///
+/// This used to demand literally one back-edge, which rejected most Java
+/// `while` loops that assert anything. `assert c;` lifts to two passing paths
+/// — the `$assertionsDisabled` short-circuit and the branch where `c` holds —
+/// and when the assert is the last statement of the body, both jump straight
+/// back to the header. Two back-edges, one header, and k-induction declined
+/// with "nothing to work on" on precisely the shape it exists for. Every task
+/// in the `float_unboundedloop` category is written that way, as is any
+/// `while (nondet()) { ...; assert p; }`.
+///
+/// Two *distinct* headers are still refused. That is nested loops or an
+/// irreducible CFG, and neither is a single transition relation.
+fn sole_loop(body: &Body) -> Option<(Vec<BlockId>, BlockId)> {
     let (_, back) = rpo_and_back_edges(body);
-    if back.len() != 1 {
-        // Several loops, or an irreducible CFG. Neither is one transition
-        // relation.
+    let header = back.iter().next()?.1;
+    if back.iter().any(|(_, h)| *h != header) {
         return None;
     }
-    back.iter().next().copied()
+    Some((back.iter().map(|(t, _)| *t).collect(), header))
 }
 
 /// Whether `body` contains a `Check` of `oid` in any of `blocks`.
@@ -560,18 +576,18 @@ fn checks_in(body: &Body, blocks: &BTreeSet<BlockId>, oid: ObligationId) -> bool
 /// having screened for it — but doing them here keeps a process spawn off the
 /// path for every obligation in every loop-free method.
 pub fn k_induction_applicable(body: &Body, oid: ObligationId) -> bool {
-    let Some((tail, header)) = sole_back_edge(body) else {
+    let Some((tails, header)) = sole_loop(body) else {
         return false;
     };
-    checks_in(body, &loop_region(body, header, tail), oid)
+    checks_in(body, &loop_region(body, header, &tails), oid)
 }
 
 /// A rough count of the terms one k-induction attempt will build: the loop
 /// region is encoded `2k + 1` times and each join emits an `ite` per live
 /// variable and per heap map.
 pub fn k_induction_cost(body: &Body, oid: ObligationId, k: u32) -> Option<usize> {
-    let (tail, header) = sole_back_edge(body)?;
-    let region = loop_region(body, header, tail);
+    let (tails, header) = sole_loop(body)?;
+    let region = loop_region(body, header, &tails);
     if !checks_in(body, &region, oid) {
         return None;
     }
@@ -580,7 +596,40 @@ pub fn k_induction_cost(body: &Body, oid: ObligationId, k: u32) -> Option<usize>
         .filter_map(|b| body.blocks.get(b.0 as usize))
         .map(|b| b.stmts.len().max(1))
         .sum();
-    Some((2 * k as usize + 1) * stmts * body.vars.len().max(1))
+    Some((2 * k as usize + 1) * stmts * merged_vars(body, &region))
+}
+
+/// How many variables a join inside the loop actually has to merge.
+///
+/// This used to be `body.vars.len()` — every variable in the *method*. The
+/// doc above always said "an `ite` per live variable", and that is the right
+/// quantity: a variable never assigned inside the loop holds the same term on
+/// both incoming edges, so the encoder emits no `ite` for it. Counting the
+/// method's whole var arena charges the loop for everything around it, and in
+/// a long method that is most of the arena.
+///
+/// The difference is not academic. `jbmc-regression/TokenTest01` is a short
+/// loop in a long string-handling method: it estimated ~24,000 terms against
+/// an 8,000 cap and was skipped without an attempt, when the loop itself
+/// merges a handful of variables.
+///
+/// Only `Stmt::Assign` binds a variable — stores go to the heap and are
+/// carried by the heap maps, which the `stmts` factor already counts. Being an
+/// estimate that gates a *cost* decision, an error here can only spend or save
+/// time; it cannot change a verdict.
+fn merged_vars(body: &Body, region: &BTreeSet<BlockId>) -> usize {
+    let mut assigned = BTreeSet::new();
+    for b in region {
+        let Some(blk) = body.blocks.get(b.0 as usize) else {
+            continue;
+        };
+        for st in &blk.stmts {
+            if let Stmt::Assign(v, _) = st {
+                assigned.insert(*v);
+            }
+        }
+    }
+    assigned.len().max(1)
 }
 
 /// Build the base and step queries for `oid` at depth `k`.
@@ -611,8 +660,8 @@ pub fn encode_k_induction(
     oid: ObligationId,
     k: u32,
 ) -> Option<KInductionQueries> {
-    let (tail, header) = sole_back_edge(body)?;
-    let loop_blocks = loop_region(body, header, tail);
+    let (tails, header) = sole_loop(body)?;
+    let loop_blocks = loop_region(body, header, &tails);
 
     // The obligation has to be inside the loop for the induction to be about
     // it at all.
