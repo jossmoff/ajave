@@ -1402,7 +1402,10 @@ mod tests {
             return;
         }
         let (prog, main) = overflow_program();
-        let smt2 = encode_chc_interproc(&prog, &main, &[ObligationId(0)]);
+        // No seeded invariants: this test is about the overflow encoding, and
+        // an empty map is the "nothing known" case the engine starts from.
+        let no_invariants = HashMap::new();
+        let smt2 = encode_chc_interproc(&prog, &main, &[ObligationId(0)], &no_invariants);
         assert!(
             smt2.contains("; overflow"),
             "the inter-procedural encoding must route 32-bit overflow to \
