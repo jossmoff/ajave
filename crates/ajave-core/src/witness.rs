@@ -65,13 +65,13 @@ pub fn emit_violation_yaml(
         // No nondet calls — the violation is on a fixed path.
         // Emit a single target waypoint at the violation line.
         out.push_str("    - segment:\n");
-        emit_target_waypoint(&mut out, &violation);
+        emit_target_waypoint(&mut out, violation);
     } else {
         out.push_str("    - segment:\n");
         for entry in &witness.entries {
             emit_assumption_waypoint(&mut out, entry);
         }
-        emit_target_waypoint(&mut out, &violation);
+        emit_target_waypoint(&mut out, violation);
     }
 
     out

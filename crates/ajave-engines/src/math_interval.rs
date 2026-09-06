@@ -57,7 +57,10 @@ impl Range {
         Range { lo, hi }
     }
     pub fn top() -> Range {
-        Range { lo: f64::NEG_INFINITY, hi: f64::INFINITY }
+        Range {
+            lo: f64::NEG_INFINITY,
+            hi: f64::INFINITY,
+        }
     }
     pub fn is_top(&self) -> bool {
         self.lo == f64::NEG_INFINITY && self.hi == f64::INFINITY
@@ -330,7 +333,10 @@ mod tests {
     #[test]
     fn partial_functions_are_precise_inside_their_domain() {
         let s = ev("sqrt", 4.0, 9.0);
-        assert!(s.lo <= 2.0 && s.hi >= 3.0 && s.lo > 1.9 && s.hi < 3.1, "{s:?}");
+        assert!(
+            s.lo <= 2.0 && s.hi >= 3.0 && s.lo > 1.9 && s.hi < 3.1,
+            "{s:?}"
+        );
         let e = ev("exp", 0.0, 1.0);
         assert!(e.lo <= 1.0 && e.hi >= std::f64::consts::E);
     }

@@ -26,13 +26,11 @@ fn removable(rv: &Rvalue) -> bool {
         // visible in its result. `contract_of` knows which are pure; anything
         // it has not been told about is `Contract::OPAQUE`, and the default
         // must be to keep the call.
-        Rvalue::Call { target, .. } => ajave_models::contract_of(
-            &target.class,
-            &target.name,
-            &target.desc,
-        )
-        .map(|c| c.effect == ajave_models::Effect::Pure)
-        .unwrap_or(false),
+        Rvalue::Call { target, .. } => {
+            ajave_models::contract_of(&target.class, &target.name, &target.desc)
+                .map(|c| c.effect == ajave_models::Effect::Pure)
+                .unwrap_or(false)
+        }
 
         // Allocation is observable twice over: `new int[n]` throws
         // NegativeArraySizeException for n < 0, and object identity is
@@ -46,12 +44,19 @@ fn removable(rv: &Rvalue) -> bool {
         // removing it saves nothing an engine notices, and reasoning about
         // which loads are safe is precisely the kind of second opinion about
         // heap behaviour that belongs in one place, not here.
-        Rvalue::ArrayLoad { .. } | Rvalue::ArrayLength(_)
-        | Rvalue::GetField { .. } | Rvalue::GetStatic(_) => false,
+        Rvalue::ArrayLoad { .. }
+        | Rvalue::ArrayLength(_)
+        | Rvalue::GetField { .. }
+        | Rvalue::GetStatic(_) => false,
 
         // Pure computation over values already in scope.
-        Rvalue::Use(_) | Rvalue::Bin(..) | Rvalue::Neg(_) | Rvalue::Cast(..)
-        | Rvalue::Cmp(..) | Rvalue::InstanceOf { .. } | Rvalue::Havoc(..) => true,
+        Rvalue::Use(_)
+        | Rvalue::Bin(..)
+        | Rvalue::Neg(_)
+        | Rvalue::Cast(..)
+        | Rvalue::Cmp(..)
+        | Rvalue::InstanceOf { .. }
+        | Rvalue::Havoc(..) => true,
     }
 }
 

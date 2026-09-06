@@ -2,10 +2,10 @@
 
 use std::collections::HashSet;
 
-use log::debug;
 use ajave_core::smt::{SatResult, Term};
 use ajave_ir::*;
 use ajave_models;
+use log::debug;
 
 use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
 use ajave_core::artifact::{Approximations, ProgramPoint};
@@ -20,10 +20,18 @@ use ajave_core::artifact::{Approximations, ProgramPoint};
 /// isn't modelled, so NRE discharge must be blocked.
 fn str_call_can_throw(target: &MethodKey) -> bool {
     let name = target.name.as_str();
-    matches!(name,
-        "charAt" | "substring" | "codePointAt" | "codePointBefore"
-        | "setCharAt" | "deleteCharAt" | "delete" | "insert"
-        | "getChars" | "subSequence"
+    matches!(
+        name,
+        "charAt"
+            | "substring"
+            | "codePointAt"
+            | "codePointBefore"
+            | "setCharAt"
+            | "deleteCharAt"
+            | "delete"
+            | "insert"
+            | "getChars"
+            | "subSequence"
     )
 }
 
@@ -51,7 +59,11 @@ fn str_call_can_throw(target: &MethodKey) -> bool {
 /// A method absent from this list is treated as possibly-throwing, which costs
 /// precision only. When in doubt, leave it out.
 pub(crate) fn could_throw_runtime_exception(target: &MethodKey) -> bool {
-    if is_total_jdk_method(target.class.as_str(), target.name.as_str(), target.desc.as_str()) {
+    if is_total_jdk_method(
+        target.class.as_str(),
+        target.name.as_str(),
+        target.desc.as_str(),
+    ) {
         return false;
     }
     // A call whose failure modes are *all* seeded as obligations cannot throw
@@ -71,8 +83,10 @@ pub(crate) fn could_throw_runtime_exception(target: &MethodKey) -> bool {
     // obligations carry the burden there would be claiming something untrue.
     if ajave_models::SEED_CALL_PRECONDITIONS.load(std::sync::atomic::Ordering::Relaxed) {
         if let Some(c) = ajave_models::contract_of(
-            target.class.as_str(), target.name.as_str(), target.desc.as_str())
-        {
+            target.class.as_str(),
+            target.name.as_str(),
+            target.desc.as_str(),
+        ) {
             if !c.requires.is_empty() && c.preconditions_all_seeded() {
                 return false;
             }
@@ -125,7 +139,9 @@ impl<'a> ExploreCtx<'a> {
     fn propagate_str_to_aliases(&mut self, var_id: VarId, str_term: Term) {
         self.str_vars.insert(var_id, str_term);
         if let Some(&recv_term) = self.vars.get(&var_id) {
-            let aliases: Vec<VarId> = self.vars.iter()
+            let aliases: Vec<VarId> = self
+                .vars
+                .iter()
                 .filter(|(vid, &t)| **vid != var_id && t == recv_term)
                 .map(|(vid, _)| *vid)
                 .collect();
@@ -209,8 +225,13 @@ impl<'a> ExploreCtx<'a> {
         let targets = if is_virtual {
             // If the receiver (args[0]) has a known concrete class from `new`,
             // restrict dispatch to only that type's implementation.
-            let receiver_class = args.first()
-                .and_then(|a| if let Operand::Var(v) = a { self.concrete_classes.get(v).cloned() } else { None });
+            let receiver_class = args.first().and_then(|a| {
+                if let Operand::Var(v) = a {
+                    self.concrete_classes.get(v).cloned()
+                } else {
+                    None
+                }
+            });
 
             if let Some(recv_cls) = receiver_class {
                 // Precise devirtualization: only consider the concrete type's method.
@@ -241,14 +262,18 @@ impl<'a> ExploreCtx<'a> {
                         Some(k) => vec![k],
                         None => {
                             let t = self.prog.devirtualise(target);
-                            if t.is_empty() { return false; }
+                            if t.is_empty() {
+                                return false;
+                            }
                             t
                         }
                     }
                 }
             } else {
                 let t = self.prog.devirtualise(target);
-                if t.is_empty() { return false; }
+                if t.is_empty() {
+                    return false;
+                }
                 t
             }
         } else {
@@ -267,7 +292,9 @@ impl<'a> ExploreCtx<'a> {
 
         let mut ret_tainted = false;
         for resolved in &targets {
-            if self.budget_exhausted() { break; }
+            if self.budget_exhausted() {
+                break;
+            }
             let callee = self.prog.body(resolved).unwrap();
 
             let saved_body = self.body;
@@ -296,7 +323,9 @@ impl<'a> ExploreCtx<'a> {
             let mut slot = 0u16;
             for (i, arg_t) in arg_terms.iter().enumerate() {
                 if let Some((vid_idx, vinfo)) = callee
-                    .vars.iter().enumerate()
+                    .vars
+                    .iter()
+                    .enumerate()
                     .find(|(_, vi)| matches!(vi.kind, VarKind::Local(s) if s == slot))
                 {
                     let vid = VarId(vid_idx as u32);
@@ -426,7 +455,9 @@ impl<'a> ExploreCtx<'a> {
     }
 
     fn find_join_multi(&self, targets: &[BlockId]) -> Option<BlockId> {
-        if targets.is_empty() { return None; }
+        if targets.is_empty() {
+            return None;
+        }
         // Compute forward reachable sets for each target.
         let reach_sets: Vec<HashSet<u32>> = targets
             .iter()
@@ -447,7 +478,8 @@ impl<'a> ExploreCtx<'a> {
             common = common.intersection(r).copied().collect();
         }
         let target_set: HashSet<u32> = targets.iter().map(|t| t.0).collect();
-        let mut candidates: Vec<u32> = common.into_iter()
+        let mut candidates: Vec<u32> = common
+            .into_iter()
             .filter(|b| !target_set.contains(b))
             .collect();
         candidates.sort();
@@ -477,7 +509,9 @@ impl<'a> ExploreCtx<'a> {
                     }
                 }
                 Stmt::Assume(op) => {
-                    if !self.handle_assume(op) { return false; }
+                    if !self.handle_assume(op) {
+                        return false;
+                    }
                 }
                 Stmt::Check(oid) => self.handle_check(*oid),
                 Stmt::PutStatic(fk, val) => self.handle_put_static(fk, val),
@@ -513,10 +547,7 @@ impl<'a> ExploreCtx<'a> {
     /// keeps the method each truncation happened in, which is the first step
     /// to charging the cost only to the obligations actually at risk.
     fn mark_incomplete(&mut self, why: &'static str) {
-        log::debug!(
-            "smt-bmc: INCOMPLETE ({why}) in {}",
-            self.body.key
-        );
+        log::debug!("smt-bmc: INCOMPLETE ({why}) in {}", self.body.key);
         self.incomplete_methods.insert(self.body.key.clone());
         // Where the cut happened, and every call site above it: a cut inside a
         // callee means the caller never returned from this call, so whatever
@@ -530,6 +561,9 @@ impl<'a> ExploreCtx<'a> {
         self.completeness.all_paths_complete = false;
     }
 
+    // Nested deliberately: the outer match is on the IR node and the inner on
+    // its payload, which mirrors the IR's own shape.
+    #[allow(clippy::collapsible_match)]
     fn handle_assign(&mut self, v: VarId, rv: &Rvalue) -> bool {
         let is_tainted = self.rvalue_tainted(rv);
         let (t, str_term) = match rv {
@@ -564,7 +598,10 @@ impl<'a> ExploreCtx<'a> {
                                 // contents are whatever it is; say nothing.
                                 _ => self.solver.fresh_str("sb_init"),
                             };
-                            debug!("str <init> propagating to v{} (class={})", recv_v.0, target.class);
+                            debug!(
+                                "str <init> propagating to v{} (class={})",
+                                recv_v.0, target.class
+                            );
                             self.propagate_str_to_aliases(*recv_v, init_str);
                             // Propagate constant string value through <init>(String)
                             if target.desc.starts_with("(Ljava/lang/String;)") {
@@ -579,7 +616,8 @@ impl<'a> ExploreCtx<'a> {
                         }
                     }
                     (self.encode_rvalue(rv), None)
-                } else if matches!(target.name.as_str(),
+                } else if matches!(
+                    target.name.as_str(),
                     "append" | "setLength" | "deleteCharAt" | "delete" | "insert" | "reverse"
                 ) {
                     // Mutating method — update str_vars for receiver and all aliases
@@ -607,7 +645,11 @@ impl<'a> ExploreCtx<'a> {
                     }
                 }
             }
-            Rvalue::Call { target, args, is_virtual } => {
+            Rvalue::Call {
+                target,
+                args,
+                is_virtual,
+            } => {
                 if let Some((bv, st)) = self.encode_wrapper_str_call(target, args) {
                     // Modelled call — check if the original method could throw
                     // a RuntimeException. The model resolves the return value
@@ -634,8 +676,10 @@ impl<'a> ExploreCtx<'a> {
                 } else {
                     // Call was not resolved — havoced.
                     if std::env::var("AJAVE_REPORT_UNRESOLVED").is_ok() {
-                        eprintln!("UNRESOLVED\t{}\t{}\t{}\t{}",
-                            target.class, target.name, target.desc, is_virtual);
+                        eprintln!(
+                            "UNRESOLVED\t{}\t{}\t{}\t{}",
+                            target.class, target.name, target.desc, is_virtual
+                        );
                     }
                     // A call we could not inline is not automatically a gap in
                     // the analysis. One that cannot throw unnoticed and writes
@@ -667,10 +711,10 @@ impl<'a> ExploreCtx<'a> {
                     if could_throw_runtime_exception(target) {
                         self.completeness.all_calls_resolved = false;
                     } else {
-                        let pure = ajave_models::contract_of(
-                            &target.class, &target.name, &target.desc)
-                            .map(|c| c.effect == ajave_models::Effect::Pure)
-                            .unwrap_or(false);
+                        let pure =
+                            ajave_models::contract_of(&target.class, &target.name, &target.desc)
+                                .map(|c| c.effect == ajave_models::Effect::Pure)
+                                .unwrap_or(false);
                         if !pure {
                             self.field_arrays.clear();
                         }
@@ -705,8 +749,7 @@ impl<'a> ExploreCtx<'a> {
                     // never fired, because `Math.sin` lifts to a `Call` and
                     // reaches this path instead. That is why the first attempt
                     // at this measured no change at all.
-                    self.approximated =
-                        self.approximated.union(Approximations::UNMODELLED_CALL);
+                    self.approximated = self.approximated.union(Approximations::UNMODELLED_CALL);
                     // If an earlier pass already asked about this call and
                     // got an answer, use it now rather than asking again.
                     if let Some((lo, hi)) =
@@ -747,7 +790,11 @@ impl<'a> ExploreCtx<'a> {
                     // Non-program String static: create a fresh string term
                     // so downstream operations can be constrained.
                     if fk.desc == "Ljava/lang/String;" && !self.is_program_class(&fk.class) {
-                        Some(self.solver.fresh_str(&format!("sf_{}_{}", fk.class.replace('/', "_"), fk.name)))
+                        Some(self.solver.fresh_str(&format!(
+                            "sf_{}_{}",
+                            fk.class.replace('/', "_"),
+                            fk.name
+                        )))
                     } else {
                         None
                     }
@@ -799,13 +846,19 @@ impl<'a> ExploreCtx<'a> {
         // holds — the same slot-reuse hazard that produced wrong answers in
         // the interval domain.
         match self.pending_fp.take() {
-            Some(fp) => { self.fp_vars.insert(v, fp); }
+            Some(fp) => {
+                self.fp_vars.insert(v, fp);
+            }
             None => {
                 if let Rvalue::Use(Operand::Var(src)) = rv {
                     // A copy carries the float view along with the bits.
                     match self.fp_vars.get(src).copied() {
-                        Some(fp) => { self.fp_vars.insert(v, fp); }
-                        None => { self.fp_vars.remove(&v); }
+                        Some(fp) => {
+                            self.fp_vars.insert(v, fp);
+                        }
+                        None => {
+                            self.fp_vars.remove(&v);
+                        }
                     }
                 } else {
                     self.fp_vars.remove(&v);
@@ -815,7 +868,9 @@ impl<'a> ExploreCtx<'a> {
         self.var_widths.insert(v, self.rvalue_result_width(rv));
         // Track concrete class from `new` for exception dispatch / instanceof.
         match rv {
-            Rvalue::New(class) => { self.concrete_classes.insert(v, class.clone()); }
+            Rvalue::New(class) => {
+                self.concrete_classes.insert(v, class.clone());
+            }
             Rvalue::Use(Operand::Var(src)) => {
                 // Copy propagation: if src has a concrete class, propagate it.
                 if let Some(c) = self.concrete_classes.get(src).cloned() {
@@ -824,7 +879,9 @@ impl<'a> ExploreCtx<'a> {
                     self.concrete_classes.remove(&v);
                 }
             }
-            _ => { self.concrete_classes.remove(&v); }
+            _ => {
+                self.concrete_classes.remove(&v);
+            }
         }
         if let Some(st) = str_term {
             self.str_vars.insert(v, st);
@@ -843,7 +900,9 @@ impl<'a> ExploreCtx<'a> {
                     self.str_consts.remove(&v);
                 }
             }
-            _ => { self.str_consts.remove(&v); }
+            _ => {
+                self.str_consts.remove(&v);
+            }
         }
         if is_tainted {
             self.tainted.insert(v);
@@ -860,13 +919,17 @@ impl<'a> ExploreCtx<'a> {
 
     fn handle_assume(&mut self, op: &Operand) -> bool {
         let tainted = self.operand_tainted(op);
-        if tainted { self.path_tainted = true; }
+        if tainted {
+            self.path_tainted = true;
+        }
         if !tainted {
             let t = self.encode_operand(op);
             let c = self.nonzero_constraint(t);
             self.path_constraints.push(c);
             let res = self.check_sat_with_path();
-            if res == SatResult::Unsat { return false; }
+            if res == SatResult::Unsat {
+                return false;
+            }
         }
         true
     }
@@ -878,8 +941,16 @@ impl<'a> ExploreCtx<'a> {
         let cond = self.encode_operand(&ob_cond);
         let violation_cond = self.zero_constraint(cond);
         let (res, witness) = self.check_sat_with_path_and_witness(violation_cond);
-        log::debug!("smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
-            oid, self.body.key, ob_kind, is_tainted, self.path_tainted, res, self.path_constraints.len());
+        log::debug!(
+            "smt-bmc: check {:?} in {} kind={:?} tainted={} path_tainted={} res={:?} pc_len={}",
+            oid,
+            self.body.key,
+            ob_kind,
+            is_tainted,
+            self.path_tainted,
+            res,
+            self.path_constraints.len()
+        );
         if res == SatResult::Sat && !is_tainted {
             // Record violations even when path_tainted — the JVM replay
             // certifier will filter out spurious witnesses from imprecise
@@ -920,8 +991,10 @@ impl<'a> ExploreCtx<'a> {
                 }
             }
         }
-        if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown) {
-            self.skipped_obligations.insert((self.body.key.clone(), oid));
+        if res != SatResult::Unsat && (is_tainted || self.path_tainted || res == SatResult::Unknown)
+        {
+            self.skipped_obligations
+                .insert((self.body.key.clone(), oid));
         }
         if self.path_tainted {
             self.completeness.has_tainted_paths = true;
@@ -1000,7 +1073,11 @@ impl<'a> ExploreCtx<'a> {
 
         if !exceptional.is_empty() {
             // Find Stack(0) variable — the handler entry expects the exception there.
-            let stack0_vid = self.body.vars.iter().enumerate()
+            let stack0_vid = self
+                .body
+                .vars
+                .iter()
+                .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Stack(0)))
                 .map(|(i, _)| VarId(i as u32));
 
@@ -1017,9 +1094,13 @@ impl<'a> ExploreCtx<'a> {
                         return;
                     }
                 };
-                if self.prog.is_subtype(&thrown_class, &handler_class) || thrown_class == handler_class {
-                    debug!("smt-bmc: exception dispatch: throw {} caught by handler for {} at bb{}",
-                           thrown_class, handler_class, edge.target.0);
+                if self.prog.is_subtype(&thrown_class, &handler_class)
+                    || thrown_class == handler_class
+                {
+                    debug!(
+                        "smt-bmc: exception dispatch: throw {} caught by handler for {} at bb{}",
+                        thrown_class, handler_class, edge.target.0
+                    );
                     if let Some(sv) = stack0_vid {
                         self.vars.insert(sv, thrown_term);
                     }
@@ -1032,7 +1113,10 @@ impl<'a> ExploreCtx<'a> {
         // No local handler matched. If we're inside an inlined callee,
         // propagate the exception to the caller via inline_throw.
         if self.call_depth > 0 {
-            debug!("smt-bmc: exception propagating from callee: throw {}", thrown_class);
+            debug!(
+                "smt-bmc: exception propagating from callee: throw {}",
+                thrown_class
+            );
             self.inline_throw = Some((thrown_term, thrown_class));
         } else {
             self.mark_incomplete("handle_throw");
@@ -1050,7 +1134,11 @@ impl<'a> ExploreCtx<'a> {
         let exceptional = self.body.block(block_id).exceptional.clone();
 
         if !exceptional.is_empty() {
-            let stack0_vid = self.body.vars.iter().enumerate()
+            let stack0_vid = self
+                .body
+                .vars
+                .iter()
+                .enumerate()
                 .find(|(_, vi)| matches!(vi.kind, VarKind::Stack(0)))
                 .map(|(i, _)| VarId(i as u32));
 
@@ -1065,7 +1153,9 @@ impl<'a> ExploreCtx<'a> {
                         return;
                     }
                 };
-                if self.prog.is_subtype(thrown_class, &handler_class) || thrown_class == handler_class {
+                if self.prog.is_subtype(thrown_class, &handler_class)
+                    || thrown_class == handler_class
+                {
                     debug!("smt-bmc: cross-method exception dispatch: {} caught by handler for {} at bb{}",
                            thrown_class, handler_class, edge.target.0);
                     if let Some(sv) = stack0_vid {
@@ -1100,6 +1190,9 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
+    // Encoder plumbing: each argument is a distinct piece of solver state, and
+    // bundling them into a struct would only move the same list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn handle_branch(
         &mut self,
         block_id: BlockId,
@@ -1115,12 +1208,31 @@ impl<'a> ExploreCtx<'a> {
         let cond_nz = self.solver.not(cond_bool);
 
         if let Some(join) = self.find_join(then_, else_) {
-            self.handle_branch_diamond(cond_tainted, cond_nz, cond_bool, then_, else_, join, stop_at);
+            self.handle_branch_diamond(
+                cond_tainted,
+                cond_nz,
+                cond_bool,
+                then_,
+                else_,
+                join,
+                stop_at,
+            );
         } else {
-            self.handle_branch_fork(block_id, cond_tainted, cond_nz, cond_bool, then_, else_, stop_at);
+            self.handle_branch_fork(
+                block_id,
+                cond_tainted,
+                cond_nz,
+                cond_bool,
+                then_,
+                else_,
+                stop_at,
+            );
         }
     }
 
+    // Encoder plumbing: each argument is a distinct piece of solver state, and
+    // bundling them into a struct would only move the same list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn handle_branch_diamond(
         &mut self,
         cond_tainted: bool,
@@ -1132,15 +1244,23 @@ impl<'a> ExploreCtx<'a> {
         stop_at: Option<BlockId>,
     ) {
         let saved = self.save_state();
-        if cond_tainted { self.path_tainted = true; }
-        if !cond_tainted { self.path_constraints.push(cond_nz); }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
+        if !cond_tainted {
+            self.path_constraints.push(cond_nz);
+        }
         self.explore_block_until(then_, 0, Some(join));
         let then_state = self.save_state();
         self.restore_state(saved);
 
         let saved = self.save_state();
-        if cond_tainted { self.path_tainted = true; }
-        if !cond_tainted { self.path_constraints.push(cond_bool); }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
+        if !cond_tainted {
+            self.path_constraints.push(cond_bool);
+        }
         self.explore_block_until(else_, 0, Some(join));
         let else_state = self.save_state();
         self.restore_state(saved);
@@ -1150,6 +1270,9 @@ impl<'a> ExploreCtx<'a> {
         self.explore_block_until(join, 0, stop_at);
     }
 
+    // Encoder plumbing: each argument is a distinct piece of solver state, and
+    // bundling them into a struct would only move the same list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn handle_branch_fork(
         &mut self,
         block_id: BlockId,
@@ -1161,8 +1284,14 @@ impl<'a> ExploreCtx<'a> {
         stop_at: Option<BlockId>,
     ) {
         self.fork_count += 1;
-        log::trace!("smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
-            block_id.0, self.body.key, then_.0, else_.0, stop_at.map(|b| b.0));
+        log::trace!(
+            "smt-bmc: fork at bb{} in {} then=bb{} else=bb{} stop_at={:?}",
+            block_id.0,
+            self.body.key,
+            then_.0,
+            else_.0,
+            stop_at.map(|b| b.0)
+        );
 
         let saved = self.save_state();
         let ir_before = self.inline_return;
@@ -1170,15 +1299,25 @@ impl<'a> ExploreCtx<'a> {
         let irt_before = self.inline_return_tainted;
 
         let mut then_explored = false;
-        if cond_tainted { self.path_tainted = true; }
+        if cond_tainted {
+            self.path_tainted = true;
+        }
         if cond_tainted && self.tainted_branch_is_infeasible(cond_nz) {
-            log::trace!("smt-bmc: fork-then bb{} in {} pruned by a supplied bound",
-                then_.0, self.body.key);
+            log::trace!(
+                "smt-bmc: fork-then bb{} in {} pruned by a supplied bound",
+                then_.0,
+                self.body.key
+            );
         } else if !cond_tainted {
             self.path_constraints.push(cond_nz);
             let feas = self.check_sat_with_path();
-            log::trace!("smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
-                then_.0, self.body.key, feas, cond_tainted);
+            log::trace!(
+                "smt-bmc: fork-then bb{} in {} feas={:?} tainted={}",
+                then_.0,
+                self.body.key,
+                feas,
+                cond_tainted
+            );
             // `Unknown` means the solver could not decide whether this branch
             // is reachable. Exploring it anyway is right -- refusing would miss
             // bugs -- but the subtree it opens cannot support a claim of having
@@ -1217,20 +1356,32 @@ impl<'a> ExploreCtx<'a> {
         // unexplored, which is exactly the thing a completeness claim must not
         // paper over.
         if self.budget_exhausted() {
-            log::trace!("smt-bmc: fork-else bb{} in {} SKIPPED: budget exhausted",
-                else_.0, self.body.key);
+            log::trace!(
+                "smt-bmc: fork-else bb{} in {} SKIPPED: budget exhausted",
+                else_.0,
+                self.body.key
+            );
             self.mark_incomplete("handle_branch_fork");
         }
         if !self.budget_exhausted() {
-            if cond_tainted { self.path_tainted = true; }
+            if cond_tainted {
+                self.path_tainted = true;
+            }
             if cond_tainted && self.tainted_branch_is_infeasible(cond_bool) {
-                log::trace!("smt-bmc: fork-else bb{} in {} pruned by a supplied bound",
-                    else_.0, self.body.key);
+                log::trace!(
+                    "smt-bmc: fork-else bb{} in {} pruned by a supplied bound",
+                    else_.0,
+                    self.body.key
+                );
             } else if !cond_tainted {
                 self.path_constraints.push(cond_bool);
                 let feas = self.check_sat_with_path();
-                log::trace!("smt-bmc: fork-else bb{} in {} feas={:?}",
-                    else_.0, self.body.key, feas);
+                log::trace!(
+                    "smt-bmc: fork-else bb{} in {} feas={:?}",
+                    else_.0,
+                    self.body.key,
+                    feas
+                );
                 if feas == SatResult::Unknown {
                     self.mark_incomplete("handle_branch_fork");
                 }
@@ -1263,12 +1414,12 @@ impl<'a> ExploreCtx<'a> {
             let base_len = self.nondet_terms.len();
             if then_explored {
                 for nd in &then_state.nondet_terms[base_len..] {
-                    self.nondet_terms.push(nd.clone());
+                    self.nondet_terms.push(*nd);
                 }
             }
             if else_explored {
                 for nd in &else_state.nondet_terms[base_len..] {
-                    self.nondet_terms.push(nd.clone());
+                    self.nondet_terms.push(*nd);
                 }
             }
             self.merge_states_ite(cond_nz, &then_state, &else_state);
@@ -1350,19 +1501,27 @@ impl<'a> ExploreCtx<'a> {
 
         let mut case_saved: Vec<(Term, SavedState)> = Vec::new();
         for &(_, target, cond_eq) in &case_conds {
-            if self.budget_exhausted() { break; }
+            if self.budget_exhausted() {
+                break;
+            }
             let saved = self.save_state();
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             self.path_constraints.push(cond_eq);
             self.explore_block_until(target, 0, Some(join));
             case_saved.push((cond_eq, self.save_state()));
             self.restore_state(saved);
         }
 
-        if self.budget_exhausted() { return; }
+        if self.budget_exhausted() {
+            return;
+        }
 
         let saved = self.save_state();
-        if value_tainted { self.path_tainted = true; }
+        if value_tainted {
+            self.path_tainted = true;
+        }
         for &(_, _, cond_eq) in &case_conds {
             let neq = self.solver.not(cond_eq);
             self.path_constraints.push(neq);
@@ -1394,15 +1553,21 @@ impl<'a> ExploreCtx<'a> {
         let ir_before = self.inline_return;
         let irs_before = self.inline_return_str;
         let irt_before = self.inline_return_tainted;
-        let mut case_saved: Vec<(Term, SavedState, Option<Term>, Option<Term>, bool)> = Vec::new();
+        // (case guard, state to resume from, string term, length term, is default)
+        type SwitchCase = (Term, SavedState, Option<Term>, Option<Term>, bool);
+        let mut case_saved: Vec<SwitchCase> = Vec::new();
 
         for &(case_val, target) in cases {
-            if self.budget_exhausted() { break; }
+            if self.budget_exhausted() {
+                break;
+            }
             self.fork_count += 1;
             self.inline_return = ir_before;
             self.inline_return_str = irs_before;
             self.inline_return_tainted = irt_before;
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             let cv = self.solver.bv_const(case_val as i64, 32);
             let eq = self.solver.bveq(vt, cv);
             self.path_constraints.push(eq);
@@ -1419,7 +1584,9 @@ impl<'a> ExploreCtx<'a> {
         self.inline_return_str = irs_before;
         self.inline_return_tainted = irt_before;
         if !self.budget_exhausted() {
-            if value_tainted { self.path_tainted = true; }
+            if value_tainted {
+                self.path_tainted = true;
+            }
             for &(case_val, _) in cases {
                 let cv = self.solver.bv_const(case_val as i64, 32);
                 let eq = self.solver.bveq(vt, cv);
@@ -1445,14 +1612,18 @@ impl<'a> ExploreCtx<'a> {
                 (Some(c), Some(m)) if c != m => {
                     merged_ir = Some(self.solver.ite(*eq, c, m));
                 }
-                (Some(c), None) => { merged_ir = Some(c); }
+                (Some(c), None) => {
+                    merged_ir = Some(c);
+                }
                 _ => {}
             }
             match (*c_irs, merged_irs) {
                 (Some(c), Some(m)) if c != m => {
                     merged_irs = Some(self.solver.ite(*eq, c, m));
                 }
-                (Some(c), None) => { merged_irs = Some(c); }
+                (Some(c), None) => {
+                    merged_irs = Some(c);
+                }
                 _ => {}
             }
         }
@@ -1499,7 +1670,9 @@ impl<'a> ExploreCtx<'a> {
     /// express in `Expr` would make the binding a lie, and a claim nobody can
     /// read is worse than no claim.
     fn ask_about_call(&mut self, dest: VarId, target: &MethodKey, args: &[Operand]) {
-        let Some(block) = self.current_block else { return };
+        let Some(block) = self.current_block else {
+            return;
+        };
         let mut arg_exprs = Vec::new();
         for a in args {
             match a {
@@ -1507,9 +1680,7 @@ impl<'a> ExploreCtx<'a> {
                 Operand::Const(Const::Int(n)) => {
                     arg_exprs.push(ajave_core::term::Expr::Int(*n as i64))
                 }
-                Operand::Const(Const::Long(n)) => {
-                    arg_exprs.push(ajave_core::term::Expr::Int(*n))
-                }
+                Operand::Const(Const::Long(n)) => arg_exprs.push(ajave_core::term::Expr::Int(*n)),
                 Operand::Const(Const::Double(d)) => {
                     arg_exprs.push(ajave_core::term::Expr::double(*d))
                 }
@@ -1518,9 +1689,8 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         let about = ajave_core::term::Expr::Var(dest);
-        let call = ajave_core::term::Expr::call(
-            &target.class, &target.name, &target.desc, arg_exprs,
-        );
+        let call =
+            ajave_core::term::Expr::call(&target.class, &target.name, &target.desc, arg_exprs);
         let given = vec![ajave_core::term::Expr::bin(
             ajave_core::term::Op::Eq,
             about.clone(),
@@ -1572,7 +1742,12 @@ impl<'a> ExploreCtx<'a> {
         self.explore_block_until(block_id, stmt_idx, None);
     }
 
-    fn explore_block_until(&mut self, block_id: BlockId, stmt_idx: usize, stop_at: Option<BlockId>) {
+    fn explore_block_until(
+        &mut self,
+        block_id: BlockId,
+        stmt_idx: usize,
+        stop_at: Option<BlockId>,
+    ) {
         if stop_at == Some(block_id) {
             return;
         }
@@ -1608,16 +1783,21 @@ impl<'a> ExploreCtx<'a> {
             Terminator::Branch { cond, then_, else_ } => {
                 self.handle_branch(block_id, cond.clone(), *then_, *else_, stop_at);
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 self.handle_switch(value.clone(), cases.clone(), *default, stop_at);
             }
             Terminator::Return(Some(val)) => {
                 if self.call_depth > 0 {
                     self.inline_return = Some(self.encode_operand(val));
-                    self.inline_return_str = self.encode_str_operand(val)
-                        .or(self.inline_return_str);
+                    self.inline_return_str =
+                        self.encode_str_operand(val).or(self.inline_return_str);
                     self.inline_return_tainted = self.inline_return_tainted
-                        || self.operand_tainted(val) || self.path_tainted;
+                        || self.operand_tainted(val)
+                        || self.path_tainted;
                 }
             }
             Terminator::Return(None) | Terminator::Halt => {}
@@ -1656,7 +1836,11 @@ mod jdk_allowlist_tests {
         ("java/util/Stack", "peek", "()Ljava/lang/Object;"),
         ("java/util/ArrayDeque", "pop", "()Ljava/lang/Object;"),
         // Bounds / store checks.
-        ("java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V"),
+        (
+            "java/lang/System",
+            "arraycopy",
+            "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+        ),
         ("java/lang/String", "charAt", "(I)C"),
         ("java/lang/String", "substring", "(I)Ljava/lang/String;"),
         // ArithmeticException on overflow or zero divisor.
@@ -1667,28 +1851,67 @@ mod jdk_allowlist_tests {
         ("java/lang/Math", "floorMod", "(II)I"),
         // NumberFormatException — note these differ from the primitive
         // overloads only by descriptor, which is why the check is descriptor-keyed.
-        ("java/lang/Integer", "valueOf", "(Ljava/lang/String;)Ljava/lang/Integer;"),
+        (
+            "java/lang/Integer",
+            "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Integer;",
+        ),
         ("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I"),
         ("java/lang/Double", "parseDouble", "(Ljava/lang/String;)D"),
         // IllegalFormatException.
-        ("java/lang/String", "format", "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"),
-        ("java/io/PrintStream", "format", "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;"),
+        (
+            "java/lang/String",
+            "format",
+            "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+        ),
+        (
+            "java/io/PrintStream",
+            "format",
+            "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+        ),
         // NPE on null arguments.
-        ("java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;"),
-        ("java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z"),
-        ("java/util/TreeMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+        (
+            "java/lang/String",
+            "concat",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+        ),
+        (
+            "java/lang/String",
+            "contains",
+            "(Ljava/lang/CharSequence;)Z",
+        ),
+        (
+            "java/util/TreeMap",
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
         // NegativeArraySizeException — again distinguished only by descriptor.
         ("java/lang/StringBuilder", "<init>", "(I)V"),
         // Blanket class allowlists used to let these through.
         ("java/util/Arrays", "copyOfRange", "([III)[I"),
-        ("java/util/Collections", "max", "(Ljava/util/Collection;)Ljava/lang/Object;"),
-        ("java/util/Collections", "nCopies", "(ILjava/lang/Object;)Ljava/util/List;"),
+        (
+            "java/util/Collections",
+            "max",
+            "(Ljava/util/Collection;)Ljava/lang/Object;",
+        ),
+        (
+            "java/util/Collections",
+            "nCopies",
+            "(ILjava/lang/Object;)Ljava/util/List;",
+        ),
         ("java/util/Scanner", "hasNext", "()Z"),
         // Regex methods throw PatternSyntaxException.
         ("java/lang/String", "matches", "(Ljava/lang/String;)Z"),
-        ("java/lang/String", "split", "(Ljava/lang/String;)[Ljava/lang/String;"),
-        ("java/lang/String", "replaceAll",
-         "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+        (
+            "java/lang/String",
+            "split",
+            "(Ljava/lang/String;)[Ljava/lang/String;",
+        ),
+        (
+            "java/lang/String",
+            "replaceAll",
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        ),
     ];
 
     /// Signatures verified total on a real JVM under adversarial arguments.
@@ -1740,7 +1963,11 @@ mod jdk_allowlist_tests {
     #[test]
     fn verifier_match_is_exact() {
         assert!(!is_total_jdk_method("MyVerifierHelper", "doWork", "()V"));
-        assert!(!is_total_jdk_method("com/example/Verifier", "doWork", "()V"));
+        assert!(!is_total_jdk_method(
+            "com/example/Verifier",
+            "doWork",
+            "()V"
+        ));
         assert!(is_total_jdk_method(
             "org/sosy_lab/sv_benchmarks/Verifier",
             "nondetInt",
@@ -1751,24 +1978,43 @@ mod jdk_allowlist_tests {
     fn enumeration_has_more_elements_is_total_but_next_element_is_not() {
         // Exactly the Iterator split: the query is total, the accessor throws
         // when exhausted and that is its specified contract.
-        assert!(is_total_jdk_method("java/util/Enumeration", "hasMoreElements", "()Z"));
+        assert!(is_total_jdk_method(
+            "java/util/Enumeration",
+            "hasMoreElements",
+            "()Z"
+        ));
         assert!(!is_total_jdk_method(
-            "java/util/Enumeration", "nextElement", "()Ljava/lang/Object;"));
+            "java/util/Enumeration",
+            "nextElement",
+            "()Ljava/lang/Object;"
+        ));
     }
 
     #[test]
     fn collections_factories_are_total_but_the_class_is_not() {
-        assert!(is_total_jdk_method("java/util/Collections", "emptyList", "()Ljava/util/List;"));
         assert!(is_total_jdk_method(
-            "java/util/Collections", "singleton", "(Ljava/lang/Object;)Ljava/util/Set;"));
+            "java/util/Collections",
+            "emptyList",
+            "()Ljava/util/List;"
+        ));
+        assert!(is_total_jdk_method(
+            "java/util/Collections",
+            "singleton",
+            "(Ljava/lang/Object;)Ljava/util/Set;"
+        ));
         // `max` on an empty collection throws; the class must never be
         // allowlisted wholesale.
         assert!(!is_total_jdk_method(
-            "java/util/Collections", "max", "(Ljava/util/Collection;)Ljava/lang/Object;"));
+            "java/util/Collections",
+            "max",
+            "(Ljava/util/Collection;)Ljava/lang/Object;"
+        ));
         // `enumeration` NPEs on a null argument, so it is not total either.
         assert!(!is_total_jdk_method(
-            "java/util/Collections", "enumeration",
-            "(Ljava/util/Collection;)Ljava/util/Enumeration;"));
+            "java/util/Collections",
+            "enumeration",
+            "(Ljava/util/Collection;)Ljava/util/Enumeration;"
+        ));
     }
 
     #[test]
@@ -1776,13 +2022,24 @@ mod jdk_allowlist_tests {
         // Factories and constructors guarantee it; a lookup does not, and
         // claiming otherwise would discharge a NullDeref that really can fire.
         assert!(ajave_models::returns_nonnull(
-            "java/util/Collections", "singleton", "(Ljava/lang/Object;)Ljava/util/Set;"));
-        assert!(ajave_models::returns_nonnull("java/lang/StringBuilder", "toString",
-            "()Ljava/lang/String;"));
+            "java/util/Collections",
+            "singleton",
+            "(Ljava/lang/Object;)Ljava/util/Set;"
+        ));
+        assert!(ajave_models::returns_nonnull(
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;"
+        ));
         assert!(!ajave_models::returns_nonnull(
-            "java/util/Map", "get", "(Ljava/lang/Object;)Ljava/lang/Object;"));
-        assert!(!ajave_models::returns_nonnull("mockx/servlet/http/HttpServletRequest",
-            "getHeader", "(Ljava/lang/String;)Ljava/lang/String;"));
+            "java/util/Map",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;"
+        ));
+        assert!(!ajave_models::returns_nonnull(
+            "mockx/servlet/http/HttpServletRequest",
+            "getHeader",
+            "(Ljava/lang/String;)Ljava/lang/String;"
+        ));
     }
-
 }

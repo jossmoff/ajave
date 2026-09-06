@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Every job runs a `just` recipe rather than an inline command. A local check
+# that differs from the remote one is how the two silently drift -- which is
+# exactly what happened to `boundaries` and `strategy-docs`, both of which
+# still read `crates/roast-*` after the rename and so failed on every run for
+# weeks without anyone noticing.
 jobs:
   fmt:
     name: fmt
@@ -19,7 +24,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - uses: extractions/setup-just@v2
+      - run: just fmt-check
 
   clippy:
     name: clippy
@@ -30,7 +36,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: extractions/setup-just@v2
+      - run: just clippy
 
   test:
     name: test
@@ -43,18 +50,21 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: cargo test --workspace
+      - uses: extractions/setup-just@v2
+      - run: just test
 
   boundaries:
     name: boundaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: bash scripts/check-boundaries.sh
+      - uses: extractions/setup-just@v2
+      - run: just boundaries
 
   strategy-docs:
     name: strategy-docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: bash scripts/check-strategy-docs.sh
+      - uses: extractions/setup-just@v2
+      - run: just strategy-docs

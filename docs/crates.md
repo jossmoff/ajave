@@ -22,7 +22,7 @@ ajave-ir  <---- ajave-models
 | `ajave-models` | What ajave assumes `java.*` calls do, without analysing their bytecode | `ajave-ir` | `ajave-core`, `ajave-frontend` |
 | `ajave-frontend` | Classfile parsing, the bytecode lifter | `ajave-ir`, `ajave-models` | `ajave-core` |
 | `ajave-core` | Blackboard, CPA substrate, `Engine`/`Certifier` traits, orchestrator | `ajave-ir`, `ajave-models` | `ajave-frontend` |
-| `ajave-engines` | Concrete strategies (interval AI, concolic falsifier, presolve) | `ajave-ir`, `ajave-models`, `ajave-core` | `ajave-frontend` |
+| `ajave-engines` | The verification strategies: AI, BMC, concolic, k-induction, CHC, IMC, CEGAR | `ajave-ir`, `ajave-models`, `ajave-core` | `ajave-frontend` |
 | `ajave` (bin) | CLI driver: compile, lift, run the portfolio, certify, report | all of the above | — |
 
 ## Why the graph is shaped like this

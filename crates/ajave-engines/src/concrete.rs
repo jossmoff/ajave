@@ -13,15 +13,15 @@
 //! interpreter can evaluate them against the tracked content instead of
 //! returning Unknown.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use log::{debug, info};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::verdict::{NondetEntry, NondetValue, Witness};
 use ajave_ir::*;
 use ajave_models as models;
+use log::{debug, info};
 
 use crate::math_eval::{eval_math_call, is_concrete_math_call};
 use crate::str_eval::eval_str_call;
@@ -57,7 +57,7 @@ impl Value {
 
 /// Outcome of running one concrete path to completion.
 #[derive(Debug)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Ran to a `Return` with nothing amiss.
     Clean,
     /// Ran to a `Return` carrying a value.
@@ -137,7 +137,12 @@ impl Run {
         min_cmp_distance: f64,
         float_ty: std::rc::Rc<std::collections::HashSet<VarId>>,
     ) -> Run {
-        Run { store, min_cmp_distance, min_cmp_signed: f64::INFINITY, float_ty }
+        Run {
+            store,
+            min_cmp_distance,
+            min_cmp_signed: f64::INFINITY,
+            float_ty,
+        }
     }
 
     fn is_float_operand(&self, o: &Operand) -> bool {
@@ -217,21 +222,35 @@ impl Run {
                     (Ty::Int, Ty::Long, Value::I64(x)) => Value::I32(x as i32),
                     (Ty::Long, Ty::Int, Value::I32(x)) => Value::I64(x as i64),
                     // float → int: reinterpret bits as float, cast to int
-                    (Ty::Int, Ty::Float, Value::I32(x)) => Value::I32(f32::from_bits(x as u32) as i32),
-                    (Ty::Long, Ty::Float, Value::I32(x)) => Value::I64(f32::from_bits(x as u32) as i64),
-                    (Ty::Long, Ty::Double, Value::I64(x)) => Value::I64(f64::from_bits(x as u64) as i64),
-                    (Ty::Int, Ty::Double, Value::I64(x)) => Value::I32(f64::from_bits(x as u64) as i32),
+                    (Ty::Int, Ty::Float, Value::I32(x)) => {
+                        Value::I32(f32::from_bits(x as u32) as i32)
+                    }
+                    (Ty::Long, Ty::Float, Value::I32(x)) => {
+                        Value::I64(f32::from_bits(x as u32) as i64)
+                    }
+                    (Ty::Long, Ty::Double, Value::I64(x)) => {
+                        Value::I64(f64::from_bits(x as u64) as i64)
+                    }
+                    (Ty::Int, Ty::Double, Value::I64(x)) => {
+                        Value::I32(f64::from_bits(x as u64) as i32)
+                    }
                     // int → float: cast to float, store as bits
                     (Ty::Float, Ty::Int, Value::I32(x)) => Value::I32((x as f32).to_bits() as i32),
                     (Ty::Float, Ty::Long, Value::I64(x)) => Value::I32((x as f32).to_bits() as i32),
                     (Ty::Double, Ty::Int, Value::I32(x)) => Value::I64((x as f64).to_bits() as i64),
-                    (Ty::Double, Ty::Long, Value::I64(x)) => Value::I64((x as f64).to_bits() as i64),
+                    (Ty::Double, Ty::Long, Value::I64(x)) => {
+                        Value::I64((x as f64).to_bits() as i64)
+                    }
                     // float ↔ double
-                    (Ty::Double, Ty::Float, Value::I32(x)) => Value::I64((f32::from_bits(x as u32) as f64).to_bits() as i64),
-                    (Ty::Float, Ty::Double, Value::I64(x)) => Value::I32((f64::from_bits(x as u64) as f32).to_bits() as i32),
+                    (Ty::Double, Ty::Float, Value::I32(x)) => {
+                        Value::I64((f32::from_bits(x as u32) as f64).to_bits() as i64)
+                    }
+                    (Ty::Float, Ty::Double, Value::I64(x)) => {
+                        Value::I32((f64::from_bits(x as u64) as f32).to_bits() as i32)
+                    }
                     (_, _, v) => v,
                 }
-            },
+            }
             Rvalue::Cmp(kind, a, b) => {
                 let av = self.eval(a);
                 let bv = self.eval(b);
@@ -400,11 +419,50 @@ fn route(prog: &Program, block: &Block, class: &str) -> Option<BlockId> {
     None
 }
 
-
 // String eval (`eval_str_call`) moved to str_eval.rs
 // Math eval (`eval_math_call`, `is_concrete_math_call`) moved to math_eval.rs
 /// Shared mutable state for a concrete execution — threaded through call
 /// inlining so field reads/writes and allocations are visible across frames.
+/// A symbolic expression shadowing a concrete value, in SMT-LIB text.
+///
+/// Concolic execution runs the program for real and records, alongside each
+/// concrete value, how it was computed from the nondeterministic inputs. The
+/// concrete run decides control flow; the symbolic shadow only says what
+/// *else* the inputs could have been.
+#[derive(Clone, Debug)]
+pub(crate) struct Sym {
+    text: String,
+    /// True when `text` is an SMT `Bool` rather than an `Int`. The IR stores
+    /// comparison results as 0/1 integers, so a branch on an Int-valued shadow
+    /// has to be spelled `(distinct e 0)`.
+    is_bool: bool,
+}
+
+/// One branch the concrete run took, and the condition it turned on.
+#[derive(Clone, Debug)]
+pub(crate) struct PathCond {
+    pub text: String,
+    pub taken: bool,
+}
+
+/// An SMT integer literal. Negatives are `(- n)` in SMT-LIB, not `-n`.
+fn lit(v: i64) -> String {
+    if v < 0 {
+        format!("(- {})", -(v as i128))
+    } else {
+        v.to_string()
+    }
+}
+
+/// The integer value of a constant operand, if it has one.
+fn int_const(c: &Const) -> Option<i64> {
+    match c {
+        Const::Int(i) => Some(*i as i64),
+        Const::Long(l) => Some(*l),
+        _ => None,
+    }
+}
+
 struct ConcreteState<'a> {
     prog: &'a Program,
     /// See `Run::min_cmp_distance`.
@@ -435,6 +493,22 @@ struct ConcreteState<'a> {
     call_depth: u32,
     /// Classes whose `<clinit>` has already been executed.
     initialized_classes: HashSet<String>,
+    /// Record a symbolic shadow and path condition as we go.
+    concolic: bool,
+    /// Shadow expressions for the *entry* frame only.
+    ///
+    /// Deliberately not maintained across inlined calls: `VarId`s are numbered
+    /// per body, so one map cannot serve two frames, and the recursion these
+    /// exist to defeat is exactly what we want executed concretely rather than
+    /// symbolically. A branch inside a callee therefore yields no flip, which
+    /// costs exploration and not correctness.
+    sym: HashMap<VarId, Sym>,
+    /// Branch conditions taken, in execution order.
+    path: Vec<PathCond>,
+    /// Index of the nondet choice consumed by the rvalue being assigned.
+    last_nondet: Option<usize>,
+    /// Nondet choices that got a symbolic name, by index.
+    sym_inputs: BTreeSet<usize>,
 }
 
 /// Maximum call inlining depth to prevent infinite recursion.
@@ -462,6 +536,11 @@ impl<'a> ConcreteState<'a> {
             static_fields: HashMap::new(),
             call_depth: 0,
             initialized_classes: HashSet::new(),
+            concolic: false,
+            sym: HashMap::new(),
+            path: Vec::new(),
+            last_nondet: None,
+            sym_inputs: BTreeSet::new(),
         }
     }
 
@@ -556,7 +635,11 @@ impl<'a> ConcreteState<'a> {
     /// map; heap state is shared through `self`.
     /// Evaluate an rvalue in the context of a concrete store.
     /// Returns `Ok(value)` for the computed result, or `Err(outcome)` for early termination.
-    fn eval_assign(&mut self, rv: &Rvalue, store: &mut HashMap<VarId, Value>) -> Result<Value, Outcome> {
+    fn eval_assign(
+        &mut self,
+        rv: &Rvalue,
+        store: &mut HashMap<VarId, Value>,
+    ) -> Result<Value, Outcome> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
             Rvalue::Havoc(ty, _) => Ok(self.eval_havoc(ty)),
@@ -615,29 +698,43 @@ impl<'a> ConcreteState<'a> {
                 if models::STR_OWNERS.contains(&target.class.as_str()) =>
             {
                 Ok(eval_str_call(
-                    target, args, store,
-                    &mut self.str_store, &mut self.sb_store, &mut self.alloc_id,
+                    target,
+                    args,
+                    store,
+                    &mut self.str_store,
+                    &mut self.sb_store,
+                    &mut self.alloc_id,
                 ))
             }
-            Rvalue::Call { target, args, .. } => {
-                match self.try_inline_call(target, args, store) {
-                    Some(InlineResult::Returned(rv)) => Ok(rv),
-                    Some(InlineResult::Halted) => Err(Outcome::Halted),
-                    Some(InlineResult::Violated { method, oid, witness, entries }) => {
-                        Err(Outcome::Violated { method, oid, witness, entries })
-                    }
-                    Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
-                    None => {
-                        let mut r = Run::new(std::mem::take(store), self.min_cmp_distance, self.float_ty.clone());
-                        let val = r.eval_rvalue(rv);
-                        *store = r.store;
-                        self.min_cmp_distance = r.min_cmp_distance;
-                self.min_cmp_signed = r.min_cmp_signed;
-                        self.min_cmp_signed = r.min_cmp_signed;
-                        Ok(val)
-                    }
+            Rvalue::Call { target, args, .. } => match self.try_inline_call(target, args, store) {
+                Some(InlineResult::Returned(rv)) => Ok(rv),
+                Some(InlineResult::Halted) => Err(Outcome::Halted),
+                Some(InlineResult::Violated {
+                    method,
+                    oid,
+                    witness,
+                    entries,
+                }) => Err(Outcome::Violated {
+                    method,
+                    oid,
+                    witness,
+                    entries,
+                }),
+                Some(InlineResult::Threw(cls)) => Err(Outcome::Threw(cls)),
+                None => {
+                    let mut r = Run::new(
+                        std::mem::take(store),
+                        self.min_cmp_distance,
+                        self.float_ty.clone(),
+                    );
+                    let val = r.eval_rvalue(rv);
+                    *store = r.store;
+                    self.min_cmp_distance = r.min_cmp_distance;
+                    self.min_cmp_signed = r.min_cmp_signed;
+                    self.min_cmp_signed = r.min_cmp_signed;
+                    Ok(val)
                 }
-            }
+            },
             Rvalue::GetField { obj, field } => {
                 let obj_val = self.eval_op(obj, store);
                 Ok(match obj_val {
@@ -654,7 +751,8 @@ impl<'a> ConcreteState<'a> {
                     return Ok(Value::I32(0));
                 }
                 self.ensure_clinit(&fk.class);
-                Ok(self.static_fields
+                Ok(self
+                    .static_fields
                     .get(&(fk.class.clone(), fk.name.clone()))
                     .copied()
                     .unwrap_or_else(|| {
@@ -670,7 +768,11 @@ impl<'a> ConcreteState<'a> {
                     }))
             }
             other => {
-                let mut r = Run::new(std::mem::take(store), self.min_cmp_distance, self.float_ty.clone());
+                let mut r = Run::new(
+                    std::mem::take(store),
+                    self.min_cmp_distance,
+                    self.float_ty.clone(),
+                );
                 let val = r.eval_rvalue(other);
                 *store = r.store;
                 self.min_cmp_distance = r.min_cmp_distance;
@@ -679,9 +781,107 @@ impl<'a> ConcreteState<'a> {
         }
     }
 
-    /// Evaluate a Nondet rvalue: pick a choice and record in trace.
+    /// SMT text for an operand: its shadow if it has one, else its concrete
+    /// value as a literal. `None` when the value is not an integer we can
+    /// express, which makes the whole expression unshadowed.
+    fn sym_operand(&self, op: &Operand, store: &HashMap<VarId, Value>) -> Option<(String, bool)> {
+        match op {
+            Operand::Var(v) => {
+                if let Some(sy) = self.sym.get(v) {
+                    return Some((sy.text.clone(), true));
+                }
+                match store.get(v) {
+                    Some(Value::I32(i)) => Some((lit(*i as i64), false)),
+                    Some(Value::I64(i)) => Some((lit(*i), false)),
+                    _ => None,
+                }
+            }
+            Operand::Const(c) => int_const(c).map(|i| (lit(i), false)),
+        }
+    }
+
+    /// Shadow for an rvalue, or `None` to drop the variable's shadow.
+    ///
+    /// Anything this cannot express becomes concrete, which removes flips and
+    /// therefore exploration. It cannot cause a wrong answer: a violation is
+    /// only ever reported when the concrete run actually reaches and fails a
+    /// check.
+    fn sym_rvalue(&self, rv: &Rvalue, store: &HashMap<VarId, Value>) -> Option<Sym> {
+        match rv {
+            Rvalue::Use(a) => {
+                let (t, sym) = self.sym_operand(a, store)?;
+                sym.then(|| Sym { text: t, is_bool: matches!(a, Operand::Var(v) if self.sym.get(v).is_some_and(|s| s.is_bool)) })
+            }
+            Rvalue::Neg(a) => {
+                let (t, sym) = self.sym_operand(a, store)?;
+                sym.then(|| Sym {
+                    text: format!("(- {})", t),
+                    is_bool: false,
+                })
+            }
+            Rvalue::Bin(op, a, b) => {
+                let (ta, sa) = self.sym_operand(a, store)?;
+                let (tb, sb) = self.sym_operand(b, store)?;
+                if !sa && !sb {
+                    return None; // wholly concrete: nothing to remember
+                }
+                let (o, is_bool) = match op {
+                    BinOp::Add => ("+", false),
+                    BinOp::Sub => ("-", false),
+                    BinOp::Mul => ("*", false),
+                    BinOp::Lt => ("<", true),
+                    BinOp::Le => ("<=", true),
+                    BinOp::Gt => (">", true),
+                    BinOp::Ge => (">=", true),
+                    BinOp::Eq => ("=", true),
+                    BinOp::Ne => ("distinct", true),
+                    // Div/Rem are Euclidean in SMT and truncating in Java, and
+                    // LIA has no bitwise operators. Modelling them wrongly
+                    // would make the solver hand back inputs that do not
+                    // reproduce, so decline instead.
+                    BinOp::Div
+                    | BinOp::Rem
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::Xor
+                    | BinOp::Shl
+                    | BinOp::Shr
+                    | BinOp::UShr => return None,
+                };
+                Some(Sym {
+                    text: format!("({} {} {})", o, ta, tb),
+                    is_bool,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the branch the concrete run took.
+    fn record_branch(&mut self, cond: &Operand, taken: bool) {
+        if !self.concolic || self.call_depth != 0 {
+            return;
+        }
+        let Operand::Var(v) = cond else { return };
+        let Some(sy) = self.sym.get(v) else { return };
+        let text = if sy.is_bool {
+            sy.text.clone()
+        } else {
+            format!("(distinct {} 0)", sy.text)
+        };
+        self.path.push(PathCond { text, taken });
+    }
+
+    /// Evaluate a Nondet rvalue: pick a choice and record it in the trace.
     fn eval_nondet(&mut self, ty: &Ty) -> Value {
         let raw = self.choices.get(self.choice_idx).copied().unwrap_or(0);
+        // Which input this value came from, so the assignment can name it.
+        // Only the entry frame is shadowed (see `ConcreteState::sym`).
+        self.last_nondet = if self.concolic && self.call_depth == 0 {
+            Some(self.choice_idx)
+        } else {
+            None
+        };
         self.choice_idx += 1;
         let line: Option<u16> = None;
         match ty {
@@ -785,7 +985,9 @@ impl<'a> ConcreteState<'a> {
             if let Some(class) = models::exception_class(ob.kind) {
                 if let Some(target) = route(self.prog, block, class) {
                     if let Some(slot) = body
-                        .vars.iter().enumerate()
+                        .vars
+                        .iter()
+                        .enumerate()
                         .find(|(_, vi)| vi.kind == VarKind::Stack(0))
                         .map(|(i, _)| VarId(i as u32))
                     {
@@ -846,7 +1048,10 @@ impl<'a> ConcreteState<'a> {
             let b = body.block(block);
             if idx >= b.stmts.len() {
                 match &b.term {
-                    Terminator::Goto(t) => { block = *t; idx = 0; }
+                    Terminator::Goto(t) => {
+                        block = *t;
+                        idx = 0;
+                    }
                     Terminator::Branch { cond, then_, else_ } => {
                         let cv = store
                             .get(match cond {
@@ -855,19 +1060,32 @@ impl<'a> ConcreteState<'a> {
                             })
                             .copied()
                             .unwrap_or(Value::Unknown);
-                        if cv == Value::Unknown { return Outcome::Inconclusive; }
-                        block = if cv.nonzero() { *then_ } else { *else_ };
+                        if cv == Value::Unknown {
+                            return Outcome::Inconclusive;
+                        }
+                        let taken = cv.nonzero();
+                        self.record_branch(cond, taken);
+                        block = if taken { *then_ } else { *else_ };
                         idx = 0;
                     }
-                    Terminator::Switch { value, cases, default } => {
+                    Terminator::Switch {
+                        value,
+                        cases,
+                        default,
+                    } => {
                         let v = match value {
                             Operand::Var(vid) => store.get(vid).copied().unwrap_or(Value::Unknown),
                             other => Value::I32(match other {
                                 Operand::Const(Const::Int(n)) => *n,
                                 _ => 0,
                             }),
-                        }.as_i64() as i32;
-                        block = cases.iter().find(|(k, _)| *k == v).map(|(_, t)| *t).unwrap_or(*default);
+                        }
+                        .as_i64() as i32;
+                        block = cases
+                            .iter()
+                            .find(|(k, _)| *k == v)
+                            .map(|(_, t)| *t)
+                            .unwrap_or(*default);
                         idx = 0;
                     }
                     Terminator::Return(ret) => {
@@ -883,7 +1101,9 @@ impl<'a> ConcreteState<'a> {
                             Operand::Var(v) => {
                                 if let Some(Value::Ref(aid)) = store.get(v) {
                                     self.alloc_types.get(aid).cloned()
-                                } else { None }
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         };
@@ -911,8 +1131,31 @@ impl<'a> ConcreteState<'a> {
                 // JVM performs is a separate `Check`.
                 Stmt::MonitorEnter(_) | Stmt::MonitorExit(_) => {}
                 Stmt::Assign(v, rv) => {
+                    self.last_nondet = None;
                     match self.eval_assign(rv, &mut store) {
-                        Ok(val) => { store.insert(*v, val); }
+                        Ok(val) => {
+                            store.insert(*v, val);
+                            if self.concolic && self.call_depth == 0 {
+                                // A fresh input gets a name; anything else
+                                // inherits a shadow built from its operands,
+                                // and an unshadowable rvalue clears the entry
+                                // so the value is treated as concrete.
+                                if let Some(idx) = self.last_nondet.take() {
+                                    self.sym_inputs.insert(idx);
+                                    self.sym.insert(
+                                        *v,
+                                        Sym {
+                                            text: format!("n{}", idx),
+                                            is_bool: false,
+                                        },
+                                    );
+                                } else if let Some(sy) = self.sym_rvalue(rv, &store) {
+                                    self.sym.insert(*v, sy);
+                                } else {
+                                    self.sym.remove(v);
+                                }
+                            }
+                        }
                         Err(Outcome::Threw(cls)) => {
                             if let Some(target) = route(self.prog, b, &cls) {
                                 block = target;
@@ -932,7 +1175,9 @@ impl<'a> ConcreteState<'a> {
                         })
                         .copied()
                         .unwrap_or(Value::Unknown);
-                    if !v.nonzero() { return Outcome::Halted; }
+                    if !v.nonzero() {
+                        return Outcome::Halted;
+                    }
                 }
                 Stmt::PutField { obj, field, val } => {
                     let obj_val = self.eval_op(obj, &store);
@@ -946,7 +1191,8 @@ impl<'a> ConcreteState<'a> {
                 Stmt::PutStatic(fk, val) => {
                     self.ensure_clinit(&fk.class);
                     let v = self.eval_op(val, &store);
-                    self.static_fields.insert((fk.class.clone(), fk.name.clone()), v);
+                    self.static_fields
+                        .insert((fk.class.clone(), fk.name.clone()), v);
                 }
                 Stmt::ArrayStore { .. } => {}
                 Stmt::Check(oid) => {
@@ -970,16 +1216,38 @@ impl<'a> ConcreteState<'a> {
 
 /// Run the body once against a fully-predetermined sequence of nondet
 /// choices. Choices beyond what's provided fall back to `0`.
-pub(crate) fn run_with_choices(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Outcome {
+pub(crate) fn run_with_choices(
+    prog: &Program,
+    body: &Body,
+    choices: &[i64],
+    step_budget: u64,
+) -> Outcome {
     let mut state = ConcreteState::new(prog, choices, step_budget);
     state.run_body(body, HashMap::new())
+}
+
+/// Run once with symbolic shadowing on, returning the branches taken.
+///
+/// The `Outcome` is from a real execution: a `Violated` here means the
+/// interpreter actually reached the check and it actually failed, so the
+/// choices that produced it are a genuine witness rather than a candidate.
+pub(crate) fn run_concolic(
+    prog: &Program,
+    body: &Body,
+    choices: &[i64],
+    step_budget: u64,
+) -> (Outcome, Vec<PathCond>, BTreeSet<usize>) {
+    let mut state = ConcreteState::new(prog, choices, step_budget);
+    state.concolic = true;
+    let out = state.run_body(body, HashMap::new());
+    (out, state.path, state.sym_inputs)
 }
 
 /// Run, and report how close the run came to taking a violating branch.
 ///
 /// `f64::INFINITY` means no float comparison was reached. Zero means one held
 /// exactly, which for this corpus's `== 0.0` guards is the violating branch.
-pub fn run_with_fitness(
+pub(crate) fn run_with_fitness(
     prog: &Program,
     body: &Body,
     choices: &[i64],
@@ -1027,6 +1295,12 @@ pub struct Concrete {
     done: bool,
 }
 
+impl Default for Concrete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Concrete {
     pub fn new() -> Self {
         Concrete { done: false }
@@ -1064,10 +1338,7 @@ impl Engine for Concrete {
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
-            let oref = ObligationRef {
-                method,
-                id: oid,
-            };
+            let oref = ObligationRef { method, id: oid };
             debug!(
                 "concrete: publishing violation at {oref:?}, witness={:?}",
                 witness.nondet_sequence

@@ -231,8 +231,10 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
         // reason to decline. If the interpreter genuinely cannot resolve one it
         // says so there, which is the honest place for it.
         ThreadDiscovery::Unresolved(why) => {
-            log::debug!("concurrency: thread discovery is incomplete ({why}); \
-                         bodies will be resolved at start()");
+            log::debug!(
+                "concurrency: thread discovery is incomplete ({why}); \
+                         bodies will be resolved at start()"
+            );
             Vec::new()
         }
         ThreadDiscovery::Resolved(e) => e,
@@ -261,11 +263,16 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
     // Anything else is a real, distinct object identity. An operand the
     // interpreter cannot evaluate at all already stops exploration, so the
     // failure mode is UNKNOWN rather than a wrong verdict.
-    let _ = (&monitored, &monitored_fields, &field_writes, &alloc_count, unresolved_monitor);
+    let _ = (
+        &monitored,
+        &monitored_fields,
+        &field_writes,
+        &alloc_count,
+        unresolved_monitor,
+    );
 
     Ok(entries)
 }
-
 
 /// Outcome of exhaustively exploring the bounded interleaving space.
 #[derive(Clone, Debug)]
@@ -357,6 +364,9 @@ struct Transition {
 }
 
 struct Explorer<'a> {
+    /// Not read directly; it carries the `'a` that `Interp<'a>` needs in this
+    /// struct's methods. Removing it forces a `PhantomData` that says less.
+    #[allow(dead_code)]
     prog: &'a Program,
     bounds: Bounds,
     strategy: Strategy,
@@ -624,8 +634,8 @@ impl<'a> Explorer<'a> {
                         interp.last_access = saved_last_access.clone();
                         interp.choice_at = saved_choice_at;
                         interp.spurious_used = saved_spurious;
-                    interp.path_tainted = saved_path_tainted.clone();
-                    interp.stale = saved_stale.clone();
+                        interp.path_tainted = saved_path_tainted.clone();
+                        interp.stale = saved_stale.clone();
                     }
                 }
                 // Under `no-data-race` a violated obligation is not the
@@ -716,8 +726,8 @@ impl<'a> Explorer<'a> {
             interp.last_access = saved_last_access;
             interp.choice_at = saved_choice_at;
             interp.spurious_used = saved_spurious;
-                    interp.path_tainted = saved_path_tainted.clone();
-                    interp.stale = saved_stale.clone();
+            interp.path_tainted = saved_path_tainted.clone();
+            interp.stale = saved_stale.clone();
         }
 
         self.backtrack.truncate(depth);
@@ -775,8 +785,7 @@ fn build_initial_state(
     // just possibly a different one. No benchmark here does it, and the
     // alternative (lazy initialisation during exploration) needs `<clinit>`
     // frames pushed mid-schedule.
-    let mut statics: std::collections::BTreeMap<(String, String), (bool, i64)> =
-        Default::default();
+    let mut statics: std::collections::BTreeMap<(String, String), (bool, i64)> = Default::default();
     let mut heap: std::collections::BTreeMap<(ObjId, String), (bool, i64)> = Default::default();
     let mut clinit_failed: Option<String> = None;
     for mk in prog.bodies.keys().filter(|k| k.name == "<clinit>").cloned() {
@@ -888,7 +897,6 @@ fn build_initial_state(
         schedule: Vec::new(),
         switches: 0,
     })
-
 }
 
 /// Explore every interleaving of `entries` plus the main thread.
@@ -909,7 +917,7 @@ pub fn explore_for(
     strategy: Strategy,
     want_races: bool,
 ) -> Exploration {
-    let Some(entry) = prog.entry.clone() else {
+    let Some(_entry) = prog.entry.clone() else {
         return Exploration::Incomplete("no entry method".into());
     };
     if entries.len() + 1 > bounds.max_threads {
@@ -943,7 +951,9 @@ pub fn explore_for(
     if let Some(r) = &interp.race {
         log::info!(
             "concurrency: data race on {} between threads {} and {}",
-            r.location, r.threads.0, r.threads.1
+            r.location,
+            r.threads.0,
+            r.threads.1
         );
     }
     // A race found anywhere in the explored space is a real race: it is
@@ -986,7 +996,6 @@ pub fn explore_for(
         },
     }
 }
-
 
 /// Re-run the program forcing exactly the schedule a witness records, and
 /// report whether the same obligation is violated.
@@ -1113,13 +1122,21 @@ impl Engine for ConcurrencyEngine {
                 // precondition of the proof rather than a separate question --
                 // see the DRF-SC note on the ExhaustiveNoViolation arm.
                 match explore_for(prog, &entries, self.bounds, Strategy::Dpor, false) {
-                    Exploration::Violation { obligation, method, schedule, choices } => {
+                    Exploration::Violation {
+                        obligation,
+                        method,
+                        schedule,
+                        choices,
+                    } => {
                         info!(
                             "concurrency: violation of {method}#{} under a {}-slice schedule",
                             obligation.0,
                             schedule.len()
                         );
-                        let oref = ObligationRef { method, id: obligation };
+                        let oref = ObligationRef {
+                            method,
+                            id: obligation,
+                        };
                         let witness = Witness {
                             nondet_sequence: Vec::new(),
                             entries: Vec::new(),
@@ -1131,10 +1148,17 @@ impl Engine for ConcurrencyEngine {
                             Direction::Under,
                             Artifact::Status(
                                 oref,
-                                Status::Violated { by: self.id(), witness },
+                                Status::Violated {
+                                    by: self.id(),
+                                    witness,
+                                },
                             ),
                         );
-                        if published.is_ok() { Progress::Advanced } else { Progress::Stalled }
+                        if published.is_ok() {
+                            Progress::Advanced
+                        } else {
+                            Progress::Stalled
+                        }
                     }
                     // Same reasoning as a deadlock: a race is not a violation
                     // of either scored property. It matters because it decides
@@ -1211,9 +1235,15 @@ impl Engine for ConcurrencyEngine {
                                     },
                                 ),
                             );
-                            if published.is_ok() { advanced = true; }
+                            if published.is_ok() {
+                                advanced = true;
+                            }
                         }
-                        if advanced { Progress::Advanced } else { Progress::Stalled }
+                        if advanced {
+                            Progress::Advanced
+                        } else {
+                            Progress::Stalled
+                        }
                     }
                     Exploration::Incomplete(why) => {
                         info!("concurrency: exploration incomplete — {why}");
@@ -1235,7 +1265,11 @@ mod tests {
     }
 
     fn mk_key(class: &str, name: &str, desc: &str) -> MethodKey {
-        MethodKey { class: class.into(), name: name.into(), desc: desc.into() }
+        MethodKey {
+            class: class.into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
     }
 
     fn body_named(key: MethodKey, stmts: Vec<Stmt>, nvars: usize) -> Body {
@@ -1293,7 +1327,11 @@ mod tests {
                 vec![Stmt::Assign(
                     VarId(0),
                     Rvalue::Call {
-                        target: mk("java/util/concurrent/Phaser", "arriveAndAwaitAdvance", "()I"),
+                        target: mk(
+                            "java/util/concurrent/Phaser",
+                            "arriveAndAwaitAdvance",
+                            "()I",
+                        ),
                         args: vec![Operand::Var(VarId(1))],
                         is_virtual: true,
                     },

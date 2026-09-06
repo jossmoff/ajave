@@ -33,16 +33,16 @@
 use std::collections::HashMap;
 
 use ajave_core::artifact::ProgramPoint;
-use ajave_models as models;
 use ajave_ir::verdict::ThreadId;
 use ajave_ir::{
     BinOp, BlockId, Body, Const, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt,
     Terminator, VarId,
 };
+use ajave_models as models;
 
-use ajave_ir::FieldKey;
-use crate::vclock::SyncKey;
 use crate::concurrent_state::{GlobalState, ObjId, ThreadState, ThreadStatus};
+use crate::vclock::SyncKey;
+use ajave_ir::FieldKey;
 
 /// A concrete value. Mirrors `concrete::Value` but local to this interpreter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +75,17 @@ impl Val {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access {
     /// Read or write of an instance field.
-    Field { obj: ObjId, name: String, write: bool },
+    Field {
+        obj: ObjId,
+        name: String,
+        write: bool,
+    },
     /// Read or write of a static field.
-    Static { class: String, name: String, write: bool },
+    Static {
+        class: String,
+        name: String,
+        write: bool,
+    },
     /// Acquire or release of a monitor. Two monitor operations on the same
     /// object are always dependent: their order decides who gets the lock.
     Monitor(ObjId),
@@ -96,12 +104,28 @@ impl Access {
     pub fn conflicts(&self, other: &Access) -> bool {
         match (self, other) {
             (
-                Access::Field { obj: a, name: n, write: w1 },
-                Access::Field { obj: b, name: m, write: w2 },
+                Access::Field {
+                    obj: a,
+                    name: n,
+                    write: w1,
+                },
+                Access::Field {
+                    obj: b,
+                    name: m,
+                    write: w2,
+                },
             ) => a == b && n == m && (*w1 || *w2),
             (
-                Access::Static { class: c1, name: n1, write: w1 },
-                Access::Static { class: c2, name: n2, write: w2 },
+                Access::Static {
+                    class: c1,
+                    name: n1,
+                    write: w1,
+                },
+                Access::Static {
+                    class: c2,
+                    name: n2,
+                    write: w2,
+                },
             ) => c1 == c2 && n1 == n2 && (*w1 || *w2),
             (Access::Monitor(a), Access::Monitor(b)) => a == b,
             (Access::Lifecycle(a), Access::Lifecycle(b)) => a == b,
@@ -161,8 +185,6 @@ pub struct Frame {
     /// Where the caller's result goes, if this frame was entered by a call.
     pub ret_to: Option<VarId>,
 }
-
-/// Interpreter over a `GlobalState`, holding the program and allocation counter.
 
 /// Operands an rvalue reads, for taint propagation.
 fn rvalue_operands(rv: &Rvalue) -> Vec<Operand> {
@@ -251,7 +273,13 @@ pub struct Interp<'a> {
     pub hb: crate::vclock::Hb,
     /// Last write and reads per memory location, for race detection.
     #[allow(clippy::type_complexity)]
-    pub last_access: HashMap<(u32, String), (Option<(u32, crate::vclock::VClock)>, Vec<(u32, crate::vclock::VClock)>)>,
+    pub last_access: HashMap<
+        (u32, String),
+        (
+            Option<(u32, crate::vclock::VClock)>,
+            Vec<(u32, crate::vclock::VClock)>,
+        ),
+    >,
     /// The first data race found, if any.
     pub race: Option<Race>,
     /// The value each location held before its most recent write.
@@ -380,9 +408,7 @@ impl<'a> Interp<'a> {
         let mut budget = self.steps_left;
         loop {
             if budget == 0 {
-                return Step::Unsupported(
-                    "a thread ran too long without a visible action".into(),
-                );
+                return Step::Unsupported("a thread ran too long without a visible action".into());
             }
             budget -= 1;
 
@@ -500,8 +526,6 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Note what this statement touches, before executing it.
-
     /// Does a `catch` of `caught` catch a thrown `thrown`?
     ///
     /// `None` is the catch-all the compiler emits for `finally`. Otherwise the
@@ -514,7 +538,9 @@ impl<'a> Interp<'a> {
     /// that cannot happen, and failing to catch kills a thread that would have
     /// recovered. So the caller stops instead of guessing.
     fn handler_catches(&self, caught: &Option<String>, thrown: &str) -> Option<bool> {
-        let Some(caught) = caught else { return Some(true) };
+        let Some(caught) = caught else {
+            return Some(true);
+        };
         let mut cur = thrown.to_string();
         loop {
             if &cur == caught {
@@ -599,11 +625,7 @@ impl<'a> Interp<'a> {
                         break;
                     }
                     Some(false) => continue,
-                    None => {
-                        return Err(format!(
-                            "cannot tell whether a handler catches {class}"
-                        ))
-                    }
+                    None => return Err(format!("cannot tell whether a handler catches {class}")),
                 }
             }
             if let Some(t) = target {
@@ -639,7 +661,6 @@ impl<'a> Interp<'a> {
         }
     }
 
-
     /// Is `class` `java/lang/Thread` or a subclass of it?
     fn is_thread_subclass(&self, class: &str) -> bool {
         let mut cur = class.to_string();
@@ -652,7 +673,6 @@ impl<'a> Interp<'a> {
         }
         false
     }
-
 
     /// Does a read of this location race with a write by another thread?
     ///
@@ -679,9 +699,13 @@ impl<'a> Interp<'a> {
     /// Without it, unsafe publication is invisible: seeing the flag set implies
     /// the data write already happened *under sequential consistency*, so no
     /// amount of interleaving search reaches the bug.
-    fn stale_read(&mut self, tid: ThreadId, obj: u32, name: &str, cur: (bool, i64))
-        -> Option<Result<(bool, i64), String>>
-    {
+    fn stale_read(
+        &mut self,
+        tid: ThreadId,
+        obj: u32,
+        name: &str,
+        cur: (bool, i64),
+    ) -> Option<Result<(bool, i64), String>> {
         if !self.read_races(tid, obj, name) {
             return None;
         }
@@ -738,12 +762,18 @@ impl<'a> Interp<'a> {
     /// take part in a race by definition (JLS 17.4.1), and instead contributes
     /// a happens-before edge here.
     fn note_access(&mut self, tid: u32, obj: u32, field: &FieldKey, write: bool) {
-        log::trace!("access t{tid} obj{obj} {}.{} write={write}", field.class, field.name);
+        log::trace!(
+            "access t{tid} obj{obj} {}.{} write={write}",
+            field.class,
+            field.name
+        );
         if self.prog.volatile_fields.contains(field) {
             if write {
-                self.hb.release(tid, SyncKey::Volatile(obj, field.name.clone()));
+                self.hb
+                    .release(tid, SyncKey::Volatile(obj, field.name.clone()));
             } else {
-                self.hb.acquire(tid, SyncKey::Volatile(obj, field.name.clone()));
+                self.hb
+                    .acquire(tid, SyncKey::Volatile(obj, field.name.clone()));
             }
             return;
         }
@@ -758,7 +788,10 @@ impl<'a> Interp<'a> {
             if *wt != tid && !wc.happens_before(&clock) && self.race.is_none() {
                 log::debug!(
                     "race: {}.{} prev-write t{wt} {:?} vs t{tid} {:?}",
-                    field.class, field.name, wc, clock
+                    field.class,
+                    field.name,
+                    wc,
+                    clock
                 );
                 self.race = Some(Race {
                     location: format!("{}.{}", field.class, field.name),
@@ -1123,12 +1156,8 @@ impl<'a> Interp<'a> {
                 if ob.guarded && typed_handler {
                     let class = ajave_models::exception_class(ob.kind)
                         .unwrap_or("java/lang/RuntimeException");
-                    let step = self.raise_from(
-                        g,
-                        tid,
-                        class,
-                        Some((*oid, frame.at.method.clone())),
-                    )?;
+                    let step =
+                        self.raise_from(g, tid, class, Some((*oid, frame.at.method.clone())))?;
                     return Ok(Some(step));
                 }
                 Ok(Some(Step::Violated(*oid, frame.at.method.clone())))
@@ -1207,7 +1236,11 @@ impl<'a> Interp<'a> {
                 if let Some(&cur) = g.heap.get(&(ObjId(r), field.name.clone())) {
                     if let Some(res) = self.stale_read(tid, r, &field.name, cur) {
                         let (is_ref, v) = res?;
-                        return Ok(Some(if is_ref { Val::Ref(v as u32) } else { Val::Int(v) }));
+                        return Ok(Some(if is_ref {
+                            Val::Ref(v as u32)
+                        } else {
+                            Val::Int(v)
+                        }));
                     }
                 }
                 // Unset fields read as their Java default: 0 for a primitive,
@@ -1229,7 +1262,11 @@ impl<'a> Interp<'a> {
                 if let Some(&cur) = g.statics.get(&(fk.class.clone(), fk.name.clone())) {
                     if let Some(res) = self.stale_read(tid, 0, &fk.name, cur) {
                         let (is_ref, v) = res?;
-                        return Ok(Some(if is_ref { Val::Ref(v as u32) } else { Val::Int(v) }));
+                        return Ok(Some(if is_ref {
+                            Val::Ref(v as u32)
+                        } else {
+                            Val::Int(v)
+                        }));
                     }
                 }
                 match g.statics.get(&(fk.class.clone(), fk.name.clone())) {
@@ -1585,7 +1622,8 @@ impl<'a> Interp<'a> {
                     // that lock while parking on the condition itself.
                     let id = self.next_obj;
                     self.next_obj += 1;
-                    g.heap.insert((ObjId(id), "$lock".to_string()), (false, recv.0 as i64));
+                    g.heap
+                        .insert((ObjId(id), "$lock".to_string()), (false, recv.0 as i64));
                     return Ok(Some(Val::Ref(id)));
                 }
                 _ => return Err(format!("unmodelled ReentrantLock.{}", target.name)),
@@ -1621,10 +1659,12 @@ impl<'a> Interp<'a> {
             let key = (recv, "$value".to_string());
             let cur = g.heap.get(&key).map(|&(_, v)| v).unwrap_or(0);
             let arg = |i: usize| -> Option<i64> {
-                args.get(i).and_then(|a| self.eval(frame, a)).map(|v| match v {
-                    Val::Int(n) => n,
-                    Val::Ref(r) => r as i64,
-                })
+                args.get(i)
+                    .and_then(|a| self.eval(frame, a))
+                    .map(|v| match v {
+                        Val::Int(n) => n,
+                        Val::Ref(r) => r as i64,
+                    })
             };
             let (result, new) = match target.name.as_str() {
                 "<init>" => (None, Some(arg(1).unwrap_or(0))),
@@ -1657,8 +1697,10 @@ impl<'a> Interp<'a> {
                 // what makes it cheaper than `compareAndSet`, and why its
                 // contract says it must be used in a retry loop. Modelling it
                 // as an exact CAS reports code that uses it once as correct.
-                "weakCompareAndSet" | "weakCompareAndSetPlain"
-                | "weakCompareAndSetAcquire" | "weakCompareAndSetRelease" => {
+                "weakCompareAndSet"
+                | "weakCompareAndSetPlain"
+                | "weakCompareAndSetAcquire"
+                | "weakCompareAndSetRelease" => {
                     let expect = arg(1).ok_or("atomic cas expected")?;
                     let update = arg(2).ok_or("atomic cas update")?;
                     if cur != expect {
@@ -1680,10 +1722,7 @@ impl<'a> Interp<'a> {
             }
             if is_ref {
                 // `compareAndSet` still reports a boolean, not a reference.
-                let boolean = matches!(
-                    target.name.as_str(),
-                    "compareAndSet" | "weakCompareAndSet"
-                );
+                let boolean = matches!(target.name.as_str(), "compareAndSet" | "weakCompareAndSet");
                 return Ok(result.map(|v| {
                     if boolean {
                         Val::Int(v)
@@ -1796,7 +1835,11 @@ impl<'a> Interp<'a> {
                         None => return Ok(None),
                         Some(false) => {}
                     }
-                    let depth = g.threads[ti].monitors.iter().filter(|&&m| m == recv).count();
+                    let depth = g.threads[ti]
+                        .monitors
+                        .iter()
+                        .filter(|&&m| m == recv)
+                        .count();
                     // Parking in wait() releases the monitor for real, so it
                     // publishes like any other release. `notify` itself needs
                     // no edge: the ordering comes from the notifier leaving the
@@ -1902,7 +1945,10 @@ impl<'a> Interp<'a> {
                 .collect();
             let arg = |i: usize| -> Option<i64> { argv.get(i).copied().flatten() };
             let get = |g: &GlobalState, f: &str| -> i64 {
-                g.heap.get(&(recv, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+                g.heap
+                    .get(&(recv, f.to_string()))
+                    .map(|&(_, v)| v)
+                    .unwrap_or(0)
             };
             let set = |g: &mut GlobalState, f: &str, v: i64| {
                 g.heap.insert((recv, f.to_string()), (false, v));
@@ -2023,7 +2069,9 @@ impl<'a> Interp<'a> {
                         set(g, "$permits", have - 1);
                         return Ok(Some(Val::Int(1)));
                     }
-                    let Some(c) = self.choose(2) else { return Ok(None) };
+                    let Some(c) = self.choose(2) else {
+                        return Ok(None);
+                    };
                     if c == 0 {
                         return Ok(Some(Val::Int(0)));
                     }
@@ -2065,7 +2113,9 @@ impl<'a> Interp<'a> {
                     // one thread and leave the rest waiting on a barrier that
                     // can never trip -- a deadlock the JVM does not have.
                     if target.desc != "()I" {
-                        let Some(c) = self.choose(2) else { return Ok(None) };
+                        let Some(c) = self.choose(2) else {
+                            return Ok(None);
+                        };
                         if c == 0 {
                             set(g, "$broken", 1);
                             for t in g.threads.iter_mut() {
@@ -2131,7 +2181,13 @@ impl<'a> Interp<'a> {
                     return Ok(Some(Val::Int(get(g, "$arrived"))));
                 }
 
-                (c, m) => return Err(format!("unmodelled {}.{}", c.rsplit('/').next().unwrap_or(c), m)),
+                (c, m) => {
+                    return Err(format!(
+                        "unmodelled {}.{}",
+                        c.rsplit('/').next().unwrap_or(c),
+                        m
+                    ))
+                }
             }
         }
 
@@ -2184,7 +2240,11 @@ impl<'a> Interp<'a> {
                     if !g.threads[ti].holds(lock) {
                         return Err("Condition.await without holding the lock".into());
                     }
-                    let depth = g.threads[ti].monitors.iter().filter(|&&m| m == lock).count();
+                    let depth = g.threads[ti]
+                        .monitors
+                        .iter()
+                        .filter(|&&m| m == lock)
+                        .count();
                     self.hb.release(tid.0, SyncKey::Monitor(lock.0));
                     g.threads[ti].monitors.retain(|&m| m != lock);
                     g.monitor_owner.remove(&lock);
@@ -2264,8 +2324,10 @@ impl<'a> Interp<'a> {
             self.next_obj += 1;
             self.obj_class
                 .insert(id, "java/util/concurrent/ExecutorService".to_string());
-            g.heap.insert((ObjId(id), "$workers".to_string()), (false, n));
-            g.heap.insert((ObjId(id), "$submitted".to_string()), (false, 0));
+            g.heap
+                .insert((ObjId(id), "$workers".to_string()), (false, n));
+            g.heap
+                .insert((ObjId(id), "$submitted".to_string()), (false, 0));
             return Ok(Some(Val::Ref(id)));
         }
 
@@ -2297,8 +2359,7 @@ impl<'a> Interp<'a> {
                     g.heap
                         .insert((recv, "$submitted".to_string()), (false, submitted));
 
-                    let Some(Val::Ref(task)) = args.get(1).and_then(|a| self.eval(frame, a))
-                    else {
+                    let Some(Val::Ref(task)) = args.get(1).and_then(|a| self.eval(frame, a)) else {
                         return Err("submitted task is not a reference".into());
                     };
                     let t = ThreadId(self.next_tid);
@@ -2323,7 +2384,11 @@ impl<'a> Interp<'a> {
                         None => return Err(format!("no frame for {run}")),
                     }
                     if let Some(st) = g.threads.iter_mut().find(|x| x.id == t) {
-                        st.at = ProgramPoint { method: run, block: entry_block, index: 0 };
+                        st.at = ProgramPoint {
+                            method: run,
+                            block: entry_block,
+                            index: 0,
+                        };
                         st.status = ThreadStatus::Runnable;
                     }
                     // Submitting is a fork: everything the submitter has done
@@ -2379,7 +2444,9 @@ impl<'a> Interp<'a> {
                                 .unwrap_or(false)
                         });
                         if any_running {
-                            let Some(c) = self.choose(2) else { return Ok(None) };
+                            let Some(c) = self.choose(2) else {
+                                return Ok(None);
+                            };
                             if c == 0 {
                                 return Ok(Some(Val::Int(0)));
                             }
@@ -2497,7 +2564,10 @@ impl<'a> Interp<'a> {
             };
             let ti = tid.0 as usize;
             let get = |g: &GlobalState, f: &str| -> i64 {
-                g.heap.get(&(recv, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+                g.heap
+                    .get(&(recv, f.to_string()))
+                    .map(|&(_, v)| v)
+                    .unwrap_or(0)
             };
             let set = |g: &mut GlobalState, f: &str, v: i64| {
                 g.heap.insert((recv, f.to_string()), (false, v));
@@ -2565,7 +2635,9 @@ impl<'a> Interp<'a> {
                             }
                             // Timed: either nothing arrived before the deadline,
                             // or an element did and this behaves as `take`.
-                            let Some(c) = self.choose(2) else { return Ok(None) };
+                            let Some(c) = self.choose(2) else {
+                                return Ok(None);
+                            };
                             if c == 0 {
                                 return Ok(Some(Val::Ref(0)));
                             }
@@ -2616,7 +2688,10 @@ impl<'a> Interp<'a> {
         // simplification and is unsound in the expensive direction: it
         // serialises two readers and hides a real race, a wrong TRUE.
         // ReadWriteLockConcurrentReaders exists to catch exactly that.
-        if target.class.starts_with("java/util/concurrent/locks/ReentrantReadWriteLock") {
+        if target
+            .class
+            .starts_with("java/util/concurrent/locks/ReentrantReadWriteLock")
+        {
             let recv = match args.first().and_then(|a| self.eval(frame, a)) {
                 Some(Val::Ref(r)) if r != 0 => ObjId(r),
                 _ => return Err("unresolved ReentrantReadWriteLock receiver".into()),
@@ -2633,7 +2708,10 @@ impl<'a> Interp<'a> {
                 recv
             };
             let get = |g: &GlobalState, f: &str| -> i64 {
-                g.heap.get(&(parent, f.to_string())).map(|&(_, v)| v).unwrap_or(0)
+                g.heap
+                    .get(&(parent, f.to_string()))
+                    .map(|&(_, v)| v)
+                    .unwrap_or(0)
             };
             let set = |g: &mut GlobalState, f: &str, v: i64| {
                 g.heap.insert((parent, f.to_string()), (false, v));
@@ -2665,9 +2743,7 @@ impl<'a> Interp<'a> {
                             .insert((ObjId(id), "$rwlock".to_string()), (false, parent.0 as i64));
                         return Ok(Some(Val::Ref(id)));
                     }
-                    other => {
-                        return Err(format!("unmodelled ReentrantReadWriteLock.{other}"))
-                    }
+                    other => return Err(format!("unmodelled ReentrantReadWriteLock.{other}")),
                 }
             }
 
@@ -2785,10 +2861,17 @@ impl<'a> Interp<'a> {
                 .collect();
             let arg = |i: usize| -> Option<i64> { argv.get(i).copied().flatten() };
             let present = |g: &GlobalState, k: i64| -> bool {
-                g.heap.get(&(recv, format!("$p{k}"))).map(|&(_, v)| v).unwrap_or(0) == 1
+                g.heap
+                    .get(&(recv, format!("$p{k}")))
+                    .map(|&(_, v)| v)
+                    .unwrap_or(0)
+                    == 1
             };
             let value = |g: &GlobalState, k: i64| -> i64 {
-                g.heap.get(&(recv, format!("$k{k}"))).map(|&(_, v)| v).unwrap_or(0)
+                g.heap
+                    .get(&(recv, format!("$k{k}")))
+                    .map(|&(_, v)| v)
+                    .unwrap_or(0)
             };
             match target.name.as_str() {
                 "<init>" => return Ok(None),
@@ -2803,7 +2886,11 @@ impl<'a> Interp<'a> {
                     g.heap.insert((recv, format!("$k{k}")), (false, v));
                     g.heap.insert((recv, format!("$p{k}")), (false, 1));
                     if !had {
-                        let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                        let n = g
+                            .heap
+                            .get(&(recv, "$n".to_string()))
+                            .map(|&(_, v)| v)
+                            .unwrap_or(0);
                         g.heap.insert((recv, "$n".to_string()), (false, n + 1));
                     }
                     // Both report the previous mapping, or null when absent.
@@ -2811,7 +2898,11 @@ impl<'a> Interp<'a> {
                 }
                 "get" => {
                     let k = arg(1).ok_or("map key")?;
-                    return Ok(Some(Val::Ref(if present(g, k) { value(g, k) as u32 } else { 0 })));
+                    return Ok(Some(Val::Ref(if present(g, k) {
+                        value(g, k) as u32
+                    } else {
+                        0
+                    })));
                 }
                 "containsKey" => {
                     let k = arg(1).ok_or("map key")?;
@@ -2824,16 +2915,28 @@ impl<'a> Interp<'a> {
                     }
                     let old = value(g, k);
                     g.heap.insert((recv, format!("$p{k}")), (false, 0));
-                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    let n = g
+                        .heap
+                        .get(&(recv, "$n".to_string()))
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0);
                     g.heap.insert((recv, "$n".to_string()), (false, n - 1));
                     return Ok(Some(Val::Ref(old as u32)));
                 }
                 "size" => {
-                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    let n = g
+                        .heap
+                        .get(&(recv, "$n".to_string()))
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0);
                     return Ok(Some(Val::Int(n)));
                 }
                 "isEmpty" => {
-                    let n = g.heap.get(&(recv, "$n".to_string())).map(|&(_, v)| v).unwrap_or(0);
+                    let n = g
+                        .heap
+                        .get(&(recv, "$n".to_string()))
+                        .map(|&(_, v)| v)
+                        .unwrap_or(0);
                     return Ok(Some(Val::Int((n == 0) as i64)));
                 }
                 // `compute*` and `merge` take a lambda the interpreter would
@@ -2933,14 +3036,21 @@ impl<'a> Interp<'a> {
                         return Ok(None);
                     }
                     self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
-                    let v = g.heap.get(&(recv, "$v".to_string())).map(|&(_, x)| x).unwrap_or(0);
+                    let v = g
+                        .heap
+                        .get(&(recv, "$v".to_string()))
+                        .map(|&(_, x)| x)
+                        .unwrap_or(0);
                     return Ok(Some(Val::Ref(v as u32)));
                 }
                 "getNow" => {
                     if done {
                         self.hb.acquire(tid.0, SyncKey::Sync(recv.0));
-                        let v =
-                            g.heap.get(&(recv, "$v".to_string())).map(|&(_, x)| x).unwrap_or(0);
+                        let v = g
+                            .heap
+                            .get(&(recv, "$v".to_string()))
+                            .map(|&(_, x)| x)
+                            .unwrap_or(0);
                         return Ok(Some(Val::Ref(v as u32)));
                     }
                     let d = match args.get(1).and_then(|a| self.eval(frame, a)) {

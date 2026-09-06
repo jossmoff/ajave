@@ -130,23 +130,6 @@ fn encode(vals: &[f64], slots: &[Slot]) -> Vec<i64> {
         .collect()
 }
 
-/// The next representable double from `v` toward `dir`'s infinity.
-///
-/// Exact float equality is reached one representable value at a time; an
-/// arithmetic step of any fixed size may step straight over the solution.
-fn next_after(v: f64, dir: f64) -> f64 {
-    if v.is_nan() {
-        return v;
-    }
-    if v == 0.0 {
-        return if dir > 0.0 { f64::from_bits(1) } else { -f64::from_bits(1) };
-    }
-    let bits = v.to_bits() as i64;
-    let up = (v > 0.0) == (dir > 0.0);
-    let next = if up { bits + 1 } else { bits - 1 };
-    f64::from_bits(next as u64)
-}
-
 struct Candidate {
     vals: Vec<f64>,
     fitness: f64,
@@ -159,12 +142,20 @@ fn evaluate(prog: &Program, body: &Body, vals: &[f64], slots: &[Slot]) -> Candid
     let choices = encode(vals, slots);
     let (out, fitness, signed) = run_with_fitness(prog, body, &choices, STEP_BUDGET);
     let hit = match out {
-        Outcome::Violated { method, oid, witness, entries } => {
-            Some((method, oid, witness, entries))
-        }
+        Outcome::Violated {
+            method,
+            oid,
+            witness,
+            entries,
+        } => Some((method, oid, witness, entries)),
         _ => None,
     };
-    Candidate { vals: vals.to_vec(), fitness, signed, hit }
+    Candidate {
+        vals: vals.to_vec(),
+        fitness,
+        signed,
+        hit,
+    }
 }
 
 /// Find a value of variable `i` that drives the compared expression to exactly
@@ -285,7 +276,13 @@ fn from_ordered_bits(o: i64) -> f64 {
 /// Each variable is probed in both directions; an improvement is followed with
 /// a geometrically growing step until it stops paying, which is what lets the
 /// search cross many orders of magnitude without knowing the scale in advance.
-fn search(prog: &Program, body: &Body, slots: &[Slot], evals: &mut usize, best_out: &mut f64) -> Option<Candidate> {
+fn search(
+    prog: &Program,
+    body: &Body,
+    slots: &[Slot],
+    evals: &mut usize,
+    best_out: &mut f64,
+) -> Option<Candidate> {
     let n = slots.len();
     let float_idx: Vec<usize> = (0..n).filter(|i| slots[*i] != Slot::NotFloat).collect();
     if float_idx.is_empty() {
@@ -484,20 +481,31 @@ impl Engine for FloatSearch {
         let Some((method, oid, seq, entries)) = c.hit else {
             return Progress::Exhausted;
         };
-        let oref = ObligationRef { method: method.clone(), id: oid };
-        if !open.iter().any(|o| *o == oref) {
+        let oref = ObligationRef {
+            method: method.clone(),
+            id: oid,
+        };
+        if !open.contains(&oref) {
             debug!("float-search: {oref} is not open, not publishing");
             return Progress::Exhausted;
         }
 
         info!("float-search: violation for {oref} after {evals} candidate runs");
-        let witness = Witness { nondet_sequence: seq, entries, schedule: Vec::new(), choices: Vec::new() };
+        let witness = Witness {
+            nondet_sequence: seq,
+            entries,
+            schedule: Vec::new(),
+            choices: Vec::new(),
+        };
         let _ = bb.publish(
             self.id(),
             Direction::Under,
             Artifact::Status(
                 oref,
-                ajave_core::artifact::Status::Violated { by: self.id(), witness },
+                ajave_core::artifact::Status::Violated {
+                    by: self.id(),
+                    witness,
+                },
             ),
         );
         Progress::Advanced

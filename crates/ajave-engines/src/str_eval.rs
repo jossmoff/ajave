@@ -107,9 +107,11 @@ pub(crate) fn eval_str_call(
                         Some(s) => Some(s),
                         None => match arg {
                             Operand::Var(vid) => match store.get(vid).copied() {
-                                Some(Value::I32(n)) if is_bool => {
-                                    Some(if n != 0 { "true".into() } else { "false".into() })
-                                }
+                                Some(Value::I32(n)) if is_bool => Some(if n != 0 {
+                                    "true".into()
+                                } else {
+                                    "false".into()
+                                }),
                                 Some(Value::I32(n)) if is_char => {
                                     Some(String::from(char::from_u32(n as u32).unwrap_or('?')))
                                 }
@@ -119,7 +121,11 @@ pub(crate) fn eval_str_call(
                             },
                             Operand::Const(Const::Int(n)) => {
                                 if is_bool {
-                                    Some(if *n != 0 { "true".into() } else { "false".into() })
+                                    Some(if *n != 0 {
+                                        "true".into()
+                                    } else {
+                                        "false".into()
+                                    })
                                 } else if is_char {
                                     Some(String::from(char::from_u32(*n as u32).unwrap_or('?')))
                                 } else {
@@ -488,9 +494,11 @@ pub(crate) fn eval_str_call(
             let is_char = target.desc.starts_with("(C)");
             let result = match args.first() {
                 Some(Operand::Var(vid)) => match store.get(vid).copied() {
-                    Some(Value::I32(n)) if is_bool => {
-                        Some(if n != 0 { "true".to_string() } else { "false".to_string() })
-                    }
+                    Some(Value::I32(n)) if is_bool => Some(if n != 0 {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    }),
                     Some(Value::I32(n)) if is_char => {
                         Some(String::from(char::from_u32(n as u32).unwrap_or('?')))
                     }
@@ -501,7 +509,11 @@ pub(crate) fn eval_str_call(
                 },
                 Some(Operand::Const(Const::Int(n))) => {
                     if is_bool {
-                        Some(if *n != 0 { "true".to_string() } else { "false".to_string() })
+                        Some(if *n != 0 {
+                            "true".to_string()
+                        } else {
+                            "false".to_string()
+                        })
                     } else if is_char {
                         Some(String::from(char::from_u32(*n as u32).unwrap_or('?')))
                     } else {

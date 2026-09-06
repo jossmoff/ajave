@@ -17,12 +17,12 @@
 //! Original paper: Sheeran, Singh & Stålmarck, "Checking Safety Properties
 //! Using Induction and a SAT-Solver", CHARME 2000.
 
-use log::{debug, info};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_core::smt::{SatResult, SolverFactory};
 use ajave_ir::*;
+use log::{debug, info};
 
 use std::collections::BTreeSet;
 
@@ -113,7 +113,9 @@ impl Engine for KInduction {
         let mut advanced = false;
 
         for oref in &inductive {
-            let Some(body) = prog.body(&oref.method) else { continue };
+            let Some(body) = prog.body(&oref.method) else {
+                continue;
+            };
             match self.try_k_induction(body, oref.id) {
                 Ok(Some(proved_k)) => {
                     debug!("k-induction: proved {oref} by induction at k={proved_k}");
@@ -151,10 +153,7 @@ impl Engine for KInduction {
             if !has_loops {
                 // Nothing the method can reach has a back-edge, so the BMC's
                 // bounded search covered every path. Discharge directly.
-                debug!(
-                    "k-induction: {} is loop-free, discharging at k={}",
-                    oref, k
-                );
+                debug!("k-induction: {} is loop-free, discharging at k={}", oref, k);
                 let _ = bb.publish(
                     self.id(),
                     self.direction(),
@@ -346,7 +345,10 @@ impl KInduction {
         // omits back-edges, handlers, or unlifted instructions can be UNSAT
         // for a program that is unsafe on the paths it left out.
         if !encoding.complete {
-            debug!("k-induction: encoding of {} is incomplete, declining", body.key);
+            debug!(
+                "k-induction: encoding of {} is incomplete, declining",
+                body.key
+            );
             return Ok(false);
         }
 
@@ -376,11 +378,18 @@ mod tests {
     use ajave_core::smt_smtlib::SmtLibFactory;
 
     fn key() -> MethodKey {
-        MethodKey { class: "Main".into(), name: "main".into(), desc: "()V".into() }
+        MethodKey {
+            class: "Main".into(),
+            name: "main".into(),
+            desc: "()V".into(),
+        }
     }
 
     fn int_var(slot: u16) -> VarInfo {
-        VarInfo { kind: VarKind::Local(slot), ty: Ty::Int }
+        VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Int,
+        }
     }
 
     /// ```text
@@ -437,19 +446,10 @@ mod tests {
                     id: BlockId(2),
                     bytecode_offset: 2,
                     stmts: vec![
-                        Stmt::Assign(
-                            x,
-                            Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(1)),
-                        ),
-                        Stmt::Assign(
-                            t,
-                            Rvalue::Bin(BinOp::Lt, Operand::Var(x), Operand::int(2)),
-                        ),
+                        Stmt::Assign(x, Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(1))),
+                        Stmt::Assign(t, Rvalue::Bin(BinOp::Lt, Operand::Var(x), Operand::int(2))),
                         Stmt::Check(ObligationId(0)),
-                        Stmt::Assign(
-                            i,
-                            Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::int(1)),
-                        ),
+                        Stmt::Assign(i, Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::int(1))),
                     ],
                     term: Terminator::Goto(BlockId(1)),
                     exceptional: vec![],
@@ -561,10 +561,7 @@ mod tests {
                 blk(
                     3,
                     vec![
-                        Stmt::Assign(
-                            t,
-                            Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0)),
-                        ),
+                        Stmt::Assign(t, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
                         Stmt::Check(ObligationId(0)),
                     ],
                     Terminator::Return(None),
@@ -622,18 +619,18 @@ mod tests {
             return;
         };
         let mut solver = factory.create().expect("solver");
-        let looped = smt_encode::encode_body(
-            solver.as_mut(),
-            &loop_failing_on_second_iteration(),
-            "a",
+        let looped =
+            smt_encode::encode_body(solver.as_mut(), &loop_failing_on_second_iteration(), "a");
+        assert!(
+            !looped.complete,
+            "a body with a back-edge is not fully encoded"
         );
-        assert!(!looped.complete, "a body with a back-edge is not fully encoded");
-        let flat = smt_encode::encode_body(
-            solver.as_mut(),
-            &branch_join_reads_stale_definition(),
-            "b",
+        let flat =
+            smt_encode::encode_body(solver.as_mut(), &branch_join_reads_stale_definition(), "b");
+        assert!(
+            flat.complete,
+            "a loop-free body with no handlers is fully encoded"
         );
-        assert!(flat.complete, "a loop-free body with no handlers is fully encoded");
     }
 
     // ---------------------------------------------------------------
@@ -689,16 +686,25 @@ mod tests {
         let (a, x, c) = (VarId(0), VarId(1), VarId(2));
         let body = straight_line(
             vec![
-                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::Assign(
+                    a,
+                    Rvalue::NewArray {
+                        elem: "I".into(),
+                        len: Operand::int(4),
+                    },
+                ),
                 Stmt::ArrayStore {
                     arr: Operand::Var(a),
                     idx: Operand::int(0),
                     val: Operand::int(5),
                 },
-                Stmt::Assign(x, Rvalue::ArrayLoad {
-                    arr: Operand::Var(a),
-                    idx: Operand::int(0),
-                }),
+                Stmt::Assign(
+                    x,
+                    Rvalue::ArrayLoad {
+                        arr: Operand::Var(a),
+                        idx: Operand::int(0),
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
                 Stmt::Check(ObligationId(0)),
             ],
@@ -718,23 +724,36 @@ mod tests {
         let (a, x, c) = (VarId(0), VarId(1), VarId(2));
         let body = straight_line(
             vec![
-                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::Assign(
+                    a,
+                    Rvalue::NewArray {
+                        elem: "I".into(),
+                        len: Operand::int(4),
+                    },
+                ),
                 Stmt::ArrayStore {
                     arr: Operand::Var(a),
                     idx: Operand::int(0),
                     val: Operand::int(0),
                 },
-                Stmt::Assign(x, Rvalue::ArrayLoad {
-                    arr: Operand::Var(a),
-                    idx: Operand::int(0),
-                }),
+                Stmt::Assign(
+                    x,
+                    Rvalue::ArrayLoad {
+                        arr: Operand::Var(a),
+                        idx: Operand::int(0),
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
                 Stmt::Check(ObligationId(0)),
             ],
             3,
             c,
         );
-        assert_eq!(prove(&body), Ok(false), "a[0] was written 0, so a[0] > 0 fails");
+        assert_eq!(
+            prove(&body),
+            Ok(false),
+            "a[0] was written 0, so a[0] > 0 fails"
+        );
     }
 
     /// A store at one index must not be visible at another.
@@ -746,16 +765,25 @@ mod tests {
         let (a, x, c) = (VarId(0), VarId(1), VarId(2));
         let body = straight_line(
             vec![
-                Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::int(4) }),
+                Stmt::Assign(
+                    a,
+                    Rvalue::NewArray {
+                        elem: "I".into(),
+                        len: Operand::int(4),
+                    },
+                ),
                 Stmt::ArrayStore {
                     arr: Operand::Var(a),
                     idx: Operand::int(0),
                     val: Operand::int(5),
                 },
-                Stmt::Assign(x, Rvalue::ArrayLoad {
-                    arr: Operand::Var(a),
-                    idx: Operand::int(1),
-                }),
+                Stmt::Assign(
+                    x,
+                    Rvalue::ArrayLoad {
+                        arr: Operand::Var(a),
+                        idx: Operand::int(1),
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(x), Operand::int(0))),
                 Stmt::Check(ObligationId(0)),
             ],
@@ -781,14 +809,32 @@ mod tests {
             return;
         }
         let (o, q, y, c) = (VarId(0), VarId(1), VarId(2), VarId(3));
-        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let f = FieldKey {
+            class: "Obj".into(),
+            name: "f".into(),
+            desc: "I".into(),
+        };
         let body = straight_line(
             vec![
                 Stmt::Assign(o, Rvalue::New("Obj".into())),
                 Stmt::Assign(q, Rvalue::New("Obj".into())),
-                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
-                Stmt::PutField { obj: Operand::Var(q), field: f.clone(), val: Operand::int(2) },
-                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                Stmt::PutField {
+                    obj: Operand::Var(o),
+                    field: f.clone(),
+                    val: Operand::int(1),
+                },
+                Stmt::PutField {
+                    obj: Operand::Var(q),
+                    field: f.clone(),
+                    val: Operand::int(2),
+                },
+                Stmt::Assign(
+                    y,
+                    Rvalue::GetField {
+                        obj: Operand::Var(o),
+                        field: f,
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
                 Stmt::Check(ObligationId(0)),
             ],
@@ -807,15 +853,33 @@ mod tests {
             return;
         }
         let (o, u, y, c) = (VarId(0), VarId(1), VarId(2), VarId(3));
-        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let f = FieldKey {
+            class: "Obj".into(),
+            name: "f".into(),
+            desc: "I".into(),
+        };
         let body = straight_line(
             vec![
                 Stmt::Assign(o, Rvalue::New("Obj".into())),
-                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
+                Stmt::PutField {
+                    obj: Operand::Var(o),
+                    field: f.clone(),
+                    val: Operand::int(1),
+                },
                 // `u` is an incoming reference, not an allocation.
                 Stmt::Assign(u, Rvalue::Nondet(Ty::Ref, None)),
-                Stmt::PutField { obj: Operand::Var(u), field: f.clone(), val: Operand::int(2) },
-                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                Stmt::PutField {
+                    obj: Operand::Var(u),
+                    field: f.clone(),
+                    val: Operand::int(2),
+                },
+                Stmt::Assign(
+                    y,
+                    Rvalue::GetField {
+                        obj: Operand::Var(o),
+                        field: f,
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
                 Stmt::Check(ObligationId(0)),
             ],
@@ -837,28 +901,49 @@ mod tests {
             return;
         }
         let (o, y, c, r) = (VarId(0), VarId(1), VarId(2), VarId(3));
-        let f = FieldKey { class: "Obj".into(), name: "f".into(), desc: "I".into() };
+        let f = FieldKey {
+            class: "Obj".into(),
+            name: "f".into(),
+            desc: "I".into(),
+        };
         let body = straight_line(
             vec![
                 Stmt::Assign(o, Rvalue::New("Obj".into())),
-                Stmt::PutField { obj: Operand::Var(o), field: f.clone(), val: Operand::int(1) },
-                Stmt::Assign(r, Rvalue::Call {
-                    target: MethodKey {
-                        class: "Helper".into(),
-                        name: "mutate".into(),
-                        desc: "()V".into(),
+                Stmt::PutField {
+                    obj: Operand::Var(o),
+                    field: f.clone(),
+                    val: Operand::int(1),
+                },
+                Stmt::Assign(
+                    r,
+                    Rvalue::Call {
+                        target: MethodKey {
+                            class: "Helper".into(),
+                            name: "mutate".into(),
+                            desc: "()V".into(),
+                        },
+                        args: vec![],
+                        is_virtual: false,
                     },
-                    args: vec![],
-                    is_virtual: false,
-                }),
-                Stmt::Assign(y, Rvalue::GetField { obj: Operand::Var(o), field: f }),
+                ),
+                Stmt::Assign(
+                    y,
+                    Rvalue::GetField {
+                        obj: Operand::Var(o),
+                        field: f,
+                    },
+                ),
                 Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(y), Operand::int(1))),
                 Stmt::Check(ObligationId(0)),
             ],
             4,
             c,
         );
-        assert_eq!(prove(&body), Ok(false), "Helper.mutate may have written o.f");
+        assert_eq!(
+            prove(&body),
+            Ok(false),
+            "Helper.mutate may have written o.f"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -922,23 +1007,11 @@ mod tests {
                 blk(
                     2,
                     vec![
-                        Stmt::Assign(
-                            x,
-                            Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(2)),
-                        ),
-                        Stmt::Assign(
-                            t,
-                            Rvalue::Bin(BinOp::Rem, Operand::Var(x), Operand::int(2)),
-                        ),
-                        Stmt::Assign(
-                            t,
-                            Rvalue::Bin(BinOp::Eq, Operand::Var(t), Operand::int(0)),
-                        ),
+                        Stmt::Assign(x, Rvalue::Bin(BinOp::Add, Operand::Var(x), Operand::int(2))),
+                        Stmt::Assign(t, Rvalue::Bin(BinOp::Rem, Operand::Var(x), Operand::int(2))),
+                        Stmt::Assign(t, Rvalue::Bin(BinOp::Eq, Operand::Var(t), Operand::int(0))),
                         Stmt::Check(ObligationId(0)),
-                        Stmt::Assign(
-                            i,
-                            Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::int(1)),
-                        ),
+                        Stmt::Assign(i, Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::int(1))),
                     ],
                     Terminator::Goto(BlockId(1)),
                 ),
@@ -1012,11 +1085,10 @@ mod tests {
             bytecode_offset: 4,
             stmts: tail,
             term: Terminator::Goto(BlockId(1)),
-        exceptional: vec![],
+            exceptional: vec![],
         });
-        assert_eq!(
+        assert!(
             super::super::smt_encode::k_induction_applicable(&body, ObligationId(0)),
-            true,
             "two latches sharing one header is a single loop and must not be refused"
         );
         let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
@@ -1036,13 +1108,11 @@ mod tests {
         }
         let mut body = loop_with_inductive_invariant();
         // Move the check from the loop body to the block after the loop.
-        body.blocks[2].stmts.retain(|s| !matches!(s, Stmt::Check(_)));
+        body.blocks[2]
+            .stmts
+            .retain(|s| !matches!(s, Stmt::Check(_)));
         body.blocks[3].stmts.push(Stmt::Check(ObligationId(0)));
         let engine = KInduction::new(Box::new(SmtLibFactory::from_env().expect("solver")));
-        assert_eq!(
-            engine.try_k_induction(&body, ObligationId(0)),
-            Ok(None),
-        );
+        assert_eq!(engine.try_k_induction(&body, ObligationId(0)), Ok(None),);
     }
 }
-

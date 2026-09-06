@@ -168,7 +168,11 @@ fn interpolate_smtinterpol(
 }
 
 /// Public wrapper for running a solver script in batch mode.
-pub fn run_solver_batch_pub(binary: &str, args: &[&str], script: &str) -> Result<Vec<String>, String> {
+pub fn run_solver_batch_pub(
+    binary: &str,
+    args: &[&str],
+    script: &str,
+) -> Result<Vec<String>, String> {
     run_solver_batch(binary, args, script)
 }
 
@@ -291,21 +295,19 @@ pub fn encode_body_lia(
                     path_conds.push(theory.encode_nonzero(&expr));
                 }
 
-                Stmt::Check(oid) => {
-                    if obligations.contains(oid) {
-                        let ob = body.obligation(*oid);
-                        let cond_expr = smt_text::encode_operand(&theory, &ob.cond, &var_exprs);
-                        let mut econds = path_conds.clone();
-                        econds.push(theory.encode_is_zero(&cond_expr));
-                        let error_cond = if econds.is_empty() {
-                            "true".to_string()
-                        } else if econds.len() == 1 {
-                            econds[0].clone()
-                        } else {
-                            format!("(and {})", econds.join(" "))
-                        };
-                        error_clauses.push((*oid, error_cond));
-                    }
+                Stmt::Check(oid) if obligations.contains(oid) => {
+                    let ob = body.obligation(*oid);
+                    let cond_expr = smt_text::encode_operand(&theory, &ob.cond, &var_exprs);
+                    let mut econds = path_conds.clone();
+                    econds.push(theory.encode_is_zero(&cond_expr));
+                    let error_cond = if econds.is_empty() {
+                        "true".to_string()
+                    } else if econds.len() == 1 {
+                        econds[0].clone()
+                    } else {
+                        format!("(and {})", econds.join(" "))
+                    };
+                    error_clauses.push((*oid, error_cond));
                 }
                 _ => {}
             }
@@ -439,7 +441,6 @@ pub struct LiaEncoding {
     pub error_formulas: Vec<(ajave_ir::ObligationId, String)>,
     pub n_vars: usize,
 }
-
 
 /// Extract predicate atoms from an interpolant formula string.
 ///

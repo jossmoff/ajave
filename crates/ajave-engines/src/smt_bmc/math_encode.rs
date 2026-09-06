@@ -22,62 +22,125 @@ impl<'a> ExploreCtx<'a> {
             ),
             "java/lang/Integer" => matches!(
                 target.name.as_str(),
-                "parseInt" | "max" | "min" | "sum"
-                    | "signum" | "toUnsignedLong"
-                    | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                    | "compare" | "compareTo" | "hashCode"
-                    | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                    | "rotateLeft" | "rotateRight"
-                    | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                "parseInt"
+                    | "max"
+                    | "min"
+                    | "sum"
+                    | "signum"
+                    | "toUnsignedLong"
+                    | "divideUnsigned"
+                    | "remainderUnsigned"
+                    | "compareUnsigned"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "highestOneBit"
+                    | "lowestOneBit"
+                    | "rotateLeft"
+                    | "rotateRight"
+                    | "bitCount"
+                    | "numberOfLeadingZeros"
+                    | "numberOfTrailingZeros"
                     | "reverse"
-                    | "floatValue" | "doubleValue"
+                    | "floatValue"
+                    | "doubleValue"
             ),
             "java/lang/Long" => matches!(
                 target.name.as_str(),
-                "parseLong" | "max" | "min" | "sum" | "signum"
-                    | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                    | "compare" | "compareTo" | "hashCode"
-                    | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                    | "rotateLeft" | "rotateRight"
-                    | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+                "parseLong"
+                    | "max"
+                    | "min"
+                    | "sum"
+                    | "signum"
+                    | "divideUnsigned"
+                    | "remainderUnsigned"
+                    | "compareUnsigned"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "highestOneBit"
+                    | "lowestOneBit"
+                    | "rotateLeft"
+                    | "rotateRight"
+                    | "bitCount"
+                    | "numberOfLeadingZeros"
+                    | "numberOfTrailingZeros"
                     | "reverse"
-                    | "floatValue" | "doubleValue"
+                    | "floatValue"
+                    | "doubleValue"
             ),
             "java/lang/Short" => matches!(
                 target.name.as_str(),
-                "parseShort" | "compare" | "compareTo" | "hashCode" | "reverseBytes" | "toUnsignedInt" | "toUnsignedLong"
-                    | "floatValue" | "doubleValue"
+                "parseShort"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "reverseBytes"
+                    | "toUnsignedInt"
+                    | "toUnsignedLong"
+                    | "floatValue"
+                    | "doubleValue"
             ),
             "java/lang/Byte" => matches!(
                 target.name.as_str(),
-                "parseByte" | "compare" | "compareTo" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
-                    | "floatValue" | "doubleValue"
+                "parseByte"
+                    | "compare"
+                    | "compareTo"
+                    | "hashCode"
+                    | "toUnsignedInt"
+                    | "toUnsignedLong"
+                    | "floatValue"
+                    | "doubleValue"
             ),
             "java/lang/Character" => {
                 self.is_char_or_wrapper_util(&target.class, &target.name)
-                    || matches!(target.name.as_str(), "compare" | "compareTo" | "hashCode" | "reverseBytes")
+                    || matches!(
+                        target.name.as_str(),
+                        "compare" | "compareTo" | "hashCode" | "reverseBytes"
+                    )
             }
-            "java/lang/Boolean" => matches!(
-                target.name.as_str(),
-                "compareTo" | "hashCode"
-            ),
+            "java/lang/Boolean" => matches!(target.name.as_str(), "compareTo" | "hashCode"),
             "java/lang/Float" => matches!(
                 target.name.as_str(),
-                "floatToRawIntBits" | "floatToIntBits" | "intBitsToFloat"
-                    | "isNaN" | "isInfinite" | "isFinite"
-                    | "compare" | "compareTo" | "max" | "min" | "sum"
+                "floatToRawIntBits"
+                    | "floatToIntBits"
+                    | "intBitsToFloat"
+                    | "isNaN"
+                    | "isInfinite"
+                    | "isFinite"
+                    | "compare"
+                    | "compareTo"
+                    | "max"
+                    | "min"
+                    | "sum"
                     | "hashCode"
-                    | "byteValue" | "shortValue"
-                    | "intValue" | "longValue" | "doubleValue"
+                    | "byteValue"
+                    | "shortValue"
+                    | "intValue"
+                    | "longValue"
+                    | "doubleValue"
             ),
             "java/lang/Double" => matches!(
                 target.name.as_str(),
-                "doubleToRawLongBits" | "doubleToLongBits" | "longBitsToDouble"
-                    | "isNaN" | "isInfinite" | "isFinite"
-                    | "compare" | "compareTo" | "max" | "min" | "sum"
+                "doubleToRawLongBits"
+                    | "doubleToLongBits"
+                    | "longBitsToDouble"
+                    | "isNaN"
+                    | "isInfinite"
+                    | "isFinite"
+                    | "compare"
+                    | "compareTo"
+                    | "max"
+                    | "min"
+                    | "sum"
                     | "hashCode"
-                    | "byteValue" | "shortValue"
-                    | "intValue" | "longValue" | "floatValue"
+                    | "byteValue"
+                    | "shortValue"
+                    | "intValue"
+                    | "longValue"
+                    | "floatValue"
             ),
             _ => false,
         }
@@ -90,25 +153,39 @@ impl<'a> ExploreCtx<'a> {
         let bytes = inner.as_bytes();
         while pos < bytes.len() {
             let w = match bytes[pos] {
-                b'J' | b'D' => { pos += 1; 64 }
+                b'J' | b'D' => {
+                    pos += 1;
+                    64
+                }
                 b'L' => {
-                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] != b';' {
+                        pos += 1;
+                    }
                     pos += 1;
                     32
                 }
                 b'[' => {
-                    while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] == b'[' {
+                        pos += 1;
+                    }
                     if pos < bytes.len() && bytes[pos] == b'L' {
-                        while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                        while pos < bytes.len() && bytes[pos] != b';' {
+                            pos += 1;
+                        }
                         pos += 1;
                     } else {
                         pos += 1;
                     }
                     32
                 }
-                _ => { pos += 1; 32 }
+                _ => {
+                    pos += 1;
+                    32
+                }
             };
-            if arg_idx == idx { return w; }
+            if arg_idx == idx {
+                return w;
+            }
             arg_idx += 1;
         }
         32
@@ -141,9 +218,19 @@ impl<'a> ExploreCtx<'a> {
                 let f = self.solver.fp_from_bits(bits, fw);
 
                 let (max_i, min_i, max_f, min_f) = if wide {
-                    (i64::MAX, i64::MIN, 9.223372036854776e18_f64, -9.223372036854776e18_f64)
+                    (
+                        i64::MAX,
+                        i64::MIN,
+                        9.223372036854776e18_f64,
+                        -9.223372036854776e18_f64,
+                    )
                 } else {
-                    (i32::MAX as i64, i32::MIN as i64, 2147483648.0_f64, -2147483648.0_f64)
+                    (
+                        i32::MAX as i64,
+                        i32::MIN as i64,
+                        2147483648.0_f64,
+                        -2147483648.0_f64,
+                    )
                 };
 
                 let zero_i = self.solver.bv_const(0, iw);
@@ -303,7 +390,7 @@ impl<'a> ExploreCtx<'a> {
                 let a = self.encode_operand(&args[0]);
                 if arg0_w == 64 {
                     // double: exponent is bits[62:52], bias=1023
-                    let exp = self.solver.extract(a, 62, 52);  // 11 bits
+                    let exp = self.solver.extract(a, 62, 52); // 11 bits
                     let exp32 = self.solver.zero_extend(exp, 21); // → BV32
                     let bias = self.solver.bv_const(1023, 32);
                     let all_ones = self.solver.bv_const(0x7FF_i64, 32);
@@ -317,7 +404,7 @@ impl<'a> ExploreCtx<'a> {
                     self.solver.ite(is_subnormal, min_minus1, r)
                 } else {
                     // float: exponent is bits[30:23], bias=127
-                    let exp = self.solver.extract(a, 30, 23);  // 8 bits
+                    let exp = self.solver.extract(a, 30, 23); // 8 bits
                     let exp32 = self.solver.zero_extend(exp, 24); // → BV32
                     let bias = self.solver.bv_const(127, 32);
                     let all_ones = self.solver.bv_const(0xFF_i64, 32);
@@ -370,8 +457,10 @@ impl<'a> ExploreCtx<'a> {
                 let inner = self.solver.ite(eq, zero, one);
                 self.solver.ite(lt, mone, inner)
             }
-            ("java/lang/Integer", "parseInt") | ("java/lang/Long", "parseLong")
-            | ("java/lang/Short", "parseShort") | ("java/lang/Byte", "parseByte") => {
+            ("java/lang/Integer", "parseInt")
+            | ("java/lang/Long", "parseLong")
+            | ("java/lang/Short", "parseShort")
+            | ("java/lang/Byte", "parseByte") => {
                 let w = if class == "java/lang/Long" { 64 } else { 32 };
                 self.solver.fresh_bv("parse", w)
             }
@@ -393,9 +482,10 @@ impl<'a> ExploreCtx<'a> {
                 let b = self.encode_operand(&args[1]);
                 self.solver.bvsub(a, b)
             }
-            ("java/lang/Integer" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Character", "hashCode") => {
-                self.encode_operand(&args[0])
-            }
+            (
+                "java/lang/Integer" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Character",
+                "hashCode",
+            ) => self.encode_operand(&args[0]),
             ("java/lang/Long", "hashCode") => {
                 let a = self.encode_operand(&args[0]);
                 let c32 = self.solver.bv_const(32, 64);
@@ -481,12 +571,10 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Integer" | "java/lang/Long", "bitCount") => {
                 let a = self.encode_operand(&args[0]);
                 let w = arg0_w;
-                let mut nodes: Vec<_> = (0..w)
-                    .map(|i| self.solver.extract(a, i, i))
-                    .collect();
+                let mut nodes: Vec<_> = (0..w).map(|i| self.solver.extract(a, i, i)).collect();
                 let mut current_width: u32 = 1;
                 while nodes.len() > 1 {
-                    let mut next = Vec::with_capacity((nodes.len() + 1) / 2);
+                    let mut next = Vec::with_capacity(nodes.len().div_ceil(2));
                     for chunk in nodes.chunks(2) {
                         if chunk.len() == 2 {
                             let l = self.solver.zero_extend(chunk[0], 1);
@@ -582,7 +670,7 @@ impl<'a> ExploreCtx<'a> {
                 // Pairwise concat tree: bits[0] is MSB
                 let mut nodes = bits;
                 while nodes.len() > 1 {
-                    let mut next = Vec::with_capacity((nodes.len() + 1) / 2);
+                    let mut next = Vec::with_capacity(nodes.len().div_ceil(2));
                     for chunk in nodes.chunks(2) {
                         if chunk.len() == 2 {
                             next.push(self.solver.concat(chunk[0], chunk[1]));
@@ -625,7 +713,11 @@ impl<'a> ExploreCtx<'a> {
                 let d = self.encode_operand(&args[1]);
                 let w = arg0_w;
                 let wc = self.solver.bv_const(w as i64, w);
-                let d_w = if w == 64 { self.solver.zero_extend(d, 32) } else { d };
+                let d_w = if w == 64 {
+                    self.solver.zero_extend(d, 32)
+                } else {
+                    d
+                };
                 let mask = self.solver.bv_const(w as i64 - 1, w);
                 let dist = self.solver.bvand(d_w, mask);
                 let complement = self.solver.bvsub(wc, dist);
@@ -639,7 +731,11 @@ impl<'a> ExploreCtx<'a> {
                 let d = self.encode_operand(&args[1]);
                 let w = arg0_w;
                 let wc = self.solver.bv_const(w as i64, w);
-                let d_w = if w == 64 { self.solver.zero_extend(d, 32) } else { d };
+                let d_w = if w == 64 {
+                    self.solver.zero_extend(d, 32)
+                } else {
+                    d
+                };
                 let mask = self.solver.bv_const(w as i64 - 1, w);
                 let dist = self.solver.bvand(d_w, mask);
                 let complement = self.solver.bvsub(wc, dist);
@@ -762,9 +858,7 @@ impl<'a> ExploreCtx<'a> {
                     a
                 }
             }
-            ("java/lang/Double", "longBitsToDouble") => {
-                self.encode_operand(&args[0])
-            }
+            ("java/lang/Double", "longBitsToDouble") => self.encode_operand(&args[0]),
 
             // isNaN: exp all-ones AND mantissa non-zero
             ("java/lang/Float", "isNaN") => {
@@ -877,12 +971,8 @@ impl<'a> ExploreCtx<'a> {
 
             // Float.compare / Double.compare: totalOrder comparison
             // Java semantics: -0.0 < +0.0, NaN > +Inf (regardless of NaN sign bit)
-            ("java/lang/Float", "compare") => {
-                self.encode_fp_compare_32(&args[0], &args[1])
-            }
-            ("java/lang/Double", "compare") => {
-                self.encode_fp_compare_64(&args[0], &args[1])
-            }
+            ("java/lang/Float", "compare") => self.encode_fp_compare_32(&args[0], &args[1]),
+            ("java/lang/Double", "compare") => self.encode_fp_compare_64(&args[0], &args[1]),
 
             // Float/Double compareTo: unbox $$value, then compare
             ("java/lang/Float", "compareTo") => {
@@ -1118,9 +1208,7 @@ impl<'a> ExploreCtx<'a> {
             (_, _) if self.is_char_or_wrapper_util(class, name) => {
                 self.encode_char_wrapper_call(class, name, args)
             }
-            _ => {
-                self.solver.fresh_bv("math_hv", 32)
-            }
+            _ => self.solver.fresh_bv("math_hv", 32),
         }
     }
 
@@ -1677,7 +1765,7 @@ impl<'a> ExploreCtx<'a> {
         let mantissa = self.solver.extract(float_bits, 22, 0); // BV23
 
         let zero8 = self.solver.bv_const(0, 8);
-        let zero64 = self.solver.bv_const(0, 64);
+        let _zero64 = self.solver.bv_const(0, 64);
 
         // Check for zero (±0)
         let exp_zero = self.solver.bveq(biased_exp, zero8);
@@ -1696,7 +1784,7 @@ impl<'a> ExploreCtx<'a> {
         let double_exp = self.solver.bvadd(exp_extended, bias_adjust); // BV11
 
         let man_extended = self.solver.zero_extend(mantissa, 29); // BV52 (23 + 29 = 52)
-        // Shift mantissa left by 29 to put it in the right position
+                                                                  // Shift mantissa left by 29 to put it in the right position
         let shift29 = self.solver.bv_const(29, 52);
         let man_shifted = self.solver.bvshl(man_extended, shift29);
 

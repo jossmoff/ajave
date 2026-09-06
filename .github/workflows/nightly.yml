@@ -1,0 +1,48 @@
+name: nightly
+
+# Deeper gates, kept off the push path deliberately: a check that makes an
+# unrelated change red is a check people learn to bypass. These run on a
+# schedule and report, and are allowed to fail without blocking anyone.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: mutation testing
+    runs-on: ubuntu-latest
+    # A surviving mutant is a missing test, not a broken build.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-mutants --locked
+      - run: just mutants
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-report
+          path: mutants.out/
+
+  determinism:
+    name: determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: extractions/setup-just@v2
+      # Verdicts must not depend on hash iteration order or leftover state.
+      # CLAUDE.md documents this costing +/-15-30 points of unexplained noise;
+      # the rule existed and nothing enforced it.
+      - run: just determinism

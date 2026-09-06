@@ -145,8 +145,10 @@ fn successors(block: &Block) -> Vec<BlockId> {
             v.push(*default);
             v
         }
-        Terminator::Return(_) | Terminator::Halt
-        | Terminator::Throw(_) | Terminator::Diverge(_) => vec![],
+        Terminator::Return(_)
+        | Terminator::Halt
+        | Terminator::Throw(_)
+        | Terminator::Diverge(_) => vec![],
     }
 }
 
@@ -176,7 +178,9 @@ fn rpo_and_back_edges(body: &Body) -> (Vec<BlockId>, BTreeSet<(BlockId, BlockId)
     }
     while let Some((bid, next)) = stack.pop() {
         let idx = bid.0 as usize;
-        let Some(block) = body.blocks.get(idx) else { continue };
+        let Some(block) = body.blocks.get(idx) else {
+            continue;
+        };
         let succs = successors(block);
         if next < succs.len() {
             stack.push((bid, next + 1));
@@ -235,7 +239,7 @@ fn walk_region(
         Grey,
         Black,
     }
-    let internal = |from: BlockId, to: BlockId| members.contains(&to) && to != entry;
+    let internal = |_from: BlockId, to: BlockId| members.contains(&to) && to != entry;
     let mut colour: BTreeMap<BlockId, Colour> =
         members.iter().map(|b| (*b, Colour::White)).collect();
     let mut post = Vec::new();
@@ -243,7 +247,9 @@ fn walk_region(
     let mut stack = vec![(entry, 0usize)];
     colour.insert(entry, Colour::Grey);
     while let Some((bid, next)) = stack.pop() {
-        let Some(block) = body.blocks.get(bid.0 as usize) else { continue };
+        let Some(block) = body.blocks.get(bid.0 as usize) else {
+            continue;
+        };
         let succs: Vec<BlockId> = successors(block)
             .into_iter()
             .filter(|t| internal(bid, *t))
@@ -278,8 +284,12 @@ fn walk_region(
     };
 
     for bid in post {
-        let Some(edges) = incoming.remove(&bid) else { continue };
-        let Some(block) = body.blocks.get(bid.0 as usize) else { continue };
+        let Some(edges) = incoming.remove(&bid) else {
+            continue;
+        };
+        let Some(block) = body.blocks.get(bid.0 as usize) else {
+            continue;
+        };
         let (mut pc, state) = env.merge(edges);
         env.vars = state.vars;
         env.pts = state.pts;
@@ -356,11 +366,11 @@ fn walk_region(
             pts: env.pts.clone(),
             heap: env.heap.clone(),
         };
-        let mut send = |env: &mut Env,
-                        incoming: &mut BTreeMap<BlockId, Vec<(Term, State)>>,
-                        out: &mut RegionOut,
-                        target: BlockId,
-                        edge_pc: Term| {
+        let send = |env: &mut Env,
+                    incoming: &mut BTreeMap<BlockId, Vec<(Term, State)>>,
+                    out: &mut RegionOut,
+                    target: BlockId,
+                    edge_pc: Term| {
             if internal(bid, target) {
                 incoming
                     .entry(target)
@@ -383,7 +393,11 @@ fn walk_region(
                 send(env, &mut incoming, &mut out, *then_, then_pc);
                 send(env, &mut incoming, &mut out, *else_, else_pc);
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 let vt = env.encode_operand(value);
                 let mut default_pc = pc;
                 for (val, target) in cases {
@@ -518,7 +532,9 @@ fn loop_region(body: &Body, header: BlockId, tails: &[BlockId]) -> BTreeSet<Bloc
     region.insert(header);
     let mut work = vec![header];
     while let Some(b) = work.pop() {
-        let Some(block) = body.blocks.get(b.0 as usize) else { continue };
+        let Some(block) = body.blocks.get(b.0 as usize) else {
+            continue;
+        };
         for t in successors(block) {
             // The back-edge ends the iteration, and so does the exit edge.
             if t == header || (b == header && exit_targets.contains(&t)) {
@@ -562,9 +578,11 @@ fn sole_loop(body: &Body) -> Option<(Vec<BlockId>, BlockId)> {
 /// Whether `body` contains a `Check` of `oid` in any of `blocks`.
 fn checks_in(body: &Body, blocks: &BTreeSet<BlockId>, oid: ObligationId) -> bool {
     blocks.iter().any(|b| {
-        body.blocks
-            .get(b.0 as usize)
-            .is_some_and(|blk| blk.stmts.iter().any(|s| matches!(s, Stmt::Check(o) if *o == oid)))
+        body.blocks.get(b.0 as usize).is_some_and(|blk| {
+            blk.stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Check(o) if *o == oid))
+        })
     })
 }
 
@@ -693,6 +711,9 @@ pub fn encode_k_induction(
 
     // --- one pass through the loop ---------------------------------------
     // Returns the violation on this pass and the state on the back-edge.
+    // Encoder plumbing: each argument is a distinct piece of solver state, and
+    // bundling them into a struct would only move the same list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn transition(
         env: &mut Env,
         body: &Body,
@@ -732,8 +753,16 @@ pub fn encode_k_induction(
     let mut base = env.solver.bool_const(false);
     let (mut st, mut pc) = (init_state, init_pc);
     for j in 0..k {
-        let (v, next_pc, next_st) =
-            transition(&mut env, body, &loop_blocks, header, oid, st, pc, &format!("b{j}"))?;
+        let (v, next_pc, next_st) = transition(
+            &mut env,
+            body,
+            &loop_blocks,
+            header,
+            oid,
+            st,
+            pc,
+            &format!("b{j}"),
+        )?;
         base = env.solver.or(base, v);
         st = next_st;
         pc = next_pc;
@@ -745,8 +774,16 @@ pub fn encode_k_induction(
     let (mut st, mut pc) = (arb, tt);
     let mut step = env.solver.bool_const(true);
     for j in 0..=k {
-        let (v, next_pc, next_st) =
-            transition(&mut env, body, &loop_blocks, header, oid, st, pc, &format!("s{j}"))?;
+        let (v, next_pc, next_st) = transition(
+            &mut env,
+            body,
+            &loop_blocks,
+            header,
+            oid,
+            st,
+            pc,
+            &format!("s{j}"),
+        )?;
         if j == k {
             // The failing iteration.
             step = env.solver.and(step, v);
@@ -848,8 +885,10 @@ impl<'a> Env<'a> {
         // edge agrees. Disagreement is a genuine may-alias, and dropping to
         // "unknown" is what makes a later store havoc all arrays instead of
         // updating the wrong one.
-        let pts_keys: BTreeSet<VarId> =
-            edges.iter().flat_map(|(_, st)| st.pts.keys().copied()).collect();
+        let pts_keys: BTreeSet<VarId> = edges
+            .iter()
+            .flat_map(|(_, st)| st.pts.keys().copied())
+            .collect();
         for k in pts_keys {
             let mut sites = edges.iter().map(|(_, st)| st.pts.get(&k).copied());
             let first = sites.next().flatten();
@@ -1046,7 +1085,10 @@ impl<'a> Env<'a> {
                 (self.solver.array_select(map, i), None)
             }
             Rvalue::ArrayLength(arr) => {
-                match self.site_of(arr).and_then(|s| self.heap.lengths.get(&s).copied()) {
+                match self
+                    .site_of(arr)
+                    .and_then(|s| self.heap.lengths.get(&s).copied())
+                {
                     Some(t) => (t, None),
                     None => (self.fresh("arrlen", 32), None),
                 }

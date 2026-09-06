@@ -152,10 +152,8 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                             };
                             match args.get(1) {
                                 Some(Operand::Var(r)) => {
-                                    let cls = var_alloc
-                                        .get(r)
-                                        .and_then(|a| alloc_class.get(a))
-                                        .cloned();
+                                    let cls =
+                                        var_alloc.get(r).and_then(|a| alloc_class.get(a)).cloned();
                                     match cls {
                                         Some(c) => {
                                             alloc_runnable.insert(recv_alloc, c);
@@ -202,10 +200,14 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                                         "{caller}: resolved thread body {run} has no lifted body"
                                     ));
                                 }
-                                pending.push((caller.to_string(), ordinal, ThreadEntry {
-                                    run,
-                                    started_from: caller.clone(),
-                                }));
+                                pending.push((
+                                    caller.to_string(),
+                                    ordinal,
+                                    ThreadEntry {
+                                        run,
+                                        started_from: caller.clone(),
+                                    },
+                                ));
                                 ordinal += 1;
                             }
                         } else if is_executor(&target.class)
@@ -251,7 +253,10 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
                             pending.push((
                                 caller.to_string(),
                                 ordinal,
-                                ThreadEntry { run, started_from: caller.clone() },
+                                ThreadEntry {
+                                    run,
+                                    started_from: caller.clone(),
+                                },
                             ));
                             ordinal += 1;
                         } else if is_thread_class(prog, &target.class) && target.name == "start" {
@@ -331,7 +336,11 @@ mod tests {
     }
 
     fn mk_key(class: &str, name: &str, desc: &str) -> MethodKey {
-        MethodKey { class: class.into(), name: name.into(), desc: desc.into() }
+        MethodKey {
+            class: class.into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
     }
 
     fn body_named(key: MethodKey, stmts: Vec<Stmt>, nvars: usize) -> Body {

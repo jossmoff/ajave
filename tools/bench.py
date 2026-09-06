@@ -418,7 +418,18 @@ def main():
                     help="parallel workers (default 6). Kept below core count: "
                          "each run spawns a solver child, and oversubscribing "
                          "turns slow tasks into timeouts")
-    ap.add_argument("--timeout", type=int, default=60)
+    ap.add_argument("--timeout", type=int, default=300,
+                    help="per-task budget in seconds (default 300). SV-COMP "
+                         "2026 allows 900s with 4 dedicated cores and 15GB; "
+                         "this was 60s, which scored us against a budget 15x "
+                         "stricter than the competition and turned capability "
+                         "into apparent failure. Measured 2026-09-05: of 92 "
+                         "tasks that timed out at 60s, a large fraction answer "
+                         "correctly under 300s -- several within a second or "
+                         "two of the old line. 300 rather than 900 keeps a run "
+                         "practical; it is still a floor, not a competition "
+                         "figure. Raise it uniformly, never per task (see "
+                         "CLAUDE.md).")
     ap.add_argument("--limit", type=int,
                     help="sample N tasks spread across the set")
     ap.add_argument("--check", action="store_true",

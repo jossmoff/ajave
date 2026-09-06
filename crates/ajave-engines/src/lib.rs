@@ -6,32 +6,34 @@
 //! `ajave-cli` -- nothing in this crate or `ajave-core` should need to
 //! change. See `docs/strategies/` for the write-up of each one.
 
-pub mod vclock;
 pub mod body_analysis;
+pub mod liveness;
+pub mod vclock;
 // Re-exported for the CLI's verdict guard: an unmodelled throwing call means a
 // TRUE for no-runtime-exception is not ours to claim.
 pub use body_analysis::{body_has_unmodelled_throwing_call, first_unmodelled_throwing_call};
+pub mod ai;
 pub mod body_shape;
+pub mod cegar;
+pub mod chc;
+pub mod concolic;
+pub mod concrete;
 pub mod concurrency;
 pub mod concurrent_exec;
 pub mod concurrent_state;
-pub mod threads;
-pub mod ai;
-pub mod cegar;
-pub mod chc;
-pub mod concrete;
 pub mod float_search;
-mod math_eval;
-mod str_eval;
 pub mod imc;
 pub mod interpolation;
 pub mod interval;
-pub mod math_interval;
 pub mod kinduction;
+mod math_eval;
+pub mod math_interval;
 pub mod nra;
 pub mod predicate;
-pub mod ranges;
 pub mod presolve;
+pub mod ranges;
 pub mod smt_bmc;
 pub mod smt_encode;
 pub mod smt_text;
+mod str_eval;
+pub mod threads;

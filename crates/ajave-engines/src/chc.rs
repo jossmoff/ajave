@@ -14,19 +14,25 @@
 
 use crate::body_analysis::body_uses_float_types;
 use crate::smt_text::{self, LiaTheory, SmtTheory};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as IoWrite;
 use std::process::{Command, Stdio};
 
-use log::{debug, info, trace, warn};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::*;
+use log::{debug, info, trace, warn};
 
 pub struct ChcEngine {
     solver_binary: String,
     done: bool,
+}
+
+impl Default for ChcEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChcEngine {
@@ -118,13 +124,14 @@ impl Engine for ChcEngine {
         // bug — a correct guard overridden by a wrong argument about which
         // direction the approximation ran.
         let has_handlers = reachable_methods.iter().any(|mk| {
-            prog.body(mk).is_some_and(|b| {
-                b.blocks.iter().any(|blk| !blk.exceptional.is_empty())
-            })
+            prog.body(mk)
+                .is_some_and(|b| b.blocks.iter().any(|blk| !blk.exceptional.is_empty()))
         });
         if has_handlers {
-            info!("chc: skipping — reachable methods have exception handlers, \
-                   whose obligations this encoding cannot reach");
+            info!(
+                "chc: skipping — reachable methods have exception handlers, \
+                   whose obligations this encoding cannot reach"
+            );
             return Progress::Stalled;
         }
 
@@ -171,7 +178,7 @@ impl Engine for ChcEngine {
         // return values that violate assertions. Verifier.nondet* calls are safe
         // because CHC models them as unconstrained inputs (correct semantics).
         let has_unresolved = reachable_methods.iter().any(|mk| {
-            prog.body(mk).map_or(false, |b| {
+            prog.body(mk).is_some_and(|b| {
                 b.blocks.iter().any(|blk| {
                     blk.stmts.iter().any(|s| {
                         if let Stmt::Assign(_, Rvalue::Call { target, .. }) = s {
@@ -205,9 +212,7 @@ impl Engine for ChcEngine {
         let obs: Vec<ObligationId> = open
             .iter()
             .filter(|oref| oref.method == *entry)
-            .filter(|oref| {
-                body.obligation(oref.id).kind == ObligationKind::Assertion
-            })
+            .filter(|oref| body.obligation(oref.id).kind == ObligationKind::Assertion)
             .map(|oref| oref.id)
             .collect();
 
@@ -226,8 +231,7 @@ impl Engine for ChcEngine {
         // program, and assuming it here would be assuming it about ours. That
         // is exactly what `Approximations` was added to express, and the check
         // is cheap enough that there is no reason to skip it.
-        let mut invariants: HashMap<(MethodKey, BlockId), Vec<(usize, i64, i64)>> =
-            HashMap::new();
+        let mut invariants: BlockInvariants = HashMap::new();
         for inv in bb.invariants_for(entry) {
             if let Some((v, lo, hi)) = interval_of(&inv.formula) {
                 invariants
@@ -324,6 +328,9 @@ fn solver_timeout_secs() -> u32 {
         .unwrap_or(10)
 }
 
+// Nested deliberately: the outer match is on the IR node and the inner on
+// its payload, which mirrors the IR's own shape.
+#[allow(clippy::collapsible_match)]
 fn body_uses_heap_ops(body: &Body) -> bool {
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -378,7 +385,10 @@ fn param_slot_count(desc: &str) -> usize {
             }
             b'L' => {
                 slots += 1;
-                pos = inner[pos..].find(';').map(|p| pos + p + 1).unwrap_or(bytes.len());
+                pos = inner[pos..]
+                    .find(';')
+                    .map(|p| pos + p + 1)
+                    .unwrap_or(bytes.len());
             }
             b'[' => {
                 slots += 1;
@@ -389,7 +399,10 @@ fn param_slot_count(desc: &str) -> usize {
                 }
                 if pos < bytes.len() {
                     if bytes[pos] == b'L' {
-                        pos = inner[pos..].find(';').map(|p| pos + p + 1).unwrap_or(bytes.len());
+                        pos = inner[pos..]
+                            .find(';')
+                            .map(|p| pos + p + 1)
+                            .unwrap_or(bytes.len());
                     } else {
                         pos += 1;
                     }
@@ -438,11 +451,18 @@ fn find_param_var_indices(body: &Body, mk: &MethodKey) -> Vec<usize> {
 /// exact shape returns `None` and is ignored.
 fn interval_of(e: &ajave_core::term::Expr) -> Option<(VarId, i64, i64)> {
     use ajave_core::term::{Expr, Op};
-    let Expr::Bin(Op::And, lo_e, hi_e) = e else { return None };
-    let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) =
-        (lo_e.as_ref(), hi_e.as_ref()) else { return None };
+    let Expr::Bin(Op::And, lo_e, hi_e) = e else {
+        return None;
+    };
+    let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) = (lo_e.as_ref(), hi_e.as_ref())
+    else {
+        return None;
+    };
     let (Expr::Int(lo), Expr::Var(v1), Expr::Var(v2), Expr::Int(hi)) =
-        (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref()) else { return None };
+        (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref())
+    else {
+        return None;
+    };
     if v1 != v2 {
         return None;
     }
@@ -462,7 +482,10 @@ struct FreshGen {
 
 impl FreshGen {
     fn new() -> Self {
-        FreshGen { counter: 0, extra_forall: Vec::new() }
+        FreshGen {
+            counter: 0,
+            extra_forall: Vec::new(),
+        }
     }
 
     /// A fresh binder. LIA declares everything `Int`.
@@ -495,7 +518,6 @@ impl FreshGen {
     }
 }
 
-
 /// Return type descriptor character from method descriptor.
 fn return_type_char(desc: &str) -> char {
     let after = desc.split(')').nth(1).unwrap_or("V");
@@ -507,8 +529,25 @@ fn return_type_char(desc: &str) -> char {
 // (with overflow guards for soundness)
 // ---------------------------------------------------------------------------
 
+// The JVM's integral ranges (JLS 4.2.1). These are what the range constraints
+// in `block_app_src` assert about every integral variable, and what the
+// overflow side-conditions compare against.
+//
+// They were declared and never read for a long time, which `CLAUDE.md` records
+// as its example of a comment stating a soundness argument that the code did
+// not maintain. Referencing them here is the point: the values in the encoding
+// and the values in the guard are now the same symbols.
+/// Interval bounds another engine published, per block: `(var index, lo, hi)`.
+///
+/// Keyed by `(MethodKey, BlockId)` and not by `BlockId` alone -- a `BlockId`
+/// indexes into one `Body`, and `CLAUDE.md` records what keying a
+/// longer-lived collection by it alone cost the last time.
+type BlockInvariants = HashMap<(MethodKey, BlockId), Vec<(usize, i64, i64)>>;
+
 const INT_MIN: i64 = -2147483648;
 const INT_MAX: i64 = 2147483647;
+const LONG_MIN: i64 = i64::MIN;
+const LONG_MAX: i64 = i64::MAX;
 
 fn lia_int(value: i32) -> String {
     if value < 0 {
@@ -572,10 +611,7 @@ fn lia_rvalue(
             let r = lia_operand(b, var_map);
             let e = theory.encode_binop(op, &l, &r);
             if smt_text::overflowing(op) {
-                overflow.push(smt_text::lia_overflow_cond(
-                    &e,
-                    is_wide(a) || is_wide(b),
-                ));
+                overflow.push(smt_text::lia_overflow_cond(&e, is_wide(a) || is_wide(b)));
             }
             e
         }
@@ -630,7 +666,7 @@ fn encode_chc_interproc(
     // exclude a genuinely reachable error state and claim safety. That is a
     // wrong TRUE at -16, which is why only bounds from an over-approximating
     // producer that approximated nothing are accepted; see the caller.
-    invariants: &HashMap<(MethodKey, BlockId), Vec<(usize, i64, i64)>>,
+    invariants: &BlockInvariants,
 ) -> String {
     let mut out = String::new();
     out.push_str("(set-logic HORN)\n\n");
@@ -682,15 +718,59 @@ fn encode_chc_interproc(
         ));
     }
 
-    // Declare block relations for each method.
+    // Declare block relations for each method, over the variables that block
+    // actually needs on entry rather than every variable in the method.
+    //
+    // Spacer has to synthesise an interpretation for each predicate and the
+    // difficulty grows sharply with arity, so passing dead state is not merely
+    // wasteful. Measured on a five-line recursive program whose summary is
+    // `f(n) >= 0`: 14-ary block predicates timed out, the same program over
+    // its two live variables is `sat` in 0.01s.
+    //
+    // `liveness` documents why an imprecise live set cannot cause a wrong
+    // verdict -- an omitted variable becomes an unconstrained binder in the
+    // successor, which over-approximates.
+    let live: HashMap<MethodKey, BTreeMap<BlockId, BTreeSet<usize>>> = all_methods
+        .iter()
+        .filter_map(|mk| {
+            prog.body(mk)
+                .map(|b| (mk.clone(), crate::liveness::live_in(b)))
+        })
+        .collect();
+    // Parameters count as live in every block, whatever liveness says.
+    //
+    // The summary clause for a method concludes `m_s(params, ret)` at each
+    // return site, so the parameters have to still be in scope there -- but a
+    // parameter read only at the top of the method is dead by the time control
+    // reaches a `return`. Dropping it made the summary quantify the parameter
+    // universally, so `f` was described as able to return v4+1 for *any*
+    // argument. That is an over-approximation and therefore sound, which is
+    // exactly why it showed up as an unprovable safe program rather than a
+    // wrong answer -- but it destroys the summary, which is the whole point of
+    // the inter-procedural encoding.
+    let live_at = |mk: &MethodKey, bid: u32| -> Vec<usize> {
+        let mut set: BTreeSet<usize> = live
+            .get(mk)
+            .and_then(|m| m.get(&BlockId(bid)))
+            .cloned()
+            .unwrap_or_default();
+        if let Some(ps) = method_params.get(mk) {
+            set.extend(ps.iter().copied());
+        }
+        set.into_iter().collect()
+    };
+
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = &method_ids[mk];
-        let n_vars = body.vars.len();
-        let sig = (0..n_vars).map(|_| "Int").collect::<Vec<_>>().join(" ");
 
         out.push_str(&format!("; blocks for {}\n", mk));
         for block in &body.blocks {
+            let sig = live_at(mk, block.id.0)
+                .iter()
+                .map(|_| "Int")
+                .collect::<Vec<_>>()
+                .join(" ");
             out.push_str(&format!(
                 "(declare-fun {}_b{} ({}) Bool)\n",
                 mid, block.id.0, sig
@@ -728,12 +808,59 @@ fn encode_chc_interproc(
 
         // Every clause body that mentions a source block goes through here, so
         // conjoining the block's invariant once reaches all of them.
+        // A block whose live set is empty declares a 0-ary predicate, and
+        // SMT-LIB spells that as a bare name -- `(p )` is a parse error.
+        let app_of = |mid: &str, bid: u32, args: &str| -> String {
+            if args.is_empty() {
+                format!("{}_b{}", mid, bid)
+            } else {
+                format!("({}_b{} {})", mid, bid, args)
+            }
+        };
         let block_app_src = |bid: u32| -> String {
-            let app = format!("({}_b{} {})", mid, bid, src_vars.join(" "));
-            let Some(bounds) = invariants.get(&(mk.clone(), BlockId(bid))) else {
-                return app;
-            };
+            let args = live_at(mk, bid)
+                .iter()
+                .map(|i| src_vars[*i].clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let app = app_of(&mid, bid, &args);
+
+            // Every integral variable is within its JVM type's range.
+            //
+            // The encoding uses unbounded `Int`, and without this the solver
+            // is free to believe an `int` holds 2^40 -- which makes the
+            // overflow side-conditions reachable and every proof fail. That is
+            // sound (it only ever refuses to prove) but it refuses almost
+            // everything: measured on a bounded recursive program, dropping
+            // the overflow clauses turned a timeout into `sat`, and this is
+            // the honest way to get the same effect. JLS 4.2.1 fixes the
+            // ranges, so this asserts nothing the JVM does not guarantee.
             let mut parts = vec![app];
+            for i in live_at(mk, bid) {
+                let Some(vi) = body.vars.get(i) else { continue };
+                match vi.ty {
+                    Ty::Int => {
+                        parts.push(format!("(<= (- {}) v{})", -INT_MIN, i));
+                        parts.push(format!("(<= v{} {})", i, INT_MAX));
+                    }
+                    Ty::Long => {
+                        parts.push(format!("(<= (- {}) v{})", LONG_MIN.unsigned_abs(), i));
+                        parts.push(format!("(<= v{} {})", i, LONG_MAX));
+                    }
+                    // References are abstract ids, strings are not integers,
+                    // and floats are not modelled by this theory; none of them
+                    // carries a JLS integer range.
+                    Ty::Float | Ty::Double | Ty::Ref | Ty::Str => {}
+                }
+            }
+
+            let Some(bounds) = invariants.get(&(mk.clone(), BlockId(bid))) else {
+                return if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    format!("(and {})", parts.join(" "))
+                };
+            };
             for (idx, lo, hi) in bounds {
                 if *idx >= n_vars {
                     continue;
@@ -753,12 +880,19 @@ fn encode_chc_interproc(
             }
         };
         let block_app_dst = |bid: u32| -> String {
-            format!("({}_b{} {})", mid, bid, dst_vars.join(" "))
+            let args = live_at(mk, bid)
+                .iter()
+                .map(|i| dst_vars[*i].clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+            app_of(&mid, bid, &args)
         };
 
         out.push_str(&format!(
             "; === {} ===\n(assert (forall ({}) {}))\n",
-            mk, forall_src, block_app_src(body.entry.0)
+            mk,
+            forall_src,
+            block_app_src(body.entry.0)
         ));
 
         for block in &body.blocks {
@@ -824,7 +958,12 @@ fn encode_chc_interproc(
                         }
                         _ => {
                             let expr = lia_rvalue(
-                                rv, &var_map, &mut fresh, &is_wide, &mut overflow, &theory,
+                                rv,
+                                &var_map,
+                                &mut fresh,
+                                &is_wide,
+                                &mut overflow,
+                                &theory,
                             );
                             fresh.note(&expr);
                             // Name the value instead of substituting its text.
@@ -850,22 +989,20 @@ fn encode_chc_interproc(
                         let expr = lia_operand(op, &var_map);
                         constraints.push(format!("(not (= {} 0))", expr));
                     }
-                    Stmt::Check(oid) => {
-                        if is_entry && obligations.contains(oid) {
-                            let ob = body.obligation(*oid);
-                            let cond_expr = lia_operand(&ob.cond, &var_map);
-                            let mut conds = constraints.clone();
-                            conds.extend(call_constraints.iter().cloned());
-                            conds.push(format!("(= {} 0)", cond_expr));
-                            conds.push(block_app_src(block.id.0));
+                    Stmt::Check(oid) if is_entry && obligations.contains(oid) => {
+                        let ob = body.obligation(*oid);
+                        let cond_expr = lia_operand(&ob.cond, &var_map);
+                        let mut conds = constraints.clone();
+                        conds.extend(call_constraints.iter().cloned());
+                        conds.push(format!("(= {} 0)", cond_expr));
+                        conds.push(block_app_src(block.id.0));
 
-                            let body_expr = and_expr(&conds);
-                            let q = add_extra_forall_lia(&forall_src, &fresh);
-                            out.push_str(&format!(
-                                "(assert (forall ({}) (=> {} error)))\n",
-                                q, body_expr
-                            ));
-                        }
+                        let body_expr = and_expr(&conds);
+                        let q = add_extra_forall_lia(&forall_src, &fresh);
+                        out.push_str(&format!(
+                            "(assert (forall ({}) (=> {} error)))\n",
+                            q, body_expr
+                        ));
                     }
                     _ => {}
                 }
@@ -896,7 +1033,10 @@ fn encode_chc_interproc(
 
             let mut assign_conds: Vec<String> = Vec::new();
             for i in 0..n_vars {
-                let val = var_map.get(&i).cloned().unwrap_or_else(|| format!("v{}", i));
+                let val = var_map
+                    .get(&i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("v{}", i));
                 let dst = format!("w{}", i);
                 if val != dst {
                     assign_conds.push(format!("(= {} {})", dst, val));
@@ -949,7 +1089,7 @@ fn encode_chc_interproc(
                     for (cv, target) in cases {
                         let cv_s = lia_int(*cv);
                         let eq = format!("(= {} {})", ve, cv_s);
-                        mk_trans(target.0, &[eq.clone()], &mut out);
+                        mk_trans(target.0, std::slice::from_ref(&eq), &mut out);
                         neg.push(format!("(not {})", eq));
                     }
                     mk_trans(default.0, &neg, &mut out);
@@ -959,7 +1099,10 @@ fn encode_chc_interproc(
                     let mut summary_args: Vec<String> = param_indices
                         .iter()
                         .map(|&pi| {
-                            var_map.get(&pi).cloned().unwrap_or_else(|| format!("v{}", pi))
+                            var_map
+                                .get(&pi)
+                                .cloned()
+                                .unwrap_or_else(|| format!("v{}", pi))
                         })
                         .collect();
                     summary_args.push(ret_expr);
@@ -1138,26 +1281,23 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     let expr = smt_text::encode_operand(&BitvectorTheory, op, &var_map);
                     constraints.push(BitvectorTheory.encode_nonzero(&expr));
                 }
-                Stmt::Check(oid) => {
-                    if obligations.contains(oid) {
-                        let ob = body.obligation(*oid);
-                        let cond_expr =
-                            smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
-                        let mut error_conds = constraints.clone();
-                        error_conds.push(BitvectorTheory.encode_is_zero(&cond_expr));
-                        error_conds.push(block_app(block.id.0));
+                Stmt::Check(oid) if obligations.contains(oid) => {
+                    let ob = body.obligation(*oid);
+                    let cond_expr = smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
+                    let mut error_conds = constraints.clone();
+                    error_conds.push(BitvectorTheory.encode_is_zero(&cond_expr));
+                    error_conds.push(block_app(block.id.0));
 
-                        let body_expr = if error_conds.len() == 1 {
-                            error_conds[0].clone()
-                        } else {
-                            format!("(and {})", error_conds.join(" "))
-                        };
+                    let body_expr = if error_conds.len() == 1 {
+                        error_conds[0].clone()
+                    } else {
+                        format!("(and {})", error_conds.join(" "))
+                    };
 
-                        out.push_str(&format!(
-                            "(assert (forall ({}) (=> {} error)))\n",
-                            forall_src, body_expr
-                        ));
-                    }
+                    out.push_str(&format!(
+                        "(assert (forall ({}) (=> {} error)))\n",
+                        forall_src, body_expr
+                    ));
                 }
                 _ => {}
             }
@@ -1185,7 +1325,9 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 
             format!(
                 "(assert (forall ({}) (=> {} {})))\n",
-                forall_both, body_expr, block_app_dst(target_bid)
+                forall_both,
+                body_expr,
+                block_app_dst(target_bid)
             )
         };
 
@@ -1210,7 +1352,7 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                 for (cv, target) in cases {
                     let cv_encoded = BitvectorTheory.encode_int(*cv);
                     let eq = format!("(= {} {})", val_expr, cv_encoded);
-                    out.push_str(&mk_trans(target.0, &[eq.clone()]));
+                    out.push_str(&mk_trans(target.0, std::slice::from_ref(&eq)));
                     neg_cases.push(format!("(not {})", eq));
                 }
                 out.push_str(&mk_trans(default.0, &neg_cases));
@@ -1292,11 +1434,18 @@ mod tests {
     use super::*;
 
     fn mk(name: &str, desc: &str) -> MethodKey {
-        MethodKey { class: "Main".into(), name: name.into(), desc: desc.into() }
+        MethodKey {
+            class: "Main".into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
     }
 
     fn int_var(slot: u16) -> VarInfo {
-        VarInfo { kind: VarKind::Local(slot), ty: Ty::Int }
+        VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Int,
+        }
     }
 
     /// ```text
@@ -1363,10 +1512,7 @@ mod tests {
                                 is_virtual: false,
                             },
                         ),
-                        Stmt::Assign(
-                            c,
-                            Rvalue::Bin(BinOp::Gt, Operand::Var(r), Operand::Var(n)),
-                        ),
+                        Stmt::Assign(c, Rvalue::Bin(BinOp::Gt, Operand::Var(r), Operand::Var(n))),
                         Stmt::Check(ObligationId(0)),
                     ],
                     term: Terminator::Return(None),
@@ -1449,8 +1595,14 @@ mod lia_unmodelled_operator_tests {
     #[test]
     fn an_operator_lia_cannot_model_is_havoced_not_encoded() {
         for op in [
-            BinOp::Div, BinOp::Rem, BinOp::And, BinOp::Or,
-            BinOp::Xor, BinOp::Shl, BinOp::Shr, BinOp::UShr,
+            BinOp::Div,
+            BinOp::Rem,
+            BinOp::And,
+            BinOp::Or,
+            BinOp::Xor,
+            BinOp::Shl,
+            BinOp::Shr,
+            BinOp::UShr,
         ] {
             let e = encode(&Rvalue::Bin(op, Operand::int(7), Operand::int(3)));
             assert!(e.starts_with("_f"), "{op:?} must be havoced, got {e}");
@@ -1461,7 +1613,10 @@ mod lia_unmodelled_operator_tests {
     #[test]
     fn a_narrowing_cast_is_havoced_not_encoded() {
         let e = encode(&Rvalue::Cast(Ty::Int, Ty::Long, Operand::Var(VarId(0))));
-        assert!(e.starts_with("_f"), "narrowing cast must be havoced, got {e}");
+        assert!(
+            e.starts_with("_f"),
+            "narrowing cast must be havoced, got {e}"
+        );
     }
 
     /// The operators LIA *does* model must still be encoded, or the fix would

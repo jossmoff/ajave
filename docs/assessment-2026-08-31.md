@@ -60,6 +60,26 @@ count, so essentially the same benchmark set. Maximum achievable score on it is
 
 **ajave scores ~1,850 on that corpus** (815 + 1035), or 65% of maximum, with **zero wrong answers of its own**.
 
+> **Correction (2026-09-06): the two numbers are not computed the same way.**
+>
+> This section compares our raw score sum against SV-COMP's published
+> *Overall* column. Recomputing a raw sum from the competition's own result
+> XML, over the same runs and with the same +2/+1/-16/-32 weights, gives
+> **JBMC 1728** — not the published **1561**. Two different figures from
+> identical run data mean the published Overall applies something a raw sum
+> does not, most likely per-category normalisation so that large categories
+> cannot dominate.
+>
+> Until that formula is reproduced, treat every cross-tool comparison in this
+> document as **indicative only**. The safe claims are the ones that do not
+> depend on the formula: per-task verdicts, wrong-answer counts, and
+> "which tasks does nobody solve" — see the 2026-09-06 entry in `changes.md`,
+> where ajave solves 27 of the 68 tasks no 2026 verifier solved, with zero
+> wrong answers.
+>
+> Reproducing SV-COMP's normalisation is tracked as a prerequisite for any
+> published comparison.
+
 ### Why that number is not yet a claim
 
 It is measured with our harness and our certification, and three things stand
@@ -81,7 +101,8 @@ between it and a defensible comparison:
    (issue #72), where our FALSE is correct and confirmed by executing the
    program on a JVM with the witness input.
 
-The honest framing: *on the same corpus and the same scoring formula, with a 15×
+The honest framing (but see the correction above: the scoring formula is
+*not* confirmed to be the same): *on the same corpus, with a 15×
 smaller time budget, ajave computes 1,837 points' worth of correct verdicts.*
 Whether that survives official validation is unknown and is the first thing to
 find out.

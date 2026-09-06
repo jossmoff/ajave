@@ -7,6 +7,9 @@ use ajave_models;
 /// in the simplified SMT/LIA encoding: field access, instance-of checks,
 /// method calls, or explicit havoc. Proving engines skip such bodies to
 /// remain sound.
+// Nested deliberately: matching `Stmt::Assign` and then the `Rvalue` mirrors
+// the IR's own shape, and fusing them into one pattern reads worse.
+#[allow(clippy::collapsible_match)]
 pub fn body_uses_havoced_ops(body: &Body) -> bool {
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -32,14 +35,18 @@ pub fn body_uses_havoced_ops(body: &Body) -> bool {
 /// for bodies that manipulate 64-bit values (comparisons, casts, etc.).
 pub fn body_uses_wide_types(body: &Body) -> bool {
     use ajave_ir::Ty;
-    body.vars.iter().any(|vi| matches!(vi.ty, Ty::Long | Ty::Double))
+    body.vars
+        .iter()
+        .any(|vi| matches!(vi.ty, Ty::Long | Ty::Double))
 }
 
 /// Returns `true` if the body uses Float or Double typed variables (but not
 /// necessarily Long). Used to route bodies to the widening interval CPA.
 pub fn body_uses_float_types(body: &Body) -> bool {
     use ajave_ir::Ty;
-    body.vars.iter().any(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+    body.vars
+        .iter()
+        .any(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
 }
 
 /// Returns `true` if the body uses Long typed variables. The i32-based
@@ -89,7 +96,11 @@ pub fn body_has_loops(body: &Body) -> bool {
 
 /// Walk backward through a block's statements to find the most recent
 /// assignment of `v` to a binary operation `Rvalue::Bin(op, a, b)`.
-pub fn find_defining_bin(body: &Body, block: BlockId, v: VarId) -> Option<(BinOp, &Operand, &Operand)> {
+pub fn find_defining_bin(
+    body: &Body,
+    block: BlockId,
+    v: VarId,
+) -> Option<(BinOp, &Operand, &Operand)> {
     for s in body.block(block).stmts.iter().rev() {
         if let Stmt::Assign(dv, Rvalue::Bin(op, a, b)) = s {
             if *dv == v {

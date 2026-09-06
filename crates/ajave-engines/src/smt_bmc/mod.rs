@@ -20,7 +20,6 @@ mod str_encode;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use log::{debug, info, warn};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
@@ -28,6 +27,7 @@ use ajave_core::smt::{SatResult, Solver, SolverFactory, Term};
 use ajave_ir::verdict::{NondetEntry, NondetValue, Witness};
 use ajave_ir::*;
 use ajave_models;
+use log::{debug, info, warn};
 
 /// Field identification key with named fields for type safety.
 ///
@@ -43,7 +43,11 @@ struct FK {
 
 impl FK {
     fn new(class: impl Into<String>, name: impl Into<String>, desc: impl Into<String>) -> Self {
-        FK { class: class.into(), name: name.into(), desc: desc.into() }
+        FK {
+            class: class.into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
     }
 }
 
@@ -103,7 +107,11 @@ const MAX_FORKS: u32 = 500;
 /// can be repeated rather than re-argued.
 pub fn asking_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AJAVE_ASK").map(|v| v == "1").unwrap_or(false))
+    *ON.get_or_init(|| {
+        std::env::var("AJAVE_ASK")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
 }
 
 fn budget_scale() -> u64 {
@@ -174,20 +182,34 @@ impl Completeness {
             return Some("has_potentially_throwing_havoc");
         }
         if method == entry {
-            return self.has_unresolved_in_try.then_some("has_unresolved_in_try");
+            return self
+                .has_unresolved_in_try
+                .then_some("has_unresolved_in_try");
         }
         if method_explored {
-            if assertion_only && !self.has_unresolved_in_try && !self.has_depth_limited_havoc && !self.has_tainted_paths {
+            if assertion_only
+                && !self.has_unresolved_in_try
+                && !self.has_depth_limited_havoc
+                && !self.has_tainted_paths
+            {
                 return None;
             }
             if assertion_only {
-                if self.has_unresolved_in_try { return Some("has_unresolved_in_try"); }
-                if self.has_depth_limited_havoc { return Some("has_depth_limited_havoc"); }
-                if self.has_tainted_paths { return Some("has_tainted_paths"); }
+                if self.has_unresolved_in_try {
+                    return Some("has_unresolved_in_try");
+                }
+                if self.has_depth_limited_havoc {
+                    return Some("has_depth_limited_havoc");
+                }
+                if self.has_tainted_paths {
+                    return Some("has_tainted_paths");
+                }
             }
             return (!self.all_calls_resolved).then_some("all_calls_resolved");
         }
-        if !self.all_paths_complete { return Some("all_paths_complete"); }
+        if !self.all_paths_complete {
+            return Some("all_paths_complete");
+        }
         (!self.all_calls_resolved).then_some("all_calls_resolved")
     }
 
@@ -196,7 +218,13 @@ impl Completeness {
     /// For NRE (assertion_only=false), havoced calls to methods that could
     /// throw RuntimeException block discharge — the exception isn't modelled
     /// as an obligation and could cause an undetected runtime exception.
-    fn can_discharge(&self, method: &MethodKey, entry: &MethodKey, method_explored: bool, assertion_only: bool) -> bool {
+    fn can_discharge(
+        &self,
+        method: &MethodKey,
+        entry: &MethodKey,
+        method_explored: bool,
+        assertion_only: bool,
+    ) -> bool {
         if !assertion_only && self.has_potentially_throwing_havoc {
             return false;
         }
@@ -211,7 +239,11 @@ impl Completeness {
             // Guard: has_unresolved_in_try=true means a havoced call in a try
             // block could throw to a handler containing the assertion, so we
             // can't discharge.
-            if assertion_only && !self.has_unresolved_in_try && !self.has_depth_limited_havoc && !self.has_tainted_paths {
+            if assertion_only
+                && !self.has_unresolved_in_try
+                && !self.has_depth_limited_havoc
+                && !self.has_tainted_paths
+            {
                 true
             } else {
                 self.all_calls_resolved
@@ -330,8 +362,10 @@ fn block_successors(block: &Block) -> Vec<BlockId> {
             v.push(*default);
             v
         }
-        Terminator::Return(_) | Terminator::Halt
-        | Terminator::Throw(_) | Terminator::Diverge(_) => vec![],
+        Terminator::Return(_)
+        | Terminator::Halt
+        | Terminator::Throw(_)
+        | Terminator::Diverge(_) => vec![],
     }
 }
 
@@ -510,9 +544,12 @@ impl Engine for SmtBmc {
                     continue;
                 }
                 if let Answer::Bounds { lo, hi } = &lemma.answer {
-                    if let (ajave_core::term::Expr::Var(v),
-                            ajave_core::term::Expr::Double(l),
-                            ajave_core::term::Expr::Double(h)) = (&about, lo, hi) {
+                    if let (
+                        ajave_core::term::Expr::Var(v),
+                        ajave_core::term::Expr::Double(l),
+                        ajave_core::term::Expr::Double(h),
+                    ) = (&about, lo, hi)
+                    {
                         debug!("smt-bmc: assuming bound on v{} from {}", v.0, lemma.by);
                         known_bounds.insert((method.clone(), *v), (*l, *h));
                     }
@@ -615,9 +652,10 @@ impl Engine for SmtBmc {
                 for (_, oid, _) in &violations {
                     // Find which block contains this violated obligation.
                     for block in &body.blocks {
-                        let is_violation_block = block.stmts.iter().any(|s| {
-                            matches!(s, Stmt::Check(o) if *o == *oid)
-                        });
+                        let is_violation_block = block
+                            .stmts
+                            .iter()
+                            .any(|s| matches!(s, Stmt::Check(o) if *o == *oid));
                         if is_violation_block && !block.exceptional.is_empty() {
                             // This block has exception edges — the violation
                             // could dispatch to a handler.
@@ -643,26 +681,40 @@ impl Engine for SmtBmc {
                                 }
                             }
                         }
-                        if found { break; }
+                        if found {
+                            break;
+                        }
                         // Follow successors.
                         match &blk.term {
                             Terminator::Goto(t) => {
-                                if visited.insert(*t) { queue.push(*t); }
+                                if visited.insert(*t) {
+                                    queue.push(*t);
+                                }
                             }
                             Terminator::Branch { then_, else_, .. } => {
-                                if visited.insert(*then_) { queue.push(*then_); }
-                                if visited.insert(*else_) { queue.push(*else_); }
+                                if visited.insert(*then_) {
+                                    queue.push(*then_);
+                                }
+                                if visited.insert(*else_) {
+                                    queue.push(*else_);
+                                }
                             }
                             Terminator::Switch { default, cases, .. } => {
-                                if visited.insert(*default) { queue.push(*default); }
+                                if visited.insert(*default) {
+                                    queue.push(*default);
+                                }
                                 for (_, t) in cases {
-                                    if visited.insert(*t) { queue.push(*t); }
+                                    if visited.insert(*t) {
+                                        queue.push(*t);
+                                    }
                                 }
                             }
                             _ => {}
                         }
                         for edge in &blk.exceptional {
-                            if visited.insert(edge.target) { queue.push(edge.target); }
+                            if visited.insert(edge.target) {
+                                queue.push(edge.target);
+                            }
                         }
                     }
                 }
@@ -702,10 +754,7 @@ impl Engine for SmtBmc {
 
         let mut advanced = false;
         for (method, oid, witness) in violations {
-            let oref = ObligationRef {
-                method,
-                id: oid,
-            };
+            let oref = ObligationRef { method, id: oid };
             debug!(
                 "smt-bmc: publishing violation at {oref:?}, witness={:?}",
                 witness.nondet_sequence
@@ -753,7 +802,10 @@ impl Engine for SmtBmc {
         if log::log_enabled!(log::Level::Debug) && !ctx.completeness.all_paths_complete {
             debug!(
                 "smt-bmc: cut_points={:?} at_risk={} open={}",
-                ctx.cut_points.iter().map(|(m, b)| format!("{}#bb{}", m.name, b.0)).collect::<Vec<_>>(),
+                ctx.cut_points
+                    .iter()
+                    .map(|(m, b)| format!("{}#bb{}", m.name, b.0))
+                    .collect::<Vec<_>>(),
                 at_risk.len(),
                 bb.open_or_unconfirmed().len(),
             );
@@ -766,8 +818,7 @@ impl Engine for SmtBmc {
             //
             // Safety net: if a cut was recorded but produced no at-risk set,
             // something is unaccounted for and the old global behaviour stands.
-            let cuts_accounted =
-                ctx.completeness.all_paths_complete || !at_risk.is_empty();
+            let cuts_accounted = ctx.completeness.all_paths_complete || !at_risk.is_empty();
             if cuts_accounted {
                 // Include obligations whose only status is an unconfirmed
                 // violation: an exhaustive exploration that found nothing is
@@ -778,7 +829,8 @@ impl Engine for SmtBmc {
                     ctx.inlined_methods, open_list, ctx.skipped_obligations, violated_oids);
                 let assertion_only = bb.is_assertion_only();
                 for oref in open_list {
-                    let method_explored = &oref.method == entry || ctx.inlined_methods.contains(&oref.method);
+                    let method_explored =
+                        &oref.method == entry || ctx.inlined_methods.contains(&oref.method);
                     // If a runtime-exception violation could dispatch to an
                     // exception handler containing an Assertion, don't discharge
                     // that Assertion (BMC doesn't explore exception dispatch paths).
@@ -791,11 +843,19 @@ impl Engine for SmtBmc {
                     }
                     let blocker = if at_risk.contains(&(oref.method.clone(), oref.id)) {
                         "all_paths_complete"
-                    } else if !ctx.completeness.can_discharge(&oref.method, entry, method_explored, assertion_only) {
+                    } else if !ctx.completeness.can_discharge(
+                        &oref.method,
+                        entry,
+                        method_explored,
+                        assertion_only,
+                    ) {
                         ctx.completeness
                             .discharge_blocker(&oref.method, entry, method_explored, assertion_only)
                             .unwrap_or("completeness")
-                    } else if ctx.skipped_obligations.contains(&(oref.method.clone(), oref.id)) {
+                    } else if ctx
+                        .skipped_obligations
+                        .contains(&(oref.method.clone(), oref.id))
+                    {
                         "skipped_obligation"
                     } else if violated_oids.contains(&(oref.method.clone(), oref.id)) {
                         "violated"
@@ -828,14 +888,19 @@ impl Engine for SmtBmc {
                     .iter()
                     .map(|o| o.method.to_string())
                     .collect();
-                let trunc: std::collections::BTreeSet<String> =
-                    ctx.incomplete_methods.iter().map(|m| m.to_string()).collect();
+                let trunc: std::collections::BTreeSet<String> = ctx
+                    .incomplete_methods
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect();
                 let elsewhere = open_methods.difference(&trunc).count();
                 debug!(
                     "smt-bmc: BLOCKER all_paths_complete for every obligation (outer gate); \
                      open in {} method(s), truncated in {} method(s), {} open method(s) \
                      were never truncated",
-                    open_methods.len(), trunc.len(), elsewhere
+                    open_methods.len(),
+                    trunc.len(),
+                    elsewhere
                 );
             }
             if !ctx.completeness.all_paths_complete && violations_empty {
@@ -891,14 +956,14 @@ impl Engine for SmtBmc {
         // pass fell into, and the reason `open_for` exists. Gating on `open()`
         // here meant the engine never returned in exactly the case that
         // motivated asking.
-        if asked_now
-            && self.may_reenter
-            && !bb.open_for(Approximations::UNMODELLED_CALL).is_empty()
+        if asked_now && self.may_reenter && !bb.open_for(Approximations::UNMODELLED_CALL).is_empty()
         {
             self.may_reenter = false;
             self.done = false;
-            debug!("smt-bmc: asked {} question(s); will return for the answers",
-                   self.asked.len());
+            debug!(
+                "smt-bmc: asked {} question(s); will return for the answers",
+                self.asked.len()
+            );
             return Progress::Stalled;
         }
 
@@ -958,7 +1023,11 @@ struct ExploreCtx<'a> {
     /// Collected rather than published inline because `ExploreCtx` does not
     /// hold the blackboard — the same reason `violations` is a field. Each is
     /// `(program point, about, given)`.
-    pending_queries: Vec<(ProgramPoint, ajave_core::term::Expr, Vec<ajave_core::term::Expr>)>,
+    pending_queries: Vec<(
+        ProgramPoint,
+        ajave_core::term::Expr,
+        Vec<ajave_core::term::Expr>,
+    )>,
     /// Bounds another engine has already established for a variable, as
     /// `(method, var) -> (lo bits, hi bits)`.
     ///
@@ -1119,9 +1188,13 @@ impl<'a> ExploreCtx<'a> {
         match rv {
             Rvalue::Use(op) | Rvalue::Neg(op) => self.width_of_operand(op),
             Rvalue::Bin(_, a, _) => self.width_of_operand(a),
-            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty, _) | Rvalue::Cast(ty, _, _) => self.width_of_ty(ty),
+            Rvalue::Nondet(ty, _) | Rvalue::Havoc(ty, _) | Rvalue::Cast(ty, _, _) => {
+                self.width_of_ty(ty)
+            }
             Rvalue::Cmp(_, _, _) | Rvalue::InstanceOf { .. } | Rvalue::ArrayLength(_) => 32,
-            Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => Self::field_elem_width(&fk.desc),
+            Rvalue::GetStatic(fk) | Rvalue::GetField { field: fk, .. } => {
+                Self::field_elem_width(&fk.desc)
+            }
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
             Rvalue::New(_) | Rvalue::NewArray { .. } => 32,
             Rvalue::Call { target, .. } => Self::ret_width_from_desc(&target.desc),
@@ -1161,11 +1234,12 @@ impl<'a> ExploreCtx<'a> {
     fn operand_is_float(&self, op: &Operand) -> bool {
         match op {
             Operand::Const(c) => matches!(c.ty(), Ty::Float | Ty::Double),
-            Operand::Var(v) => {
-                self.body.vars.get(v.0 as usize)
-                    .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
-                    .unwrap_or(false)
-            }
+            Operand::Var(v) => self
+                .body
+                .vars
+                .get(v.0 as usize)
+                .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+                .unwrap_or(false),
         }
     }
 
@@ -1174,12 +1248,20 @@ impl<'a> ExploreCtx<'a> {
     }
 
     fn field_key_raw(fk: &FieldKey) -> FK {
-        FK { class: fk.class.clone(), name: fk.name.clone(), desc: fk.desc.clone() }
+        FK {
+            class: fk.class.clone(),
+            name: fk.name.clone(),
+            desc: fk.desc.clone(),
+        }
     }
 
     fn field_key_resolved(&self, fk: &FieldKey) -> FK {
         let resolved_class = self.prog.resolve_field_class(&fk.class, &fk.name, &fk.desc);
-        FK { class: resolved_class, name: fk.name.clone(), desc: fk.desc.clone() }
+        FK {
+            class: resolved_class,
+            name: fk.name.clone(),
+            desc: fk.desc.clone(),
+        }
     }
 
     fn rvalue_tainted(&mut self, rv: &Rvalue) -> bool {
@@ -1206,11 +1288,20 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::NewArray { len, .. } => self.operand_tainted(len),
             Rvalue::InstanceOf { obj, .. } => self.operand_tainted(obj),
             Rvalue::New(_) => false,
-            Rvalue::Call { target, args, is_virtual } => {
+            Rvalue::Call {
+                target,
+                args,
+                is_virtual,
+            } => {
                 if ajave_models::STR_OWNERS.contains(&target.class.as_str()) {
                     let unmodelled = !self.str_call_modelled(target, args);
                     if unmodelled {
-                        log::debug!("smt-bmc: TAINT-SOURCE str {}.{}{}", target.class, target.name, target.desc);
+                        log::debug!(
+                            "smt-bmc: TAINT-SOURCE str {}.{}{}",
+                            target.class,
+                            target.name,
+                            target.desc
+                        );
                     }
                     return unmodelled;
                 }
@@ -1220,17 +1311,20 @@ impl<'a> ExploreCtx<'a> {
                 if self.can_inline(target, *is_virtual) {
                     return false;
                 }
-                log::debug!("smt-bmc: TAINT-SOURCE call {}.{}{}", target.class, target.name, target.desc);
+                log::debug!(
+                    "smt-bmc: TAINT-SOURCE call {}.{}{}",
+                    target.class,
+                    target.name,
+                    target.desc
+                );
                 true
             }
             Rvalue::Use(o) => self.operand_tainted(o),
             Rvalue::Neg(o) => {
-                self.operand_tainted(o)
-                    || self.operand_is_float(o) || self.operand_float_tainted(o)
+                self.operand_tainted(o) || self.operand_is_float(o) || self.operand_float_tainted(o)
             }
             Rvalue::Cast(_, _, o) => {
-                self.operand_tainted(o)
-                    || self.operand_is_float(o) || self.operand_float_tainted(o)
+                self.operand_tainted(o) || self.operand_is_float(o) || self.operand_float_tainted(o)
             }
             // Float arithmetic and comparison are encoded in the SMT
             // FloatingPoint theory, so a float operand no longer implies an
@@ -1239,7 +1333,8 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::Bin(op, a, b) => {
                 let float_operand = self.operand_is_float(a) || self.operand_is_float(b);
                 let modelled = float_operand && fp_binop_modelled(*op);
-                self.operand_tainted(a) || self.operand_tainted(b)
+                self.operand_tainted(a)
+                    || self.operand_tainted(b)
                     || (float_operand && !modelled)
                     || (!modelled
                         && (self.operand_float_tainted(a) || self.operand_float_tainted(b)))
@@ -1263,23 +1358,20 @@ impl<'a> ExploreCtx<'a> {
         // Modelled float arithmetic produces an exactly-represented result,
         // so it does not spread float taint.
         if let Rvalue::Bin(op, a, b) = rv {
-            if (self.operand_is_float(a) || self.operand_is_float(b))
-                && fp_binop_modelled(*op)
-            {
-                return self.operand_float_tainted(a) && self.operand_float_tainted(b)
-                    && false;
+            if (self.operand_is_float(a) || self.operand_is_float(b)) && fp_binop_modelled(*op) {
+                return self.operand_float_tainted(a) && self.operand_float_tainted(b) && false;
             }
         }
         match rv {
             Rvalue::Use(o) | Rvalue::Neg(o) => {
                 self.operand_float_tainted(o) || self.operand_is_float(o)
             }
-            Rvalue::Cast(_, _, o) => {
-                self.operand_float_tainted(o) || self.operand_is_float(o)
-            }
+            Rvalue::Cast(_, _, o) => self.operand_float_tainted(o) || self.operand_is_float(o),
             Rvalue::Bin(_, a, b) => {
-                self.operand_float_tainted(a) || self.operand_float_tainted(b)
-                    || self.operand_is_float(a) || self.operand_is_float(b)
+                self.operand_float_tainted(a)
+                    || self.operand_float_tainted(b)
+                    || self.operand_is_float(a)
+                    || self.operand_is_float(b)
             }
             // Cmp result is int, not float — float taint stops here.
             // If operands came from imprecise float arithmetic, they are already
@@ -1328,7 +1420,10 @@ impl<'a> ExploreCtx<'a> {
             let zero = self.solver.bv_const(0, elem_width);
             self.solver.const_array(zero, elem_width)
         } else {
-            self.solver.fresh_array(&format!("f_{}_{}", k.class.replace('/', "_"), k.name), elem_width)
+            self.solver.fresh_array(
+                &format!("f_{}_{}", k.class.replace('/', "_"), k.name),
+                elem_width,
+            )
         };
         self.field_arrays.insert(k.clone(), arr);
         arr
@@ -1342,7 +1437,8 @@ impl<'a> ExploreCtx<'a> {
             let empty = self.solver.str_const("");
             self.solver.const_str_array(empty)
         } else {
-            self.solver.fresh_str_array(&format!("fs_{}_{}", k.class.replace('/', "_"), k.name))
+            self.solver
+                .fresh_str_array(&format!("fs_{}_{}", k.class.replace('/', "_"), k.name))
         };
         self.field_str_arrays.insert(k.clone(), arr);
         arr
@@ -1391,12 +1487,16 @@ impl<'a> ExploreCtx<'a> {
         for (vid_idx, info) in self.body.vars.iter().enumerate() {
             if let ajave_ir::VarKind::Local(slot) = info.kind {
                 if info.ty == ajave_ir::Ty::Ref {
-                    if let Some(class) = params.iter().find(|(s, _)| *s == slot as usize).map(|(_, c)| c.clone()) {
+                    if let Some(class) = params
+                        .iter()
+                        .find(|(s, _)| *s == slot as usize)
+                        .map(|(_, c)| c.clone())
+                    {
                         let vid = ajave_ir::VarId(vid_idx as u32);
                         let t = self.get_var(vid);
                         self.assert_nonzero(t);
                         // Store the declared type so instanceof checks work
-                        let type_id = self.get_type_id(&class) as i64;
+                        let type_id = self.get_type_id(&class);
                         let tid_term = self.solver.bv_const(type_id, 32);
                         let ta = self.solver.array_store(self.type_array, t, tid_term);
                         self.type_array = ta;
@@ -1416,12 +1516,19 @@ impl<'a> ExploreCtx<'a> {
         while pos < bytes.len() && bytes[pos] != b')' {
             let start = pos;
             match bytes[pos] {
-                b'J' | b'D' => { pos += 1; slot += 2; }
+                b'J' | b'D' => {
+                    pos += 1;
+                    slot += 2;
+                }
                 b'L' => {
                     pos += 1;
                     let class_start = pos;
-                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
-                    let class = std::str::from_utf8(&bytes[class_start..pos]).unwrap_or("").to_string();
+                    while pos < bytes.len() && bytes[pos] != b';' {
+                        pos += 1;
+                    }
+                    let class = std::str::from_utf8(&bytes[class_start..pos])
+                        .unwrap_or("")
+                        .to_string();
                     pos += 1;
                     result.push((slot, class));
                     slot += 1;
@@ -1429,18 +1536,27 @@ impl<'a> ExploreCtx<'a> {
                 b'[' => {
                     // Array type: [L...; or [I etc — the full descriptor is the class
                     let arr_start = start;
-                    while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] == b'[' {
+                        pos += 1;
+                    }
                     if pos < bytes.len() && bytes[pos] == b'L' {
-                        while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                        while pos < bytes.len() && bytes[pos] != b';' {
+                            pos += 1;
+                        }
                         pos += 1;
                     } else if pos < bytes.len() {
                         pos += 1;
                     }
-                    let class = std::str::from_utf8(&bytes[arr_start..pos]).unwrap_or("").to_string();
+                    let class = std::str::from_utf8(&bytes[arr_start..pos])
+                        .unwrap_or("")
+                        .to_string();
                     result.push((slot, class));
                     slot += 1;
                 }
-                _ => { pos += 1; slot += 1; }
+                _ => {
+                    pos += 1;
+                    slot += 1;
+                }
             }
         }
         result
@@ -1485,7 +1601,10 @@ impl<'a> ExploreCtx<'a> {
                     self.ai_hints_applied.insert((block_id, vid));
                     log::trace!(
                         "smt-bmc: applied AI hint v{} ∈ [{}, {}] at bb{}",
-                        vid.0, lo, hi, block_id.0
+                        vid.0,
+                        lo,
+                        hi,
+                        block_id.0
                     );
                 }
             }
@@ -1582,7 +1701,7 @@ impl<'a> ExploreCtx<'a> {
             entries,
             // Sequential engine: no interleaving to record.
             schedule: Vec::new(),
-                choices: Vec::new(),
+            choices: Vec::new(),
         }
     }
 }
@@ -1593,7 +1712,11 @@ mod bounded_publish_tests {
     use ajave_ir::{Block, Body, Obligation, ObligationKind, Terminator, VarInfo, VarKind};
 
     fn key(name: &str) -> MethodKey {
-        MethodKey { class: "Main".into(), name: name.into(), desc: "()V".into() }
+        MethodKey {
+            class: "Main".into(),
+            name: name.into(),
+            desc: "()V".into(),
+        }
     }
 
     /// Two blocks in sequence, with the obligation in the second.
@@ -1640,7 +1763,10 @@ mod bounded_publish_tests {
                 is_static: true,
                 key: mk.clone(),
                 entry: BlockId(0),
-                vars: vec![VarInfo { kind: VarKind::Local(0), ty: Ty::Int }],
+                vars: vec![VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Int,
+                }],
                 obligations: vec![Obligation {
                     id: ObligationId(0),
                     kind: ObligationKind::Assertion,

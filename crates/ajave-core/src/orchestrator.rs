@@ -7,9 +7,9 @@
 use crate::artifact::{EngineId, Status};
 use crate::blackboard::Blackboard;
 use crate::engine::{Budget, Engine, Progress};
-use log::{debug, info};
 use ajave_ir::verdict::Verdict;
 use ajave_ir::Program;
+use log::{debug, info};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -53,8 +53,7 @@ impl Orchestrator {
         // misattributed by reasoning about the code instead of measuring it.
         // This makes the attribution a fact rather than a hypothesis.
         let mut init_ms: Vec<(EngineId, u128)> = Vec::new();
-        let mut step_ms: std::collections::HashMap<String, u128> =
-            std::collections::HashMap::new();
+        let mut step_ms: std::collections::HashMap<String, u128> = std::collections::HashMap::new();
         let mut discharged_by: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         let mut violated_by: std::collections::HashMap<String, usize> =
@@ -103,8 +102,7 @@ impl Orchestrator {
                     .count();
                 let t0 = std::time::Instant::now();
                 let progress = e.step(prog, &mut self.bb, self.budget);
-                *step_ms.entry(e.id().0.to_string()).or_default() +=
-                    t0.elapsed().as_millis();
+                *step_ms.entry(e.id().0.to_string()).or_default() += t0.elapsed().as_millis();
                 let after = self.bb.proved_safe_count();
                 let after_v = self
                     .bb
@@ -112,12 +110,10 @@ impl Orchestrator {
                     .filter(|(_, s)| matches!(s, Status::Violated { .. }))
                     .count();
                 if after > before {
-                    *discharged_by.entry(e.id().0.to_string()).or_default() +=
-                        after - before;
+                    *discharged_by.entry(e.id().0.to_string()).or_default() += after - before;
                 }
                 if after_v > before_v {
-                    *violated_by.entry(e.id().0.to_string()).or_default() +=
-                        after_v - before_v;
+                    *violated_by.entry(e.id().0.to_string()).or_default() += after_v - before_v;
                 }
                 match progress {
                     Progress::Advanced => advanced = true,

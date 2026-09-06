@@ -9,11 +9,11 @@
 //! It is over-approximating, so the blackboard will refuse to let it emit a
 //! violation no matter what it computes.
 
-use log::{debug, info};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::{Const, Operand, Program};
+use log::{debug, info};
 
 pub struct Presolve {
     done: bool,
@@ -46,7 +46,10 @@ impl Engine for Presolve {
         }
         self.done = true;
 
-        info!("presolve: scanning {} open obligations", bb.open_or_unconfirmed().len());
+        info!(
+            "presolve: scanning {} open obligations",
+            bb.open_or_unconfirmed().len()
+        );
         let mut advanced = false;
         let mut discharged = 0usize;
         for oref in bb.open_or_unconfirmed() {

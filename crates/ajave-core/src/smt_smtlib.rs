@@ -86,9 +86,11 @@ impl SmtLib {
         }
         match s {
             Sort::Bv(w) => format!("(_ BitVec {w})"),
-            Sort::Fp(w) => format!("(_ FloatingPoint {} {})",
-                                   if w == 32 { 8 } else { 11 },
-                                   if w == 32 { 24 } else { 53 }),
+            Sort::Fp(w) => format!(
+                "(_ FloatingPoint {} {})",
+                if w == 32 { 8 } else { 11 },
+                if w == 32 { 24 } else { 53 }
+            ),
             Sort::Array { idx, elem } => {
                 format!("(Array (_ BitVec {idx}) (_ BitVec {elem}))")
             }
@@ -108,7 +110,6 @@ impl SmtLib {
         }
         self.alloc(name, sort)
     }
-
 
     /// FP arithmetic carrying the round-nearest-even mode Java mandates.
     fn fp_binop_rne(&mut self, op: &str, a: Term, b: Term) -> Term {
@@ -213,7 +214,7 @@ impl Solver for SmtLib {
             64 => value as u64,
             _ => (value as u64) & ((1u64 << width) - 1),
         };
-        let name = if width % 4 == 0 {
+        let name = if width.is_multiple_of(4) {
             // Hex literal: exact number of hex digits
             let hex_digits = (width as usize) / 4;
             format!("#x{uval:0>hex_digits$x}")
@@ -343,12 +344,17 @@ impl Solver for SmtLib {
     fn concat(&mut self, hi: Term, lo: Term) -> Term {
         let hn = self.name(hi).to_string();
         let ln = self.name(lo).to_string();
-        let hi_w = match self.sort(hi) { Sort::Bv(w) => w, _ => 32 };
-        let lo_w = match self.sort(lo) { Sort::Bv(w) => w, _ => 32 };
+        let hi_w = match self.sort(hi) {
+            Sort::Bv(w) => w,
+            _ => 32,
+        };
+        let lo_w = match self.sort(lo) {
+            Sort::Bv(w) => w,
+            _ => 32,
+        };
         let expr = format!("(concat {hn} {ln})");
         self.define_term("t", &expr, Sort::Bv(hi_w + lo_w))
     }
-
 
     // ── IEEE-754 floating point ─────────────────────────────────────────
 
@@ -366,12 +372,18 @@ impl Solver for SmtLib {
         // text would be re-rounded by the solver and need not denote the same
         // float the JVM had.
         let name = if value.is_nan() {
-            format!("(_ NaN {} {})", if width == 32 { 8 } else { 11 },
-                    if width == 32 { 24 } else { 53 })
+            format!(
+                "(_ NaN {} {})",
+                if width == 32 { 8 } else { 11 },
+                if width == 32 { 24 } else { 53 }
+            )
         } else if value.is_infinite() {
             let kind = if value > 0.0 { "+oo" } else { "-oo" };
-            format!("(_ {kind} {} {})", if width == 32 { 8 } else { 11 },
-                    if width == 32 { 24 } else { 53 })
+            format!(
+                "(_ {kind} {} {})",
+                if width == 32 { 8 } else { 11 },
+                if width == 32 { 24 } else { 53 }
+            )
         } else if width == 32 {
             let bits = (value as f32).to_bits();
             format!("((_ to_fp 8 24) #x{bits:08x})")
@@ -495,10 +507,14 @@ impl Solver for SmtLib {
         let en = self.name(else_);
         let cached = Self::sort_str(sort);
         if !cached.is_empty() {
-            self.send(&format!("(define-const {name} {cached} (ite {cn} {tn} {en}))"));
+            self.send(&format!(
+                "(define-const {name} {cached} (ite {cn} {tn} {en}))"
+            ));
         } else {
             let sort_s = Self::sort_str_dynamic(sort);
-            self.send(&format!("(define-const {name} {sort_s} (ite {cn} {tn} {en}))"));
+            self.send(&format!(
+                "(define-const {name} {sort_s} (ite {cn} {tn} {en}))"
+            ));
         }
         self.alloc(name, sort)
     }
@@ -642,9 +658,8 @@ impl Solver for SmtLib {
 
     fn str_chars_within(&mut self, s: Term, lo: u32, hi: u32) -> Term {
         let sn = self.name(s).to_string();
-        let expr = format!(
-            "(str.in_re {sn} (re.* (re.range (_ char #x{lo:04X}) (_ char #x{hi:04X}))))"
-        );
+        let expr =
+            format!("(str.in_re {sn} (re.* (re.range (_ char #x{lo:04X}) (_ char #x{hi:04X}))))");
         self.define_term("b", &expr, Sort::Bool)
     }
 
@@ -664,7 +679,10 @@ impl Solver for SmtLib {
     }
 
     fn fresh_array(&mut self, name: &str, elem_width: u32) -> Term {
-        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sort = Sort::Array {
+            idx: 32,
+            elem: elem_width,
+        };
         let sname = format!("{name}_{}", self.next_id);
         let cached = Self::sort_str(sort);
         if !cached.is_empty() {
@@ -678,7 +696,10 @@ impl Solver for SmtLib {
 
     fn const_array(&mut self, val: Term, elem_width: u32) -> Term {
         let vn = self.name(val).to_string();
-        let sort = Sort::Array { idx: 32, elem: elem_width };
+        let sort = Sort::Array {
+            idx: 32,
+            elem: elem_width,
+        };
         let cached = Self::sort_str(sort);
         let expr = if !cached.is_empty() {
             format!("((as const {cached}) {vn})")
@@ -712,7 +733,9 @@ impl Solver for SmtLib {
 
     fn fresh_str_array(&mut self, name: &str) -> Term {
         let sname = format!("{name}_{}", self.next_id);
-        self.send(&format!("(declare-const {sname} (Array (_ BitVec 32) String))"));
+        self.send(&format!(
+            "(declare-const {sname} (Array (_ BitVec 32) String))"
+        ));
         self.alloc(sname, Sort::StrArray)
     }
 

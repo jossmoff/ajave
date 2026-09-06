@@ -10,20 +10,40 @@ impl<'a> ExploreCtx<'a> {
         match class {
             "java/lang/Character" => matches!(
                 name,
-                "isDigit" | "isLetter" | "isLetterOrDigit"
-                    | "isUpperCase" | "isLowerCase" | "isWhitespace" | "isSpaceChar"
-                    | "isAlphabetic" | "isBmpCodePoint"
-                    | "toUpperCase" | "toLowerCase" | "toTitleCase"
-                    | "charCount" | "isValidCodePoint"
-                    | "isSupplementaryCodePoint" | "isISOControl"
-                    | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                    | "isJavaLetter" | "isJavaLetterOrDigit"
+                "isDigit"
+                    | "isLetter"
+                    | "isLetterOrDigit"
+                    | "isUpperCase"
+                    | "isLowerCase"
+                    | "isWhitespace"
+                    | "isSpaceChar"
+                    | "isAlphabetic"
+                    | "isBmpCodePoint"
+                    | "toUpperCase"
+                    | "toLowerCase"
+                    | "toTitleCase"
+                    | "charCount"
+                    | "isValidCodePoint"
+                    | "isSupplementaryCodePoint"
+                    | "isISOControl"
+                    | "isJavaIdentifierStart"
+                    | "isJavaIdentifierPart"
+                    | "isJavaLetter"
+                    | "isJavaLetterOrDigit"
                     | "isSpace"
-                    | "toCodePoint" | "digit" | "forDigit"
-                    | "getType" | "isDefined" | "isMirrored" | "isTitleCase"
-                    | "isUnicodeIdentifierPart" | "isUnicodeIdentifierStart"
-                    | "isIdentifierIgnorable" | "getDirectionality"
-                    | "getNumericValue" | "isIdeographic"
+                    | "toCodePoint"
+                    | "digit"
+                    | "forDigit"
+                    | "getType"
+                    | "isDefined"
+                    | "isMirrored"
+                    | "isTitleCase"
+                    | "isUnicodeIdentifierPart"
+                    | "isUnicodeIdentifierStart"
+                    | "isIdentifierIgnorable"
+                    | "getDirectionality"
+                    | "getNumericValue"
+                    | "isIdeographic"
             ),
             _ => false,
         }
@@ -48,7 +68,12 @@ impl<'a> ExploreCtx<'a> {
         acc
     }
 
-    pub(super) fn encode_char_wrapper_call(&mut self, class: &str, name: &str, args: &[Operand]) -> Term {
+    pub(super) fn encode_char_wrapper_call(
+        &mut self,
+        class: &str,
+        name: &str,
+        args: &[Operand],
+    ) -> Term {
         let one = self.solver.bv_const(1, 32);
         let zero = self.solver.bv_const(0, 32);
 
@@ -56,11 +81,21 @@ impl<'a> ExploreCtx<'a> {
         // where our model is only sound for ASCII. This ensures witnesses are
         // replayable on the JVM. Non-classification methods (toCodePoint,
         // charCount, etc.) work for the full range.
-        let is_classification = matches!(name,
-            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
-            | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isSpace"
-            | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-            | "isJavaLetter" | "isJavaLetterOrDigit"
+        let is_classification = matches!(
+            name,
+            "isDigit"
+                | "isLetter"
+                | "isLetterOrDigit"
+                | "isUpperCase"
+                | "isLowerCase"
+                | "isWhitespace"
+                | "isSpaceChar"
+                | "isAlphabetic"
+                | "isSpace"
+                | "isJavaIdentifierStart"
+                | "isJavaIdentifierPart"
+                | "isJavaLetter"
+                | "isJavaLetterOrDigit"
         );
         if is_classification {
             for arg in args {
@@ -233,10 +268,19 @@ impl<'a> ExploreCtx<'a> {
                 // `isJavaLetterOrDigit` is the deprecated alias and shares the
                 // table.
                 let c = self.encode_operand(&args[0]);
-                let r = self.char_in_ranges(c, &[
-                    (0x00, 0x08), (0x0E, 0x1B), (0x24, 0x24), (0x30, 0x39),
-                    (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A), (0x7F, 0x7F),
-                ]);
+                let r = self.char_in_ranges(
+                    c,
+                    &[
+                        (0x00, 0x08),
+                        (0x0E, 0x1B),
+                        (0x24, 0x24),
+                        (0x30, 0x39),
+                        (0x41, 0x5A),
+                        (0x5F, 0x5F),
+                        (0x61, 0x7A),
+                        (0x7F, 0x7F),
+                    ],
+                );
                 self.solver.ite(r, one, zero)
             }
             ("java/lang/Character", "toCodePoint") => {
@@ -346,9 +390,7 @@ impl<'a> ExploreCtx<'a> {
                 let ch = self.solver.ite(is_digit, as_digit, as_letter);
                 self.solver.ite(valid, ch, zero)
             }
-            ("java/lang/Character", "getType") => {
-                self.encode_get_type(&args[0])
-            }
+            ("java/lang/Character", "getType") => self.encode_get_type(&args[0]),
             ("java/lang/Character", "isDefined") => {
                 // Only what is *certain*, because `isDefined` is a Unicode
                 // table and most of the code-point space is not derivable from
@@ -426,7 +468,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Character", "isTitleCase") => {
                 // Unicode titlecase chars: DŽ=0x01C5, LJ=0x01C8, NJ=0x01CB, Dz=0x01F2
                 let c = self.encode_operand(&args[0]);
-                let t1 = self.bv_eq_char(c, 0xC5); // Would need 16-bit but using bv_const
+                let _t1 = self.bv_eq_char(c, 0xC5); // Would need 16-bit but using bv_const
                 let v1 = self.solver.bv_const(0x01C5, 32);
                 let v2 = self.solver.bv_const(0x01C8, 32);
                 let v3 = self.solver.bv_const(0x01CB, 32);
@@ -493,9 +535,7 @@ impl<'a> ExploreCtx<'a> {
             ("java/lang/Character", "getDirectionality") => {
                 self.encode_get_directionality(&args[0])
             }
-            ("java/lang/Character", "getNumericValue") => {
-                self.encode_get_numeric_value(&args[0])
-            }
+            ("java/lang/Character", "getNumericValue") => self.encode_get_numeric_value(&args[0]),
             _ => self.solver.fresh_bv("char_hv", 32),
         }
     }
@@ -565,7 +605,7 @@ impl<'a> ExploreCtx<'a> {
 
     fn encode_get_type(&mut self, arg: &Operand) -> Term {
         let c = self.encode_operand(arg);
-        let zero = self.solver.bv_const(0, 32);
+        let _zero = self.solver.bv_const(0, 32);
         // Category constants
         let upper_letter = self.solver.bv_const(1, 32);
         let lower_letter = self.solver.bv_const(2, 32);
@@ -613,9 +653,9 @@ impl<'a> ExploreCtx<'a> {
         let is_mod = self.bv_eq_char(c, b'`');
 
         // Unicode ranges beyond ASCII
-        let is_cjk = self.bv_in_range(c, 0x4E00, 0x9FFF);  // CJK Unified Ideographs (OTHER_LETTER)
-        let is_latin_ext = self.bv_in_range(c, 0x00C0, 0x00FF); // Latin-1 Supplement letters
-        // Titlecase chars: DŽ=0x01C5, LJ=0x01C8, NJ=0x01CB, Dz=0x01F2
+        let is_cjk = self.bv_in_range(c, 0x4E00, 0x9FFF); // CJK Unified Ideographs (OTHER_LETTER)
+        let _is_latin_ext = self.bv_in_range(c, 0x00C0, 0x00FF); // Latin-1 Supplement letters
+                                                                 // Titlecase chars: DŽ=0x01C5, LJ=0x01C8, NJ=0x01CB, Dz=0x01F2
         let tc1 = self.solver.bv_const(0x01C5, 32);
         let tc2 = self.solver.bv_const(0x01C8, 32);
         let tc3 = self.solver.bv_const(0x01CB, 32);
@@ -653,8 +693,8 @@ impl<'a> ExploreCtx<'a> {
         // Remaining ASCII printable → OTHER_PUNCTUATION
         let is_printable = self.bv_in_range(c, 0x21, 0x7E);
         let is_already = self.or_chain(&[
-            is_upper, is_lower, is_digit, is_dash, is_start, is_end,
-            is_conn, is_math, is_dollar, is_mod,
+            is_upper, is_lower, is_digit, is_dash, is_start, is_end, is_conn, is_math, is_dollar,
+            is_mod,
         ]);
         let not_already = self.solver.not(is_already);
         let is_other_punct = self.solver.and(is_printable, not_already);
@@ -663,16 +703,16 @@ impl<'a> ExploreCtx<'a> {
 
     fn encode_get_directionality(&mut self, arg: &Operand) -> Term {
         let c = self.encode_operand(arg);
-        let l_dir = self.solver.bv_const(0, 32);   // LEFT_TO_RIGHT
-        let en_dir = self.solver.bv_const(3, 32);   // EUROPEAN_NUMBER
-        let es_dir = self.solver.bv_const(4, 32);   // EUROPEAN_NUMBER_SEPARATOR
-        let et_dir = self.solver.bv_const(5, 32);   // EUROPEAN_NUMBER_TERMINATOR
-        let cs_dir = self.solver.bv_const(6, 32);   // COMMON_NUMBER_SEPARATOR
-        let ps_dir = self.solver.bv_const(8, 32);   // PARAGRAPH_SEPARATOR
-        let ss_dir = self.solver.bv_const(9, 32);   // SEGMENT_SEPARATOR
-        let ws_dir = self.solver.bv_const(12, 32);  // WHITESPACE
-        let on_dir = self.solver.bv_const(13, 32);  // OTHER_NEUTRALS
-        let bn_dir = self.solver.bv_const(18, 32);  // BOUNDARY_NEUTRAL
+        let l_dir = self.solver.bv_const(0, 32); // LEFT_TO_RIGHT
+        let en_dir = self.solver.bv_const(3, 32); // EUROPEAN_NUMBER
+        let es_dir = self.solver.bv_const(4, 32); // EUROPEAN_NUMBER_SEPARATOR
+        let et_dir = self.solver.bv_const(5, 32); // EUROPEAN_NUMBER_TERMINATOR
+        let cs_dir = self.solver.bv_const(6, 32); // COMMON_NUMBER_SEPARATOR
+        let ps_dir = self.solver.bv_const(8, 32); // PARAGRAPH_SEPARATOR
+        let ss_dir = self.solver.bv_const(9, 32); // SEGMENT_SEPARATOR
+        let ws_dir = self.solver.bv_const(12, 32); // WHITESPACE
+        let on_dir = self.solver.bv_const(13, 32); // OTHER_NEUTRALS
+        let bn_dir = self.solver.bv_const(18, 32); // BOUNDARY_NEUTRAL
         let undef = self.solver.bv_const(-1_i64, 32); // UNDEFINED: -1 as signed byte → -1 as signed int
         let is_upper = self.bv_in_range(c, b'A' as i64, b'Z' as i64);
         let is_lower = self.bv_in_range(c, b'a' as i64, b'z' as i64);

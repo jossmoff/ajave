@@ -316,10 +316,7 @@ fn corpus_verdicts_match_declared_ground_truth() {
             let va = run("assert", &task.inputs);
             let nre = run("no-runtime-exception", &task.inputs);
             let outcome = combine(task.expect_true, &va, &nre);
-            results
-                .lock()
-                .unwrap()
-                .push((task.name, outcome, va, nre));
+            results.lock().unwrap().push((task.name, outcome, va, nre));
         }));
     }
     for h in handles {

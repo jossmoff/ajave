@@ -17,11 +17,11 @@
 
 use std::collections::HashSet;
 
-use log::{debug, info};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::*;
+use log::{debug, info};
 
 use crate::interpolation::{
     encode_body_lia, find_interpolation_solver, InterpolationResult, InterpolationSolver,
@@ -33,6 +33,12 @@ const MAX_ITERATIONS: u32 = 50;
 pub struct ImcEngine {
     solver: Option<InterpolationSolver>,
     done: bool,
+}
+
+impl Default for ImcEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ImcEngine {
@@ -149,11 +155,7 @@ impl Engine for ImcEngine {
 ///    d. If UNSAT: get interpolant I between F∧T and Bad
 ///    e. If I ⊆ F: fixpoint → proved safe
 ///    f. Else F = F ∨ I, iterate
-fn try_imc(
-    solver: &InterpolationSolver,
-    body: &Body,
-    oid: ObligationId,
-) -> Result<bool, String> {
+fn try_imc(solver: &InterpolationSolver, body: &Body, oid: ObligationId) -> Result<bool, String> {
     let encoding = encode_body_lia(body, &[oid], "");
 
     // *Every* error formula for this obligation, not just the first.
@@ -194,7 +196,11 @@ fn try_imc(
     let mut reachable = "true".to_string();
 
     for iteration in 0..MAX_ITERATIONS {
-        debug!("imc: iteration {}, reachable = {}", iteration, &reachable[..reachable.len().min(100)]);
+        debug!(
+            "imc: iteration {}, reachable = {}",
+            iteration,
+            &reachable[..reachable.len().min(100)]
+        );
 
         // Partition A: F(s) ∧ T(s, s')
         // Partition B: Bad(s')
@@ -252,12 +258,7 @@ fn try_imc(
 
 /// Check if formula `a` is subsumed by formula `b` (a ⟹ b).
 /// Returns true if `a ∧ ¬b` is UNSAT.
-fn is_subsumed(
-    _solver: &InterpolationSolver,
-    declarations: &str,
-    a: &str,
-    b: &str,
-) -> bool {
+fn is_subsumed(_solver: &InterpolationSolver, declarations: &str, a: &str, b: &str) -> bool {
     if b == "true" {
         return true;
     }
@@ -305,13 +306,11 @@ fn rename_var_in_sexp(sexp: &str, from: &str, to: &str) -> String {
     while i < bytes.len() {
         if i + from_bytes.len() <= bytes.len() && &bytes[i..i + from_bytes.len()] == from_bytes {
             // Check that this is a word boundary.
-            let before_ok =
-                i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
-            let after_ok = i + from_bytes.len() >= bytes.len()
-                || {
-                    let next = bytes[i + from_bytes.len()];
-                    !next.is_ascii_alphanumeric() && next != b'_'
-                };
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after_ok = i + from_bytes.len() >= bytes.len() || {
+                let next = bytes[i + from_bytes.len()];
+                !next.is_ascii_alphanumeric() && next != b'_'
+            };
             if before_ok && after_ok {
                 result.push_str(to);
                 i += from_bytes.len();
@@ -332,12 +331,11 @@ fn collect_free_vars(formula: &str, declarations: &str) -> Vec<String> {
         if (token.starts_with("nd") || token.starts_with("bw") || token.starts_with("hv"))
             && token.len() > 2
             && token[2..].chars().all(|c| c.is_ascii_digit())
+            && !declarations.contains(token)
+            && !vars.contains(&token.to_string())
         {
-            if !declarations.contains(token) && !vars.contains(&token.to_string()) {
-                vars.push(token.to_string());
-            }
+            vars.push(token.to_string());
         }
     }
     vars
 }
-

@@ -7,11 +7,17 @@
 
 ## What it proves or finds
 
-Bounded concrete execution over a small candidate set (`{0, 1, -1, 2, -2,
-i32::MAX, i32::MIN}`, plus `i64` equivalents) for every `Verifier.nondet*`
-call, run for real against the lifted IR — not solved for, enumerated. On a
-`Check` failure with nothing able to catch it, publishes `Status::Violated`
-with the exact value sequence used, which doubles as the witness.
+A single concrete execution of the lifted IR with every `Verifier.nondet*`
+call returning zero. On a `Check` failure that nothing can catch, it publishes
+`Status::Violated` with the value sequence used, which doubles as the witness.
+
+One probe, not a search. An earlier version enumerated a small candidate set
+(`{0, 1, -1, 2, -2, i32::MAX, i32::MIN}`); that was removed, and `search()`
+now carries a standing instruction not to reintroduce boundary values or any
+other hardcoded choice pattern. Picking values that happen to trigger known
+benchmarks is overfitting. Finding the input that triggers a bug belongs to an
+engine that reasons: `smt_bmc` solves for it, and `concolic` reaches it by
+flipping a branch and asking the solver.
 
 Exceptional control flow is routed properly, not just detected: a `Check`
 failure inside a `try` region looks up the enclosing block's exceptional
@@ -65,18 +71,21 @@ axis that matters is **completeness**, not soundness:
   Under-approximation incompleteness. Fixing this properly means real heap
   modelling (concrete arrays and objects, at least for the paths actually
   explored), not patching around `Unknown`'s propagation further.
-- `count_nondet_slots` under-counts when the all-zero probe run doesn't hit a
-  violation — it falls back to a fixed guess of 3 slots. Under-counting only
-  means fewer combinations get tried.
+- Only the all-zero input is tried, so any bug needing a specific value is
+  invisible here by design. That is the intended division of labour, not a
+  gap to close in this engine.
 
 ## Known incompleteness
 
-The candidate set is small and fixed. `assert2` in the corpus
-(`if (i >= 1000) assert i > 1000`) needs the *exact* value `1000` to trigger,
-which isn't in the candidate pool — this engine correctly reports `UNKNOWN`
-on it rather than finding the bug. Real BMC (Tier 2/3 proper, solver-backed)
-is the fix; this engine is deliberately "enumerate, don't solve" and is
-explicit about that trade in its own module doc.
+Anything that needs a non-zero input. `assert2` in the corpus
+(`if (i >= 1000) assert i > 1000`) triggers only on the exact value `1000`, so
+this engine correctly reports UNKNOWN rather than finding the bug. `smt_bmc`
+solves for such a value directly; `concolic` reaches it by negating the
+branch condition that guards it.
+
+This engine is deliberately the cheapest thing that can find a bug at all. It
+runs first because it costs one execution, and everything it cannot reach is
+another engine's work.
 
 ## How it's certified
 
@@ -87,4 +96,5 @@ sequence instead of calling `Random`) is compiled and run against the actual
 task classpath. Only `CertResult::Confirmed` results survive to the final
 verdict — an unconfirmed `FALSE` is downgraded to `UNKNOWN` in
 `ajave-cli/src/main.rs` rather than reported. This is the one strategy in the
-portfolio whose output is fully independently checked end to end.
+portfolio whose output is fully independently checked end to end. `concolic`
+now shares that property; see `concolic.md`.

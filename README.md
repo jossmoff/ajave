@@ -45,7 +45,7 @@ crates/
   ajave-models/    what ajave assumes java.* library calls do
   ajave-frontend/  classfile parsing + bytecode lifter
   ajave-core/      blackboard, CPA substrate, engine/certifier traits
-  ajave-engines/   concrete strategies (interval AI, concolic falsifier, ...)
+  ajave-engines/   the verification strategies (AI, BMC, concolic, CHC, ...)
   ajave-cli/       the `ajave` binary: wires everything together
 ```
 

@@ -124,6 +124,9 @@ impl Expr {
         Expr::Bin(op, Box::new(a), Box::new(b))
     }
 
+    // Named for the domain operation, not the std trait: these are
+    // interval/term algebra, and `Interval::div` reads correctly.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(a: Expr) -> Expr {
         Expr::Not(Box::new(a))
     }
@@ -212,7 +215,9 @@ impl std::fmt::Display for Expr {
             Expr::Bool(b) => write!(f, "{b}"),
             Expr::Bin(op, a, b) => write!(f, "({a} {} {b})", op.symbol()),
             Expr::Not(a) => write!(f, "!{a}"),
-            Expr::Apply { class, name, args, .. } => {
+            Expr::Apply {
+                class, name, args, ..
+            } => {
                 let short = class.rsplit('/').next().unwrap_or(class);
                 write!(f, "{short}.{name}(")?;
                 for (i, a) in args.iter().enumerate() {
@@ -281,7 +286,12 @@ mod tests {
     /// `contract_of`; a lemma about one overload is not a lemma about another.
     #[test]
     fn overloads_are_different_claims() {
-        let from_int = Expr::call("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", vec![]);
+        let from_int = Expr::call(
+            "java/lang/Integer",
+            "valueOf",
+            "(I)Ljava/lang/Integer;",
+            vec![],
+        );
         let from_str = Expr::call(
             "java/lang/Integer",
             "valueOf",

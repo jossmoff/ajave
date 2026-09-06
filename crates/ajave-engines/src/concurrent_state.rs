@@ -49,9 +49,13 @@ use ajave_ir::{MethodKey, VarId};
 pub enum ThreadStatus {
     Runnable,
     /// Waiting to acquire the monitor of the given object.
-    Blocked { monitor: ObjId },
+    Blocked {
+        monitor: ObjId,
+    },
     /// Inside `Object.wait()` on the given monitor, pending a notify.
-    Waiting { monitor: ObjId },
+    Waiting {
+        monitor: ObjId,
+    },
     /// Created but `start()` has not been called. Not runnable, and not
     /// deadlocked either — the program simply has not started it yet.
     NotStarted,
@@ -63,7 +67,9 @@ pub enum ThreadStatus {
     /// thread has done anything, which invents interleavings the JVM cannot
     /// produce. That is a wrong FALSE for an Under engine — and it is exactly
     /// what happened before this was modelled.
-    Joining { on: ThreadId },
+    Joining {
+        on: ThreadId,
+    },
     Terminated,
 }
 
@@ -218,7 +224,6 @@ impl Default for Bounds {
             max_spurious: 1,
         }
     }
-
 }
 
 impl Bounds {
@@ -230,7 +235,10 @@ impl Bounds {
     /// check on any constant chosen by watching benchmarks.
     pub fn from_env() -> Bounds {
         fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
-            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
         }
         let d = Bounds::default();
         Bounds {
@@ -450,7 +458,10 @@ mod tests {
             thread(0, ThreadStatus::Terminated),
             thread(1, ThreadStatus::Terminated),
         ]);
-        assert!(!done.is_deadlocked(), "clean termination reported as deadlock");
+        assert!(
+            !done.is_deadlocked(),
+            "clean termination reported as deadlock"
+        );
     }
 
     #[test]
@@ -463,8 +474,14 @@ mod tests {
         assert_eq!(
             g.schedule,
             vec![
-                ScheduleSlice { thread: ThreadId(0), steps: 2 },
-                ScheduleSlice { thread: ThreadId(1), steps: 1 },
+                ScheduleSlice {
+                    thread: ThreadId(0),
+                    steps: 2
+                },
+                ScheduleSlice {
+                    thread: ThreadId(1),
+                    steps: 1
+                },
             ]
         );
     }

@@ -8,14 +8,14 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser};
-use log::{debug, info, warn};
 use ajave_core::engine::Engine;
 use ajave_core::orchestrator::Orchestrator;
 use ajave_frontend::classfile::ClassFile;
 use ajave_frontend::lift;
 use ajave_ir::verdict;
 use ajave_ir::Program;
+use clap::{ArgAction, Parser};
+use log::{debug, info, warn};
 
 #[derive(Parser)]
 #[command(
@@ -120,7 +120,14 @@ fn collect_classes(root: &Path) -> Vec<PathBuf> {
 /// whole run: dropping it deletes the classpath out from under the analysis.
 fn compile_if_needed(
     inputs: &[PathBuf],
-) -> Result<(Vec<PathBuf>, String, Option<ajave_core::scratch::ScratchDir>), String> {
+) -> Result<
+    (
+        Vec<PathBuf>,
+        String,
+        Option<ajave_core::scratch::ScratchDir>,
+    ),
+    String,
+> {
     let java_files: Vec<PathBuf> = inputs
         .iter()
         .flat_map(|p| collect_by_ext(p, "java"))
@@ -204,6 +211,10 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         // refuses a program with no threads immediately.
         Box::new(ajave_engines::concurrency::ConcurrencyEngine::new()),
         Box::new(ajave_engines::concrete::Concrete::new()),
+        // Concolic runs straight after concrete: it starts from the same
+        // all-zero probe and only differs once a branch needs flipping, so
+        // anything concrete can find it finds on its first iteration.
+        Box::new(ajave_engines::concolic::Concolic::new()),
     ];
     // NRA before BMC: NRA handles transcendental math (sin, cos, exp, etc.)
     // via cvc5's native support. BMC havoces these calls and produces garbage
@@ -343,7 +354,9 @@ struct ViolationInfo {
 fn emit_program_shape(prog: &ajave_ir::Program, plan: &ajave_core::plan::Plan) {
     use ajave_engines::body_shape;
     let Some(entry) = &prog.entry else { return };
-    let Some(entry_body) = prog.body(entry) else { return };
+    let Some(entry_body) = prog.body(entry) else {
+        return;
+    };
     let entry_shape = body_shape::analyze(entry_body);
 
     // Whole-program rollup: an engine's cost is driven by everything it may be
@@ -427,8 +440,8 @@ fn confirm_violations(
         // schedule replay instead, and say plainly which certifier ran — the
         // two are not equally strong evidence.
         if violation.witness.needs_schedule() {
-            let entries = ajave_engines::concurrency::check_preconditions(program)
-                .unwrap_or_default();
+            let entries =
+                ajave_engines::concurrency::check_preconditions(program).unwrap_or_default();
             let ok = ajave_engines::concurrency::replay_schedule(
                 program,
                 &entries,
@@ -440,17 +453,18 @@ fn confirm_violations(
             if trace || ok {
                 eprintln!(
                     "schedule-replay: {} {} (interpreter, not a real JVM)",
-                    if ok { "confirmed" } else { "could not reproduce" },
+                    if ok {
+                        "confirmed"
+                    } else {
+                        "could not reproduce"
+                    },
                     violation.obligation_ref
                 );
             }
             if ok {
                 any_confirmed = true;
                 if confirmed.is_none() {
-                    confirmed = Some((
-                        violation.obligation_ref.clone(),
-                        violation.witness.clone(),
-                    ));
+                    confirmed = Some((violation.obligation_ref.clone(), violation.witness.clone()));
                 }
             }
             continue;
@@ -467,7 +481,10 @@ fn confirm_violations(
                 //
                 // Always reported, never silent: it needs no expected-verdict
                 // label, so it holds on programs no benchmark covers.
-                if contested.iter().any(|(o, _)| o == &violation.obligation_ref) {
+                if contested
+                    .iter()
+                    .any(|(o, _)| o == &violation.obligation_ref)
+                {
                     eprintln!(
                         "CONTRADICTION: {} was proved safe by an over-approximating \
                          engine and violated by a witness that reproduced on a real \
@@ -476,10 +493,7 @@ fn confirm_violations(
                     );
                 }
                 if confirmed.is_none() {
-                    confirmed = Some((
-                        violation.obligation_ref.clone(),
-                        violation.witness.clone(),
-                    ));
+                    confirmed = Some((violation.obligation_ref.clone(), violation.witness.clone()));
                 }
                 if trace {
                     eprintln!("jvm-replay: confirmed {}", violation.obligation_ref);
@@ -518,12 +532,8 @@ fn emit_witness_file(
         .map(|o| o.kind)
         .unwrap_or(ajave_ir::ObligationKind::Assertion);
     let spec = match kind {
-        ajave_ir::ObligationKind::Assertion => {
-            "CHECK( init(Main.main()), LTL(G assert) )"
-        }
-        _ => {
-            "CHECK(init(Main.main()), LTL(G ! uncaught(java.lang.RuntimeException)))"
-        }
+        ajave_ir::ObligationKind::Assertion => "CHECK( init(Main.main()), LTL(G assert) )",
+        _ => "CHECK(init(Main.main()), LTL(G ! uncaught(java.lang.RuntimeException)))",
     };
     let yaml = ajave_core::witness::emit_violation_yaml(
         witness,
@@ -659,7 +669,11 @@ fn main() {
         .min_by_key(|k| {
             // Prefer the "Main" class (SV-COMP convention), then shorter
             // class names (less likely to be a nested/test class).
-            if k.class == "Main" { 0 } else { 1 + k.class.len() }
+            if k.class == "Main" {
+                0
+            } else {
+                1 + k.class.len()
+            }
         })
         .cloned();
 
@@ -779,7 +793,10 @@ fn main() {
                 // Switchable so the two strategies can be compared directly; see the
                 // equivalence test. AJAVE_DEADLOCK_EXHAUSTIVE=1 forces the
                 // unreduced baseline.
-                if std::env::var("AJAVE_DEADLOCK_EXHAUSTIVE").map(|v| v == "1").unwrap_or(false) {
+                if std::env::var("AJAVE_DEADLOCK_EXHAUSTIVE")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
                     ajave_engines::concurrency::Strategy::Exhaustive
                 } else {
                     ajave_engines::concurrency::Strategy::Dpor
@@ -787,7 +804,10 @@ fn main() {
             ) {
                 ajave_engines::concurrency::Exploration::Deadlock { schedule } => {
                     if cli.trace {
-                        eprintln!("no-deadlock: reachable under a {}-slice schedule", schedule.len());
+                        eprintln!(
+                            "no-deadlock: reachable under a {}-slice schedule",
+                            schedule.len()
+                        );
                     }
                     verdict::Verdict::False
                 }
@@ -800,13 +820,9 @@ fn main() {
                     verdict::Verdict::True
                 }
                 // A violation of some other property is not a deadlock.
-                ajave_engines::concurrency::Exploration::Violation { .. } => {
-                    verdict::Verdict::True
-                }
+                ajave_engines::concurrency::Exploration::Violation { .. } => verdict::Verdict::True,
                 // A race is not a deadlock.
-                ajave_engines::concurrency::Exploration::DataRace { .. } => {
-                    verdict::Verdict::True
-                }
+                ajave_engines::concurrency::Exploration::DataRace { .. } => verdict::Verdict::True,
                 ajave_engines::concurrency::Exploration::Incomplete(why) => {
                     info!("no-deadlock: exploration incomplete — {why}");
                     verdict::Verdict::Unknown
@@ -899,7 +915,9 @@ fn main() {
     let contested = orchestrator.bb.contested();
     let violations = collect_violations(&orchestrator);
     let confirmed_witness = if cli.no_replay {
-        violations.first().map(|v| (v.obligation_ref.clone(), v.witness.clone()))
+        violations
+            .first()
+            .map(|v| (v.obligation_ref.clone(), v.witness.clone()))
     } else if !violations.is_empty() && verdict == verdict::Verdict::False {
         confirm_violations(&violations, &classpath, &prog, cli.trace, &contested)
     } else {
@@ -925,8 +943,10 @@ fn main() {
             // Recomputing the verdict with the refuted violations excluded
             // asks the right question: with no surviving counterexample, is
             // every obligation discharged?
-            let refuted: Vec<ajave_core::artifact::ObligationRef> =
-                violations.iter().map(|v| v.obligation_ref.clone()).collect();
+            let refuted: Vec<ajave_core::artifact::ObligationRef> = violations
+                .iter()
+                .map(|v| v.obligation_ref.clone())
+                .collect();
             match orchestrator.bb.verdict_excluding(&refuted) {
                 verdict::Verdict::True => {
                     if cli.trace {

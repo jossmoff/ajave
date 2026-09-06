@@ -6,8 +6,8 @@
 //! multi-year project. Certificate checking gets most of the assurance now.
 
 use crate::artifact::*;
-use log::{debug, warn};
 use ajave_ir::{ObligationKind, Program};
+use log::{debug, warn};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CertResult {
@@ -49,12 +49,24 @@ fn b64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -150,7 +162,9 @@ public interface ObjectFactory<T> { T createObject(); }
     /// through a Verifier-controlled mock `BufferedReader`, so the *data* is
     /// ours — but they reach it through a real `java.net.Socket`:
     ///
-    ///     socket = new Socket("host.example.org", 39544);
+    /// ```java
+    /// socket = new Socket("host.example.org", 39544);
+    /// ```
     ///
     /// On any machine that resolves DNS honestly that throws
     /// `UnknownHostException`, the task's own `catch (IOException)` swallows
@@ -166,10 +180,9 @@ public interface ObjectFactory<T> { T createObject(); }
     /// succeeds, the stream is empty, close does nothing. **No input comes from
     /// here.** The data still arrives through `Verifier`, so the witness is
     /// still what decides, and a wrong witness still fails.
-    const ENV_MOCKS: &[(&str, &str)] = &[
-        (
-            "java/net/Socket.java",
-            r#"package java.net;
+    const ENV_MOCKS: &[(&str, &str)] = &[(
+        "java/net/Socket.java",
+        r#"package java.net;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ByteArrayInputStream;
@@ -184,8 +197,7 @@ public class Socket implements java.io.Closeable {
     public boolean isConnected() { return true; }
 }
 "#,
-        ),
-    ];
+    )];
 
     /// Does the program reach any class we have a stand-in for?
     ///
@@ -206,9 +218,7 @@ public class Socket implements java.io.Closeable {
         })
     }
 
-    fn build_shadow(
-        &self,
-    ) -> Result<(std::path::PathBuf, crate::scratch::ScratchDir), String> {
+    fn build_shadow(&self) -> Result<(std::path::PathBuf, crate::scratch::ScratchDir), String> {
         // Unique per call and self-deleting. Naming it after the pid alone
         // meant a run could inherit a previous run's directory, and this one
         // goes at the front of the replay classpath — stale classes here flip a
@@ -375,7 +385,10 @@ impl Certifier for JvmReplay {
         let mut str_idx = 0usize;
         for entry in &witness.entries {
             if let ajave_ir::verdict::NondetValue::Str(s) = &entry.value {
-                cmd.arg(format!("-Dajave.str.{str_idx}={}", b64_encode(s.as_bytes())));
+                cmd.arg(format!(
+                    "-Dajave.str.{str_idx}={}",
+                    b64_encode(s.as_bytes())
+                ));
                 str_idx += 1;
             }
         }
@@ -455,9 +468,7 @@ impl Certifier for JvmReplay {
         // failing, and it means this witness didn't actually reach the bug
         // (a stale trace, or an interpreter/JVM divergence). Refuted, not
         // Inconclusive: we have a definite answer, and it disagrees with us.
-        let result = if !out.status.success()
-            && accepted.iter().any(|e| stderr.contains(e))
-        {
+        let result = if !out.status.success() && accepted.iter().any(|e| stderr.contains(e)) {
             CertResult::Confirmed
         } else {
             CertResult::Refuted
@@ -491,7 +502,10 @@ impl Certifier for JvmReplay {
                  loose={} strict={} entries={} strs={} seq=[{}] strvals={:?} method={}",
                 result,
                 ob.kind,
-                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into()),
                 thrown,
                 loose,
                 strict,

@@ -17,8 +17,16 @@ ajave is built around three commitments that follow from that:
 2. **Artifacts, not verdicts.** Engines exchange invariants, precisions, traces
    and bounds through a shared blackboard. A portfolio that only exchanges
    verdicts throws away almost everything each engine learned.
-3. **Nothing is trusted.** Every `FALSE` is a witness replayed on a real JVM;
-   every `TRUE` is an invariant checked inductively by a separate small checker.
+3. **Violations are not trusted.** Every `FALSE` is a witness replayed on a
+   real JVM by `core::certify::JvmReplay`, and a violation that does not
+   reproduce is downgraded to UNKNOWN rather than reported.
+
+   `TRUE` has no equivalent check. `Certifier` has exactly one implementation,
+   and it certifies violations. A discharge therefore rests on the publishing
+   engine's own soundness plus the direction discipline the blackboard
+   enforces at publish time — not on independent confirmation. An inductive
+   invariant checker for `TRUE` is intended and does not exist; until it does,
+   the asymmetry is the honest description of what the design guarantees.
 
 ## 1. Tool pipeline
 

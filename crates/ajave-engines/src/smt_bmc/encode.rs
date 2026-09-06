@@ -64,7 +64,9 @@ pub(super) fn set_fp_arith(on: bool) {
 
 /// The default, from the environment. Read once at engine start.
 pub(super) fn fp_arith_default() -> bool {
-    std::env::var("AJAVE_FP_ARITH").map(|v| v == "1").unwrap_or(false)
+    std::env::var("AJAVE_FP_ARITH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 impl<'a> ExploreCtx<'a> {
@@ -159,8 +161,7 @@ impl<'a> ExploreCtx<'a> {
                 // We do not model this call. No change of *encoding* recovers
                 // it, so record it separately from the approximations that a
                 // more faithful theory would fix.
-                self.approximated =
-                    self.approximated.union(Approximations::UNMODELLED_CALL);
+                self.approximated = self.approximated.union(Approximations::UNMODELLED_CALL);
                 let w = self.width_of_ty(ty);
                 let t = self.solver.fresh_bv("hv", w);
                 // A result the JDK documents as never null is constrained
@@ -185,21 +186,21 @@ impl<'a> ExploreCtx<'a> {
                 let t = self.encode_operand(o);
                 match (src, ty) {
                     // Integer width changes
-                    (Ty::Int, Ty::Long) => self.solver.sign_extend(t, 32),     // i2l
-                    (Ty::Long, Ty::Int) => self.solver.extract(t, 31, 0),      // l2i
+                    (Ty::Int, Ty::Long) => self.solver.sign_extend(t, 32), // i2l
+                    (Ty::Long, Ty::Int) => self.solver.extract(t, 31, 0),  // l2i
                     // Int → Float/Double
-                    (Ty::Int, Ty::Float) => self.encode_i2f(t),                // i2f
-                    (Ty::Int, Ty::Double) => self.encode_i2d(t),               // i2d
-                    (Ty::Long, Ty::Float) => self.solver.fresh_bv("l2f", 32),  // l2f
-                    (Ty::Long, Ty::Double) => self.encode_l2d(t),              // l2d
+                    (Ty::Int, Ty::Float) => self.encode_i2f(t), // i2f
+                    (Ty::Int, Ty::Double) => self.encode_i2d(t), // i2d
+                    (Ty::Long, Ty::Float) => self.solver.fresh_bv("l2f", 32), // l2f
+                    (Ty::Long, Ty::Double) => self.encode_l2d(t), // l2d
                     // Float/Double → Int
-                    (Ty::Float, Ty::Int) => self.encode_f2i(t),                // f2i
-                    (Ty::Float, Ty::Long) => self.encode_f2l(t),               // f2l
-                    (Ty::Double, Ty::Int) => self.encode_d2i(t),               // d2i
-                    (Ty::Double, Ty::Long) => self.encode_d2l(t),              // d2l
+                    (Ty::Float, Ty::Int) => self.encode_f2i(t), // f2i
+                    (Ty::Float, Ty::Long) => self.encode_f2l(t), // f2l
+                    (Ty::Double, Ty::Int) => self.encode_d2i(t), // d2i
+                    (Ty::Double, Ty::Long) => self.encode_d2l(t), // d2l
                     // Float ↔ Double
-                    (Ty::Float, Ty::Double) => self.encode_f2d(t),             // f2d
-                    (Ty::Double, Ty::Float) => self.solver.fresh_bv("d2f", 32),// d2f
+                    (Ty::Float, Ty::Double) => self.encode_f2d(t), // f2d
+                    (Ty::Double, Ty::Float) => self.solver.fresh_bv("d2f", 32), // d2f
                     _ => t,
                 }
             }
@@ -252,7 +253,11 @@ impl<'a> ExploreCtx<'a> {
                         let zero = self.solver.bv_const(0, 32);
                         let one = self.solver.bv_const(1, 32);
 
-                        let nan_val = if *kind == CmpKind::FloatL { minus1 } else { one };
+                        let nan_val = if *kind == CmpKind::FloatL {
+                            minus1
+                        } else {
+                            one
+                        };
                         let ordered = {
                             let inner = self.solver.ite(eq, zero, one);
                             self.solver.ite(lt, minus1, inner)
@@ -297,7 +302,9 @@ impl<'a> ExploreCtx<'a> {
                 let ref_term = self.solver.bv_const(id, 32);
                 let type_id = self.get_type_id(class);
                 let type_id_term = self.solver.bv_const(type_id, 32);
-                let new_ta = self.solver.array_store(self.type_array, ref_term, type_id_term);
+                let new_ta = self
+                    .solver
+                    .array_store(self.type_array, ref_term, type_id_term);
                 self.type_array = new_ta;
                 ref_term
             }
@@ -461,7 +468,11 @@ impl<'a> ExploreCtx<'a> {
     /// including itself, and -0.0 equals 0.0 — both of which a bitvector
     /// comparison on the raw pattern gets wrong.
     pub(super) fn encode_fp_binop(
-        &mut self, op: BinOp, a: &Operand, b: &Operand, width: u32,
+        &mut self,
+        op: BinOp,
+        a: &Operand,
+        b: &Operand,
+        width: u32,
     ) -> Option<Term> {
         let at = self.encode_fp_operand(a, width);
         let bt = self.encode_fp_operand(b, width);
@@ -475,26 +486,56 @@ impl<'a> ExploreCtx<'a> {
         // term in `pending_fp` for the assignment site to attach to the
         // destination variable — keeping full precision for later float
         // operations instead of round-tripping through unconstrained bits.
-        let mut arith = |s: &mut Self, r: Term| {
+        let arith = |s: &mut Self, r: Term| {
             s.pending_fp = Some(r);
             s.solver.fp_to_bits(r, width)
         };
         Some(match op {
-            BinOp::Add => { let r = self.solver.fp_add(at, bt); arith(self, r) }
-            BinOp::Sub => { let r = self.solver.fp_sub(at, bt); arith(self, r) }
-            BinOp::Mul => { let r = self.solver.fp_mul(at, bt); arith(self, r) }
-            BinOp::Div => { let r = self.solver.fp_div(at, bt); arith(self, r) }
-            BinOp::Rem => { let r = self.solver.fp_rem(at, bt); arith(self, r) }
-            BinOp::Eq => { let c = self.solver.fp_eq(at, bt); bool_to_int(self, c) }
+            BinOp::Add => {
+                let r = self.solver.fp_add(at, bt);
+                arith(self, r)
+            }
+            BinOp::Sub => {
+                let r = self.solver.fp_sub(at, bt);
+                arith(self, r)
+            }
+            BinOp::Mul => {
+                let r = self.solver.fp_mul(at, bt);
+                arith(self, r)
+            }
+            BinOp::Div => {
+                let r = self.solver.fp_div(at, bt);
+                arith(self, r)
+            }
+            BinOp::Rem => {
+                let r = self.solver.fp_rem(at, bt);
+                arith(self, r)
+            }
+            BinOp::Eq => {
+                let c = self.solver.fp_eq(at, bt);
+                bool_to_int(self, c)
+            }
             BinOp::Ne => {
                 let c = self.solver.fp_eq(at, bt);
                 let n = self.solver.not(c);
                 bool_to_int(self, n)
             }
-            BinOp::Lt => { let c = self.solver.fp_lt(at, bt); bool_to_int(self, c) }
-            BinOp::Le => { let c = self.solver.fp_le(at, bt); bool_to_int(self, c) }
-            BinOp::Gt => { let c = self.solver.fp_gt(at, bt); bool_to_int(self, c) }
-            BinOp::Ge => { let c = self.solver.fp_ge(at, bt); bool_to_int(self, c) }
+            BinOp::Lt => {
+                let c = self.solver.fp_lt(at, bt);
+                bool_to_int(self, c)
+            }
+            BinOp::Le => {
+                let c = self.solver.fp_le(at, bt);
+                bool_to_int(self, c)
+            }
+            BinOp::Gt => {
+                let c = self.solver.fp_gt(at, bt);
+                bool_to_int(self, c)
+            }
+            BinOp::Ge => {
+                let c = self.solver.fp_ge(at, bt);
+                bool_to_int(self, c)
+            }
             // Bitwise and shift operators do not apply to floats in Java.
             _ => return None,
         })
@@ -521,15 +562,28 @@ impl<'a> ExploreCtx<'a> {
         // a real one, so 18 of 25 sampled tasks found the violation and then
         // withdrew it. Those are points computed correctly and discarded.
         let fp_op = if fp_arith() {
-            matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt
-                     | BinOp::Ge | BinOp::Add | BinOp::Sub | BinOp::Mul
-                     | BinOp::Div | BinOp::Rem)
+            matches!(
+                op,
+                BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
+                    | BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Rem
+            )
         } else {
-            matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+            matches!(
+                op,
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            )
         };
         if fp_op {
-            if let (Some(wa), Some(wb)) =
-                (self.fp_width_of_operand(a), self.fp_width_of_operand(b))
+            if let (Some(wa), Some(wb)) = (self.fp_width_of_operand(a), self.fp_width_of_operand(b))
             {
                 let w = wa.max(wb);
                 if let Some(t) = self.encode_fp_binop(op, a, b, w) {
@@ -542,8 +596,10 @@ impl<'a> ExploreCtx<'a> {
         // patterns. Sound as an under-approximation of *something*, but not of
         // this program, so say so: the FPA pass asks for exactly the
         // obligations closed under this approximation.
-        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
-            && (self.fp_width_of_operand(a).is_some() || self.fp_width_of_operand(b).is_some())
+        if matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+        ) && (self.fp_width_of_operand(a).is_some() || self.fp_width_of_operand(b).is_some())
         {
             self.approximated = self.approximated.union(Approximations::FLOAT_ARITH);
         }

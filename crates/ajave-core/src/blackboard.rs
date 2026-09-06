@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::artifact::*;
-use log::{debug, trace, warn};
 use ajave_ir::verdict::Verdict;
 use ajave_ir::{BlockId, MethodKey, Program, VarId};
+use log::{debug, trace, warn};
 
 #[derive(Debug)]
 pub struct Rejected {
@@ -122,7 +122,11 @@ impl Blackboard {
             "blackboard: seeded {} reachable obligations (total assertions in program: {}){}",
             self.statuses.len(),
             self.total_assertions,
-            if assertion_only { " (assertion-only)" } else { "" }
+            if assertion_only {
+                " (assertion-only)"
+            } else {
+                ""
+            }
         );
     }
 
@@ -398,15 +402,27 @@ impl Blackboard {
         // Identical questions are one question. An engine re-deriving the same
         // subgoal on twenty paths should not make twenty engines answer it
         // twenty times, and the answer is the same either way.
-        if let Some(q) = self.queries.iter().find(|q| {
-            q.at == at && q.about == about && q.want == want && q.given == given
-        }) {
+        if let Some(q) = self
+            .queries
+            .iter()
+            .find(|q| q.at == at && q.about == about && q.want == want && q.given == given)
+        {
             return q.id;
         }
         let id = self.next_query;
         self.next_query += 1;
-        let q = Query { id, asked_by, at, about, want, given };
-        debug!("blackboard: query {id} from {asked_by}: {} ({want:?})", q.about);
+        let q = Query {
+            id,
+            asked_by,
+            at,
+            about,
+            want,
+            given,
+        };
+        debug!(
+            "blackboard: query {id} from {asked_by}: {} ({want:?})",
+            q.about
+        );
         let _ = self.publish(asked_by, Direction::Exact, Artifact::Query(q));
         id
     }
@@ -462,7 +478,9 @@ impl Blackboard {
 
     /// Whether any interval bounds have been published.
     pub fn has_interval_hints(&self) -> bool {
-        self.invariants.iter().any(|i| i.status == InvStatus::Candidate)
+        self.invariants
+            .iter()
+            .any(|i| i.status == InvStatus::Candidate)
     }
 
     /// Interval bounds for a method, read off the **artifact log**.
@@ -483,11 +501,19 @@ impl Blackboard {
         use crate::term::{Expr, Op};
         let mut out = HashMap::new();
         for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
-            let Expr::Bin(Op::And, lo_e, hi_e) = &inv.formula else { continue };
+            let Expr::Bin(Op::And, lo_e, hi_e) = &inv.formula else {
+                continue;
+            };
             let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) =
-                (lo_e.as_ref(), hi_e.as_ref()) else { continue };
+                (lo_e.as_ref(), hi_e.as_ref())
+            else {
+                continue;
+            };
             let (Expr::Int(lo), Expr::Var(v1), Expr::Var(v2), Expr::Int(hi)) =
-                (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref()) else { continue };
+                (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref())
+            else {
+                continue;
+            };
             if v1 != v2 {
                 continue;
             }
@@ -591,7 +617,10 @@ impl Blackboard {
             .map(|(_, v)| v)
             .collect();
 
-        if remaining.iter().any(|s| matches!(s, Status::Violated { .. })) {
+        if remaining
+            .iter()
+            .any(|s| matches!(s, Status::Violated { .. }))
+        {
             return Verdict::False;
         }
         // The blackboard holds one status per obligation, so an obligation
@@ -610,7 +639,10 @@ impl Blackboard {
                 return Verdict::Unknown;
             }
         }
-        if remaining.iter().all(|s| matches!(s, Status::Discharged { .. })) {
+        if remaining
+            .iter()
+            .all(|s| matches!(s, Status::Discharged { .. }))
+        {
             return Verdict::True;
         }
         Verdict::Unknown
@@ -752,9 +784,7 @@ mod tests {
             "fixing the float encoding leaves the unmodelled call unfixed"
         );
         assert_eq!(
-            bb.open_for(
-                Approximations::FLOAT_ARITH.union(Approximations::UNMODELLED_CALL)
-            ),
+            bb.open_for(Approximations::FLOAT_ARITH.union(Approximations::UNMODELLED_CALL)),
             vec![oref()],
             "an engine that fixes both should still be offered it"
         );
@@ -824,12 +854,18 @@ mod tests {
     // ── the query/lemma channel ────────────────────────────────────────
 
     fn point() -> ProgramPoint {
-        ProgramPoint { method: oref().method, block: ajave_ir::BlockId(0), index: 0 }
+        ProgramPoint {
+            method: oref().method,
+            block: ajave_ir::BlockId(0),
+            index: 0,
+        }
     }
 
     fn sin_x() -> crate::term::Expr {
         crate::term::Expr::call(
-            "java/lang/Math", "sin", "(D)D",
+            "java/lang/Math",
+            "sin",
+            "(D)D",
             vec![crate::term::Expr::Var(ajave_ir::VarId(0))],
         )
     }
@@ -874,7 +910,13 @@ mod tests {
     #[test]
     fn an_over_approximating_engine_may_not_answer_with_a_witness() {
         let mut bb = Blackboard::new();
-        let q = bb.ask(EngineId("smt-bmc"), point(), sin_x(), Want::Satisfiable, vec![]);
+        let q = bb.ask(
+            EngineId("smt-bmc"),
+            point(),
+            sin_x(),
+            Want::Satisfiable,
+            vec![],
+        );
         let r = bb.publish(
             EngineId("interval-ai"),
             Direction::Over,

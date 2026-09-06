@@ -2,6 +2,119 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-06 — concolic execution, and a scoring comparison that was not like-for-like
+
+### Evaluation order, not budget, was defeating recursion
+
+`jayhorn-recursive`'s `Unsat*` tasks all have one shape: a nondeterministic
+input, a recursive call, and *then* the constraint that pins the input.
+
+```java
+int x = Verifier.nondetInt();
+int result = fibonacci(x);      // explored with x unconstrained: exponential
+if (x != 5 || result == 3) return; else assert false;
+```
+
+Forward symbolic execution meets `fibonacci(x)` knowing nothing about `x` and
+forks until its budget is gone. Three measurements isolate the cause: raising
+the fork budget eightfold changes nothing, while moving `if (x != 5)` above the
+call turns UNKNOWN into FALSE with no other edit.
+
+Concolic execution reverses the roles. The concrete run decides control flow —
+`fibonacci(5)` is a handful of additions — and the solver only ever sees the
+branch conditions along one path. Flip the last unflipped branch, solve, rerun.
+On `UnsatFibonacci01` it finds `x = 5` on the second run.
+
+**Why it cannot produce a wrong answer.** A violation is reported only when a
+real execution reached the check and the check failed; the solver proposes
+inputs and never decides that anything is violated. So the witness is the input
+execution ran on, and it reproduces by construction. That is what makes the
+incomplete symbolic shadow harmless — `sym_rvalue` declines integer division
+(Euclidean in SMT, truncating in Java) and every bitwise operator (LIA has
+none), which costs branch flips and therefore paths, not correctness.
+
+The shadow covers the entry frame only. `VarId`s are numbered per body, and the
+recursion this exists to defeat is exactly what should run concretely.
+
+| | before | after |
+|---|---|---|
+| `jayhorn-recursive` valid-assert | 5 correct | **9 correct** |
+| valid-assert | 857 (719 correct) | **862 (724 correct)** |
+| no-runtime-exception | 1118 (567 correct) | 1118 (567 correct) |
+| new wrong answers | — | **0** |
+
+Wall time rose 1.7%, since the engine runs on every task. The one remaining
+`Unsat*` task, `UnsatAddition02`, branches on a *call result*, which is
+concrete and so unflippable; that needs a callee summary, which is CHC's job.
+
+### CHC: predicate arity was the reason it proved nothing recursive
+
+A five-line program whose summary is `f(n) >= 0` timed out. Hand-writing the
+same program's summary over its two live variables is `sat` in 0.01s. The
+encoder gave every block predicate *every* variable in the method — 14-ary for
+that program — and Spacer's difficulty grows sharply with arity.
+
+`liveness.rs` restricts each block predicate to the variables live at its
+entry. Arity fell 22→4 on Ackermann and 25→4 on MultCommutative. An imprecise
+live set cannot cause a wrong verdict: an omitted variable becomes an
+unconstrained binder in the successor, which over-approximates.
+
+Two further fixes followed from reading the generated clauses:
+
+- **Parameters must stay live.** The summary concludes `m_s(params, ret)` at
+  each return site, but a parameter read only at the top is dead there. Liveness
+  alone therefore produced `(=> (m1_b3 v4) (m1_s v0 _f0))` with `v0` free —
+  describing `f` as able to return anything for any argument. Sound, and
+  useless.
+- **Integral variables need their JLS ranges.** The encoding used unbounded
+  `Int` and never said a Java `int` is 32-bit, so the solver believed `v0` could
+  be 2^40 and concluded `v0 - 1` may overflow. Confirmed by diagnostic: dropping
+  the overflow clauses turned a timeout into `sat`.
+
+These moved z3 from `unsat` — a *spurious counterexample* — to `unknown`, an
+honest "no invariant found". They convert no tasks. `jayhorn-recursive`'s
+`Sat*` proofs need either an invariant generator stronger than Spacer, or, for
+`SatAddition01` and `SatGcd`, exact modular semantics: those assert
+`addition(m,n) == m + n` with inputs up to `INT_MAX`, and the property holds
+*only because* Java wrapping is well-defined. Routing overflow to `error` can
+never prove that (#17).
+
+### The published SV-COMP score is not a raw sum
+
+`docs/assessment-2026-08-31.md` compared our raw score total against SV-COMP's
+published *Overall* column. Recomputing a raw sum from the competition's own
+result XML, over the same runs with the same +2/+1/-16/-32 weights, gives
+**JBMC 1728** against a published **1561**. Two figures from identical run data
+mean the Overall applies something a raw sum does not — most likely
+per-category normalisation.
+
+Every cross-tool score comparison in this repository is therefore *indicative
+only* until that formula is reproduced. The claims that survive are the ones
+that do not depend on it: per-task verdicts, wrong-answer counts, and which
+tasks nobody solves.
+
+### Harness: the budget was 15x stricter than the competition
+
+`bench.py` defaulted to 60s per task; SV-COMP 2026 allows 900s with four
+dedicated cores. Re-probing the 92 tasks that timed out at 60s showed **57
+capability-bound** (still TIMEOUT at 300s), 10 budget-bound and 8 answering
+UNKNOWN — so the budget was worth about 10 tasks, not 92. The default is now
+300s: measured VA 857 against 847, with no-runtime-exception unchanged.
+
+### Documentation
+
+Auditing the docs against the code found one claim that was simply untrue.
+`architecture.md` stated that "every `TRUE` is an invariant checked inductively
+by a separate small checker". `Certifier` has exactly one implementation and it
+certifies *violations*; no such checker exists. A discharge rests on the
+publishing engine's soundness and the blackboard's direction discipline, and
+the doc now says so.
+
+Also corrected: `strategies/concrete.md` documented a candidate set
+(`{0, 1, -1, 2, -2, i32::MAX, i32::MIN}`) that was deliberately removed, and
+`docs/README.md` gained an engine registry recording that 7 of 13 engines have
+no strategy doc — a rule the repository states and had stopped following.
+
 ## 2026-09-05 — replay can patch java.base, and why str.to_int cannot model parseInt
 
 Two attempts at the same target — `juliet-java`, stuck at 0/9 — with opposite

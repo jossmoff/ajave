@@ -68,7 +68,12 @@ pub enum Precondition {
     /// the 32-bit range, which the BMC encodes directly. Leaving it
     /// `Unexpressible` blocked the TRUE *and* prevented anything finding the
     /// FALSE, so such tasks were unanswerable in both directions.
-    NoOverflow { a: u8, b: u8, op: ajave_ir::BinOp, width: u8 },
+    NoOverflow {
+        a: u8,
+        b: u8,
+        op: ajave_ir::BinOp,
+        width: u8,
+    },
     /// The method can throw for a reason we cannot express as a condition over
     /// the call's arguments — a malformed format string, an overflow check, a
     /// comparator contract. Presence of this blocks a no-runtime-exception
@@ -156,10 +161,18 @@ pub struct Contract {
 
 impl Contract {
     /// Total: cannot throw for any input.
-    const TOTAL: Contract = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
+    const TOTAL: Contract = Contract {
+        requires: &[],
+        effect: Effect::Pure,
+        may_return_null: true,
+    };
 
     /// Cannot throw, but mutates its receiver.
-    const TOTAL_MUT: Contract = Contract { requires: &[], effect: Effect::Receiver, may_return_null: true };
+    const TOTAL_MUT: Contract = Contract {
+        requires: &[],
+        effect: Effect::Receiver,
+        may_return_null: true,
+    };
 
     /// `true` when no input can make this call raise a `RuntimeException`.
     pub fn is_total(&self) -> bool {
@@ -215,7 +228,6 @@ impl Contract {
         self.requires.iter().all(|p| p.is_seeded())
     }
 }
-
 
 /// Whether call preconditions are seeded as obligations.
 ///
@@ -353,32 +365,55 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
     let c = match (class, name) {
         // ── java.lang.String ────────────────────────────────────────────
         // The no-argument queries are total.
-        ("java/lang/String", "length" | "isEmpty" | "hashCode" | "toString"
-            | "intern" | "trim" | "toCharArray" | "toUpperCase" | "toLowerCase") => {
-            Contract::TOTAL
-        }
+        (
+            "java/lang/String",
+            "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray"
+            | "toUpperCase" | "toLowerCase",
+        ) => Contract::TOTAL,
         // `equals` is specified null-tolerant; the others throw NPE on null.
         ("java/lang/String", "equals") => Contract::TOTAL,
-        ("java/lang/String", "contains" | "startsWith" | "endsWith" | "concat"
-            | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase"
-            | "indexOf" | "lastIndexOf" | "replace") => {
-            Contract { requires: NN1, effect: Effect::Pure, may_return_null: true }
-        }
+        (
+            "java/lang/String",
+            "contains"
+            | "startsWith"
+            | "endsWith"
+            | "concat"
+            | "equalsIgnoreCase"
+            | "compareTo"
+            | "compareToIgnoreCase"
+            | "indexOf"
+            | "lastIndexOf"
+            | "replace",
+        ) => Contract {
+            requires: NN1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
         // Index-bounded accessors.
-        ("java/lang/String", "charAt" | "codePointAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
-        }
+        ("java/lang/String", "charAt" | "codePointAt") => Contract {
+            requires: IDX1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
         ("java/lang/String", "substring") => Contract {
-            requires: &[Precondition::RangeInBounds { start: 1, end: None, seq: 0 }],
+            requires: &[Precondition::RangeInBounds {
+                start: 1,
+                end: None,
+                seq: 0,
+            }],
             effect: Effect::Pure,
             may_return_null: true,
         },
         // PatternSyntaxException / IllegalFormatException are not conditions
         // over the argument values we track.
-        ("java/lang/String", "matches" | "split" | "replaceAll" | "replaceFirst"
-            | "format" | "join") => {
-            Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
-        }
+        (
+            "java/lang/String",
+            "matches" | "split" | "replaceAll" | "replaceFirst" | "format" | "join",
+        ) => Contract {
+            requires: OPAQUE,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
 
         // ── java.lang.Object ────────────────────────────────────────────
         // Monitor operations, listed before the class-level fallback below.
@@ -425,28 +460,48 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // `append` renders null as "null" for the reference overloads and is
         // total for the primitive ones.
         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
-        }
+        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => Contract {
+            requires: IDX1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
 
         // ── Boxing ──────────────────────────────────────────────────────
-        ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
-            | "java/lang/Float" | "java/lang/Double" | "java/lang/Character"
-            | "java/lang/Boolean", "valueOf") => {
+        (
+            "java/lang/Integer"
+            | "java/lang/Long"
+            | "java/lang/Short"
+            | "java/lang/Byte"
+            | "java/lang/Float"
+            | "java/lang/Double"
+            | "java/lang/Character"
+            | "java/lang/Boolean",
+            "valueOf",
+        ) => {
             if desc.starts_with("(Ljava/lang/String;)") {
                 // Parsing: NumberFormatException is not a condition over a
                 // value we model.
-                Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
+                Contract {
+                    requires: OPAQUE,
+                    effect: Effect::Pure,
+                    may_return_null: true,
+                }
             } else {
                 Contract::TOTAL
             }
         }
-        ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
-            | "java/lang/Float" | "java/lang/Double" | "java/lang/Character"
+        (
+            "java/lang/Integer"
+            | "java/lang/Long"
+            | "java/lang/Short"
+            | "java/lang/Byte"
+            | "java/lang/Float"
+            | "java/lang/Double"
+            | "java/lang/Character"
             | "java/lang/Boolean",
-            "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue"
-            | "doubleValue" | "charValue" | "booleanValue" | "hashCode"
-            | "toString" | "equals") => Contract::TOTAL,
+            "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue"
+            | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",
+        ) => Contract::TOTAL,
 
         // ── Math ────────────────────────────────────────────────────────
         ("java/lang/Math" | "java/lang/StrictMath", n) => {
@@ -461,25 +516,62 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
                 };
                 return Some(Contract {
                     requires: Box::leak(Box::new([Precondition::NoOverflow {
-                        a: 0, b: 1, op, width,
+                        a: 0,
+                        b: 1,
+                        op,
+                        width,
                     }])),
                     effect: Effect::Pure,
                     may_return_null: true,
                 });
-            } else if matches!(n,
-                "incrementExact" | "decrementExact" | "negateExact" | "absExact"
-                    | "toIntExact"
+            } else if matches!(
+                n,
+                "incrementExact" | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
             ) {
                 // Single-operand overflow; not seeded yet.
-                Contract { requires: OPAQUE, effect: Effect::Pure, may_return_null: true }
+                Contract {
+                    requires: OPAQUE,
+                    effect: Effect::Pure,
+                    may_return_null: true,
+                }
             } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
-                Contract { requires: &[Precondition::NonZero(2)], effect: Effect::Pure, may_return_null: true }
-            } else if matches!(n,
-                "abs" | "min" | "max" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
-                    | "asin" | "acos" | "atan" | "atan2" | "exp" | "expm1"
-                    | "log" | "log10" | "log1p" | "pow" | "floor" | "ceil"
-                    | "rint" | "round" | "signum" | "hypot" | "random"
-                    | "toRadians" | "toDegrees" | "ulp" | "copySign" | "fma"
+                Contract {
+                    requires: &[Precondition::NonZero(2)],
+                    effect: Effect::Pure,
+                    may_return_null: true,
+                }
+            } else if matches!(
+                n,
+                "abs"
+                    | "min"
+                    | "max"
+                    | "sqrt"
+                    | "cbrt"
+                    | "sin"
+                    | "cos"
+                    | "tan"
+                    | "asin"
+                    | "acos"
+                    | "atan"
+                    | "atan2"
+                    | "exp"
+                    | "expm1"
+                    | "log"
+                    | "log10"
+                    | "log1p"
+                    | "pow"
+                    | "floor"
+                    | "ceil"
+                    | "rint"
+                    | "round"
+                    | "signum"
+                    | "hypot"
+                    | "random"
+                    | "toRadians"
+                    | "toDegrees"
+                    | "ulp"
+                    | "copySign"
+                    | "fma"
             ) {
                 Contract::TOTAL
             } else {
@@ -488,8 +580,10 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         }
 
         // ── System ──────────────────────────────────────────────────────
-        ("java/lang/System", "currentTimeMillis" | "nanoTime" | "identityHashCode"
-            | "lineSeparator") => Contract::TOTAL,
+        (
+            "java/lang/System",
+            "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",
+        ) => Contract::TOTAL,
 
         // ── Enum ────────────────────────────────────────────────────────
         ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
@@ -499,74 +593,118 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // `next()` on an exhausted iterator throws NoSuchElementException,
         // and `hasNext()` is total. We model an iterator as its collection, so
         // emptiness is `$$coll_size == 0`.
-        ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
-        }
+        ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => Contract {
+            requires: &[Precondition::NonEmpty],
+            effect: Effect::Receiver,
+            may_return_null: true,
+        },
         ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") => {
             Contract::TOTAL
         }
         // Stack/Deque removal on an empty receiver throws.
-        ("java/util/Stack", "pop" | "peek") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
-        }
-        ("java/util/ArrayDeque" | "java/util/LinkedList",
-            "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast") => {
-            Contract { requires: &[Precondition::NonEmpty], effect: Effect::Receiver, may_return_null: true }
-        }
+        ("java/util/Stack", "pop" | "peek") => Contract {
+            requires: &[Precondition::NonEmpty],
+            effect: Effect::Receiver,
+            may_return_null: true,
+        },
+        (
+            "java/util/ArrayDeque" | "java/util/LinkedList",
+            "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast",
+        ) => Contract {
+            requires: &[Precondition::NonEmpty],
+            effect: Effect::Receiver,
+            may_return_null: true,
+        },
 
         // ── Collections ─────────────────────────────────────────────────
         // Now that element counts are tracked in `$$coll_size`, the bound on
         // an indexed access is expressible, so these stop being dead ends.
-        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
-            | "java/util/AbstractList" | "java/util/Vector", "get") => {
-            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
-        }
-        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
-            | "java/util/AbstractList" | "java/util/Vector", "size" | "isEmpty") => {
-            Contract::TOTAL
-        }
+        (
+            "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/LinkedList"
+            | "java/util/AbstractList"
+            | "java/util/Vector",
+            "get",
+        ) => Contract {
+            requires: IDX1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
+        (
+            "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/LinkedList"
+            | "java/util/AbstractList"
+            | "java/util/Vector",
+            "size" | "isEmpty",
+        ) => Contract::TOTAL,
         // Appending cannot fail for the unbounded collections; the indexed
         // `add(int, E)` and `set(int, E)` overloads can.
-        ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
-            | "java/util/AbstractList" | "java/util/Vector", "add") => {
+        (
+            "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/LinkedList"
+            | "java/util/AbstractList"
+            | "java/util/Vector",
+            "add",
+        ) => {
             if desc.starts_with("(I") {
-                Contract { requires: IDX1, effect: Effect::Receiver, may_return_null: true }
+                Contract {
+                    requires: IDX1,
+                    effect: Effect::Receiver,
+                    may_return_null: true,
+                }
             } else {
                 Contract::TOTAL_MUT
             }
         }
-        ("java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set", "add"
-            | "contains" | "size" | "isEmpty") => Contract::TOTAL_MUT,
+        (
+            "java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set",
+            "add" | "contains" | "size" | "isEmpty",
+        ) => Contract::TOTAL_MUT,
         // Hash maps tolerate null keys; sorted maps do not, so they are absent.
-        ("java/util/HashMap" | "java/util/LinkedHashMap", "put" | "get"
-            | "containsKey" | "size" | "isEmpty") => Contract::TOTAL_MUT,
+        (
+            "java/util/HashMap" | "java/util/LinkedHashMap",
+            "put" | "get" | "containsKey" | "size" | "isEmpty",
+        ) => Contract::TOTAL_MUT,
 
         // ── Output streams ──────────────────────────────────────────────
         // The constructors throw NPE on a null sink; printing is total and
         // renders null as "null". IOException is checked, so irrelevant here.
-        ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => {
-            Contract { requires: NN1, effect: Effect::Receiver, may_return_null: true }
-        }
-        ("java/io/PrintWriter" | "java/io/PrintStream",
-            "println" | "print" | "write" | "flush" | "close" | "append") => {
+        ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => Contract {
+            requires: NN1,
+            effect: Effect::Receiver,
+            may_return_null: true,
+        },
+        (
+            "java/io/PrintWriter" | "java/io/PrintStream",
+            "println" | "print" | "write" | "flush" | "close" | "append",
+        ) => {
             // `format`/`printf` are excluded: IllegalFormatException is not a
             // condition over a value we track.
             Contract::TOTAL_MUT
         }
-        ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => {
-            Contract { requires: OPAQUE, effect: Effect::Receiver, may_return_null: true }
-        }
+        ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => Contract {
+            requires: OPAQUE,
+            effect: Effect::Receiver,
+            may_return_null: true,
+        },
 
         // ── CharSequence ────────────────────────────────────────────────
         ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
-        ("java/lang/CharSequence", "charAt") => {
-            Contract { requires: IDX1, effect: Effect::Pure, may_return_null: true }
-        }
+        ("java/lang/CharSequence", "charAt") => Contract {
+            requires: IDX1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
 
         // ── java.util.Objects ───────────────────────────────────────────
-        ("java/util/Objects", "requireNonNull") => {
-            Contract { requires: NN1, effect: Effect::Pure, may_return_null: true }
-        }
+        ("java/util/Objects", "requireNonNull") => Contract {
+            requires: NN1,
+            effect: Effect::Pure,
+            may_return_null: true,
+        },
         ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") => {
             Contract::TOTAL
         }
@@ -581,12 +719,16 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
         // Thread was previously in PURE_OWNERS, which made the lifter erase
         // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
         // shape as issue #49.
-        ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => {
-            Contract { requires: OPAQUE, effect: Effect::Unknown, may_return_null: true }
-        }
+        ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => Contract {
+            requires: OPAQUE,
+            effect: Effect::Unknown,
+            may_return_null: true,
+        },
         // Queries that touch no shared state.
-        ("java/lang/Thread", "currentThread" | "getName" | "getId" | "isAlive"
-            | "isDaemon" | "getPriority") => Contract::TOTAL,
+        (
+            "java/lang/Thread",
+            "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",
+        ) => Contract::TOTAL,
 
         // ── The nondet source ───────────────────────────────────────────
         (VERIFIER, _) => Contract::TOTAL,
@@ -784,7 +926,11 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
             // factory body rather than treating it as a raw nondet ref.
             "nondetObject" => CallModel::Unmodelled,
             n if n.starts_with("nondet") => {
-                let jvm_byte = desc.as_bytes().get(desc.rfind(')').unwrap_or(0) + 1).copied().unwrap_or(b'I');
+                let jvm_byte = desc
+                    .as_bytes()
+                    .get(desc.rfind(')').unwrap_or(0) + 1)
+                    .copied()
+                    .unwrap_or(b'I');
                 CallModel::Nondet(ret_ty(desc), jvm_byte)
             }
             _ => CallModel::Unmodelled,
@@ -851,10 +997,17 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
     // Methods that can throw RuntimeException (NumberFormatException,
     // IllegalArgumentException, etc.) must NOT be Pure — the call must
     // remain visible so the BMC can flag it as potentially throwing for NRE.
-    if matches!(name,
-        "parseInt" | "parseLong" | "parseShort" | "parseByte"
-        | "parseFloat" | "parseDouble" | "parseUnsignedInt" | "parseUnsignedLong"
-        | "decode"
+    if matches!(
+        name,
+        "parseInt"
+            | "parseLong"
+            | "parseShort"
+            | "parseByte"
+            | "parseFloat"
+            | "parseDouble"
+            | "parseUnsignedInt"
+            | "parseUnsignedLong"
+            | "decode"
     ) {
         return CallModel::Unmodelled;
     }
@@ -879,7 +1032,9 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
             "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
             // (String, Integer) -> Integer: the default is already boxed.
             "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
-            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => CallModel::ReturnArg(1, None),
+            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {
+                CallModel::ReturnArg(1, None)
+            }
             // The one-argument forms return null when the property is absent,
             // which is a different fact and not modelled here.
             _ => CallModel::Unmodelled,
@@ -917,9 +1072,19 @@ fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
         // Overflow (`*Exact`) and zero-divisor (`floorDiv`/`floorMod`) checks.
         "java/lang/Math" | "java/lang/StrictMath" => matches!(
             name,
-            "addExact" | "subtractExact" | "multiplyExact" | "incrementExact"
-                | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
-                | "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod" | "divideExact"
+            "addExact"
+                | "subtractExact"
+                | "multiplyExact"
+                | "incrementExact"
+                | "decrementExact"
+                | "negateExact"
+                | "absExact"
+                | "toIntExact"
+                | "floorDiv"
+                | "floorMod"
+                | "ceilDiv"
+                | "ceilMod"
+                | "divideExact"
         ),
         // Monitor operations. All three throw `IllegalMonitorStateException`
         // unless the caller owns the monitor, and `wait` also throws
@@ -936,8 +1101,8 @@ fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
         // IndexOutOfBounds / ArrayStore / NPE.
         "java/lang/System" => name == "arraycopy",
         // Boxing from a String parses, and parsing throws.
-        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short"
-        | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" => {
+        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+        | "java/lang/Float" | "java/lang/Double" => {
             name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
         }
         // Bounds and comparator contracts.
@@ -948,14 +1113,25 @@ fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
         // `max`/`min` throw on an empty collection; `nCopies` on a negative count.
         "java/util/Collections" => matches!(
             name,
-            "max" | "min" | "nCopies" | "unmodifiableList" | "unmodifiableMap"
-                | "unmodifiableSet" | "sort" | "binarySearch"
+            "max"
+                | "min"
+                | "nCopies"
+                | "unmodifiableList"
+                | "unmodifiableMap"
+                | "unmodifiableSet"
+                | "sort"
+                | "binarySearch"
         ),
         // Partial by contract: out-of-range index, empty receiver, null key.
-        "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
+        "java/util/List"
+        | "java/util/ArrayList"
+        | "java/util/LinkedList"
         | "java/util/AbstractList" => matches!(name, "get" | "set" | "remove" | "add"),
-        "java/util/Map" | "java/util/HashMap" | "java/util/TreeMap"
-        | "java/util/LinkedHashMap" | "java/util/AbstractMap" => {
+        "java/util/Map"
+        | "java/util/HashMap"
+        | "java/util/TreeMap"
+        | "java/util/LinkedHashMap"
+        | "java/util/AbstractMap" => {
             // Sorted maps throw on null/incomparable keys; the hash maps do not,
             // but `TreeMap` shares this owner set, so stay conservative.
             matches!(name, "put" | "get" | "remove")
@@ -1077,61 +1253,136 @@ fn is_math_call(owner: &str, name: &str) -> bool {
     match owner {
         "java/lang/Math" | "java/lang/StrictMath" => matches!(
             name,
-            "abs" | "min" | "max" | "addExact" | "subtractExact"
-                | "multiplyExact" | "negateExact" | "floorDiv" | "floorMod"
-                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "exp" | "log" | "log10" | "pow" | "sqrt" | "round"
-                | "ceil" | "floor" | "toRadians" | "toDegrees"
-                | "sinh" | "cosh" | "tanh"
+            "abs"
+                | "min"
+                | "max"
+                | "addExact"
+                | "subtractExact"
+                | "multiplyExact"
+                | "negateExact"
+                | "floorDiv"
+                | "floorMod"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "exp"
+                | "log"
+                | "log10"
+                | "pow"
+                | "sqrt"
+                | "round"
+                | "ceil"
+                | "floor"
+                | "toRadians"
+                | "toDegrees"
+                | "sinh"
+                | "cosh"
+                | "tanh"
                 | "getExponent"
         ),
         "java/lang/Integer" => matches!(
             name,
-            "parseInt" | "max" | "min" | "sum"
-                | "reverseBytes" | "highestOneBit"
-                | "lowestOneBit" | "signum" | "toUnsignedLong"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
-                | "rotateLeft" | "rotateRight"
-                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+            "parseInt"
+                | "max"
+                | "min"
+                | "sum"
+                | "reverseBytes"
+                | "highestOneBit"
+                | "lowestOneBit"
+                | "signum"
+                | "toUnsignedLong"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
+                | "rotateLeft"
+                | "rotateRight"
+                | "bitCount"
+                | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros"
                 | "reverse"
         ),
         "java/lang/Long" => matches!(
             name,
-            "parseLong" | "max" | "min" | "sum" | "signum"
-                | "divideUnsigned" | "remainderUnsigned" | "compareUnsigned"
-                | "hashCode" | "compare"
-                | "reverseBytes" | "highestOneBit" | "lowestOneBit"
-                | "rotateLeft" | "rotateRight"
-                | "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros"
+            "parseLong"
+                | "max"
+                | "min"
+                | "sum"
+                | "signum"
+                | "divideUnsigned"
+                | "remainderUnsigned"
+                | "compareUnsigned"
+                | "hashCode"
+                | "compare"
+                | "reverseBytes"
+                | "highestOneBit"
+                | "lowestOneBit"
+                | "rotateLeft"
+                | "rotateRight"
+                | "bitCount"
+                | "numberOfLeadingZeros"
+                | "numberOfTrailingZeros"
                 | "reverse"
         ),
         "java/lang/Character" => matches!(
             name,
-            "isDigit" | "isLetter" | "isLetterOrDigit" | "isUpperCase" | "isLowerCase"
-                | "isWhitespace" | "isSpaceChar" | "isAlphabetic" | "isBmpCodePoint"
-                | "isSupplementaryCodePoint" | "isValidCodePoint"
-                | "toUpperCase" | "toLowerCase" | "toTitleCase"
-                | "digit" | "forDigit"
-                | "charCount" | "toCodePoint"
-                | "compare" | "compareTo" | "hashCode" | "reverseBytes"
-                | "isISOControl" | "isSpace"
-                | "isJavaIdentifierStart" | "isJavaIdentifierPart"
-                | "isJavaLetter" | "isJavaLetterOrDigit"
-                | "getType" | "isDefined" | "isMirrored" | "isTitleCase"
-                | "isUnicodeIdentifierPart" | "isUnicodeIdentifierStart"
-                | "isIdentifierIgnorable" | "getDirectionality"
-                | "getNumericValue" | "isIdeographic"
+            "isDigit"
+                | "isLetter"
+                | "isLetterOrDigit"
+                | "isUpperCase"
+                | "isLowerCase"
+                | "isWhitespace"
+                | "isSpaceChar"
+                | "isAlphabetic"
+                | "isBmpCodePoint"
+                | "isSupplementaryCodePoint"
+                | "isValidCodePoint"
+                | "toUpperCase"
+                | "toLowerCase"
+                | "toTitleCase"
+                | "digit"
+                | "forDigit"
+                | "charCount"
+                | "toCodePoint"
+                | "compare"
+                | "compareTo"
+                | "hashCode"
+                | "reverseBytes"
+                | "isISOControl"
+                | "isSpace"
+                | "isJavaIdentifierStart"
+                | "isJavaIdentifierPart"
+                | "isJavaLetter"
+                | "isJavaLetterOrDigit"
+                | "getType"
+                | "isDefined"
+                | "isMirrored"
+                | "isTitleCase"
+                | "isUnicodeIdentifierPart"
+                | "isUnicodeIdentifierStart"
+                | "isIdentifierIgnorable"
+                | "getDirectionality"
+                | "getNumericValue"
+                | "isIdeographic"
         ),
         "java/lang/Short" => matches!(
             name,
-            "parseShort" | "compare" | "compareTo" | "hashCode" | "reverseBytes"
-                | "toUnsignedInt" | "toUnsignedLong"
+            "parseShort"
+                | "compare"
+                | "compareTo"
+                | "hashCode"
+                | "reverseBytes"
+                | "toUnsignedInt"
+                | "toUnsignedLong"
         ),
         "java/lang/Byte" => matches!(
             name,
-            "parseByte" | "compare" | "compareTo" | "hashCode"
-                | "toUnsignedInt" | "toUnsignedLong"
+            "parseByte" | "compare" | "compareTo" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
         ),
         "java/lang/Boolean" => matches!(
             name,
@@ -1139,16 +1390,30 @@ fn is_math_call(owner: &str, name: &str) -> bool {
         ),
         "java/lang/Float" => matches!(
             name,
-            "floatToRawIntBits" | "floatToIntBits" | "intBitsToFloat"
-                | "isNaN" | "isInfinite" | "isFinite"
-                | "compare" | "max" | "min" | "sum"
+            "floatToRawIntBits"
+                | "floatToIntBits"
+                | "intBitsToFloat"
+                | "isNaN"
+                | "isInfinite"
+                | "isFinite"
+                | "compare"
+                | "max"
+                | "min"
+                | "sum"
                 | "hashCode"
         ),
         "java/lang/Double" => matches!(
             name,
-            "doubleToRawLongBits" | "doubleToLongBits" | "longBitsToDouble"
-                | "isNaN" | "isInfinite" | "isFinite"
-                | "compare" | "max" | "min" | "sum"
+            "doubleToRawLongBits"
+                | "doubleToLongBits"
+                | "longBitsToDouble"
+                | "isNaN"
+                | "isInfinite"
+                | "isFinite"
+                | "compare"
+                | "max"
+                | "min"
+                | "sum"
                 | "hashCode"
         ),
         _ => false,
@@ -1191,16 +1456,14 @@ fn is_map_owner(owner: &str) -> bool {
 }
 
 fn is_iterator_owner(owner: &str) -> bool {
-    matches!(
-        owner,
-        "java/util/Iterator" | "java/util/ListIterator"
-    )
+    matches!(owner, "java/util/Iterator" | "java/util/ListIterator")
 }
 
 fn is_map_entry_owner(owner: &str) -> bool {
     matches!(
         owner,
-        "java/util/Map$Entry" | "java/util/AbstractMap$SimpleEntry"
+        "java/util/Map$Entry"
+            | "java/util/AbstractMap$SimpleEntry"
             | "java/util/AbstractMap$SimpleImmutableEntry"
     )
 }
@@ -1254,9 +1517,9 @@ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
         "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
 
         // Collection/List/Queue/Deque load methods
-        "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast"
-        | "poll" | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast"
-        | "element" | "elementAt" | "firstElement" | "lastElement" => {
+        "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
+        | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element"
+        | "elementAt" | "firstElement" | "lastElement" => {
             Some(CallModel::CollectionLoad(ret_ty(desc)))
         }
 
@@ -1278,10 +1541,25 @@ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
     matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
         && matches!(
             name,
-            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "exp" | "log" | "log10" | "pow" | "sqrt"
-                | "sinh" | "cosh" | "tanh"
-                | "ceil" | "floor" | "toRadians" | "toDegrees"
+            "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "exp"
+                | "log"
+                | "log10"
+                | "pow"
+                | "sqrt"
+                | "sinh"
+                | "cosh"
+                | "tanh"
+                | "ceil"
+                | "floor"
+                | "toRadians"
+                | "toDegrees"
         )
 }
 
@@ -1309,72 +1587,6 @@ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
         // exception class to look for on replay, which is one reason the
         // no-deadlock property is answered outside the obligation system.
         Deadlock => None,
-    }
-}
-
-#[cfg(test)]
-mod contract_order_tests {
-    use super::*;
-
-    #[test]
-    fn more_preconditions_is_more_conservative() {
-        let weak = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
-        let strong = Contract {
-            requires: &[Precondition::NonNull(1)],
-            effect: Effect::Pure,
-            may_return_null: true,
-        };
-        assert!(strong.at_least_as_conservative_as(&weak));
-        assert!(!weak.at_least_as_conservative_as(&strong));
-    }
-
-    #[test]
-    fn a_wider_effect_is_more_conservative() {
-        let pure = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
-        let recv = Contract { requires: &[], effect: Effect::Receiver, may_return_null: true };
-        let unk = Contract { requires: &[], effect: Effect::Unknown, may_return_null: true };
-        assert!(recv.at_least_as_conservative_as(&pure));
-        assert!(unk.at_least_as_conservative_as(&recv));
-        assert!(!pure.at_least_as_conservative_as(&recv));
-    }
-
-    #[test]
-    fn opaque_is_the_top_of_the_order() {
-        // Everything the table can express must sit below OPAQUE, or a
-        // perturbation to it would not be a move *up* the order and the
-        // metamorphic test would be checking the wrong thing.
-        for (class, name, desc) in [
-            ("java/lang/String", "length", "()I"),
-            ("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;"),
-            ("java/lang/Object", "<init>", "()V"),
-            ("java/lang/Math", "abs", "(I)I"),
-        ] {
-            if let Some(c) = contract_of(class, name, desc) {
-                assert!(
-                    Contract::OPAQUE.at_least_as_conservative_as(&c),
-                    "{class}.{name} is not below OPAQUE"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_order_is_reflexive_and_transitive_where_it_should_be() {
-        let a = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
-        let b = Contract { requires: &[Precondition::NonNull(1)], effect: Effect::Receiver, may_return_null: true };
-        let c = Contract::OPAQUE;
-        assert!(a.at_least_as_conservative_as(&a));
-        assert!(b.at_least_as_conservative_as(&a));
-        assert!(c.at_least_as_conservative_as(&b) || c.requires.len() >= b.requires.len());
-    }
-
-    #[test]
-    fn a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge() {
-        // `is_total` is the soundness commitment: it lets a havoced call be
-        // treated as non-throwing. It must be exactly the bottom of the order.
-        let total = Contract { requires: &[], effect: Effect::Pure, may_return_null: true };
-        assert!(total.is_total());
-        assert!(!Contract::OPAQUE.is_total());
     }
 }
 
@@ -1435,9 +1647,14 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // overloads — the `String` ones throw `NumberFormatException`.
         "java/lang/Integer" => matches!(
             (name, desc),
-            ("intValue", "()I") | ("longValue", "()J") | ("doubleValue", "()D")
-                | ("floatValue", "()F") | ("shortValue", "()S") | ("byteValue", "()B")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("doubleValue", "()D")
+                | ("floatValue", "()F")
+                | ("shortValue", "()S")
+                | ("byteValue", "()B")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(I)Ljava/lang/Integer;")
                 | ("toString", "(I)Ljava/lang/String;")
@@ -1445,9 +1662,14 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         ),
         "java/lang/Long" => matches!(
             (name, desc),
-            ("intValue", "()I") | ("longValue", "()J") | ("doubleValue", "()D")
-                | ("floatValue", "()F") | ("shortValue", "()S") | ("byteValue", "()B")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("doubleValue", "()D")
+                | ("floatValue", "()F")
+                | ("shortValue", "()S")
+                | ("byteValue", "()B")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(J)Ljava/lang/Long;")
                 | ("toString", "(J)Ljava/lang/String;")
@@ -1455,44 +1677,67 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         ),
         "java/lang/Short" => matches!(
             (name, desc),
-            ("shortValue", "()S") | ("intValue", "()I") | ("longValue", "()J")
-                | ("doubleValue", "()D") | ("floatValue", "()F") | ("byteValue", "()B")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("shortValue", "()S")
+                | ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("doubleValue", "()D")
+                | ("floatValue", "()F")
+                | ("byteValue", "()B")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(S)Ljava/lang/Short;")
         ),
         "java/lang/Byte" => matches!(
             (name, desc),
-            ("byteValue", "()B") | ("intValue", "()I") | ("longValue", "()J")
-                | ("doubleValue", "()D") | ("floatValue", "()F") | ("shortValue", "()S")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("byteValue", "()B")
+                | ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("doubleValue", "()D")
+                | ("floatValue", "()F")
+                | ("shortValue", "()S")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(B)Ljava/lang/Byte;")
         ),
         // Float/Double parsing throws; the accessors and primitive boxing do not.
         "java/lang/Float" => matches!(
             (name, desc),
-            ("floatValue", "()F") | ("doubleValue", "()D") | ("intValue", "()I")
-                | ("longValue", "()J") | ("shortValue", "()S") | ("byteValue", "()B")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("floatValue", "()F")
+                | ("doubleValue", "()D")
+                | ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("shortValue", "()S")
+                | ("byteValue", "()B")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(F)Ljava/lang/Float;")
-                | ("isNaN", "(F)Z") | ("isInfinite", "(F)Z")
+                | ("isNaN", "(F)Z")
+                | ("isInfinite", "(F)Z")
         ),
         "java/lang/Double" => matches!(
             (name, desc),
-            ("doubleValue", "()D") | ("floatValue", "()F") | ("intValue", "()I")
-                | ("longValue", "()J") | ("shortValue", "()S") | ("byteValue", "()B")
-                | ("hashCode", "()I") | ("toString", "()Ljava/lang/String;")
+            ("doubleValue", "()D")
+                | ("floatValue", "()F")
+                | ("intValue", "()I")
+                | ("longValue", "()J")
+                | ("shortValue", "()S")
+                | ("byteValue", "()B")
+                | ("hashCode", "()I")
+                | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(D)Ljava/lang/Double;")
-                | ("isNaN", "(D)Z") | ("isInfinite", "(D)Z")
+                | ("isNaN", "(D)Z")
+                | ("isInfinite", "(D)Z")
         ),
         // `parseBoolean`/`valueOf(String)` are null-tolerant by contract here:
         // they return false rather than throwing.
         "java/lang/Boolean" => matches!(
             (name, desc),
-            ("booleanValue", "()Z") | ("hashCode", "()I")
+            ("booleanValue", "()Z")
+                | ("hashCode", "()I")
                 | ("toString", "()Ljava/lang/String;")
                 | ("equals", "(Ljava/lang/Object;)Z")
                 | ("valueOf", "(Z)Ljava/lang/Boolean;")
@@ -1517,20 +1762,53 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // divisor. The listed methods saturate to NaN/Infinity instead.
         "java/lang/Math" | "java/lang/StrictMath" => matches!(
             name,
-            "abs" | "min" | "max" | "sqrt" | "cbrt" | "sin" | "cos" | "tan"
-                | "asin" | "acos" | "atan" | "atan2" | "exp" | "expm1"
-                | "log" | "log10" | "log1p" | "pow" | "floor" | "ceil"
-                | "rint" | "round" | "signum" | "hypot" | "random"
-                | "toRadians" | "toDegrees" | "ulp" | "nextUp" | "nextDown"
-                | "nextAfter" | "copySign" | "IEEEremainder" | "sinh" | "cosh"
-                | "tanh" | "fma" | "scalb" | "getExponent"
+            "abs"
+                | "min"
+                | "max"
+                | "sqrt"
+                | "cbrt"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "exp"
+                | "expm1"
+                | "log"
+                | "log10"
+                | "log1p"
+                | "pow"
+                | "floor"
+                | "ceil"
+                | "rint"
+                | "round"
+                | "signum"
+                | "hypot"
+                | "random"
+                | "toRadians"
+                | "toDegrees"
+                | "ulp"
+                | "nextUp"
+                | "nextDown"
+                | "nextAfter"
+                | "copySign"
+                | "IEEEremainder"
+                | "sinh"
+                | "cosh"
+                | "tanh"
+                | "fma"
+                | "scalb"
+                | "getExponent"
         ),
 
         // `arraycopy` throws `IndexOutOfBounds`/`ArrayStore`/NPE and `exit` can
         // raise `SecurityException`, so neither is listed.
         "java/lang/System" => matches!(
             (name, desc),
-            ("currentTimeMillis", "()J") | ("nanoTime", "()J")
+            ("currentTimeMillis", "()J")
+                | ("nanoTime", "()J")
                 | ("identityHashCode", "(Ljava/lang/Object;)I")
                 | ("lineSeparator", "()Ljava/lang/String;")
         ),
@@ -1540,20 +1818,30 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // `(char[], int, int)` append throws `IndexOutOfBoundsException`.
         "java/lang/StringBuilder" | "java/lang/StringBuffer" => {
             matches!((name, desc), ("<init>", "()V"))
-                || matches!((name, desc),
-                    ("length", "()I") | ("toString", "()Ljava/lang/String;"))
+                || matches!(
+                    (name, desc),
+                    ("length", "()I") | ("toString", "()Ljava/lang/String;")
+                )
                 || (name == "append"
-                    && matches!(desc,
+                    && matches!(
+                        desc,
                         "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
-                        | "(Ljava/lang/String;)Ljava/lang/StringBuffer;"
-                        | "(I)Ljava/lang/StringBuilder;" | "(I)Ljava/lang/StringBuffer;"
-                        | "(J)Ljava/lang/StringBuilder;" | "(J)Ljava/lang/StringBuffer;"
-                        | "(C)Ljava/lang/StringBuilder;" | "(C)Ljava/lang/StringBuffer;"
-                        | "(Z)Ljava/lang/StringBuilder;" | "(Z)Ljava/lang/StringBuffer;"
-                        | "(D)Ljava/lang/StringBuilder;" | "(D)Ljava/lang/StringBuffer;"
-                        | "(F)Ljava/lang/StringBuilder;" | "(F)Ljava/lang/StringBuffer;"
-                        | "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
-                        | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;"))
+                            | "(Ljava/lang/String;)Ljava/lang/StringBuffer;"
+                            | "(I)Ljava/lang/StringBuilder;"
+                            | "(I)Ljava/lang/StringBuffer;"
+                            | "(J)Ljava/lang/StringBuilder;"
+                            | "(J)Ljava/lang/StringBuffer;"
+                            | "(C)Ljava/lang/StringBuilder;"
+                            | "(C)Ljava/lang/StringBuffer;"
+                            | "(Z)Ljava/lang/StringBuilder;"
+                            | "(Z)Ljava/lang/StringBuffer;"
+                            | "(D)Ljava/lang/StringBuilder;"
+                            | "(D)Ljava/lang/StringBuffer;"
+                            | "(F)Ljava/lang/StringBuilder;"
+                            | "(F)Ljava/lang/StringBuffer;"
+                            | "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+                            | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;"
+                    ))
         }
 
         // `print`/`println` swallow IOException and render null as "null".
@@ -1561,9 +1849,18 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // throws NPE on a null array, so neither is listed.
         "java/io/PrintStream" | "java/io/PrintWriter" => {
             (matches!(name, "print" | "println")
-                && matches!(desc,
-                    "()V" | "(Ljava/lang/String;)V" | "(I)V" | "(J)V" | "(C)V"
-                    | "(Z)V" | "(D)V" | "(F)V" | "(Ljava/lang/Object;)V"))
+                && matches!(
+                    desc,
+                    "()V"
+                        | "(Ljava/lang/String;)V"
+                        | "(I)V"
+                        | "(J)V"
+                        | "(C)V"
+                        | "(Z)V"
+                        | "(D)V"
+                        | "(F)V"
+                        | "(Ljava/lang/Object;)V"
+                ))
                 || matches!((name, desc), ("flush", "()V"))
         }
 
@@ -1571,8 +1868,10 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // is excluded; the rest are total.
         "java/lang/Enum" => matches!(
             (name, desc),
-            ("ordinal", "()I") | ("name", "()Ljava/lang/String;")
-                | ("toString", "()Ljava/lang/String;") | ("hashCode", "()I")
+            ("ordinal", "()I")
+                | ("name", "()Ljava/lang/String;")
+                | ("toString", "()Ljava/lang/String;")
+                | ("hashCode", "()I")
                 | ("equals", "(Ljava/lang/Object;)Z")
         ),
 
@@ -1580,10 +1879,17 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
         // `pop`, `peek` and the index-taking `add`/`remove` overloads are all
         // partial. Sorted collections are excluded entirely: `TreeMap`/`TreeSet`
         // throw NPE on a null key and `ClassCastException` on incomparable ones.
-        "java/util/ArrayList" | "java/util/LinkedList" | "java/util/HashSet"
-        | "java/util/HashMap" | "java/util/LinkedHashMap" | "java/util/LinkedHashSet" => {
+        "java/util/ArrayList"
+        | "java/util/LinkedList"
+        | "java/util/HashSet"
+        | "java/util/HashMap"
+        | "java/util/LinkedHashMap"
+        | "java/util/LinkedHashSet" => {
             matches!((name, desc), ("<init>", "()V"))
-                || matches!((name, desc), ("size", "()I") | ("isEmpty", "()Z") | ("clear", "()V"))
+                || matches!(
+                    (name, desc),
+                    ("size", "()I") | ("isEmpty", "()Z") | ("clear", "()V")
+                )
         }
 
         // `hasNext` is total; `next` throws `NoSuchElementException` when
@@ -1609,5 +1915,98 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
 
         _ => false,
     }
+}
 
+#[cfg(test)]
+mod contract_order_tests {
+    use super::*;
+
+    #[test]
+    fn more_preconditions_is_more_conservative() {
+        let weak = Contract {
+            requires: &[],
+            effect: Effect::Pure,
+            may_return_null: true,
+        };
+        let strong = Contract {
+            requires: &[Precondition::NonNull(1)],
+            effect: Effect::Pure,
+            may_return_null: true,
+        };
+        assert!(strong.at_least_as_conservative_as(&weak));
+        assert!(!weak.at_least_as_conservative_as(&strong));
+    }
+
+    #[test]
+    fn a_wider_effect_is_more_conservative() {
+        let pure = Contract {
+            requires: &[],
+            effect: Effect::Pure,
+            may_return_null: true,
+        };
+        let recv = Contract {
+            requires: &[],
+            effect: Effect::Receiver,
+            may_return_null: true,
+        };
+        let unk = Contract {
+            requires: &[],
+            effect: Effect::Unknown,
+            may_return_null: true,
+        };
+        assert!(recv.at_least_as_conservative_as(&pure));
+        assert!(unk.at_least_as_conservative_as(&recv));
+        assert!(!pure.at_least_as_conservative_as(&recv));
+    }
+
+    #[test]
+    fn opaque_is_the_top_of_the_order() {
+        // Everything the table can express must sit below OPAQUE, or a
+        // perturbation to it would not be a move *up* the order and the
+        // metamorphic test would be checking the wrong thing.
+        for (class, name, desc) in [
+            ("java/lang/String", "length", "()I"),
+            ("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;"),
+            ("java/lang/Object", "<init>", "()V"),
+            ("java/lang/Math", "abs", "(I)I"),
+        ] {
+            if let Some(c) = contract_of(class, name, desc) {
+                assert!(
+                    Contract::OPAQUE.at_least_as_conservative_as(&c),
+                    "{class}.{name} is not below OPAQUE"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_order_is_reflexive_and_transitive_where_it_should_be() {
+        let a = Contract {
+            requires: &[],
+            effect: Effect::Pure,
+            may_return_null: true,
+        };
+        let b = Contract {
+            requires: &[Precondition::NonNull(1)],
+            effect: Effect::Receiver,
+            may_return_null: true,
+        };
+        let c = Contract::OPAQUE;
+        assert!(a.at_least_as_conservative_as(&a));
+        assert!(b.at_least_as_conservative_as(&a));
+        assert!(c.at_least_as_conservative_as(&b) || c.requires.len() >= b.requires.len());
+    }
+
+    #[test]
+    fn a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge() {
+        // `is_total` is the soundness commitment: it lets a havoced call be
+        // treated as non-throwing. It must be exactly the bottom of the order.
+        let total = Contract {
+            requires: &[],
+            effect: Effect::Pure,
+            may_return_null: true,
+        };
+        assert!(total.is_total());
+        assert!(!Contract::OPAQUE.is_total());
+    }
 }

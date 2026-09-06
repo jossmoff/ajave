@@ -20,9 +20,9 @@
 use std::collections::HashMap;
 
 use crate::classfile::{ClassFile, Code, Cp};
-use log::{debug, warn};
 use ajave_ir::*;
 use ajave_models::{self as models, CallModel};
+use log::{debug, warn};
 
 /// Is `class` a known `RuntimeException` subclass (excluding `AssertionError`,
 /// which is handled by the `Assertion` obligation kind)?
@@ -794,7 +794,10 @@ fn operand_ty(op: &Operand, lifter: &Lifter) -> Ty {
 }
 
 fn spill(lifter: &mut Lifter, stmts: &mut Vec<Stmt>, stack: &[Operand]) {
-    let types: Vec<Ty> = stack.iter().map(|op| stack_ty(operand_ty(op, lifter))).collect();
+    let types: Vec<Ty> = stack
+        .iter()
+        .map(|op| stack_ty(operand_ty(op, lifter)))
+        .collect();
     let mut temps: Vec<(u16, Ty, Operand)> = Vec::new();
     for (d, op) in stack.iter().enumerate() {
         let ty = types[d];
@@ -837,7 +840,9 @@ struct InsnContext<'a, 'b> {
 
 impl<'a, 'b> InsnContext<'a, 'b> {
     fn pop(&mut self) -> Result<Operand, String> {
-        self.stack.pop().ok_or_else(|| "stack underflow".to_string())
+        self.stack
+            .pop()
+            .ok_or_else(|| "stack underflow".to_string())
     }
 
     fn assign(&mut self, ty: Ty, rvalue: Rvalue) -> Operand {
@@ -851,7 +856,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             Ty::Int,
             Rvalue::Bin(BinOp::Ne, obj.clone(), Operand::Const(Const::Null)),
         );
-        let id = self.lifter.obligation(ObligationKind::NullDeref, guard, self.insn.off as u16);
+        let id = self
+            .lifter
+            .obligation(ObligationKind::NullDeref, guard, self.insn.off as u16);
         self.stmts.push(Stmt::Check(id));
     }
 
@@ -863,7 +870,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         );
         let hi = self.assign(Ty::Int, Rvalue::Bin(BinOp::Lt, idx.clone(), len));
         let in_bounds = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
-        let id = self.lifter.obligation(ObligationKind::ArrayBounds, in_bounds, self.insn.off as u16);
+        let id =
+            self.lifter
+                .obligation(ObligationKind::ArrayBounds, in_bounds, self.insn.off as u16);
         self.stmts.push(Stmt::Check(id));
     }
 
@@ -888,11 +897,17 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             "java/lang/StringBuffer" => ("java/lang/StringBuffer", "()I"),
             // Collections carry their length in a tracked field rather than a
             // modelled call, so read it directly.
-            "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList"
-            | "java/util/AbstractList" | "java/util/Vector" => {
+            "java/util/List"
+            | "java/util/ArrayList"
+            | "java/util/LinkedList"
+            | "java/util/AbstractList"
+            | "java/util/Vector" => {
                 return Some(self.assign(
                     Ty::Int,
-                    Rvalue::GetField { obj: seq.clone(), field: Self::coll_size_field() },
+                    Rvalue::GetField {
+                        obj: seq.clone(),
+                        field: Self::coll_size_field(),
+                    },
                 ));
             }
             _ => return None,
@@ -904,7 +919,11 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         };
         Some(self.assign(
             Ty::Int,
-            Rvalue::Call { target, args: vec![seq.clone()], is_virtual: true },
+            Rvalue::Call {
+                target,
+                args: vec![seq.clone()],
+                is_virtual: true,
+            },
         ))
     }
 
@@ -923,9 +942,7 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         if !SEED_CALL_PRECONDITIONS.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        let Some(contract) =
-            models::contract_of(&target.class, &target.name, &target.desc)
-        else {
+        let Some(contract) = models::contract_of(&target.class, &target.name, &target.desc) else {
             return;
         };
         if contract.requires.is_empty() {
@@ -951,7 +968,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                             Rvalue::Bin(BinOp::Ge, arg, Operand::Const(Const::Int(0))),
                         );
                         let id = self.lifter.obligation(
-                            ObligationKind::NegArraySize, ok, self.insn.off as u16,
+                            ObligationKind::NegArraySize,
+                            ok,
+                            self.insn.off as u16,
                         );
                         self.stmts.push(Stmt::Check(id));
                     }
@@ -963,7 +982,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                             Rvalue::Bin(BinOp::Ne, arg, Operand::Const(Const::Int(0))),
                         );
                         let id = self.lifter.obligation(
-                            ObligationKind::DivByZero, ok, self.insn.off as u16,
+                            ObligationKind::DivByZero,
+                            ok,
+                            self.insn.off as u16,
                         );
                         self.stmts.push(Stmt::Check(id));
                     }
@@ -983,16 +1004,12 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                                 Ty::Int,
                                 Rvalue::Bin(BinOp::Ge, idx.clone(), Operand::Const(Const::Int(0))),
                             );
-                            let hi = self.assign(
-                                Ty::Int,
-                                Rvalue::Bin(BinOp::Lt, idx, len),
-                            );
-                            let ok = self.assign(
-                                Ty::Int,
-                                Rvalue::Bin(BinOp::And, lo, hi),
-                            );
+                            let hi = self.assign(Ty::Int, Rvalue::Bin(BinOp::Lt, idx, len));
+                            let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
                             let id = self.lifter.obligation(
-                                ObligationKind::ArrayBounds, ok, self.insn.off as u16,
+                                ObligationKind::ArrayBounds,
+                                ok,
+                                self.insn.off as u16,
                             );
                             self.stmts.push(Stmt::Check(id));
                         }
@@ -1010,13 +1027,12 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                                 Ty::Int,
                                 Rvalue::Bin(BinOp::Ge, b.clone(), Operand::Const(Const::Int(0))),
                             );
-                            let hi = self.assign(
-                                Ty::Int,
-                                Rvalue::Bin(BinOp::Le, b, len),
-                            );
+                            let hi = self.assign(Ty::Int, Rvalue::Bin(BinOp::Le, b, len));
                             let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
                             let id = self.lifter.obligation(
-                                ObligationKind::ArrayBounds, ok, self.insn.off as u16,
+                                ObligationKind::ArrayBounds,
+                                ok,
+                                self.insn.off as u16,
                             );
                             self.stmts.push(Stmt::Check(id));
                             let _ = end; // the two-argument form is not seeded yet
@@ -1031,10 +1047,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     // into 32 bits. (A 64-bit `addExact` has no wider type
                     // available, so it stays unseeded and keeps blocking.)
                     if *width == 32 {
-                        if let (Some(x), Some(y)) = (
-                            all.get(*a as usize).cloned(),
-                            all.get(*b as usize).cloned(),
-                        ) {
+                        if let (Some(x), Some(y)) =
+                            (all.get(*a as usize).cloned(), all.get(*b as usize).cloned())
+                        {
                             let xw = self.assign(Ty::Long, Rvalue::Cast(Ty::Long, Ty::Int, x));
                             let yw = self.assign(Ty::Long, Rvalue::Cast(Ty::Long, Ty::Int, y));
                             let r = self.assign(Ty::Long, Rvalue::Bin(*op, xw, yw));
@@ -1056,7 +1071,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                             );
                             let ok = self.assign(Ty::Int, Rvalue::Bin(BinOp::And, lo, hi));
                             let id = self.lifter.obligation(
-                                ObligationKind::DivByZero, ok, self.insn.off as u16,
+                                ObligationKind::DivByZero,
+                                ok,
+                                self.insn.off as u16,
                             );
                             self.stmts.push(Stmt::Check(id));
                         }
@@ -1070,7 +1087,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     if let Some(recv) = all.first().cloned() {
                         let n = self.assign(
                             Ty::Int,
-                            Rvalue::GetField { obj: recv, field: Self::coll_size_field() },
+                            Rvalue::GetField {
+                                obj: recv,
+                                field: Self::coll_size_field(),
+                            },
                         );
                         let ok = self.assign(
                             Ty::Int,
@@ -1084,7 +1104,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                         // exception the JVM never throws, refuting a witness
                         // that is actually correct.
                         let id = self.lifter.obligation(
-                            ObligationKind::ExplicitThrow, ok, self.insn.off as u16,
+                            ObligationKind::ExplicitThrow,
+                            ok,
+                            self.insn.off as u16,
                         );
                         self.stmts.push(Stmt::Check(id));
                     }
@@ -1095,7 +1117,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
     }
 
     fn branch(&mut self, cond: Operand) -> Result<LiftOut, String> {
-        let then_block = *self.block_of.get(&self.insn.targets[0]).ok_or("bad branch target")?;
+        let then_block = *self
+            .block_of
+            .get(&self.insn.targets[0])
+            .ok_or("bad branch target")?;
         let next = self.insn.off + self.insn.len;
         if next >= self.code_len {
             return Err("conditional branch at end of code".into());
@@ -1111,7 +1136,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 then_: then_block,
                 else_: else_block,
             },
-            vec![(then_block.0 as usize, height), (else_block.0 as usize, height)],
+            vec![
+                (then_block.0 as usize, height),
+                (else_block.0 as usize, height),
+            ],
         )))
     }
 
@@ -1134,7 +1162,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             0xb2..=0xb5 => self.lift_field(),
             0xb6..=0xba => self.lift_invoke(),
             0xbb..=0xc5 => self.lift_allocation(),
-            other => Err(format!("unsupported opcode 0x{other:02x} at {}", self.insn.off)),
+            other => Err(format!(
+                "unsupported opcode 0x{other:02x} at {}",
+                self.insn.off
+            )),
         }
     }
 
@@ -1148,8 +1179,12 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             0x01 => self.stack.push(Operand::Const(Const::Null)),
             0x02..=0x08 => self.stack.push(Operand::int(op as i32 - 3)),
             0x09 | 0x0a => self.stack.push(Operand::Const(Const::Long(op as i64 - 9))),
-            0x0b..=0x0d => self.stack.push(Operand::Const(Const::Float(op as f32 - 11.0))),
-            0x0e | 0x0f => self.stack.push(Operand::Const(Const::Double(op as f64 - 14.0))),
+            0x0b..=0x0d => self
+                .stack
+                .push(Operand::Const(Const::Float(op as f32 - 11.0))),
+            0x0e | 0x0f => self
+                .stack
+                .push(Operand::Const(Const::Double(op as f64 - 14.0))),
             0x10 | 0x11 => self.stack.push(Operand::int(self.insn.imm)),
             0x12..=0x14 => match self.lifter.cf.constant(self.insn.imm as u16) {
                 Some(Cp::Int(v)) => self.stack.push(Operand::Const(Const::Int(*v))),
@@ -1163,7 +1198,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     };
                     self.stack.push(Operand::Const(Const::Str(s)));
                 }
-                Some(Cp::Class(_)) => self.stack.push(Operand::Const(Const::Class("<class>".into()))),
+                Some(Cp::Class(_)) => self
+                    .stack
+                    .push(Operand::Const(Const::Class("<class>".into()))),
                 _ => return Err(format!("unsupported ldc at {}", self.insn.off)),
             },
             _ => unreachable!(),
@@ -1370,7 +1407,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     Operand::int(0)
                 };
                 let guard = self.assign(Ty::Int, Rvalue::Bin(BinOp::Ne, b.clone(), zero));
-                let id = self.lifter.obligation(ObligationKind::DivByZero, guard, off);
+                let id = self
+                    .lifter
+                    .obligation(ObligationKind::DivByZero, guard, off);
                 self.stmts.push(Stmt::Check(id));
                 let binop = if matches!(op, 0x6c | 0x6d) {
                     BinOp::Div
@@ -1434,18 +1473,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                             Ty::Int,
                             Rvalue::Bin(BinOp::Shl, a.clone(), Operand::int(24)),
                         );
-                        let result = self.assign(
-                            Ty::Int,
-                            Rvalue::Bin(BinOp::Shr, shifted, Operand::int(24)),
-                        );
+                        let result = self
+                            .assign(Ty::Int, Rvalue::Bin(BinOp::Shr, shifted, Operand::int(24)));
                         self.stack.push(result);
                     }
                     // i2c: zero-extend char — x & 0xFFFF
                     0x92 => {
-                        let result = self.assign(
-                            Ty::Int,
-                            Rvalue::Bin(BinOp::And, a, Operand::int(0xFFFF)),
-                        );
+                        let result =
+                            self.assign(Ty::Int, Rvalue::Bin(BinOp::And, a, Operand::int(0xFFFF)));
                         self.stack.push(result);
                     }
                     // i2s: sign-extend short — (x << 16) >> 16
@@ -1454,26 +1489,24 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                             Ty::Int,
                             Rvalue::Bin(BinOp::Shl, a.clone(), Operand::int(16)),
                         );
-                        let result = self.assign(
-                            Ty::Int,
-                            Rvalue::Bin(BinOp::Shr, shifted, Operand::int(16)),
-                        );
+                        let result = self
+                            .assign(Ty::Int, Rvalue::Bin(BinOp::Shr, shifted, Operand::int(16)));
                         self.stack.push(result);
                     }
                     // Other conversions: i2l, l2i, i2f, i2d, l2f, l2d, f2i, f2l, f2d, d2i, d2l, d2f
                     _ => {
                         let (dst, src) = match op {
-                            0x85 => (Ty::Long, Ty::Int),    // i2l
-                            0x86 => (Ty::Float, Ty::Int),   // i2f
-                            0x87 => (Ty::Double, Ty::Int),  // i2d
-                            0x88 => (Ty::Int, Ty::Long),    // l2i
-                            0x89 => (Ty::Float, Ty::Long),  // l2f
+                            0x85 => (Ty::Long, Ty::Int),     // i2l
+                            0x86 => (Ty::Float, Ty::Int),    // i2f
+                            0x87 => (Ty::Double, Ty::Int),   // i2d
+                            0x88 => (Ty::Int, Ty::Long),     // l2i
+                            0x89 => (Ty::Float, Ty::Long),   // l2f
                             0x8a => (Ty::Double, Ty::Long),  // l2d
-                            0x8b => (Ty::Int, Ty::Float),   // f2i
-                            0x8c => (Ty::Long, Ty::Float),  // f2l
+                            0x8b => (Ty::Int, Ty::Float),    // f2i
+                            0x8c => (Ty::Long, Ty::Float),   // f2l
                             0x8d => (Ty::Double, Ty::Float), // f2d
-                            0x8e => (Ty::Int, Ty::Double),  // d2i
-                            0x8f => (Ty::Long, Ty::Double), // d2l
+                            0x8e => (Ty::Int, Ty::Double),   // d2i
+                            0x8f => (Ty::Long, Ty::Double),  // d2l
                             0x90 => (Ty::Float, Ty::Double), // d2f
                             _ => (Ty::Int, Ty::Int),
                         };
@@ -1552,7 +1585,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 self.branch(cond)
             }
             0xa7 | 0xc8 => {
-                let target = *self.block_of.get(&self.insn.targets[0]).ok_or("bad goto target")?;
+                let target = *self
+                    .block_of
+                    .get(&self.insn.targets[0])
+                    .ok_or("bad goto target")?;
                 spill(self.lifter, self.stmts, self.stack);
                 Ok(Some((
                     Terminator::Goto(target),
@@ -1562,7 +1598,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             // Switches.
             0xaa | 0xab => {
                 let value = self.pop()?;
-                let default = *self.block_of.get(&self.insn.targets[0]).ok_or("bad switch default")?;
+                let default = *self
+                    .block_of
+                    .get(&self.insn.targets[0])
+                    .ok_or("bad switch default")?;
                 let mut cases = Vec::new();
                 let height = self.stack.len() as u16;
                 let mut succs = vec![(default.0 as usize, height)];
@@ -1831,7 +1870,8 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     // The default is a primitive; the method returns a box.
                     Some(ty) => {
                         let obj = self.lifter.temp(Ty::Ref);
-                        self.stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                        self.stmts
+                            .push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
                         self.stmts.push(Stmt::PutField {
                             obj: Operand::Var(obj),
                             field: FieldKey {
@@ -1852,7 +1892,8 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // argument into a synthetic $$value field.
                 let val = args.into_iter().next().unwrap_or(Operand::int(0));
                 let obj = self.lifter.temp(Ty::Ref);
-                self.stmts.push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                self.stmts
+                    .push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
                 self.stmts.push(Stmt::PutField {
                     obj: Operand::Var(obj),
                     field: FieldKey {
@@ -1881,7 +1922,12 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 );
                 // If the storage type differs from the method's return type,
                 // insert an explicit cast (narrowing or widening).
-                let ret_char = target.desc.as_bytes().get(target.desc.len() - 1).copied().unwrap_or(b'I');
+                let ret_char = target
+                    .desc
+                    .as_bytes()
+                    .get(target.desc.len() - 1)
+                    .copied()
+                    .unwrap_or(b'I');
                 let ret_ty = match ret_char {
                     b'J' => Ty::Long,
                     b'D' => Ty::Double,
@@ -1897,7 +1943,7 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             }
             CallModel::StaticBinOp(binop) => {
                 // Static binary method: result = arg0 op arg1.
-                let a = args.get(0).cloned().unwrap_or(Operand::int(0));
+                let a = args.first().cloned().unwrap_or(Operand::int(0));
                 let b = args.get(1).cloned().unwrap_or(Operand::int(0));
                 let result = self.assign(Ty::Int, Rvalue::Bin(binop, a, b));
                 self.stack.push(result);
@@ -1930,7 +1976,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 if name_is_growing {
                     let old = self.assign(
                         Ty::Int,
-                        Rvalue::GetField { obj: this_for_size.clone(), field: Self::coll_size_field() },
+                        Rvalue::GetField {
+                            obj: this_for_size.clone(),
+                            field: Self::coll_size_field(),
+                        },
                     );
                     let inc = self.assign(
                         Ty::Int,
@@ -1947,7 +1996,7 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 if let Some(ty) = ret {
                     let result = match ty {
                         Ty::Int => Operand::int(1), // add() → true
-                        _ => Operand::int(0),        // put()/set() → null
+                        _ => Operand::int(0),       // put()/set() → null
                     };
                     self.stack.push(result);
                 }
@@ -1980,7 +2029,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 let this = receiver.unwrap_or_else(|| args.remove(0));
                 let n = self.assign(
                     Ty::Int,
-                    Rvalue::GetField { obj: this, field: Self::coll_size_field() },
+                    Rvalue::GetField {
+                        obj: this,
+                        field: Self::coll_size_field(),
+                    },
                 );
                 self.stack.push(n);
             }
@@ -1988,7 +2040,10 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 let this = receiver.unwrap_or_else(|| args.remove(0));
                 let n = self.assign(
                     Ty::Int,
-                    Rvalue::GetField { obj: this, field: Self::coll_size_field() },
+                    Rvalue::GetField {
+                        obj: this,
+                        field: Self::coll_size_field(),
+                    },
                 );
                 let empty = self.assign(
                     Ty::Int,
@@ -2093,41 +2148,55 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         // `StringBuilder.append` is `Contract::TOTAL_MUT`: total, and
         // `append(null)` appends "null" exactly as concatenation does.
         let sb = self.lifter.temp(Ty::Ref);
-        self.stmts.push(Stmt::Assign(sb, Rvalue::New("java/lang/StringBuilder".into())));
-        self.lifter.new_classes.insert(sb, "java/lang/StringBuilder".to_string());
+        self.stmts.push(Stmt::Assign(
+            sb,
+            Rvalue::New("java/lang/StringBuilder".into()),
+        ));
+        self.lifter
+            .new_classes
+            .insert(sb, "java/lang/StringBuilder".to_string());
         let sbt = self.lifter.temp(Ty::Ref);
-        self.stmts.push(Stmt::Assign(sbt, Rvalue::Call {
-            target: MethodKey {
-                class: "java/lang/StringBuilder".into(),
-                name: "<init>".into(),
-                desc: "()V".into(),
+        self.stmts.push(Stmt::Assign(
+            sbt,
+            Rvalue::Call {
+                target: MethodKey {
+                    class: "java/lang/StringBuilder".into(),
+                    name: "<init>".into(),
+                    desc: "()V".into(),
+                },
+                args: vec![Operand::Var(sb)],
+                is_virtual: false,
             },
-            args: vec![Operand::Var(sb)],
-            is_virtual: false,
-        }));
+        ));
         for p in pieces {
             let (p, desc) = self.append_overload(p);
             let t = self.lifter.temp(Ty::Ref);
-            self.stmts.push(Stmt::Assign(t, Rvalue::Call {
-                target: MethodKey {
-                    class: "java/lang/StringBuilder".into(),
-                    name: "append".into(),
-                    desc: desc.into(),
+            self.stmts.push(Stmt::Assign(
+                t,
+                Rvalue::Call {
+                    target: MethodKey {
+                        class: "java/lang/StringBuilder".into(),
+                        name: "append".into(),
+                        desc: desc.into(),
+                    },
+                    args: vec![Operand::Var(sb), p],
+                    is_virtual: false,
                 },
-                args: vec![Operand::Var(sb), p],
-                is_virtual: false,
-            }));
+            ));
         }
         let out = self.lifter.temp(Ty::Str);
-        self.stmts.push(Stmt::Assign(out, Rvalue::Call {
-            target: MethodKey {
-                class: "java/lang/StringBuilder".into(),
-                name: "toString".into(),
-                desc: "()Ljava/lang/String;".into(),
+        self.stmts.push(Stmt::Assign(
+            out,
+            Rvalue::Call {
+                target: MethodKey {
+                    class: "java/lang/StringBuilder".into(),
+                    name: "toString".into(),
+                    desc: "()Ljava/lang/String;".into(),
+                },
+                args: vec![Operand::Var(sb)],
+                is_virtual: false,
             },
-            args: vec![Operand::Var(sb)],
-            is_virtual: false,
-        }));
+        ));
         self.stack.push(Operand::Var(out));
         debug!("invokedynamic: lowered string concat, recipe {recipe:?}");
         Ok(None)
@@ -2283,7 +2352,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     Ty::Int,
                     Rvalue::Bin(BinOp::Ge, len.clone(), Operand::int(0)),
                 );
-                let id = self.lifter.obligation(ObligationKind::NegArraySize, nonneg, off);
+                let id = self
+                    .lifter
+                    .obligation(ObligationKind::NegArraySize, nonneg, off);
                 self.stmts.push(Stmt::Check(id));
                 let elem = if op == 0xbd {
                     self.lifter
@@ -2302,7 +2373,9 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 for _ in 0..dims {
                     let len = self.pop()?;
                     let nonneg = self.assign(Ty::Int, Rvalue::Bin(BinOp::Ge, len, Operand::int(0)));
-                    let id = self.lifter.obligation(ObligationKind::NegArraySize, nonneg, off);
+                    let id = self
+                        .lifter
+                        .obligation(ObligationKind::NegArraySize, nonneg, off);
                     self.stmts.push(Stmt::Check(id));
                 }
                 // `Havoc`, not `Nondet`. The distinction is load-bearing.
@@ -2348,12 +2421,18 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                         // The assert property is exactly "is an AssertionError throw
                         // reachable". A safety condition of `false` says: violated if
                         // control ever gets here.
-                        let id = self.lifter.obligation(ObligationKind::Assertion, Operand::int(0), off);
+                        let id =
+                            self.lifter
+                                .obligation(ObligationKind::Assertion, Operand::int(0), off);
                         self.stmts.push(Stmt::Check(id));
                     } else if is_runtime_exception(cls) {
                         // NRE property: an explicit throw of a RuntimeException
                         // subclass is a violation if reachable.
-                        let id = self.lifter.obligation(ObligationKind::ExplicitThrow, Operand::int(0), off);
+                        let id = self.lifter.obligation(
+                            ObligationKind::ExplicitThrow,
+                            Operand::int(0),
+                            off,
+                        );
                         self.stmts.push(Stmt::Check(id));
                     }
                 }
@@ -2455,12 +2534,18 @@ fn lambda_forwarder(
     if impl_argc != ncap || impl_ret.is_some() {
         return None;
     }
-    let mut vars = vec![VarInfo { kind: VarKind::Local(0), ty: Ty::Ref }];
+    let mut vars = vec![VarInfo {
+        kind: VarKind::Local(0),
+        ty: Ty::Ref,
+    }];
     let mut stmts = Vec::new();
     let mut args = Vec::new();
     for i in 0..ncap {
         let v = VarId(vars.len() as u32);
-        vars.push(VarInfo { kind: VarKind::Temp, ty: Ty::Int });
+        vars.push(VarInfo {
+            kind: VarKind::Temp,
+            ty: Ty::Int,
+        });
         stmts.push(Stmt::Assign(
             v,
             Rvalue::GetField {
@@ -2475,7 +2560,10 @@ fn lambda_forwarder(
         args.push(Operand::Var(v));
     }
     let dest = VarId(vars.len() as u32);
-    vars.push(VarInfo { kind: VarKind::Temp, ty: Ty::Int });
+    vars.push(VarInfo {
+        kind: VarKind::Temp,
+        ty: Ty::Int,
+    });
     stmts.push(Stmt::Assign(
         dest,
         Rvalue::Call {
@@ -2551,7 +2639,10 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
                         continue;
                     }
                     if let Some(b) = lambda_forwarder(&synth, &sam_key, &imp, ncap) {
-                        debug!("lift: synthesised {synth}.{sam} -> {}.{}", imp.owner, imp.name);
+                        debug!(
+                            "lift: synthesised {synth}.{sam} -> {}.{}",
+                            imp.owner, imp.name
+                        );
                         prog.bodies.insert(sam_key, b);
                     }
                 }
@@ -2578,42 +2669,6 @@ pub fn lift_class(cf: &ClassFile, prog: &mut Program) {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod volatile_tests {
-    use super::*;
-    use crate::classfile::{ClassFile, Field};
-
-    fn cf_with(fields: Vec<Field>) -> ClassFile {
-        ClassFile {
-            cp: vec![],
-            this_class: "C".into(),
-            super_class: None,
-            interfaces: vec![],
-            fields,
-            methods: vec![],
-            bootstrap_methods: vec![],
-        }
-    }
-
-    #[test]
-    fn volatile_fields_are_recorded_and_plain_ones_are_not() {
-        // ACC_VOLATILE is 0x0040. The flag was dropped entirely until race
-        // detection needed it, so this pins that it survives lifting.
-        let mut prog = Program::default();
-        lift_class(
-            &cf_with(vec![
-                Field { name: "v".into(), desc: "I".into(), access: 0x0040 | 0x0008 },
-                Field { name: "plain".into(), desc: "I".into(), access: 0x0008 },
-            ]),
-            &mut prog,
-        );
-        let vol = ajave_ir::FieldKey { class: "C".into(), name: "v".into(), desc: "I".into() };
-        let plain = ajave_ir::FieldKey { class: "C".into(), name: "plain".into(), desc: "I".into() };
-        assert!(prog.volatile_fields.contains(&vol));
-        assert!(!prog.volatile_fields.contains(&plain));
     }
 }
 
@@ -2660,5 +2715,57 @@ fn catches(handler_class: &str, kind: ObligationKind) -> bool {
             thrown == "java/lang/ArrayIndexOutOfBoundsException"
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod volatile_tests {
+    use super::*;
+    use crate::classfile::{ClassFile, Field};
+
+    fn cf_with(fields: Vec<Field>) -> ClassFile {
+        ClassFile {
+            cp: vec![],
+            this_class: "C".into(),
+            super_class: None,
+            interfaces: vec![],
+            fields,
+            methods: vec![],
+            bootstrap_methods: vec![],
+        }
+    }
+
+    #[test]
+    fn volatile_fields_are_recorded_and_plain_ones_are_not() {
+        // ACC_VOLATILE is 0x0040. The flag was dropped entirely until race
+        // detection needed it, so this pins that it survives lifting.
+        let mut prog = Program::default();
+        lift_class(
+            &cf_with(vec![
+                Field {
+                    name: "v".into(),
+                    desc: "I".into(),
+                    access: 0x0040 | 0x0008,
+                },
+                Field {
+                    name: "plain".into(),
+                    desc: "I".into(),
+                    access: 0x0008,
+                },
+            ]),
+            &mut prog,
+        );
+        let vol = ajave_ir::FieldKey {
+            class: "C".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let plain = ajave_ir::FieldKey {
+            class: "C".into(),
+            name: "plain".into(),
+            desc: "I".into(),
+        };
+        assert!(prog.volatile_fields.contains(&vol));
+        assert!(!prog.volatile_fields.contains(&plain));
     }
 }

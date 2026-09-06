@@ -514,7 +514,10 @@ impl Program {
     pub fn resolve_field_class(&self, class: &str, name: &str, desc: &str) -> String {
         let mut cur = class.to_string();
         loop {
-            if self.declared_fields.contains(&(cur.clone(), name.to_string(), desc.to_string())) {
+            if self
+                .declared_fields
+                .contains(&(cur.clone(), name.to_string(), desc.to_string()))
+            {
                 return cur;
             }
             match self.supers.get(&cur) {
@@ -554,9 +557,7 @@ impl Program {
             return false;
         }
         // Any array type is also a subtype of Cloneable and Serializable
-        if sub.starts_with('[')
-            && (sup == "java/lang/Cloneable" || sup == "java/io/Serializable")
-        {
+        if sub.starts_with('[') && (sup == "java/lang/Cloneable" || sup == "java/io/Serializable") {
             return true;
         }
         let mut cur = sub.to_string();
@@ -668,7 +669,12 @@ impl Program {
             for b in &body.blocks {
                 for s in &b.stmts {
                     match s {
-                        Stmt::Assign(_, Rvalue::Call { target, is_virtual, .. }) => {
+                        Stmt::Assign(
+                            _,
+                            Rvalue::Call {
+                                target, is_virtual, ..
+                            },
+                        ) => {
                             work.push(target.clone());
                             if *is_virtual {
                                 for r in self.devirtualise(target) {
@@ -896,7 +902,10 @@ pub fn validate(body: &Body) -> Result<(), String> {
     // permuted list silently returns the wrong block.
     for (i, b) in body.blocks.iter().enumerate() {
         if b.id.0 as usize != i {
-            return Err(format!("{}: block at index {i} has id bb{}", body.key, b.id.0));
+            return Err(format!(
+                "{}: block at index {i} has id bb{}",
+                body.key, b.id.0
+            ));
         }
     }
 
@@ -914,7 +923,10 @@ pub fn validate(body: &Body) -> Result<(), String> {
         if (v.0 as usize) < nvars {
             Ok(())
         } else {
-            Err(format!("{}: {what} refers to v{} of {nvars}", body.key, v.0))
+            Err(format!(
+                "{}: {what} refers to v{} of {nvars}",
+                body.key, v.0
+            ))
         }
     };
     let check_operand = |op: &Operand, what: &str| -> Result<(), String> {
@@ -927,7 +939,10 @@ pub fn validate(body: &Body) -> Result<(), String> {
         if (b.0 as usize) < nblocks {
             Ok(())
         } else {
-            Err(format!("{}: {what} targets bb{} of {nblocks}", body.key, b.0))
+            Err(format!(
+                "{}: {what} targets bb{} of {nblocks}",
+                body.key, b.0
+            ))
         }
     };
 
@@ -972,7 +987,11 @@ pub fn validate(body: &Body) -> Result<(), String> {
                 check_block(*then_, &format!("{at} branch then"))?;
                 check_block(*else_, &format!("{at} branch else"))?;
             }
-            Terminator::Switch { value, cases, default } => {
+            Terminator::Switch {
+                value,
+                cases,
+                default,
+            } => {
                 check_operand(value, &format!("{at} switch value"))?;
                 for (_, t) in cases {
                     check_block(*t, &format!("{at} switch case"))?;
@@ -1008,8 +1027,11 @@ pub fn validate(body: &Body) -> Result<(), String> {
 /// a pass that missed a read here would delete a live value.
 pub fn rvalue_operands(rv: &Rvalue) -> Vec<&Operand> {
     match rv {
-        Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::Cast(_, _, o)
-        | Rvalue::ArrayLength(o) | Rvalue::InstanceOf { obj: o, .. }
+        Rvalue::Use(o)
+        | Rvalue::Neg(o)
+        | Rvalue::Cast(_, _, o)
+        | Rvalue::ArrayLength(o)
+        | Rvalue::InstanceOf { obj: o, .. }
         | Rvalue::GetField { obj: o, .. } => vec![o],
         Rvalue::Bin(_, a, b) | Rvalue::Cmp(_, a, b) => vec![a, b],
         Rvalue::ArrayLoad { arr, idx } => vec![arr, idx],

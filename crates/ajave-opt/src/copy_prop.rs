@@ -38,7 +38,7 @@ impl Pass for CopyPropagation {
 
             for s in &mut b.stmts {
                 // Rewrite reads first, then record what this statement defines.
-                let mut rewrite = |op: &mut Operand, changed: &mut bool, n: &mut usize| {
+                let rewrite = |op: &mut Operand, changed: &mut bool, n: &mut usize| {
                     if let Some(to) = resolve(op, &alias) {
                         *op = to;
                         *changed = true;
@@ -145,8 +145,11 @@ impl Pass for CopyPropagation {
 /// Mutable counterpart of `ajave_ir::rvalue_operands`.
 pub(crate) fn rvalue_operands_mut(rv: &mut Rvalue) -> Vec<&mut Operand> {
     match rv {
-        Rvalue::Use(o) | Rvalue::Neg(o) | Rvalue::Cast(_, _, o)
-        | Rvalue::ArrayLength(o) | Rvalue::InstanceOf { obj: o, .. }
+        Rvalue::Use(o)
+        | Rvalue::Neg(o)
+        | Rvalue::Cast(_, _, o)
+        | Rvalue::ArrayLength(o)
+        | Rvalue::InstanceOf { obj: o, .. }
         | Rvalue::GetField { obj: o, .. } => vec![o],
         Rvalue::Bin(_, a, b) | Rvalue::Cmp(_, a, b) => vec![a, b],
         Rvalue::ArrayLoad { arr, idx } => vec![arr, idx],

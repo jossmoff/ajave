@@ -79,17 +79,59 @@ const RANGES: &[(&str, &str, &str, f64, f64)] = &[
     ("java/lang/StrictMath", "cos", "(D)D", -1.0, 1.0),
     // "the arc sine ... in the range -pi/2 through pi/2". Widened by one ulp
     // at each end so a 1-ulp error cannot fall outside the claim.
-    ("java/lang/Math", "asin", "(D)D", -1.5707963267948968, 1.5707963267948968),
-    ("java/lang/StrictMath", "asin", "(D)D", -1.5707963267948968, 1.5707963267948968),
+    (
+        "java/lang/Math",
+        "asin",
+        "(D)D",
+        -1.5707963267948968,
+        1.5707963267948968,
+    ),
+    (
+        "java/lang/StrictMath",
+        "asin",
+        "(D)D",
+        -1.5707963267948968,
+        1.5707963267948968,
+    ),
     // "the arc cosine ... in the range 0.0 through pi".
     ("java/lang/Math", "acos", "(D)D", 0.0, 3.1415926535897936),
-    ("java/lang/StrictMath", "acos", "(D)D", 0.0, 3.1415926535897936),
+    (
+        "java/lang/StrictMath",
+        "acos",
+        "(D)D",
+        0.0,
+        3.1415926535897936,
+    ),
     // "the arc tangent ... in the range -pi/2 through pi/2".
-    ("java/lang/Math", "atan", "(D)D", -1.5707963267948968, 1.5707963267948968),
-    ("java/lang/StrictMath", "atan", "(D)D", -1.5707963267948968, 1.5707963267948968),
+    (
+        "java/lang/Math",
+        "atan",
+        "(D)D",
+        -1.5707963267948968,
+        1.5707963267948968,
+    ),
+    (
+        "java/lang/StrictMath",
+        "atan",
+        "(D)D",
+        -1.5707963267948968,
+        1.5707963267948968,
+    ),
     // "in the range -pi through pi" — two-argument arc tangent.
-    ("java/lang/Math", "atan2", "(DD)D", -3.1415926535897936, 3.1415926535897936),
-    ("java/lang/StrictMath", "atan2", "(DD)D", -3.1415926535897936, 3.1415926535897936),
+    (
+        "java/lang/Math",
+        "atan2",
+        "(DD)D",
+        -3.1415926535897936,
+        3.1415926535897936,
+    ),
+    (
+        "java/lang/StrictMath",
+        "atan2",
+        "(DD)D",
+        -3.1415926535897936,
+        3.1415926535897936,
+    ),
     // Non-negative or NaN: `sqrt` of a negative is NaN, `sqrt(+0.0)` is +0.0,
     // and the Javadoc guarantees a correctly rounded non-negative result
     // otherwise.
@@ -133,7 +175,9 @@ impl Default for Ranges {
 
 impl Ranges {
     pub fn new() -> Ranges {
-        Ranges { answered: std::collections::HashSet::new() }
+        Ranges {
+            answered: std::collections::HashSet::new(),
+        }
     }
 }
 
@@ -216,7 +260,9 @@ impl Engine for Ranges {
                 continue;
             }
             let answer = match bound_call(&about, &given) {
-                Some(Expr::Apply { class, name, desc, .. }) => {
+                Some(Expr::Apply {
+                    class, name, desc, ..
+                }) => {
                     match range_of(class, name, desc) {
                         Some((lo, hi)) => {
                             debug!(
@@ -240,7 +286,11 @@ impl Engine for Ranges {
             let published = bb.publish(
                 self.id(),
                 Direction::Over,
-                Artifact::Lemma(Lemma { query: id, by: self.id(), answer }),
+                Artifact::Lemma(Lemma {
+                    query: id,
+                    by: self.id(),
+                    answer,
+                }),
             );
             if published.is_ok() {
                 advanced = true;
@@ -259,8 +309,14 @@ impl Engine for Ranges {
 /// The `Expr` form of a range answer, for a consumer that wants the guarded
 /// predicate rather than the two endpoints.
 pub fn as_predicate(about: &Expr, lo: &Expr, hi: &Expr) -> Option<Expr> {
-    let (Expr::Double(l), Expr::Double(h)) = (lo, hi) else { return None };
-    Some(bounded_or_nan(about, f64::from_bits(*l), f64::from_bits(*h)))
+    let (Expr::Double(l), Expr::Double(h)) = (lo, hi) else {
+        return None;
+    };
+    Some(bounded_or_nan(
+        about,
+        f64::from_bits(*l),
+        f64::from_bits(*h),
+    ))
 }
 
 #[cfg(test)]
@@ -275,7 +331,10 @@ mod tests {
     #[test]
     fn a_range_is_guarded_by_the_nan_case() {
         let p = bounded_or_nan(&v(0), -1.0, 1.0);
-        assert_eq!(p.to_string(), "(!(v0 == v0) || ((-1d <= v0) && (v0 <= 1d)))");
+        assert_eq!(
+            p.to_string(),
+            "(!(v0 == v0) || ((-1d <= v0) && (v0 <= 1d)))"
+        );
     }
 
     /// `sqrt` and `exp` are bounded below and not above, so the claim must not

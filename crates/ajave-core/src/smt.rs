@@ -15,7 +15,10 @@ pub enum Sort {
     Str,
     Int,
     /// `(Array (_ BitVec idx_width) (_ BitVec elem_width))`
-    Array { idx: u32, elem: u32 },
+    Array {
+        idx: u32,
+        elem: u32,
+    },
     /// `(Array (_ BitVec 32) String)`
     StrArray,
     /// IEEE-754 binary float: `Float32` (width 32) or `Float64` (width 64).

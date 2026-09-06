@@ -11,18 +11,24 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use cvc5::{Kind, Solver, Term as CvcTerm, TermManager};
-use log::{debug, info};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::verdict::{NondetEntry, NondetValue, Witness};
 use ajave_ir::*;
+use cvc5::{Kind, Solver, Term as CvcTerm, TermManager};
+use log::{debug, info};
 
 use crate::body_shape;
 
 pub struct NraEngine {
     done: bool,
+}
+
+impl Default for NraEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NraEngine {
@@ -77,7 +83,10 @@ impl Engine for NraEngine {
                 continue;
             }
 
-            info!("nra: encoding obligation {:?} for {:?}", oref.id, oref.method);
+            info!(
+                "nra: encoding obligation {:?} for {:?}",
+                oref.id, oref.method
+            );
 
             match solve_nra_with_timeout(prog, &oref.method, oref.id, Duration::from_secs(8)) {
                 NraResult::Sat(witness) => {
@@ -132,7 +141,10 @@ impl Engine for NraEngine {
                         continue;
                     }
                     info!("nra: found violation for {}", oref);
-                    debug!("nra: witness seq={:?} entries={:?}", witness.nondet_sequence, witness.entries);
+                    debug!(
+                        "nra: witness seq={:?} entries={:?}",
+                        witness.nondet_sequence, witness.entries
+                    );
                     let published = bb.publish_with(
                         self.id(),
                         Direction::Under,
@@ -160,7 +172,10 @@ impl Engine for NraEngine {
                     // UNSAT over reals does not imply UNSAT over floats
                     // (NaN, Inf, -0 can violate assertions that hold over R).
                     // So we log but do NOT discharge.
-                    debug!("nra: obligation {} UNSAT over reals (not discharging — float unsoundness)", oref);
+                    debug!(
+                        "nra: obligation {} UNSAT over reals (not discharging — float unsoundness)",
+                        oref
+                    );
                 }
                 NraResult::Unknown => {
                     debug!("nra: solver returned unknown for {}", oref);
@@ -214,7 +229,10 @@ fn solve_nra_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(_) => {
-            debug!("nra: timeout for {:?}, abandoning cvc5 thread", obligation_id);
+            debug!(
+                "nra: timeout for {:?}, abandoning cvc5 thread",
+                obligation_id
+            );
             NraResult::Unknown
         }
     }
@@ -313,11 +331,7 @@ fn solve_nra(prog: &Program, oref_method: &MethodKey, obligation_id: ObligationI
                         Rvalue::Nondet(_, _) => {
                             // Track nondet var for witness construction.
                             let const_term = state.var_terms[vid.0 as usize].clone();
-                            nondet_vars.push((
-                                state.body_key.clone(),
-                                vid.0 as usize,
-                                const_term,
-                            ));
+                            nondet_vars.push((state.body_key.clone(), vid.0 as usize, const_term));
                             // Keep the fresh const (already initialized).
                         }
                         _ => {
@@ -332,17 +346,15 @@ fn solve_nra(prog: &Program, oref_method: &MethodKey, obligation_id: ObligationI
                     let neq = tm.mk_term(Kind::Not, &[tm.mk_term(Kind::Equal, &[expr, zero])]);
                     state.constraints.push(neq);
                 }
-                Stmt::Check(oid) => {
-                    if *oid == obligation_id && state.body_key == *oref_method {
-                        let obligation = body.obligation(*oid);
-                        let cond = encode_operand(&tm, &obligation.cond, &state.var_terms);
-                        let zero = tm.mk_real(0);
-                        let eq_zero = tm.mk_term(Kind::Equal, &[cond, zero]);
-                        let mut error_conds = state.constraints.clone();
-                        error_conds.push(eq_zero);
-                        error_paths.push(error_conds);
-                        found_error = true;
-                    }
+                Stmt::Check(oid) if *oid == obligation_id && state.body_key == *oref_method => {
+                    let obligation = body.obligation(*oid);
+                    let cond = encode_operand(&tm, &obligation.cond, &state.var_terms);
+                    let zero = tm.mk_real(0);
+                    let eq_zero = tm.mk_term(Kind::Equal, &[cond, zero]);
+                    let mut error_conds = state.constraints.clone();
+                    error_conds.push(eq_zero);
+                    error_paths.push(error_conds);
+                    found_error = true;
                 }
                 _ => {}
             }
@@ -426,7 +438,10 @@ fn solve_nra(prog: &Program, oref_method: &MethodKey, obligation_id: ObligationI
 
     // Build the assertion: disjunction of error paths.
     let error_paths_count = error_paths.len();
-    debug!("nra: found {} error paths for {:?}", error_paths_count, obligation_id);
+    debug!(
+        "nra: found {} error paths for {:?}",
+        error_paths_count, obligation_id
+    );
     let assertion = if error_paths.is_empty() {
         tm.mk_false()
     } else {
@@ -452,7 +467,10 @@ fn solve_nra(prog: &Program, oref_method: &MethodKey, obligation_id: ObligationI
 
     solver.assert_formula(assertion);
 
-    debug!("nra: calling check_sat for {:?} ({} error paths)", obligation_id, error_paths_count);
+    debug!(
+        "nra: calling check_sat for {:?} ({} error paths)",
+        obligation_id, error_paths_count
+    );
     let result = solver.check_sat();
     debug!("nra: check_sat returned for {:?}", obligation_id);
     if result.is_sat() {
@@ -503,7 +521,11 @@ fn extract_real_value(term: &CvcTerm) -> f64 {
         if let Some(idx) = s.find('/') {
             let num: f64 = s[..idx].parse().unwrap_or(0.0);
             let den: f64 = s[idx + 1..].parse().unwrap_or(1.0);
-            if den != 0.0 { num / den } else { 0.0 }
+            if den != 0.0 {
+                num / den
+            } else {
+                0.0
+            }
         } else {
             s.parse().unwrap_or(0.0)
         }
@@ -713,7 +735,7 @@ fn encode_transcendental_call<'tm>(
         ("java/lang/Math" | "java/lang/StrictMath", "abs") => {
             let arg = encode_operand(tm, &args[0], var_terms);
             let zero = tm.mk_real(0);
-            let neg = tm.mk_term(Kind::Neg, &[arg.clone()]);
+            let neg = tm.mk_term(Kind::Neg, std::slice::from_ref(&arg));
             tm.mk_term(
                 Kind::Ite,
                 &[tm.mk_term(Kind::Lt, &[arg.clone(), zero]), neg, arg],
@@ -770,7 +792,7 @@ fn encode_transcendental_call<'tm>(
         ("java/lang/Math" | "java/lang/StrictMath", "sinh") => {
             let arg = encode_operand(tm, &args[0], var_terms);
             // sinh(x) = (exp(x) - exp(-x)) / 2
-            let exp_pos = tm.mk_term(Kind::Exponential, &[arg.clone()]);
+            let exp_pos = tm.mk_term(Kind::Exponential, std::slice::from_ref(&arg));
             let exp_neg = tm.mk_term(Kind::Exponential, &[tm.mk_term(Kind::Neg, &[arg])]);
             let diff = tm.mk_term(Kind::Sub, &[exp_pos, exp_neg]);
             let two = tm.mk_real(2);
@@ -778,7 +800,7 @@ fn encode_transcendental_call<'tm>(
         }
         ("java/lang/Math" | "java/lang/StrictMath", "cosh") => {
             let arg = encode_operand(tm, &args[0], var_terms);
-            let exp_pos = tm.mk_term(Kind::Exponential, &[arg.clone()]);
+            let exp_pos = tm.mk_term(Kind::Exponential, std::slice::from_ref(&arg));
             let exp_neg = tm.mk_term(Kind::Exponential, &[tm.mk_term(Kind::Neg, &[arg])]);
             let sum = tm.mk_term(Kind::Add, &[exp_pos, exp_neg]);
             let two = tm.mk_real(2);
@@ -786,7 +808,7 @@ fn encode_transcendental_call<'tm>(
         }
         ("java/lang/Math" | "java/lang/StrictMath", "tanh") => {
             let arg = encode_operand(tm, &args[0], var_terms);
-            let exp_pos = tm.mk_term(Kind::Exponential, &[arg.clone()]);
+            let exp_pos = tm.mk_term(Kind::Exponential, std::slice::from_ref(&arg));
             let exp_neg = tm.mk_term(Kind::Exponential, &[tm.mk_term(Kind::Neg, &[arg])]);
             let num = tm.mk_term(Kind::Sub, &[exp_pos.clone(), exp_neg.clone()]);
             let den = tm.mk_term(Kind::Add, &[exp_pos, exp_neg]);
@@ -812,7 +834,10 @@ fn build_witness_from_nondets(
         let var_info = &body.vars[*idx];
         let val_term = solver.get_value(const_term.clone());
         let value = extract_real_value(&val_term);
-        debug!("nra: nondet {}:v{} (ty={:?}) = {}", bk.name, idx, var_info.ty, value);
+        debug!(
+            "nra: nondet {}:v{} (ty={:?}) = {}",
+            bk.name, idx, var_info.ty, value
+        );
 
         let (nondet_value, nondet_method, raw_bits) = real_to_witness(var_info.ty, value);
         nondet_sequence.push(raw_bits);
@@ -828,16 +853,12 @@ fn build_witness_from_nondets(
         entries,
         // Sequential engine: no interleaving to record.
         schedule: Vec::new(),
-                choices: Vec::new(),
+        choices: Vec::new(),
     })
 }
 
 /// Build witness from callee body's parameter variables (direct case, no entry body).
-fn build_witness_direct(
-    solver: &Solver,
-    body: &Body,
-    var_consts: &[CvcTerm],
-) -> NraResult {
+fn build_witness_direct(solver: &Solver, body: &Body, var_consts: &[CvcTerm]) -> NraResult {
     let mut nondet_sequence = Vec::new();
     let mut entries = Vec::new();
 
@@ -863,7 +884,7 @@ fn build_witness_direct(
         entries,
         // Sequential engine: no interleaving to record.
         schedule: Vec::new(),
-                choices: Vec::new(),
+        choices: Vec::new(),
     })
 }
 
@@ -880,16 +901,8 @@ fn real_to_witness(ty: Ty, value: f64) -> (NondetValue, &'static str, i64) {
             "nondetFloat",
             (value as f32).to_bits() as i64,
         ),
-        Ty::Long => (
-            NondetValue::Long(value as i64),
-            "nondetLong",
-            value as i64,
-        ),
-        _ => (
-            NondetValue::Int(value as i32),
-            "nondetInt",
-            value as i64,
-        ),
+        Ty::Long => (NondetValue::Long(value as i64), "nondetLong", value as i64),
+        _ => (NondetValue::Int(value as i32), "nondetInt", value as i64),
     }
 }
 

@@ -8,7 +8,11 @@ use super::*;
 use ajave_ir::*;
 
 fn key() -> MethodKey {
-    MethodKey { class: "Main".into(), name: "main".into(), desc: "()V".into() }
+    MethodKey {
+        class: "Main".into(),
+        name: "main".into(),
+        desc: "()V".into(),
+    }
 }
 
 fn var(kind: VarKind) -> VarInfo {
@@ -37,7 +41,11 @@ fn body(stmts: Vec<Stmt>, nlocal: usize, nstack: usize, term: Terminator) -> Bod
 
 fn opt(mut b: Body) -> (Body, Stats) {
     let s = reduce_body(&mut b, Level::Optimise);
-    assert!(validate(&b).is_ok(), "invalid after reduction: {:?}", validate(&b));
+    assert!(
+        validate(&b).is_ok(),
+        "invalid after reduction: {:?}",
+        validate(&b)
+    );
     (b, s)
 }
 
@@ -66,12 +74,18 @@ fn the_copy_chain_the_lifter_emits_collapses() {
         Terminator::Return(Some(Operand::Var(v5))),
     );
     let (b, stats) = opt(b);
-    assert!(stmts(&b).is_empty(), "the whole chain is dead once reads point at v0");
+    assert!(
+        stmts(&b).is_empty(),
+        "the whole chain is dead once reads point at v0"
+    );
     assert!(
         matches!(b.blocks[0].term, Terminator::Return(Some(Operand::Var(v))) if b.vars[v.0 as usize].kind == VarKind::Local(0)),
         "the return must read the original local, not a removed copy"
     );
-    assert!(stats.vars_removed >= 3, "the three stack temporaries go: {stats:?}");
+    assert!(
+        stats.vars_removed >= 3,
+        "the three stack temporaries go: {stats:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +138,11 @@ fn an_unread_opaque_call_is_never_removed() {
         Terminator::Return(None),
     );
     let (out, _) = opt(src);
-    assert_eq!(stmts(&out).len(), 1, "an opaque call has effects beyond its result");
+    assert_eq!(
+        stmts(&out).len(),
+        1,
+        "an opaque call has effects beyond its result"
+    );
 }
 
 /// `new int[n]` throws for n < 0, and object identity is observable through
@@ -135,7 +153,13 @@ fn an_unread_allocation_is_never_removed() {
     let src = body(
         vec![
             Stmt::Assign(n, Rvalue::Nondet(Ty::Int, None)),
-            Stmt::Assign(a, Rvalue::NewArray { elem: "I".into(), len: Operand::Var(n) }),
+            Stmt::Assign(
+                a,
+                Rvalue::NewArray {
+                    elem: "I".into(),
+                    len: Operand::Var(n),
+                },
+            ),
         ],
         0,
         2,
@@ -179,9 +203,13 @@ fn a_value_read_only_by_an_obligation_is_never_removed() {
         "the Check is the product and must survive"
     );
     let cond = out.obligations[0].cond.clone();
-    let Operand::Var(cv) = cond else { panic!("obligation condition lost its variable") };
+    let Operand::Var(cv) = cond else {
+        panic!("obligation condition lost its variable")
+    };
     assert!(
-        stmts(&out).iter().any(|s| matches!(s, Stmt::Assign(d, _) if *d == cv)),
+        stmts(&out)
+            .iter()
+            .any(|s| matches!(s, Stmt::Assign(d, _) if *d == cv)),
         "the assignment computing the obligation's condition must survive"
     );
 }
@@ -202,7 +230,11 @@ fn monitors_are_never_removed() {
         Terminator::Return(None),
     );
     let (out, _) = opt(src);
-    assert_eq!(stmts(&out).len(), 3, "monitors and the object they lock must survive");
+    assert_eq!(
+        stmts(&out).len(),
+        3,
+        "monitors and the object they lock must survive"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +251,10 @@ fn compaction_preserves_local_slots() {
     let src = body(
         vec![
             // t is dead; the two locals are parameters and must survive.
-            Stmt::Assign(t, Rvalue::Bin(BinOp::Add, Operand::Var(p0), Operand::int(1))),
+            Stmt::Assign(
+                t,
+                Rvalue::Bin(BinOp::Add, Operand::Var(p0), Operand::int(1)),
+            ),
         ],
         2,
         1,
@@ -243,7 +278,10 @@ fn normalise_rewrites_but_never_removes() {
     let mut b = body(
         vec![
             Stmt::Assign(v1, Rvalue::Use(Operand::Var(v0))),
-            Stmt::Assign(v2, Rvalue::Bin(BinOp::Add, Operand::Var(v1), Operand::int(1))),
+            Stmt::Assign(
+                v2,
+                Rvalue::Bin(BinOp::Add, Operand::Var(v1), Operand::int(1)),
+            ),
         ],
         1,
         2,
@@ -252,7 +290,11 @@ fn normalise_rewrites_but_never_removes() {
     let before = b.blocks[0].stmts.len();
     let vars_before = b.vars.len();
     reduce_body(&mut b, Level::Normalise);
-    assert_eq!(b.blocks[0].stmts.len(), before, "Normalise removes no statements");
+    assert_eq!(
+        b.blocks[0].stmts.len(),
+        before,
+        "Normalise removes no statements"
+    );
     assert_eq!(b.vars.len(), vars_before, "Normalise removes no variables");
     assert!(
         matches!(&b.blocks[0].stmts[1], Stmt::Assign(_, Rvalue::Bin(_, Operand::Var(v), _)) if *v == v0),
@@ -280,7 +322,10 @@ fn reduction_reaches_a_fixpoint() {
     let again = reduce_body(&mut b.clone(), Level::Optimise);
     assert_eq!(
         again,
-        Stats { bodies: 0, ..Default::default() },
+        Stats {
+            bodies: 0,
+            ..Default::default()
+        },
         "a second reduction of an already-reduced body must change nothing: {again:?}"
     );
 }

@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 /// whether the precise one is needed.
 pub(crate) fn read_vars(body: &Body) -> BTreeSet<VarId> {
     let mut live = BTreeSet::new();
-    let mut note = |op: &Operand, live: &mut BTreeSet<VarId>| {
+    let note = |op: &Operand, live: &mut BTreeSet<VarId>| {
         if let Operand::Var(v) = op {
             live.insert(*v);
         }
@@ -61,8 +61,10 @@ pub(crate) fn read_vars(body: &Body) -> BTreeSet<VarId> {
             Terminator::Branch { cond, .. } => note(cond, &mut live),
             Terminator::Switch { value, .. } => note(value, &mut live),
             Terminator::Return(Some(op)) | Terminator::Throw(op) => note(op, &mut live),
-            Terminator::Goto(_) | Terminator::Return(None)
-            | Terminator::Halt | Terminator::Diverge(_) => {}
+            Terminator::Goto(_)
+            | Terminator::Return(None)
+            | Terminator::Halt
+            | Terminator::Diverge(_) => {}
         }
     }
 

@@ -73,11 +73,7 @@ pub trait SmtTheory {
 }
 
 /// Encode an operand using the given theory and variable lookup.
-pub fn encode_operand<T: SmtTheory, V: VarLookup>(
-    theory: &T,
-    op: &Operand,
-    vars: &V,
-) -> String {
+pub fn encode_operand<T: SmtTheory, V: VarLookup>(theory: &T, op: &Operand, vars: &V) -> String {
     match op {
         Operand::Var(v) => vars.lookup(v.0 as usize),
         Operand::Const(Const::Int(n)) => theory.encode_int(*n),
@@ -324,7 +320,11 @@ impl SmtTheory for BitvectorTheory {
     }
 
     fn sort_of(&self, wide: bool) -> String {
-        if wide { "(_ BitVec 64)".into() } else { "(_ BitVec 32)".into() }
+        if wide {
+            "(_ BitVec 64)".into()
+        } else {
+            "(_ BitVec 32)".into()
+        }
     }
 
     fn needs_overflow_guard(&self) -> bool {
@@ -426,8 +426,14 @@ impl SmtTheory for LiaTheory {
             op,
             // No bitwise or shift operators in LIA, and `div`/`mod` are
             // Euclidean where Java's `/` and `%` truncate toward zero.
-            BinOp::Div | BinOp::Rem | BinOp::And | BinOp::Or | BinOp::Xor
-                | BinOp::Shl | BinOp::Shr | BinOp::UShr
+            BinOp::Div
+                | BinOp::Rem
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::Xor
+                | BinOp::Shl
+                | BinOp::Shr
+                | BinOp::UShr
         )
     }
 

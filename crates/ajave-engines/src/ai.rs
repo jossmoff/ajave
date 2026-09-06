@@ -10,15 +10,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::body_analysis::{body_uses_wide_types, body_uses_float_types, body_uses_long_types, body_has_loops};
-use crate::interval::{IntervalCpa, WideningIntervalCpa, Interval, Nullness, NEG_INF, POS_INF};
-use log::{debug, info};
+use crate::body_analysis::{body_has_loops, body_uses_float_types, body_uses_long_types};
+use crate::interval::{Interval, IntervalCpa, WideningIntervalCpa, NEG_INF, POS_INF};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::cpa::{reachability, HasLocation};
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_core::term::{Expr, Op};
-use ajave_ir::{BlockId, Const, FieldKey, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt, Terminator, VarId};
+use ajave_ir::{
+    BlockId, Const, FieldKey, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt, Terminator,
+    VarId,
+};
+use log::{debug, info};
 
 /// Analyze constructors to find fields guaranteed non-null after construction.
 /// Returns a set of FieldKeys that are always assigned non-null in every <init>.
@@ -50,22 +53,27 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
             for stmt in &block.stmts {
                 if let Stmt::Assign(v, rv) = stmt {
                     match rv {
-                        Rvalue::New(_) | Rvalue::NewArray { .. } => { nonnull_vars.insert(*v); }
-                        Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => { nonnull_vars.insert(*v); }
+                        Rvalue::New(_) | Rvalue::NewArray { .. } => {
+                            nonnull_vars.insert(*v);
+                        }
+                        Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => {
+                            nonnull_vars.insert(*v);
+                        }
                         // Static field loads (enum constants, etc.) are non-null
                         // in practice. This is a sound heuristic: class initializers
                         // run before any instance constructor, and static ref fields
                         // of program classes are either explicitly initialized or
                         // default to null. For enum constants they're always non-null.
-                        Rvalue::GetStatic(_) => {
+                        Rvalue::GetStatic(_)
                             // Only for Ref-typed vars (not int/boolean static fields)
-                            if body.vars.get(v.0 as usize)
+                            if body
+                                .vars
+                                .get(v.0 as usize)
                                 .map(|vi| vi.ty == ajave_ir::Ty::Ref)
                                 .unwrap_or(false)
-                            {
+                            => {
                                 nonnull_vars.insert(*v);
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -86,7 +94,9 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
                     }
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
         // Pass 3: find PutField(this, field, non-null-var).
         for block in &body.blocks {
@@ -96,7 +106,9 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
                         Operand::Var(v) => this_vars.contains(v),
                         _ => false,
                     };
-                    if !obj_is_this { continue; }
+                    if !obj_is_this {
+                        continue;
+                    }
                     let val_nonnull = match val {
                         Operand::Const(Const::Str(_) | Const::Class(_)) => true,
                         Operand::Var(vv) => nonnull_vars.contains(vv),
@@ -115,7 +127,10 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
 /// Analyze methods to find those that always return non-null.
 /// Checks if every Return(Some(v)) in the body returns a variable known to
 /// be non-null (New, string constant, class constant, this, or nonnull-param).
-fn analyze_return_nullness(prog: &Program, nonnull_fields: &HashSet<FieldKey>) -> HashSet<MethodKey> {
+fn analyze_return_nullness(
+    prog: &Program,
+    nonnull_fields: &HashSet<FieldKey>,
+) -> HashSet<MethodKey> {
     let mut nonnull_returns = HashSet::new();
     'methods: for (mk, body) in &prog.bodies {
         // Only analyze methods that return a reference type.
@@ -148,9 +163,10 @@ fn analyze_return_nullness(prog: &Program, nonnull_fields: &HashSet<FieldKey>) -
                         Rvalue::New(_) | Rvalue::NewArray { .. } => true,
                         Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => true,
                         Rvalue::GetStatic(fk) if crate::interval::is_nonnull_static(fk) => true,
-                        Rvalue::GetField { obj: Operand::Var(ov), field } => {
-                            nonnull_vars.contains(ov) && nonnull_fields.contains(field)
-                        }
+                        Rvalue::GetField {
+                            obj: Operand::Var(ov),
+                            field,
+                        } => nonnull_vars.contains(ov) && nonnull_fields.contains(field),
                         _ => false,
                     };
                     if nonnull {
@@ -171,7 +187,9 @@ fn analyze_return_nullness(prog: &Program, nonnull_fields: &HashSet<FieldKey>) -
                     }
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
 
         // Check all return statements
@@ -211,7 +229,7 @@ fn analyze_field_precision(prog: &Program) -> crate::interval::FieldPrec {
     // ── Allocation sites per class ──────────────────────────────────────
     let mut alloc_sites: HashMap<String, usize> = HashMap::new();
     let mut alloc_in_loop: HashSet<String> = HashSet::new();
-    for (_mk, body) in &prog.bodies {
+    for body in prog.bodies.values() {
         let looping = body_has_loops(body);
         for block in &body.blocks {
             for stmt in &block.stmts {
@@ -250,7 +268,12 @@ fn analyze_field_precision(prog: &Program) -> crate::interval::FieldPrec {
                         w.insert(field.clone());
                         all_written.insert(field.clone());
                     }
-                    Stmt::Assign(_, Rvalue::Call { target, is_virtual, .. }) => {
+                    Stmt::Assign(
+                        _,
+                        Rvalue::Call {
+                            target, is_virtual, ..
+                        },
+                    ) => {
                         cs.push(target.clone());
                         if *is_virtual {
                             cs.extend(prog.devirtualise(target));
@@ -373,9 +396,7 @@ impl AiEngine {
                     continue;
                 }
                 let key = (loc.block, vid);
-                let joined = block_vars
-                    .entry(key)
-                    .or_insert_with(Interval::bottom);
+                let joined = block_vars.entry(key).or_insert_with(Interval::bottom);
                 *joined = joined.join(iv);
             }
         }
@@ -416,9 +437,7 @@ impl AiEngine {
             }
         }
         if hint_count > 0 {
-            debug!(
-                "interval-ai: published {hint_count} interval hints for other engines"
-            );
+            debug!("interval-ai: published {hint_count} interval hints for other engines");
         }
     }
 }
@@ -431,7 +450,7 @@ impl AiEngine {
         reached: &[crate::interval::IState],
         bb: &mut Blackboard,
         body: &ajave_ir::Body,
-        prog: &Program,
+        _prog: &Program,
     ) -> bool {
         // NOTE: this deliberately does *not* refuse to discharge when the
         // method contains a call with unmodelled exception behaviour.
@@ -529,7 +548,10 @@ impl Engine for AiEngine {
         // Analyze constructors for field nullness.
         self.nonnull_fields = analyze_constructor_fields(prog);
         if !self.nonnull_fields.is_empty() {
-            debug!("interval-ai: {} fields known non-null from constructors", self.nonnull_fields.len());
+            debug!(
+                "interval-ai: {} fields known non-null from constructors",
+                self.nonnull_fields.len()
+            );
         }
         self.nonnull_returns = analyze_return_nullness(prog, &self.nonnull_fields);
         self.field_prec = analyze_field_precision(prog);
@@ -538,13 +560,24 @@ impl Engine for AiEngine {
             self.field_prec.singleton_classes.len()
         );
         if !self.nonnull_returns.is_empty() {
-            debug!("interval-ai: {} methods known to return non-null", self.nonnull_returns.len());
+            debug!(
+                "interval-ai: {} methods known to return non-null",
+                self.nonnull_returns.len()
+            );
         }
 
-        let Some(entry) = &prog.entry else { return; };
-        let Some(body) = prog.body(entry) else { return; };
-        if !body.is_fully_lifted() { return; }
-        if body_uses_long_types(body) { return; }
+        let Some(entry) = &prog.entry else {
+            return;
+        };
+        let Some(body) = prog.body(entry) else {
+            return;
+        };
+        if !body.is_fully_lifted() {
+            return;
+        }
+        if body_uses_long_types(body) {
+            return;
+        }
 
         // Float-loop bodies: run widening CPA and discharge obligations during
         // init, before BMC gets a chance to publish spurious violations.
@@ -560,12 +593,17 @@ impl Engine for AiEngine {
             if complete {
                 self.discharge_obligations(entry, &reached, bb, body, prog);
             } else {
-                debug!("interval-ai: float widening incomplete ({} states), skipping discharge", reached.len());
+                debug!(
+                    "interval-ai: float widening incomplete ({} states), skipping discharge",
+                    reached.len()
+                );
             }
             return;
         }
 
-        if body_uses_float_types(body) { return; }
+        if body_uses_float_types(body) {
+            return;
+        }
 
         let cpa = IntervalCpa {
             nonnull_fields: self.nonnull_fields.clone(),
@@ -622,10 +660,14 @@ impl Engine for AiEngine {
             }
         }
 
-        info!("interval-ai: analyzing {} methods", methods_to_analyze.len());
+        info!(
+            "interval-ai: analyzing {} methods",
+            methods_to_analyze.len()
+        );
 
         let mut advanced = false;
-        let max_states_per_method = ((budget.work as usize) / methods_to_analyze.len().max(1)).max(500);
+        let max_states_per_method =
+            ((budget.work as usize) / methods_to_analyze.len().max(1)).max(500);
         let cpa = IntervalCpa {
             nonnull_fields: self.nonnull_fields.clone(),
             nonnull_returns: self.nonnull_returns.clone(),
@@ -665,7 +707,10 @@ impl Engine for AiEngine {
                 // under widening rather than forfeiting the proof. Bodies that
                 // already converged keep their sharper bounds.
                 if !c && body_has_loops(body) {
-                    debug!("interval-ai: {:?} incomplete, retrying with widening", method);
+                    debug!(
+                        "interval-ai: {:?} incomplete, retrying with widening",
+                        method
+                    );
                     let mut wcpa = WideningIntervalCpa::from_body_with(body, cpa.clone());
                     // This retry exists precisely because the precise run ran
                     // out of states, so widen almost immediately rather than
@@ -681,10 +726,17 @@ impl Engine for AiEngine {
             };
 
             if !complete {
-                debug!("interval-ai: analysis incomplete for {:?}, skipping", method);
+                debug!(
+                    "interval-ai: analysis incomplete for {:?}, skipping",
+                    method
+                );
                 continue;
             }
-            debug!("interval-ai: reached {} abstract states for {:?}", reached.len(), method);
+            debug!(
+                "interval-ai: reached {} abstract states for {:?}",
+                reached.len(),
+                method
+            );
 
             if self.discharge_obligations(method, &reached, bb, body, prog) {
                 advanced = true;

@@ -42,7 +42,9 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use ajave_core::artifact::ProgramPoint;
 use ajave_core::cpa::{Cpa, HasLocation, Lattice, MergeResult};
-use ajave_ir::{BinOp, BlockId, CmpKind, Const, Edge, FieldKey, Operand, Program, Rvalue, Stmt, Ty, VarId};
+use ajave_ir::{
+    BinOp, BlockId, CmpKind, Const, Edge, FieldKey, Operand, Program, Rvalue, Stmt, Ty, VarId,
+};
 
 use crate::body_analysis::{find_defining_bin, negate_binop};
 
@@ -244,8 +246,7 @@ pub struct FloatInterval {
 
 impl PartialEq for FloatInterval {
     fn eq(&self, other: &Self) -> bool {
-        (self.is_bottom() && other.is_bottom())
-            || (self.lo == other.lo && self.hi == other.hi)
+        (self.is_bottom() && other.is_bottom()) || (self.lo == other.lo && self.hi == other.hi)
     }
 }
 impl Eq for FloatInterval {}
@@ -295,7 +296,11 @@ impl FloatInterval {
     }
     /// Threshold widening: if a bound grows, jump to the next threshold instead
     /// of ±∞. Falls back to ±∞ if no threshold is beyond the new bound.
-    pub fn widen_thresholded(old: FloatInterval, new: FloatInterval, thresholds: &[f64]) -> FloatInterval {
+    pub fn widen_thresholded(
+        old: FloatInterval,
+        new: FloatInterval,
+        thresholds: &[f64],
+    ) -> FloatInterval {
         if new.is_bottom() {
             return old;
         }
@@ -347,24 +352,58 @@ impl FloatInterval {
         }
     }
     /// Narrow both operands of `a OP b` given the comparison holds.
-    fn narrow(op: BinOp, a: FloatInterval, b: FloatInterval) -> Option<(FloatInterval, FloatInterval)> {
+    fn narrow(
+        op: BinOp,
+        a: FloatInterval,
+        b: FloatInterval,
+    ) -> Option<(FloatInterval, FloatInterval)> {
         if a.is_bottom() || b.is_bottom() {
             return Some((FloatInterval::bottom(), FloatInterval::bottom()));
         }
         let na = match op {
-            BinOp::Lt => FloatInterval { lo: a.lo, hi: a.hi.min(b.hi) },
-            BinOp::Le => FloatInterval { lo: a.lo, hi: a.hi.min(b.hi) },
-            BinOp::Gt => FloatInterval { lo: a.lo.max(b.lo), hi: a.hi },
-            BinOp::Ge => FloatInterval { lo: a.lo.max(b.lo), hi: a.hi },
-            BinOp::Eq => FloatInterval { lo: a.lo.max(b.lo), hi: a.hi.min(b.hi) },
+            BinOp::Lt => FloatInterval {
+                lo: a.lo,
+                hi: a.hi.min(b.hi),
+            },
+            BinOp::Le => FloatInterval {
+                lo: a.lo,
+                hi: a.hi.min(b.hi),
+            },
+            BinOp::Gt => FloatInterval {
+                lo: a.lo.max(b.lo),
+                hi: a.hi,
+            },
+            BinOp::Ge => FloatInterval {
+                lo: a.lo.max(b.lo),
+                hi: a.hi,
+            },
+            BinOp::Eq => FloatInterval {
+                lo: a.lo.max(b.lo),
+                hi: a.hi.min(b.hi),
+            },
             _ => a,
         };
         let nb = match op {
-            BinOp::Lt => FloatInterval { lo: b.lo.max(a.lo), hi: b.hi },
-            BinOp::Le => FloatInterval { lo: b.lo.max(a.lo), hi: b.hi },
-            BinOp::Gt => FloatInterval { lo: b.lo, hi: b.hi.min(a.hi) },
-            BinOp::Ge => FloatInterval { lo: b.lo, hi: b.hi.min(a.hi) },
-            BinOp::Eq => FloatInterval { lo: b.lo.max(a.lo), hi: b.hi.min(a.hi) },
+            BinOp::Lt => FloatInterval {
+                lo: b.lo.max(a.lo),
+                hi: b.hi,
+            },
+            BinOp::Le => FloatInterval {
+                lo: b.lo.max(a.lo),
+                hi: b.hi,
+            },
+            BinOp::Gt => FloatInterval {
+                lo: b.lo,
+                hi: b.hi.min(a.hi),
+            },
+            BinOp::Ge => FloatInterval {
+                lo: b.lo,
+                hi: b.hi.min(a.hi),
+            },
+            BinOp::Eq => FloatInterval {
+                lo: b.lo.max(a.lo),
+                hi: b.hi.min(a.hi),
+            },
             _ => b,
         };
         Some((na, nb))
@@ -432,6 +471,9 @@ impl Neg for FloatInterval {
 }
 
 impl FloatInterval {
+    // Named for the domain operation, not the std trait: these are
+    // interval/term algebra, and `Interval::div` reads correctly.
+    #[allow(clippy::should_implement_trait)]
     pub fn div(self, o: FloatInterval) -> FloatInterval {
         if self.is_bottom() || o.is_bottom() {
             return FloatInterval::bottom();
@@ -454,6 +496,9 @@ impl FloatInterval {
         FloatInterval { lo, hi }
     }
 
+    // Named for the domain operation, not the std trait: these are
+    // interval/term algebra, and `Interval::div` reads correctly.
+    #[allow(clippy::should_implement_trait)]
     pub fn rem(self, o: FloatInterval) -> FloatInterval {
         if self.is_bottom() || o.is_bottom() {
             return FloatInterval::bottom();
@@ -476,7 +521,10 @@ fn eval_float_comparison(op: BinOp, a: FloatInterval, b: FloatInterval) -> Inter
             a.lo == a.hi && b.lo == b.hi && a.lo == b.lo,
             a.hi < b.lo || b.hi < a.lo,
         ),
-        BinOp::Ne => (a.hi < b.lo || b.hi < a.lo, a.lo == a.hi && b.lo == b.hi && a.lo == b.lo),
+        BinOp::Ne => (
+            a.hi < b.lo || b.hi < a.lo,
+            a.lo == a.hi && b.lo == b.hi && a.lo == b.lo,
+        ),
         BinOp::Lt => (a.hi < b.lo, a.lo >= b.hi),
         BinOp::Le => (a.hi <= b.lo, a.lo > b.hi),
         BinOp::Gt => (a.lo > b.hi, a.hi <= b.lo),
@@ -537,7 +585,11 @@ pub enum Nullness {
 
 impl Nullness {
     fn join(self, other: Self) -> Self {
-        if self == other { self } else { Nullness::Unknown }
+        if self == other {
+            self
+        } else {
+            Nullness::Unknown
+        }
     }
     fn leq(self, other: Self) -> bool {
         self == other || other == Nullness::Unknown
@@ -591,7 +643,10 @@ impl IState {
         }
     }
     pub fn get_array_len(&self, v: VarId) -> Interval {
-        self.array_lens.get(&v).copied().unwrap_or_else(Interval::top)
+        self.array_lens
+            .get(&v)
+            .copied()
+            .unwrap_or_else(Interval::top)
     }
     pub fn get_field(&self, f: &FieldKey) -> Interval {
         self.fields.get(f).copied().unwrap_or_else(Interval::top)
@@ -610,7 +665,11 @@ impl IState {
         self.field_null.get(f).copied().unwrap_or(Nullness::Unknown)
     }
     fn set_field_null(&mut self, f: &FieldKey, n: Nullness, strong: bool) {
-        let v = if strong { n } else { self.get_field_null(f).join(n) };
+        let v = if strong {
+            n
+        } else {
+            self.get_field_null(f).join(n)
+        };
         if v == Nullness::Unknown {
             self.field_null.remove(f);
         } else {
@@ -712,39 +771,49 @@ impl IState {
             Rvalue::ArrayLength(Operand::Var(a)) => {
                 let known = self.get_array_len(*a);
                 if known == Interval::top() {
-                    Interval { lo: 0, hi: i32::MAX as i64 }
+                    Interval {
+                        lo: 0,
+                        hi: i32::MAX as i64,
+                    }
                 } else {
                     known
                 }
             }
-            Rvalue::ArrayLength(_) => Interval { lo: 0, hi: i32::MAX as i64 },
+            Rvalue::ArrayLength(_) => Interval {
+                lo: 0,
+                hi: i32::MAX as i64,
+            },
             // Flat field cells. Absent reads as Top, so this is sound even
             // when field tracking is disabled or the cell was invalidated.
             Rvalue::GetField { field, .. } => self.get_field(field),
             Rvalue::GetStatic(fk) => self.get_field(fk),
-            Rvalue::Cmp(kind, a, b) => {
-                match kind {
-                    CmpKind::FloatL | CmpKind::FloatG => {
-                        let (fa, fb) = (self.eval_operand_float(a), self.eval_operand_float(b));
-                        eval_float_cmp(fa, fb)
-                    }
-                    CmpKind::Long => Interval { lo: -1, hi: 1 },
+            Rvalue::Cmp(kind, a, b) => match kind {
+                CmpKind::FloatL | CmpKind::FloatG => {
+                    let (fa, fb) = (self.eval_operand_float(a), self.eval_operand_float(b));
+                    eval_float_cmp(fa, fb)
                 }
-            }
+                CmpKind::Long => Interval { lo: -1, hi: 1 },
+            },
             Rvalue::Bin(op, a, b) => {
                 // Check if operands are float-typed.
-                let is_float_op = var_types.is_some() && match a {
-                    Operand::Var(v) => {
-                        let vt = var_types.unwrap();
-                        matches!(
-                            vt.get(v.0 as usize).map(|vi| vi.ty),
-                            Some(Ty::Float | Ty::Double)
-                        )
-                    }
-                    Operand::Const(Const::Float(_) | Const::Double(_)) => true,
-                    _ => false,
-                };
-                if is_float_op && matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                let is_float_op = var_types.is_some()
+                    && match a {
+                        Operand::Var(v) => {
+                            let vt = var_types.unwrap();
+                            matches!(
+                                vt.get(v.0 as usize).map(|vi| vi.ty),
+                                Some(Ty::Float | Ty::Double)
+                            )
+                        }
+                        Operand::Const(Const::Float(_) | Const::Double(_)) => true,
+                        _ => false,
+                    };
+                if is_float_op
+                    && matches!(
+                        op,
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    )
+                {
                     let (fa, fb) = (self.eval_operand_float(a), self.eval_operand_float(b));
                     return eval_float_comparison(*op, fa, fb);
                 }
@@ -755,12 +824,9 @@ impl IState {
                     let na = self.operand_nullness(a);
                     let nb = self.operand_nullness(b);
                     let null_cmp = match (na, nb) {
-                        (Nullness::NonNull, Nullness::Null) | (Nullness::Null, Nullness::NonNull) => {
-                            Some(matches!(op, BinOp::Ne))
-                        }
-                        (Nullness::Null, Nullness::Null) => {
-                            Some(matches!(op, BinOp::Eq))
-                        }
+                        (Nullness::NonNull, Nullness::Null)
+                        | (Nullness::Null, Nullness::NonNull) => Some(matches!(op, BinOp::Ne)),
+                        (Nullness::Null, Nullness::Null) => Some(matches!(op, BinOp::Eq)),
                         _ => None,
                     };
                     if let Some(result) = null_cmp {
@@ -801,9 +867,8 @@ impl IState {
                     _ => FloatInterval::top(),
                 }
             }
-            Rvalue::Nondet(Ty::Float | Ty::Double, _) | Rvalue::Havoc(Ty::Float | Ty::Double, _) => {
-                FloatInterval::top()
-            }
+            Rvalue::Nondet(Ty::Float | Ty::Double, _)
+            | Rvalue::Havoc(Ty::Float | Ty::Double, _) => FloatInterval::top(),
             // `java.lang.Math` bounds. Without these every call is `top`, and a
             // program whose assertion rests on `Math.sin` cannot be proved no
             // matter how precise the rest of the analysis is.
@@ -824,18 +889,15 @@ impl IState {
                     _ => FloatInterval::top(),
                 }
             }
-            // Int-to-float cast: use the integer interval bounds.
-            Rvalue::Use(Operand::Var(v)) => {
-                let iv = self.get(*v);
-                if iv.is_bottom() {
-                    FloatInterval::bottom()
-                } else {
-                    FloatInterval {
-                        lo: iv.lo as f64,
-                        hi: iv.hi as f64,
-                    }
-                }
-            }
+            // An int-to-float conversion should read the *integer* interval and
+            // widen it, and there used to be an arm here that did. It matched
+            // `Rvalue::Use(Operand::Var(_))`, which the `Rvalue::Use(o)` arm
+            // above already covers, so it never ran -- and its comment said
+            // "cast" while it matched a use, so reordering would not have
+            // helped either. `Rvalue::Cast` is still unhandled and falls
+            // through to top, which loses the bound. Tracked as #93 with a
+            // benchmark owed before the fix; the dead code is removed rather
+            // than left to look like the case is covered.
             _ => FloatInterval::top(),
         }
     }
@@ -876,7 +938,10 @@ fn eval_bitwise(op: BinOp, a: Interval, b: Interval) -> Interval {
     // Non-negative operands: `x & y <= min(x,y)`, and `x | y` / `x ^ y` are
     // bounded above by the next power of two covering both maxima.
     match op {
-        BinOp::And => Interval { lo: 0, hi: a.hi.min(b.hi) },
+        BinOp::And => Interval {
+            lo: 0,
+            hi: a.hi.min(b.hi),
+        },
         BinOp::Or | BinOp::Xor => {
             let m = a.hi.max(b.hi);
             // Smallest all-ones mask that covers `m`.
@@ -884,7 +949,11 @@ fn eval_bitwise(op: BinOp, a: Interval, b: Interval) -> Interval {
                 0
             } else {
                 let bits = 64 - (m as u64).leading_zeros();
-                if bits >= 63 { i64::MAX } else { (1i64 << bits) - 1 }
+                if bits >= 63 {
+                    i64::MAX
+                } else {
+                    (1i64 << bits) - 1
+                }
             };
             Interval { lo: 0, hi: bound }
         }
@@ -931,7 +1000,10 @@ pub fn is_nonnull_static(fk: &FieldKey) -> bool {
             | ("java/lang/Byte", "TYPE")
             | ("java/lang/Short", "TYPE")
             | ("java/lang/Character", "TYPE")
-            | ("java/util/Collections", "EMPTY_LIST" | "EMPTY_MAP" | "EMPTY_SET")
+            | (
+                "java/util/Collections",
+                "EMPTY_LIST" | "EMPTY_MAP" | "EMPTY_SET"
+            )
     )
 }
 
@@ -986,7 +1058,13 @@ impl Lattice for IState {
         }
         // Float vars: same rule.
         for (v, fv) in &self.float_vars {
-            if !fv.leq(other.float_vars.get(v).copied().unwrap_or_else(FloatInterval::top)) {
+            if !fv.leq(
+                other
+                    .float_vars
+                    .get(v)
+                    .copied()
+                    .unwrap_or_else(FloatInterval::top),
+            ) {
                 return false;
             }
         }
@@ -1052,8 +1130,12 @@ impl Lattice for IState {
             }
         }
         let mut float_vars = BTreeMap::new();
-        let fkeys: std::collections::BTreeSet<_> =
-            self.float_vars.keys().chain(other.float_vars.keys()).copied().collect();
+        let fkeys: std::collections::BTreeSet<_> = self
+            .float_vars
+            .keys()
+            .chain(other.float_vars.keys())
+            .copied()
+            .collect();
         for k in fkeys {
             let j = self.get_float(k).join(other.get_float(k));
             if !j.is_top() {
@@ -1061,8 +1143,12 @@ impl Lattice for IState {
             }
         }
         let mut nullness = BTreeMap::new();
-        let nkeys: std::collections::BTreeSet<_> =
-            self.nullness.keys().chain(other.nullness.keys()).copied().collect();
+        let nkeys: std::collections::BTreeSet<_> = self
+            .nullness
+            .keys()
+            .chain(other.nullness.keys())
+            .copied()
+            .collect();
         for k in nkeys {
             let j = self.get_nullness(k).join(other.get_nullness(k));
             if j != Nullness::Unknown {
@@ -1070,8 +1156,12 @@ impl Lattice for IState {
             }
         }
         let mut array_lens = BTreeMap::new();
-        let akeys: std::collections::BTreeSet<_> =
-            self.array_lens.keys().chain(other.array_lens.keys()).copied().collect();
+        let akeys: std::collections::BTreeSet<_> = self
+            .array_lens
+            .keys()
+            .chain(other.array_lens.keys())
+            .copied()
+            .collect();
         for k in akeys {
             let j = self.get_array_len(k).join(other.get_array_len(k));
             if j != Interval::top() {
@@ -1079,8 +1169,12 @@ impl Lattice for IState {
             }
         }
         let mut fields = BTreeMap::new();
-        let fkeys2: std::collections::BTreeSet<_> =
-            self.fields.keys().chain(other.fields.keys()).cloned().collect();
+        let fkeys2: std::collections::BTreeSet<_> = self
+            .fields
+            .keys()
+            .chain(other.fields.keys())
+            .cloned()
+            .collect();
         for k in fkeys2 {
             let j = self.get_field(&k).join(other.get_field(&k));
             if j != Interval::top() {
@@ -1088,8 +1182,12 @@ impl Lattice for IState {
             }
         }
         let mut field_null = BTreeMap::new();
-        let nfkeys: std::collections::BTreeSet<_> =
-            self.field_null.keys().chain(other.field_null.keys()).cloned().collect();
+        let nfkeys: std::collections::BTreeSet<_> = self
+            .field_null
+            .keys()
+            .chain(other.field_null.keys())
+            .cloned()
+            .collect();
         for k in nfkeys {
             let j = self.get_field_null(&k).join(other.get_field_null(&k));
             if j != Nullness::Unknown {
@@ -1107,8 +1205,7 @@ impl Lattice for IState {
         }
     }
     fn is_bottom(&self) -> bool {
-        self.vars.values().any(|i| i.is_bottom())
-            || self.float_vars.values().any(|f| f.is_bottom())
+        self.vars.values().any(|i| i.is_bottom()) || self.float_vars.values().any(|f| f.is_bottom())
     }
 }
 
@@ -1128,30 +1225,46 @@ pub fn param_slot_count(desc: &str) -> usize {
     let mut slot = 0;
     while pos < bytes.len() && bytes[pos] != b')' {
         match bytes[pos] {
-            b'J' | b'D' => { pos += 1; slot += 2; }
+            b'J' | b'D' => {
+                pos += 1;
+                slot += 2;
+            }
             b'L' => {
-                while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                while pos < bytes.len() && bytes[pos] != b';' {
+                    pos += 1;
+                }
                 pos += 1;
                 slot += 1;
             }
             b'[' => {
-                while pos < bytes.len() && bytes[pos] == b'[' { pos += 1; }
+                while pos < bytes.len() && bytes[pos] == b'[' {
+                    pos += 1;
+                }
                 if pos < bytes.len() && bytes[pos] == b'L' {
-                    while pos < bytes.len() && bytes[pos] != b';' { pos += 1; }
+                    while pos < bytes.len() && bytes[pos] != b';' {
+                        pos += 1;
+                    }
                     pos += 1;
                 } else if pos < bytes.len() {
                     pos += 1;
                 }
                 slot += 1;
             }
-            _ => { pos += 1; slot += 1; }
+            _ => {
+                pos += 1;
+                slot += 1;
+            }
         }
     }
     slot
 }
 
 /// Find the statement in `body`'s block that defines `v` as `Cmp(kind, a, b)`.
-fn find_defining_cmp(body: &ajave_ir::Body, block: BlockId, v: VarId) -> Option<(CmpKind, &Operand, &Operand)> {
+fn find_defining_cmp(
+    body: &ajave_ir::Body,
+    block: BlockId,
+    v: VarId,
+) -> Option<(CmpKind, &Operand, &Operand)> {
     for s in body.block(block).stmts.iter().rev() {
         if let Stmt::Assign(dv, Rvalue::Cmp(kind, a, b)) = s {
             if *dv == v {
@@ -1309,17 +1422,20 @@ impl Cpa for IntervalCpa {
                         // the result is NonNull.
                         if n == Nullness::Unknown {
                             match rv {
-                                Rvalue::GetField { obj: Operand::Var(ov), field } => {
+                                Rvalue::GetField {
+                                    obj: Operand::Var(ov),
+                                    field,
+                                } => {
                                     if next.get_nullness(*ov) == Nullness::NonNull
                                         && self.nonnull_fields.contains(field)
                                     {
                                         n = Nullness::NonNull;
                                     }
                                 }
-                                Rvalue::Call { target, .. } => {
-                                    if self.nonnull_returns.contains(target) {
-                                        n = Nullness::NonNull;
-                                    }
+                                Rvalue::Call { target, .. }
+                                    if self.nonnull_returns.contains(target) =>
+                                {
+                                    n = Nullness::NonNull;
                                 }
                                 _ => {}
                             }
@@ -1333,7 +1449,10 @@ impl Cpa for IntervalCpa {
                                 // A negative length throws NegativeArraySizeException
                                 // rather than producing an array, so on the paths
                                 // that survive the length is non-negative.
-                                next.eval_operand(len).meet(Interval { lo: 0, hi: i32::MAX as i64 })
+                                next.eval_operand(len).meet(Interval {
+                                    lo: 0,
+                                    hi: i32::MAX as i64,
+                                })
                             }
                             Rvalue::Use(Operand::Var(src)) => next.get_array_len(*src),
                             _ => Interval::top(),
@@ -1440,7 +1559,9 @@ impl Cpa for IntervalCpa {
                                 if let Some((op, a, b)) = find_defining_bin(body, *block, *cv) {
                                     let mut narrowed = next.clone();
                                     let (ia, ib) = (next.eval_operand(a), next.eval_operand(b));
-                                    if let Some((na, nb)) = Interval::narrow(negate_binop(op), ia, ib) {
+                                    if let Some((na, nb)) =
+                                        Interval::narrow(negate_binop(op), ia, ib)
+                                    {
                                         if let Operand::Var(av) = a {
                                             narrowed.set(*av, na);
                                         }
@@ -1500,6 +1621,9 @@ impl WideningIntervalCpa {
     }
 
     /// Same, but carrying the interprocedural nullness facts the plain CPA uses.
+    // The guard states the condition the arm is about; folding it into the
+    // pattern hides which operators this case covers.
+    #[allow(clippy::redundant_guards)]
     pub fn from_body_with(body: &ajave_ir::Body, base: IntervalCpa) -> Self {
         let mut headers = HashSet::new();
         for block in &body.blocks {
@@ -1585,7 +1709,10 @@ impl WideningIntervalCpa {
 
         log::debug!(
             "interval-ai: {} thresholds float={:?} int={:?} headers={:?}",
-            body.key, float_thresholds, int_thresholds, headers.len()
+            body.key,
+            float_thresholds,
+            int_thresholds,
+            headers.len()
         );
         WideningIntervalCpa {
             base,
@@ -1617,8 +1744,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut float_vars = BTreeMap::new();
-        let fkeys: std::collections::BTreeSet<_> =
-            old.float_vars.keys().chain(new.float_vars.keys()).copied().collect();
+        let fkeys: std::collections::BTreeSet<_> = old
+            .float_vars
+            .keys()
+            .chain(new.float_vars.keys())
+            .copied()
+            .collect();
         for k in fkeys {
             let ov = old.get_float(k);
             let nv = new.get_float(k);
@@ -1628,8 +1759,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut nullness = BTreeMap::new();
-        let nkeys: std::collections::BTreeSet<_> =
-            old.nullness.keys().chain(new.nullness.keys()).copied().collect();
+        let nkeys: std::collections::BTreeSet<_> = old
+            .nullness
+            .keys()
+            .chain(new.nullness.keys())
+            .copied()
+            .collect();
         for k in nkeys {
             let j = old.get_nullness(k).join(new.get_nullness(k));
             if j != Nullness::Unknown {
@@ -1640,19 +1775,26 @@ impl WideningIntervalCpa {
         // inside a loop can have a length that grows each iteration, so join
         // alone would not be guaranteed to stabilise.
         let mut array_lens = BTreeMap::new();
-        let akeys: std::collections::BTreeSet<_> =
-            old.array_lens.keys().chain(new.array_lens.keys()).copied().collect();
+        let akeys: std::collections::BTreeSet<_> = old
+            .array_lens
+            .keys()
+            .chain(new.array_lens.keys())
+            .copied()
+            .collect();
         for k in akeys {
-            let w = Interval::widen_thresholded(
-                old.get_array_len(k), new.get_array_len(k), int_thresh,
-            );
+            let w =
+                Interval::widen_thresholded(old.get_array_len(k), new.get_array_len(k), int_thresh);
             if w != Interval::top() {
                 array_lens.insert(k, w);
             }
         }
         let mut fields = BTreeMap::new();
-        let ffk: std::collections::BTreeSet<_> =
-            old.fields.keys().chain(new.fields.keys()).cloned().collect();
+        let ffk: std::collections::BTreeSet<_> = old
+            .fields
+            .keys()
+            .chain(new.fields.keys())
+            .cloned()
+            .collect();
         for k in ffk {
             let w = Interval::widen_thresholded(old.get_field(&k), new.get_field(&k), int_thresh);
             if w != Interval::top() {
@@ -1660,8 +1802,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut field_null = BTreeMap::new();
-        let fnk: std::collections::BTreeSet<_> =
-            old.field_null.keys().chain(new.field_null.keys()).cloned().collect();
+        let fnk: std::collections::BTreeSet<_> = old
+            .field_null
+            .keys()
+            .chain(new.field_null.keys())
+            .cloned()
+            .collect();
         for k in fnk {
             let j = old.get_field_null(&k).join(new.get_field_null(&k));
             if j != Nullness::Unknown {
@@ -1694,8 +1840,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut float_vars = BTreeMap::new();
-        let fkeys: std::collections::BTreeSet<_> =
-            old.float_vars.keys().chain(new.float_vars.keys()).copied().collect();
+        let fkeys: std::collections::BTreeSet<_> = old
+            .float_vars
+            .keys()
+            .chain(new.float_vars.keys())
+            .copied()
+            .collect();
         for k in fkeys {
             let ov = old.get_float(k);
             let nv = new.get_float(k);
@@ -1705,8 +1855,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut nullness = BTreeMap::new();
-        let nkeys: std::collections::BTreeSet<_> =
-            old.nullness.keys().chain(new.nullness.keys()).copied().collect();
+        let nkeys: std::collections::BTreeSet<_> = old
+            .nullness
+            .keys()
+            .chain(new.nullness.keys())
+            .copied()
+            .collect();
         for k in nkeys {
             let j = old.get_nullness(k).join(new.get_nullness(k));
             if j != Nullness::Unknown {
@@ -1714,8 +1868,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut array_lens = BTreeMap::new();
-        let akeys: std::collections::BTreeSet<_> =
-            old.array_lens.keys().chain(new.array_lens.keys()).copied().collect();
+        let akeys: std::collections::BTreeSet<_> = old
+            .array_lens
+            .keys()
+            .chain(new.array_lens.keys())
+            .copied()
+            .collect();
         for k in akeys {
             let w = Interval::widen(old.get_array_len(k), new.get_array_len(k));
             if w != Interval::top() {
@@ -1723,8 +1881,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut fields = BTreeMap::new();
-        let ffk: std::collections::BTreeSet<_> =
-            old.fields.keys().chain(new.fields.keys()).cloned().collect();
+        let ffk: std::collections::BTreeSet<_> = old
+            .fields
+            .keys()
+            .chain(new.fields.keys())
+            .cloned()
+            .collect();
         for k in ffk {
             let w = Interval::widen(old.get_field(&k), new.get_field(&k));
             if w != Interval::top() {
@@ -1732,8 +1894,12 @@ impl WideningIntervalCpa {
             }
         }
         let mut field_null = BTreeMap::new();
-        let fnk: std::collections::BTreeSet<_> =
-            old.field_null.keys().chain(new.field_null.keys()).cloned().collect();
+        let fnk: std::collections::BTreeSet<_> = old
+            .field_null
+            .keys()
+            .chain(new.field_null.keys())
+            .cloned()
+            .collect();
         for k in fnk {
             let j = old.get_field_null(&k).join(new.get_field_null(&k));
             if j != Nullness::Unknown {
@@ -1880,12 +2046,7 @@ impl Cpa for WideningIntervalCpa {
     /// on their own keep their precise bounds; the delay costs iterations,
     /// never soundness, because both join and widen are upper bounds on the
     /// states they replace.
-    fn merge(
-        &self,
-        new: &IState,
-        reached: &IState,
-        _prec: &(),
-    ) -> MergeResult<IState> {
+    fn merge(&self, new: &IState, reached: &IState, _prec: &()) -> MergeResult<IState> {
         if new.at != reached.at || !self.loop_headers.contains(&new.at.block) {
             return MergeResult::Sep;
         }
@@ -1899,7 +2060,10 @@ impl Cpa for WideningIntervalCpa {
 
         let combined = if count > self.widen_delay {
             Self::widen_state_thresholded(
-                reached, new, &self.float_thresholds, &self.int_thresholds,
+                reached,
+                new,
+                &self.float_thresholds,
+                &self.int_thresholds,
             )
         } else {
             reached.join(new)
