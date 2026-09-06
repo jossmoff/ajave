@@ -813,10 +813,26 @@ fn encode_chc_interproc(
     // objects are separated by `ref`, which the lifter already gives a unique
     // value per allocation -- the role JayHorn's `allocSite` plays.
     let heap_closed = heap_is_closed(prog, &all_methods);
+    let mut alloc_site: i64 = 0;
     if heap_closed {
         out.push_str("; space invariants for the heap\n");
         out.push_str("(declare-fun phi_arr (Int Int Int) Bool)\n");
         out.push_str("(declare-fun phi_obj (Int Int Int) Bool)\n");
+        // Array length, which the JLS pins exactly: `array.length` is the
+        // dimension the array was created with (JLS 10.7), and it never
+        // changes. It was unconstrained, so every `ArrayIndexOutOfBounds`
+        // obligation -- the bulk of the no-runtime-exception property -- was
+        // unprovable no matter how obvious the bound.
+        out.push_str("(declare-fun phi_len (Int Int) Bool)\n");
+        // The allocation site an object came from, recorded as a pseudo-field.
+        //
+        // JayHorn's point: without an immutable distinguishing feature the
+        // space invariant cannot separate two objects of the same class and
+        // collapses to something useless. `allocSite` is final, so it is
+        // exactly such a feature. Objects created at the same `new` in
+        // different loop iterations still share a site, which the paper
+        // accepts.
+        out.push_str("(declare-fun phi_site (Int Int) Bool)\n");
     }
 
     for mk in &all_methods {
@@ -960,6 +976,11 @@ fn encode_chc_interproc(
             // Overflow conditions from this block's arithmetic; any one of them
             // makes `error` reachable.
             let mut overflow: Vec<String> = Vec::new();
+            // Facts about objects created in this block -- their allocation
+            // site and, for arrays, their length. Emitted as clauses after the
+            // statements, like heap writes, because they must hold whenever
+            // the block is reached.
+            let mut heap_facts: Vec<String> = Vec::new();
             // `(= name expr)` for each named intermediate value.
             let mut bindings: Vec<String> = Vec::new();
             let is_wide = |op: &Operand| -> bool {
@@ -1034,14 +1055,34 @@ fn encode_chc_interproc(
                         Rvalue::New(_) | Rvalue::NewArray { .. } => {
                             let r = fresh.fresh();
                             constraints.push(format!("(> {} 0)", r));
+                            if heap_closed {
+                                // Record where this object came from, so the
+                                // invariant can tell it from others.
+                                alloc_site += 1;
+                                heap_facts.push(format!("(phi_site {} {})", r, alloc_site));
+                            }
                             if let Rvalue::NewArray { len, .. } = rv {
                                 // JLS 15.10.1: a negative dimension throws
                                 // `NegativeArraySizeException`, so a *created*
                                 // array has a non-negative length.
                                 let l = lia_operand(len, &var_map);
                                 constraints.push(format!("(>= {} 0)", l));
+                                if heap_closed {
+                                    // JLS 10.7: `length` is the creation
+                                    // dimension, and it is final.
+                                    heap_facts.push(format!("(phi_len {} {})", r, l));
+                                }
                             }
                             var_map.insert(vid.0 as usize, r);
+                        }
+                        Rvalue::ArrayLength(arr) if heap_closed => {
+                            let a = lia_operand(arr, &var_map);
+                            let v = fresh.fresh();
+                            constraints.push(format!("(phi_len {} {})", a, v));
+                            // `length` is non-negative for any array that
+                            // exists, whether or not we saw it created.
+                            constraints.push(format!("(>= {} 0)", v));
+                            var_map.insert(vid.0 as usize, v);
                         }
                         // Heap reads: a fresh value constrained by the space
                         // invariant, rather than an unconstrained one.
@@ -1207,6 +1248,22 @@ fn encode_chc_interproc(
                     block_app_dst(target_bid)
                 ));
             };
+
+            // Facts about objects created in this block. Like heap writes,
+            // these are conclusions rather than assumptions: reaching the
+            // block establishes them.
+            for fact in &heap_facts {
+                let mut conds = constraints.clone();
+                conds.extend(bindings.iter().cloned());
+                conds.push(block_app_src(block.id.0));
+                let q = add_extra_forall_lia(&forall_src, &fresh);
+                out.push_str(&format!(
+                    "(assert (forall ({}) (=> {} {})))\n",
+                    q,
+                    and_expr(&conds),
+                    fact
+                ));
+            }
 
             // Exceptional edges, so that an obligation inside a `catch` is
             // reachable in the encoding.

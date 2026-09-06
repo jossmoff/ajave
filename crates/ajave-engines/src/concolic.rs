@@ -63,6 +63,16 @@ const MAX_ITERATIONS: usize = 60;
 /// cannot monopolise the iteration budget.
 const MAX_FLIPS_PER_PATH: usize = 24;
 
+/// Wall-clock budget for the whole search.
+///
+/// The iteration cap alone is not a cost bound: each run executes the program
+/// concretely, and a loop over a nondeterministic bound can be arbitrarily
+/// long. Measured on `jbmc-regression/aastore_aaload1`, which fills an array
+/// of nondeterministic size: concolic spent **13.3 seconds** and discharged
+/// nothing, while `chc` proved the task in 39ms. The engine is speculative, so
+/// it gets a speculative budget and stops when it runs out.
+const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2000);
+
 pub struct Concolic {
     solver_binary: String,
     done: bool,
@@ -198,12 +208,20 @@ impl Engine for Concolic {
         let mut seen: BTreeSet<Vec<i64>> = BTreeSet::new();
         let mut advanced = false;
         let mut runs = 0usize;
+        let started = std::time::Instant::now();
 
         info!("concolic: exploring from {entry:?}");
 
         while let Some(choices) = queue.pop() {
             if runs >= MAX_ITERATIONS {
                 debug!("concolic: stopping at the {MAX_ITERATIONS}-run cap");
+                break;
+            }
+            if started.elapsed() > TIME_BUDGET {
+                debug!(
+                    "concolic: stopping after {:?}, past the {TIME_BUDGET:?} budget",
+                    started.elapsed()
+                );
                 break;
             }
             if !seen.insert(choices.clone()) {
