@@ -3,6 +3,7 @@ name = "ajave-opt"
 description = "IR reduction: normalisation and optimisation between lifting and the portfolio."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

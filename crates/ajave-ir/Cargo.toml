@@ -3,6 +3,7 @@ name = "ajave-ir"
 description = "Program representation for ajave: obligations, CFG, verdicts. Zero internal dependencies."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

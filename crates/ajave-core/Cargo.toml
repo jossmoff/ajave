@@ -3,6 +3,7 @@ name = "ajave-core"
 description = "The verification core: blackboard, CPA substrate, engine/certifier traits, orchestrator. Language-agnostic."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

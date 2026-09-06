@@ -3,6 +3,7 @@ name = "ajave-frontend"
 description = "Bytecode-to-IR frontend: classfile parsing and the stack-to-CFG lifter."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

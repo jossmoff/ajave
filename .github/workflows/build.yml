@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# The toolchain comes from rust-toolchain.toml, which pins an exact version
+# rather than "stable". An unpinned channel drifts between this repo and the
+# runner, and with `-D warnings` a lint that ships in a new release turns an
+# unrelated change red -- which is how `manual_isolate_lowest_one` failed here
+# while `just clippy` passed locally.
+#
 # Every job runs a `just` recipe rather than an inline command. A local check
 # that differs from the remote one is how the two silently drift -- which is
 # exactly what happened to `boundaries` and `strategy-docs`, both of which
@@ -21,9 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: extractions/setup-just@v2
       - run: just fmt-check
 
@@ -32,9 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - run: just clippy
@@ -44,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:

@@ -1,3 +1,13 @@
+# Pinned to an exact version, not "stable".
+#
+# "stable" is a moving target, and the two ends move independently: this machine
+# was on 1.97.1 while the CI runner had 1.98.0, so a lint that shipped in 1.98
+# (`manual_isolate_lowest_one`) failed CI while `just clippy` passed locally.
+# `-D warnings` turns every new lint into a build break, so an unpinned channel
+# means an unrelated change can go red for a reason nobody introduced.
+#
+# Bump this deliberately: change the version, run `just check`, fix whatever the
+# new lints found, and commit the two together.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

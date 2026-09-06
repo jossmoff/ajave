@@ -3,6 +3,7 @@ name = "ajave-engines"
 description = "Concrete verification strategies (interval AI, concolic falsification, presolve) built on ajave-core."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
