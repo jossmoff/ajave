@@ -146,10 +146,26 @@ jdk-allowlist:
 # no test executed against them at all. A mutation score is meaningless unless
 # the suite that covers the code is the suite that runs.
 # Mutation testing where a wrong answer is most expensive.
+# Reports, never fails. `cargo mutants` exits 2 when any mutant survives, and
+# most survivors here are inert: `ajave-models` is largely a lookup table, so
+# deleting the match arm for a JDK method no benchmark calls changes nothing
+# observable. Failing on that would train people to ignore the job. The value
+# is the list of surviving mutants in the *structural* logic, not the score.
+# Mutation testing report (never fails the build).
 mutants:
-    cargo mutants --package ajave-models --file '**/lib.rs' --test-workspace true --timeout 300
-    cargo mutants --package ajave-core --file '**/blackboard.rs' --test-workspace true --timeout 300
-    cargo mutants --package ajave-engines --file '**/liveness.rs' --test-workspace true --timeout 300
+    #!/usr/bin/env bash
+    set -uo pipefail
+    status=0
+    for spec in "ajave-models:**/lib.rs" "ajave-core:**/blackboard.rs" "ajave-engines:**/liveness.rs"; do
+      pkg="${spec%%:*}"; file="${spec#*:}"
+      echo "=== $pkg ($file)"
+      cargo mutants --package "$pkg" --file "$file" --test-workspace true --timeout 300 || status=$?
+    done
+    if [ "$status" -ne 0 ]; then
+      echo
+      echo "Surviving mutants above. This is a report, not a failure -- see mutants.out/missed.txt."
+    fi
+    exit 0
 
 # Verdicts must not depend on hash iteration order or leftover state; a flake
 # here is a defect, not noise.

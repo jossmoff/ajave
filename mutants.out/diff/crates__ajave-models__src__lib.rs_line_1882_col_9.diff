@@ -1,0 +1,32 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/ArrayList" | "java/util/LinkedList" | "java/util/HashSet" | "java/util/HashMap" | "java/util/LinkedHashMap" | "java/util/LinkedHashSet" in is_total_jdk_signature
+@@ -1874,28 +1874,17 @@
+                 | ("hashCode", "()I")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+         ),
+ 
+         // Only the total queries on hash-based collections. `get`, `next`,
+         // `pop`, `peek` and the index-taking `add`/`remove` overloads are all
+         // partial. Sorted collections are excluded entirely: `TreeMap`/`TreeSet`
+         // throw NPE on a null key and `ClassCastException` on incomparable ones.
+-        "java/util/ArrayList"
+-        | "java/util/LinkedList"
+-        | "java/util/HashSet"
+-        | "java/util/HashMap"
+-        | "java/util/LinkedHashMap"
+-        | "java/util/LinkedHashSet" => {
+-            matches!((name, desc), ("<init>", "()V"))
+-                || matches!(
+-                    (name, desc),
+-                    ("size", "()I") | ("isEmpty", "()Z") | ("clear", "()V")
+-                )
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // `hasNext` is total; `next` throws `NoSuchElementException` when
+         // exhausted and `remove` throws `IllegalStateException`.
+         "java/util/Iterator" => matches!((name, desc), ("hasNext", "()Z")),
+         // `hasMoreElements` is to `Enumeration` what `hasNext` is to
+         // `Iterator`: specified to report whether more elements remain, with no
+         // failure mode. `nextElement` is deliberately absent -- it throws
+         // NoSuchElementException when exhausted, and that is its contract, not

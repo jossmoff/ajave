@@ -1,0 +1,35 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Double" in is_total_jdk_signature
+@@ -1712,31 +1712,17 @@
+                 | ("byteValue", "()B")
+                 | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(F)Ljava/lang/Float;")
+                 | ("isNaN", "(F)Z")
+                 | ("isInfinite", "(F)Z")
+         ),
+-        "java/lang/Double" => matches!(
+-            (name, desc),
+-            ("doubleValue", "()D")
+-                | ("floatValue", "()F")
+-                | ("intValue", "()I")
+-                | ("longValue", "()J")
+-                | ("shortValue", "()S")
+-                | ("byteValue", "()B")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-                | ("valueOf", "(D)Ljava/lang/Double;")
+-                | ("isNaN", "(D)Z")
+-                | ("isInfinite", "(D)Z")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         // `parseBoolean`/`valueOf(String)` are null-tolerant by contract here:
+         // they return false rather than throwing.
+         "java/lang/Boolean" => matches!(
+             (name, desc),
+             ("booleanValue", "()Z")
+                 | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")

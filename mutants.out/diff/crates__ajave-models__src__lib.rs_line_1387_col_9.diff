@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Boolean" in is_math_call
+@@ -1379,20 +1379,17 @@
+                 | "reverseBytes"
+                 | "toUnsignedInt"
+                 | "toUnsignedLong"
+         ),
+         "java/lang/Byte" => matches!(
+             name,
+             "parseByte" | "compare" | "compareTo" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
+         ),
+-        "java/lang/Boolean" => matches!(
+-            name,
+-            "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Float" => matches!(
+             name,
+             "floatToRawIntBits"
+                 | "floatToIntBits"
+                 | "intBitsToFloat"
+                 | "isNaN"
+                 | "isInfinite"
+                 | "isFinite"

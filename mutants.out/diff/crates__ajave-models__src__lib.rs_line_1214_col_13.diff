@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "compareTo" in box_model
+@@ -1206,17 +1206,17 @@
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Character" => match name {
+             "valueOf" if desc == "(C)Ljava/lang/Character;" => Some(CallModel::BoxStore(Ty::Int)),
+             "charValue" if desc == "()C" => Some(CallModel::Unbox(Ty::Int)),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
++             /* ~ changed by cargo-mutants ~ */
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Double" => match name {
+             "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Double)),
+             "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Double)),
+             "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),

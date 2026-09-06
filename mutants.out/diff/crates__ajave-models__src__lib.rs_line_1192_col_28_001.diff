@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()B" with false in box_model
+@@ -1184,17 +1184,17 @@
+             | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Short" => match name {
+             "valueOf" if desc == "(S)Ljava/lang/Short;" => Some(CallModel::BoxStore(Ty::Int)),
+             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
++            "byteValue" if false /* ~ changed by cargo-mutants ~ */ => Some(CallModel::Unbox(Ty::Int)),
+             "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Byte" => match name {
+             "valueOf" if desc == "(B)Ljava/lang/Byte;" => Some(CallModel::BoxStore(Ty::Int)),

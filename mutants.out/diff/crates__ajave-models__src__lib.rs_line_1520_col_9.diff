@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll" | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element" | "elementAt" | "firstElement" | "lastElement" in collection_model
+@@ -1512,21 +1512,17 @@
+             Some(CallModel::CollectionStore(elem_idx))
+         }
+         "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" => {
+             Some(CallModel::CollectionStore(0))
+         }
+         "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
+ 
+         // Collection/List/Queue/Deque load methods
+-        "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
+-        | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element"
+-        | "elementAt" | "firstElement" | "lastElement" => {
+-            Some(CallModel::CollectionLoad(ret_ty(desc)))
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // Iterator creation — return the collection itself
+         "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+ 
+         // Size queries read the tracked element count, which is what makes an
+         // `i < size` bound provable rather than merely stated.
+         "size" if desc == "()I" => Some(CallModel::CollectionSize),
+         "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),

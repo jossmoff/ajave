@@ -1,0 +1,215 @@
+
+*** crates/ajave-models/src/lib.rs:1149:5: replace box_model -> Option<CallModel> with Some(Default::default())
+
+*** mutation diff:
+--- crates/ajave-models/src/lib.rs
++++ replace box_model -> Option<CallModel> with Some(Default::default())
+@@ -1141,115 +1141,17 @@
+             matches!(name, "next" | "previous" | "remove")
+         }
+         _ => false,
+     }
+ }
+ 
+ /// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.
+ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+-    match owner {
+-        "java/lang/Boolean" => match name {
+-            "valueOf" if desc == "(Z)Ljava/lang/Boolean;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "booleanValue" if desc == "()Z" => Some(CallModel::Unbox(Ty::Int)),
+-            "logicalAnd" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::And)),
+-            "logicalOr" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Or)),
+-            "logicalXor" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Xor)),
+-            "compare" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Sub)),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Integer" => match name {
+-            "valueOf" if desc == "(I)Ljava/lang/Integer;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+-            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" | "toHexString" | "toBinaryString" | "toOctalString"
+-            | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Long" => match name {
+-            "valueOf" if desc == "(J)Ljava/lang/Long;" => Some(CallModel::BoxStore(Ty::Long)),
+-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Long)),
+-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Long)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Long)),
+-            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Long)),
+-            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" | "toHexString" | "toBinaryString" | "toOctalString"
+-            | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Short" => match name {
+-            "valueOf" if desc == "(S)Ljava/lang/Short;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+-            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Byte" => match name {
+-            "valueOf" if desc == "(B)Ljava/lang/Byte;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
+-            "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+-            "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+-            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+-            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Character" => match name {
+-            "valueOf" if desc == "(C)Ljava/lang/Character;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "charValue" if desc == "()C" => Some(CallModel::Unbox(Ty::Int)),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            _ => None,
+-        },
+-        "java/lang/Double" => match name {
+-            "valueOf" if desc == "(D)Ljava/lang/Double;" => Some(CallModel::BoxStore(Ty::Double)),
+-            "doubleValue" if desc == "()D" => Some(CallModel::Unbox(Ty::Double)),
+-            "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+-            "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            _ => None,
+-        },
+-        "java/lang/Float" => match name {
+-            "valueOf" if desc == "(F)Ljava/lang/Float;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+-            "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            _ => None,
+-        },
+-        _ => None,
+-    }
++    Some(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Check whether a Math/Integer/Long static method should be kept as a Call
+ /// so the SMT engine can model it precisely instead of havocing.
+ fn is_math_call(owner: &str, name: &str) -> bool {
+     match owner {
+         "java/lang/Math" | "java/lang/StrictMath" => matches!(
+             name,
+
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --no-run --verbose --workspace
+       Fresh memchr v2.8.3
+       Fresh log v0.4.33
+       Fresh unicode-ident v1.0.24
+       Dirty ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models): the file `crates/ajave-models/src/lib.rs` has changed (1788697705.463524769s, 10s after last build at 1788697695.545500562s)
+   Compiling ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+       Fresh glob v0.3.4
+       Fresh hashbrown v0.17.1
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta`
+       Fresh minimal-lexical v0.2.1
+       Fresh cfg-if v1.0.4
+       Fresh equivalent v1.0.2
+       Fresh proc-macro2 v1.0.107
+       Fresh serde_core v1.0.229
+       Fresh nom v7.1.3
+       Fresh libc v0.2.189
+       Fresh libloading v0.8.9
+       Fresh indexmap v2.14.0
+       Fresh toml_write v0.1.2
+       Fresh either v1.17.0
+       Fresh quote v1.0.47
+       Fresh serde v1.0.229
+       Fresh winnow v0.7.15
+       Fresh clang-sys v1.9.1
+       Fresh cexpr v0.6.0
+       Fresh itertools v0.13.0
+       Fresh shlex v1.3.0
+       Fresh shlex v2.0.1
+       Fresh toml_datetime v0.6.11
+       Fresh serde_spanned v0.6.9
+       Fresh syn v2.0.119
+       Fresh bitflags v2.13.1
+       Fresh rustc-hash v2.1.3
+       Fresh find-msvc-tools v0.1.9
+       Fresh unicode-segmentation v1.13.3
+       Fresh utf8parse v0.2.2
+       Fresh aho-corasick v1.1.4
+       Fresh toml_edit v0.22.27
+       Fresh bindgen v0.72.1
+       Fresh cc v1.4.0
+       Fresh convert_case v0.11.0
+       Fresh anstyle-parse v1.0.0
+       Fresh anstyle v1.0.14
+       Fresh colorchoice v1.0.5
+       Fresh anstyle-query v1.1.5
+       Fresh regex-syntax v0.8.11
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh toml v0.8.23
+       Fresh anstream v1.0.0
+       Fresh regex-automata v0.4.16
+       Fresh syn v3.0.3
+       Fresh jiff-core v0.1.0
+       Fresh strsim v0.11.1
+       Fresh heck v0.5.0
+       Fresh clap_lex v1.1.0
+       Fresh regex v1.13.1
+       Fresh clap_derive v4.6.4
+       Fresh jiff v0.2.35
+       Fresh clap_builder v4.6.2
+       Fresh ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib`
+       Fresh env_filter v2.0.0
+       Fresh clap v4.6.4
+       Fresh cvc5-sys v0.4.0
+       Fresh env_logger v0.11.11
+       Fresh cvc5 v0.4.0
+error[E0277]: the trait bound `CallModel: Default` is not satisfied
+    --> crates/ajave-models/src/lib.rs:1149:10
+     |
+1149 |     Some(Default::default()) /* ~ changed by cargo-mutants ~ */
+     |          ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Default` is not implemented for `CallModel`
+    --> crates/ajave-models/src/lib.rs:748:1
+     |
+ 748 | pub enum CallModel {
+     | ^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `ajave-models` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `ajave-models` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib` (exit status: 1)
+
+*** result: Failure(101)

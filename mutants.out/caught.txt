@@ -15,3 +15,9 @@ crates/ajave-models/src/lib.rs:337:10: delete ! in returns_nonnull
 crates/ajave-models/src/lib.rs:345:5: replace contract_of -> Option<Contract> with None
 crates/ajave-models/src/lib.rs:443:77: replace match guard desc == "()V" with true in contract_of
 crates/ajave-models/src/lib.rs:443:82: replace == with != in contract_of
+crates/ajave-models/src/lib.rs:1613:5: replace is_total_jdk_signature -> bool with true
+crates/ajave-models/src/lib.rs:1613:5: replace is_total_jdk_signature -> bool with false
+crates/ajave-models/src/lib.rs:1737:9: delete match arm "java/lang/Boolean" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1746:9: delete match arm "java/lang/Character" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1903:9: delete match arm "java/util/Enumeration" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1907:9: delete match arm "java/util/Collections" in is_total_jdk_signature

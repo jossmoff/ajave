@@ -2,3 +2,5 @@ crates/ajave-models/src/lib.rs:341:5: replace contract_for -> Contract with Defa
 crates/ajave-models/src/lib.rs:345:5: replace contract_of -> Option<Contract> with Some(Default::default())
 crates/ajave-models/src/lib.rs:808:5: replace ret_ty -> Option<Ty> with Some(Default::default())
 crates/ajave-models/src/lib.rs:921:5: replace model_for -> CallModel with Default::default()
+crates/ajave-models/src/lib.rs:1149:5: replace box_model -> Option<CallModel> with Some(Default::default())
+crates/ajave-models/src/lib.rs:1476:5: replace collection_model -> Option<CallModel> with Some(Default::default())

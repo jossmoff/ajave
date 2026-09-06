@@ -1,0 +1,80 @@
+--- crates/ajave-models/src/lib.rs
++++ replace collection_model -> Option<CallModel> with None
+@@ -1468,76 +1468,17 @@
+     )
+ }
+ 
+ /// Model collection add/get/put/iterator as synthetic field operations.
+ /// Returns `None` for methods we don't specifically model (they fall through
+ /// to `Pure` via `PURE_OWNERS`).
+ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+     // Iterator methods
+-    if is_iterator_owner(owner) {
+-        return match name {
+-            "next" | "previous" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+-            // hasNext → unconstrained boolean (Pure/Havoc)
+-            _ => None,
+-        };
+-    }
+-
+-    // Map.Entry methods — getValue/getKey read from the same $coll_last
+-    if is_map_entry_owner(owner) {
+-        return match name {
+-            "getValue" | "getKey" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+-            "setValue" => Some(CallModel::CollectionStore(0)),
+-            _ => None,
+-        };
+-    }
+-
+-    // Map methods
+-    if is_map_owner(owner) {
+-        return match name {
+-            "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]
+-            "get" | "remove" | "getOrDefault" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+-            "values" | "keySet" | "entrySet" => Some(CallModel::CollectionIterator),
+-            _ => None,
+-        };
+-    }
+-
+-    if !is_collection_owner(owner) {
+-        return None;
+-    }
+-
+-    // Collection/List/Set/Queue/Deque store methods
+-    match name {
+-        "add" | "offer" => {
+-            // add(Object) → arg 0; add(int, Object) → arg 1
+-            let elem_idx = if desc.starts_with("(I") { 1 } else { 0 };
+-            Some(CallModel::CollectionStore(elem_idx))
+-        }
+-        "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" => {
+-            Some(CallModel::CollectionStore(0))
+-        }
+-        "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
+-
+-        // Collection/List/Queue/Deque load methods
+-        "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
+-        | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element"
+-        | "elementAt" | "firstElement" | "lastElement" => {
+-            Some(CallModel::CollectionLoad(ret_ty(desc)))
+-        }
+-
+-        // Iterator creation — return the collection itself
+-        "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+-
+-        // Size queries read the tracked element count, which is what makes an
+-        // `i < size` bound provable rather than merely stated.
+-        "size" if desc == "()I" => Some(CallModel::CollectionSize),
+-        "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),
+-
+-        _ => None,
+-    }
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+ /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
+ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
+     matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
+         && matches!(
+             name,

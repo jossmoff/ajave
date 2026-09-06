@@ -1,0 +1,34 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/String" in is_total_jdk_signature
+@@ -1623,30 +1623,17 @@
+                 | ("equals", "(Ljava/lang/Object;)Z")
+         ),
+ 
+         // Only the no-argument queries. Anything taking a `String`/`CharSequence`
+         // throws NPE on null (`concat`, `contains`, `startsWith`, `replace`),
+         // anything taking an index throws (`charAt`, `substring`), the regex
+         // methods throw `PatternSyntaxException`, and `format` throws
+         // `IllegalFormatException`.
+-        "java/lang/String" => matches!(
+-            (name, desc),
+-            ("length", "()I")
+-                | ("isEmpty", "()Z")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("intern", "()Ljava/lang/String;")
+-                | ("trim", "()Ljava/lang/String;")
+-                | ("toCharArray", "()[C")
+-                | ("toUpperCase", "()Ljava/lang/String;")
+-                | ("toLowerCase", "()Ljava/lang/String;")
+-                // `equals` is null-tolerant by contract (returns false).
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // Unboxing accessors are total. `valueOf` only for the *primitive*
+         // overloads — the `String` ones throw `NumberFormatException`.
+         "java/lang/Integer" => matches!(
+             (name, desc),
+             ("intValue", "()I")
+                 | ("longValue", "()J")
+                 | ("doubleValue", "()D")

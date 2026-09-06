@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace || with && in is_total_jdk_signature
+@@ -1856,17 +1856,17 @@
+                         | "(I)V"
+                         | "(J)V"
+                         | "(C)V"
+                         | "(Z)V"
+                         | "(D)V"
+                         | "(F)V"
+                         | "(Ljava/lang/Object;)V"
+                 ))
+-                || matches!((name, desc), ("flush", "()V"))
++                && /* ~ changed by cargo-mutants ~ */ matches!((name, desc), ("flush", "()V"))
+         }
+ 
+         // `compareTo` can raise `ClassCastException` across enum types, so it
+         // is excluded; the rest are total.
+         "java/lang/Enum" => matches!(
+             (name, desc),
+             ("ordinal", "()I")
+                 | ("name", "()Ljava/lang/String;")

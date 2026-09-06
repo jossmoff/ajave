@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()I" with false in collection_model
+@@ -1523,17 +1523,17 @@
+             Some(CallModel::CollectionLoad(ret_ty(desc)))
+         }
+ 
+         // Iterator creation — return the collection itself
+         "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+ 
+         // Size queries read the tracked element count, which is what makes an
+         // `i < size` bound provable rather than merely stated.
+-        "size" if desc == "()I" => Some(CallModel::CollectionSize),
++        "size" if false /* ~ changed by cargo-mutants ~ */ => Some(CallModel::CollectionSize),
+         "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),
+ 
+         _ => None,
+     }
+ }
+ 
+ /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+ /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.

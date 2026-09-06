@@ -1,0 +1,26 @@
+--- crates/ajave-models/src/lib.rs
++++ replace is_map_entry_owner -> bool with false
+@@ -1455,22 +1455,17 @@
+     )
+ }
+ 
+ fn is_iterator_owner(owner: &str) -> bool {
+     matches!(owner, "java/util/Iterator" | "java/util/ListIterator")
+ }
+ 
+ fn is_map_entry_owner(owner: &str) -> bool {
+-    matches!(
+-        owner,
+-        "java/util/Map$Entry"
+-            | "java/util/AbstractMap$SimpleEntry"
+-            | "java/util/AbstractMap$SimpleImmutableEntry"
+-    )
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Model collection add/get/put/iterator as synthetic field operations.
+ /// Returns `None` for methods we don't specifically model (they fall through
+ /// to `Pure` via `PURE_OWNERS`).
+ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+     // Iterator methods
+     if is_iterator_owner(owner) {

@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "setValue" in collection_model
+@@ -1480,17 +1480,17 @@
+             _ => None,
+         };
+     }
+ 
+     // Map.Entry methods — getValue/getKey read from the same $coll_last
+     if is_map_entry_owner(owner) {
+         return match name {
+             "getValue" | "getKey" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+-            "setValue" => Some(CallModel::CollectionStore(0)),
++             /* ~ changed by cargo-mutants ~ */
+             _ => None,
+         };
+     }
+ 
+     // Map methods
+     if is_map_owner(owner) {
+         return match name {
+             "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]

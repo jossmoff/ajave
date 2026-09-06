@@ -1,0 +1,36 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/io/PrintStream" | "java/io/PrintWriter" in is_total_jdk_signature
+@@ -1842,32 +1842,17 @@
+                             | "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+                             | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;"
+                     ))
+         }
+ 
+         // `print`/`println` swallow IOException and render null as "null".
+         // `format`/`printf` throw `IllegalFormatException`, and `print(char[])`
+         // throws NPE on a null array, so neither is listed.
+-        "java/io/PrintStream" | "java/io/PrintWriter" => {
+-            (matches!(name, "print" | "println")
+-                && matches!(
+-                    desc,
+-                    "()V"
+-                        | "(Ljava/lang/String;)V"
+-                        | "(I)V"
+-                        | "(J)V"
+-                        | "(C)V"
+-                        | "(Z)V"
+-                        | "(D)V"
+-                        | "(F)V"
+-                        | "(Ljava/lang/Object;)V"
+-                ))
+-                || matches!((name, desc), ("flush", "()V"))
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // `compareTo` can raise `ClassCastException` across enum types, so it
+         // is excluded; the rest are total.
+         "java/lang/Enum" => matches!(
+             (name, desc),
+             ("ordinal", "()I")
+                 | ("name", "()Ljava/lang/String;")
+                 | ("toString", "()Ljava/lang/String;")

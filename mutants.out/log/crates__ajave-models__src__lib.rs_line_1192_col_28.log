@@ -1,0 +1,401 @@
+
+*** crates/ajave-models/src/lib.rs:1192:28: replace match guard desc == "()B" with true in box_model
+
+*** mutation diff:
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()B" with true in box_model
+@@ -1184,17 +1184,17 @@
+             | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Short" => match name {
+             "valueOf" if desc == "(S)Ljava/lang/Short;" => Some(CallModel::BoxStore(Ty::Int)),
+             "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Int)),
+             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Int)),
+             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Int)),
+-            "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Int)),
++            "byteValue" if true /* ~ changed by cargo-mutants ~ */ => Some(CallModel::Unbox(Ty::Int)),
+             "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Byte" => match name {
+             "valueOf" if desc == "(B)Ljava/lang/Byte;" => Some(CallModel::BoxStore(Ty::Int)),
+
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --no-run --verbose --workspace
+       Fresh memchr v2.8.3
+       Fresh log v0.4.33
+       Fresh unicode-ident v1.0.24
+       Dirty ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models): the file `crates/ajave-models/src/lib.rs` has changed (1788698584.230453930s, 15s after last build at 1788698569.885700106s)
+   Compiling ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+       Fresh glob v0.3.4
+       Fresh cfg-if v1.0.4
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta`
+       Fresh equivalent v1.0.2
+       Fresh minimal-lexical v0.2.1
+       Fresh hashbrown v0.17.1
+       Fresh proc-macro2 v1.0.107
+       Fresh serde_core v1.0.229
+       Fresh indexmap v2.14.0
+       Fresh libc v0.2.189
+       Fresh nom v7.1.3
+       Fresh libloading v0.8.9
+       Fresh toml_write v0.1.2
+       Fresh quote v1.0.47
+       Fresh serde v1.0.229
+       Fresh either v1.17.0
+       Fresh winnow v0.7.15
+       Fresh cexpr v0.6.0
+       Fresh clang-sys v1.9.1
+       Fresh rustc-hash v2.1.3
+       Fresh shlex v1.3.0
+       Fresh toml_datetime v0.6.11
+       Fresh serde_spanned v0.6.9
+       Fresh itertools v0.13.0
+       Fresh syn v2.0.119
+       Fresh unicode-segmentation v1.13.3
+       Fresh bitflags v2.13.1
+       Fresh shlex v2.0.1
+       Fresh find-msvc-tools v0.1.9
+       Fresh utf8parse v0.2.2
+       Fresh aho-corasick v1.1.4
+       Fresh toml_edit v0.22.27
+       Fresh cc v1.4.0
+       Fresh bindgen v0.72.1
+       Fresh convert_case v0.11.0
+       Fresh anstyle-parse v1.0.0
+       Fresh anstyle v1.0.14
+       Fresh regex-syntax v0.8.11
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh colorchoice v1.0.5
+       Fresh anstyle-query v1.1.5
+       Fresh toml v0.8.23
+       Fresh regex-automata v0.4.16
+       Fresh anstream v1.0.0
+       Fresh syn v3.0.3
+       Fresh clap_lex v1.1.0
+       Fresh jiff-core v0.1.0
+       Fresh heck v0.5.0
+       Fresh strsim v0.11.1
+       Fresh regex v1.13.1
+       Fresh jiff v0.2.35
+       Fresh clap_builder v4.6.2
+       Fresh clap_derive v4.6.4
+       Fresh ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib`
+       Fresh env_filter v2.0.0
+       Fresh clap v4.6.4
+       Fresh cvc5-sys v0.4.0
+       Fresh env_logger v0.11.11
+       Fresh cvc5 v0.4.0
+       Dirty ajave-core v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-core): the dependency `ajave-models` was rebuilt
+   Compiling ajave-core v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-core)
+       Dirty ajave-frontend v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-frontend): the dependency `ajave-models` was rebuilt
+   Compiling ajave-frontend v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-frontend)
+       Dirty ajave-opt v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-opt): the dependency `ajave-models` was rebuilt
+   Compiling ajave-opt v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-opt)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_core --edition=2021 crates/ajave-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=d0b33ff643814f74 -C extra-filename=-bd849f3e0770c168 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rmeta --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rmeta`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_frontend --edition=2021 crates/ajave-frontend/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=6cb240c78adf104c -C extra-filename=-b87b12b366641b3e --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rmeta --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rmeta`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_opt --edition=2021 crates/ajave-opt/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=43db74a499a5673b -C extra-filename=-09f88fe4c5b43ec9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rmeta --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rmeta`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_frontend --edition=2021 crates/ajave-frontend/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=7a71e2f83646d09b -C extra-filename=-b88cd07251f750b5 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_opt --edition=2021 crates/ajave-opt/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=e5966f879a88b654 -C extra-filename=-9febeeb7cd8b07f7 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_core --edition=2021 crates/ajave-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=ec8d40d6703329dd -C extra-filename=-af88c8964e7f5fe5 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib`
+       Dirty ajave-engines v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-engines): the dependency `ajave-models` was rebuilt
+   Compiling ajave-engines v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-engines)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_engines --edition=2021 crates/ajave-engines/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=cdcab5fa36a381d4 -C extra-filename=-228b4ca328d239f0 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rmeta --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rmeta --extern cvc5=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libcvc5-9767125d20e02e6a.rmeta --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rmeta -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_engines --edition=2021 crates/ajave-engines/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=4c7280e62ea79a0d -C extra-filename=-408f62688ca63f67 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern cvc5=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libcvc5-9767125d20e02e6a.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib`
+       Dirty ajave v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-cli): the dependency `ajave-models` was rebuilt
+   Compiling ajave v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-cli)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name corpus --edition=2021 crates/ajave-cli/tests/corpus.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=6f8b40870ad49f37 -C extra-filename=-07baefbd571bbd73 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_engines=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_engines-228b4ca328d239f0.rlib --extern ajave_frontend=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_frontend-b87b12b366641b3e.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern ajave_opt=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_opt-09f88fe4c5b43ec9.rlib --extern clap=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libclap-70ddb4406cef4e6f.rlib --extern env_logger=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libenv_logger-4d2fb87d68cf8feb.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave --edition=2021 crates/ajave-cli/src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=055605080b8e460b -C extra-filename=-f57ab16975b8076d --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_engines=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_engines-228b4ca328d239f0.rlib --extern ajave_frontend=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_frontend-b87b12b366641b3e.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern ajave_opt=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_opt-09f88fe4c5b43ec9.rlib --extern clap=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libclap-70ddb4406cef4e6f.rlib --extern env_logger=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libenv_logger-4d2fb87d68cf8feb.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave --edition=2021 crates/ajave-cli/src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=7b3b30973b3f8e3c -C extra-filename=-c39a33892d7e890f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_engines=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_engines-228b4ca328d239f0.rlib --extern ajave_frontend=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_frontend-b87b12b366641b3e.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern ajave_opt=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_opt-09f88fe4c5b43ec9.rlib --extern clap=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libclap-70ddb4406cef4e6f.rlib --extern env_logger=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libenv_logger-4d2fb87d68cf8feb.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.21s
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave-f57ab16975b8076d`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/corpus-07baefbd571bbd73`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_core-af88c8964e7f5fe5`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_engines-408f62688ca63f67`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_frontend-b88cd07251f750b5`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_ir-75088ffb61c4d29d`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_models-ab732c077cd498a9`
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_opt-9febeeb7cd8b07f7`
+
+*** result: Success
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --verbose --workspace
+       Fresh memchr v2.8.3
+       Fresh unicode-ident v1.0.24
+       Fresh log v0.4.33
+       Fresh glob v0.3.4
+       Fresh cfg-if v1.0.4
+       Fresh hashbrown v0.17.1
+       Fresh equivalent v1.0.2
+       Fresh minimal-lexical v0.2.1
+       Fresh libloading v0.8.9
+       Fresh proc-macro2 v1.0.107
+       Fresh serde_core v1.0.229
+       Fresh nom v7.1.3
+       Fresh indexmap v2.14.0
+       Fresh libc v0.2.189
+       Fresh toml_write v0.1.2
+       Fresh either v1.17.0
+       Fresh winnow v0.7.15
+       Fresh quote v1.0.47
+       Fresh serde v1.0.229
+       Fresh clang-sys v1.9.1
+       Fresh itertools v0.13.0
+       Fresh cexpr v0.6.0
+       Fresh rustc-hash v2.1.3
+       Fresh shlex v1.3.0
+       Fresh shlex v2.0.1
+       Fresh find-msvc-tools v0.1.9
+       Fresh serde_spanned v0.6.9
+       Fresh toml_datetime v0.6.11
+       Fresh syn v2.0.119
+       Fresh bitflags v2.13.1
+       Fresh unicode-segmentation v1.13.3
+       Fresh cc v1.4.0
+       Fresh utf8parse v0.2.2
+       Fresh aho-corasick v1.1.4
+       Fresh anstyle-query v1.1.5
+       Fresh colorchoice v1.0.5
+       Fresh toml_edit v0.22.27
+       Fresh convert_case v0.11.0
+       Fresh bindgen v0.72.1
+       Fresh anstyle-parse v1.0.0
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh regex-syntax v0.8.11
+       Fresh anstyle v1.0.14
+       Fresh syn v3.0.3
+       Fresh heck v0.5.0
+       Fresh clap_lex v1.1.0
+       Fresh jiff-core v0.1.0
+       Fresh toml v0.8.23
+       Fresh regex-automata v0.4.16
+       Fresh anstream v1.0.0
+       Fresh strsim v0.11.1
+       Fresh jiff v0.2.35
+       Fresh clap_derive v4.6.4
+       Fresh ajave-core v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-core)
+       Fresh regex v1.13.1
+       Fresh clap_builder v4.6.2
+       Fresh ajave-frontend v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-frontend)
+       Fresh ajave-opt v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-opt)
+       Fresh ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+       Fresh ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+       Fresh env_filter v2.0.0
+       Fresh clap v4.6.4
+       Fresh cvc5-sys v0.4.0
+       Fresh env_logger v0.11.11
+       Fresh cvc5 v0.4.0
+       Fresh ajave-engines v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-engines)
+       Fresh ajave v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave-f57ab16975b8076d`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/corpus-07baefbd571bbd73`
+
+running 6 tests
+test combine_tests::a_true_task_needs_both_properties_proved ... ok
+test combine_tests::proving_both_properties_safe_on_a_false_task_is_wrong ... ok
+test combine_tests::a_task_declared_false_passes_when_either_property_is_violated ... ok
+test combine_tests::timeouts_are_unproven_never_wrong ... ok
+test corpus_verdicts_match_declared_ground_truth ... ignored, slow: drives the corpus; run via `just test-corpus` in release
+test combine_tests::violating_either_property_on_a_true_task_is_wrong ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_core-af88c8964e7f5fe5`
+
+running 37 tests
+test blackboard::tests::a_float_approximated_violation_stays_open_to_an_engine_that_models_floats ... ok
+test blackboard::tests::an_answer_carries_what_its_author_approximated ... ok
+test blackboard::tests::an_interval_bound_survives_the_round_trip ... ok
+test blackboard::tests::a_faithfully_derived_violation_closes_the_obligation_for_everyone ... ok
+test blackboard::tests::an_over_approximating_engine_may_not_answer_with_a_witness ... ok
+test blackboard::tests::an_engine_must_fix_everything_that_went_wrong_not_merely_something ... ok
+test blackboard::tests::an_under_approximating_engine_may_not_answer_universally ... ok
+test blackboard::tests::an_unrecognised_claim_is_ignored_rather_than_misread ... ok
+test blackboard::tests::an_unrelated_approximation_does_not_reopen_the_obligation ... ok
+test blackboard::tests::approximation_sets_compose ... ok
+test blackboard::tests::declining_to_answer_is_still_an_answer ... ok
+test blackboard::tests::deterministic_violation_with_empty_witness_is_accepted ... ok
+test blackboard::tests::identical_questions_are_one_question ... ok
+test blackboard::tests::open_obligations_are_offered_to_everyone_regardless ... ok
+test blackboard::tests::over_approx_may_not_violate ... ok
+test blackboard::tests::under_approx_may_not_discharge ... ok
+test plan::tests::assertion_is_seeded_only_for_valid_assert ... ok
+test plan::tests::only_nre_wants_call_preconditions ... ok
+test plan::tests::plan_explains_why_work_was_skipped ... ok
+test plan::tests::properties_consume_disjoint_obligation_kinds ... ok
+test smt_smtlib::string_value_tests::a_braced_unicode_escape_becomes_the_character_it_names ... ok
+test smt_smtlib::string_value_tests::a_doubled_quote_is_one_quote ... ok
+test smt_smtlib::string_value_tests::a_lone_backslash_is_literal_text ... ok
+test smt_smtlib::string_value_tests::an_empty_string_stays_empty ... ok
+test smt_smtlib::string_value_tests::the_four_digit_form_is_understood_too ... ok
+test smt_smtlib::tests::parse_bv_decimal ... ok
+test smt_smtlib::tests::parse_hex_value ... ok
+test smt_smtlib::tests::sign_extend_works ... ok
+test term::tests::a_claim_about_an_unmodelled_call_announces_itself ... ok
+test term::tests::a_claim_reads_back_the_way_it_was_written ... ok
+test scratch::tests::a_new_directory_is_empty ... ok
+test scratch::tests::directory_is_removed_on_drop ... ok
+test term::tests::nan_claims_are_equal_to_themselves ... ok
+test scratch::tests::keep_suppresses_removal ... ok
+test term::tests::a_consumer_can_see_what_a_claim_is_about ... ok
+test term::tests::overloads_are_different_claims ... ok
+test scratch::tests::each_directory_is_distinct ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_engines-408f62688ca63f67`
+
+running 55 tests
+test chc::lia_unmodelled_operator_tests::a_narrowing_cast_is_havoced_not_encoded ... ok
+test chc::lia_unmodelled_operator_tests::an_operator_lia_cannot_model_is_havoced_not_encoded ... ok
+test chc::lia_unmodelled_operator_tests::operators_lia_does_model_are_still_encoded ... ok
+test concurrency::tests::sequential_program_is_refused_as_sequential ... ok
+test concurrent_state::tests::monitors_are_reentrant ... ok
+test concurrency::tests::unmodelled_primitive_refuses ... ok
+test concurrent_state::tests::schedule_records_switches_not_steps ... ok
+test concurrent_state::tests::waiting_thread_does_not_self_wake ... ok
+test concurrent_state::tests::blocked_thread_becomes_runnable_when_monitor_freed ... ok
+test concurrent_state::tests::all_blocked_is_deadlock_but_all_terminated_is_not ... ok
+test kinduction::tests::k_induction_declines_an_obligation_outside_the_loop ... ok
+test kinduction::tests::completeness_flag_tracks_back_edges ... ok
+test kinduction::tests::array_store_is_visible_to_a_later_load ... ok
+test kinduction::tests::an_unknown_reference_may_alias ... ok
+test chc::tests::interprocedural_encoding_does_not_prove_an_overflowing_property ... ok
+test kinduction::tests::array_indices_are_separated ... ok
+test math_interval::tests::a_top_argument_yields_top ... ok
+test math_interval::tests::non_math_classes_are_not_claimed ... ok
+test math_interval::tests::partial_functions_are_precise_inside_their_domain ... ok
+test math_interval::tests::partial_functions_decline_outside_their_domain ... ok
+test math_interval::tests::sin_and_cos_are_bounded_everywhere ... ok
+test math_interval::tests::sin_includes_interior_extrema ... ok
+test math_interval::tests::sin_stays_below_cos_on_the_first_octant ... ok
+test math_interval::tests::unmodelled_functions_return_none ... ok
+test ranges::tests::a_one_sided_range_makes_only_the_claim_it_can ... ok
+test kinduction::tests::an_opaque_call_havocs_the_heap ... ok
+test ranges::tests::a_range_is_guarded_by_the_nan_case ... ok
+test ranges::tests::an_unknown_function_gets_no_claim ... ok
+test ranges::tests::the_binding_is_read_from_either_side_of_the_equality ... ok
+test kinduction::tests::distinct_allocations_do_not_alias ... ok
+test ranges::tests::the_int_overload_of_abs_is_deliberately_absent ... ok
+test smt_bmc::bounded_publish_tests::a_cut_that_cannot_reach_the_obligation_leaves_it_reportable ... ok
+test smt_bmc::explore::jdk_allowlist_tests::a_non_null_return_is_claimed_only_where_specified ... ok
+test smt_bmc::bounded_publish_tests::an_obligation_past_a_cut_has_no_bounded_result_to_report ... ok
+test smt_bmc::explore::jdk_allowlist_tests::enumeration_has_more_elements_is_total_but_next_element_is_not ... ok
+test smt_bmc::explore::jdk_allowlist_tests::collections_factories_are_total_but_the_class_is_not ... ok
+test smt_bmc::explore::jdk_allowlist_tests::throwing_signatures_are_not_allowlisted ... ok
+test smt_bmc::explore::jdk_allowlist_tests::total_signatures_are_allowlisted ... ok
+test smt_bmc::explore::jdk_allowlist_tests::verifier_match_is_exact ... ok
+test threads::tests::no_threads_is_sequential ... ok
+test threads::tests::unresolvable_start_is_not_reported_as_sequential ... ok
+test vclock::tests::a_monitor_and_a_volatile_on_one_object_are_distinct ... ok
+test vclock::tests::a_releaser_s_later_actions_are_not_visible_to_the_acquirer ... ok
+test vclock::tests::acquiring_a_different_monitor_orders_nothing ... ok
+test vclock::tests::happens_before_is_transitive_through_a_chain ... ok
+test vclock::tests::fork_orders_parent_before_child ... ok
+test vclock::tests::release_then_acquire_orders_them ... ok
+test vclock::tests::unsynchronised_threads_are_concurrent ... ok
+test kinduction::tests::k_induction_handles_a_loop_with_two_latches ... ok
+test kinduction::tests::array_store_of_a_violating_value_is_not_proved ... ok
+test kinduction::tests::step_case_rejects_property_that_fails_after_one_unrolling ... ok
+test kinduction::tests::step_case_proves_a_safe_branching_body ... ok
+test kinduction::tests::step_case_rejects_violation_on_an_unmerged_branch ... ok
+test kinduction::tests::k_induction_proves_an_inductive_loop_invariant ... ok
+test kinduction::tests::k_induction_refuses_a_loop_that_fails_on_the_second_iteration ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_frontend-b88cd07251f750b5`
+
+running 1 test
+test lift::volatile_tests::volatile_fields_are_recorded_and_plain_ones_are_not ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_ir-75088ffb61c4d29d`
+
+running 1 test
+test verdict::tests::join_is_monotone_and_surfaces_disagreement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_models-ab732c077cd498a9`
+
+running 5 tests
+test contract_order_tests::a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge ... ok
+test contract_order_tests::a_wider_effect_is_more_conservative ... ok
+test contract_order_tests::more_preconditions_is_more_conservative ... ok
+test contract_order_tests::the_order_is_reflexive_and_transitive_where_it_should_be ... ok
+test contract_order_tests::opaque_is_the_top_of_the_order ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_opt-9febeeb7cd8b07f7`
+
+running 9 tests
+test tests::an_unread_allocation_is_never_removed ... ok
+test tests::compaction_preserves_local_slots ... ok
+test tests::an_unread_nondet_is_never_removed ... ok
+test tests::an_unread_opaque_call_is_never_removed ... ok
+test tests::monitors_are_never_removed ... ok
+test tests::a_value_read_only_by_an_obligation_is_never_removed ... ok
+test tests::normalise_rewrites_but_never_removes ... ok
+test tests::reduction_reaches_a_fixpoint ... ok
+test tests::the_copy_chain_the_lifter_emits_collapses ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_core
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_core --test crates/ajave-core/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-core -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_engines
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_engines --test crates/ajave-engines/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-engines -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_core=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_core-bd849f3e0770c168.rlib --extern ajave_engines=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_engines-228b4ca328d239f0.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern cvc5=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libcvc5-9767125d20e02e6a.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_frontend
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_frontend --test crates/ajave-frontend/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-frontend -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_frontend=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_frontend-b87b12b366641b3e.rlib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_ir
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_ir --test crates/ajave-ir/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_models
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_models --test crates/ajave-models/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_opt
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_opt --test crates/ajave-opt/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-opt -L native=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/build/cvc5-sys-b5ed13c2f793f6d2/out/cvc5/build/install/lib --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib --extern ajave_opt=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_opt-09f88fe4c5b43ec9.rlib --extern log=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/liblog-b7a2735142e1e6ca.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+*** result: Success

@@ -1,0 +1,35 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Long" in is_total_jdk_signature
+@@ -1655,31 +1655,17 @@
+                 | ("byteValue", "()B")
+                 | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(I)Ljava/lang/Integer;")
+                 | ("toString", "(I)Ljava/lang/String;")
+                 | ("compare", "(II)I")
+         ),
+-        "java/lang/Long" => matches!(
+-            (name, desc),
+-            ("intValue", "()I")
+-                | ("longValue", "()J")
+-                | ("doubleValue", "()D")
+-                | ("floatValue", "()F")
+-                | ("shortValue", "()S")
+-                | ("byteValue", "()B")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-                | ("valueOf", "(J)Ljava/lang/Long;")
+-                | ("toString", "(J)Ljava/lang/String;")
+-                | ("compare", "(JJ)I")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Short" => matches!(
+             (name, desc),
+             ("shortValue", "()S")
+                 | ("intValue", "()I")
+                 | ("longValue", "()J")
+                 | ("doubleValue", "()D")
+                 | ("floatValue", "()F")
+                 | ("byteValue", "()B")

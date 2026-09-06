@@ -1,0 +1,34 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Float" in box_model
+@@ -1224,30 +1224,17 @@
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
+             _ => None,
+         },
+-        "java/lang/Float" => match name {
+-            "valueOf" if desc == "(F)Ljava/lang/Float;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+-            "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+-            "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+-            "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+-            "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            _ => None,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         _ => None,
+     }
+ }
+ 
+ /// Check whether a Math/Integer/Long static method should be kept as a Call
+ /// so the SMT engine can model it precisely instead of havocing.
+ fn is_math_call(owner: &str, name: &str) -> bool {
+     match owner {

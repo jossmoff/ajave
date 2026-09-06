@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "get" | "remove" | "getOrDefault" in collection_model
+@@ -1489,17 +1489,17 @@
+             _ => None,
+         };
+     }
+ 
+     // Map methods
+     if is_map_owner(owner) {
+         return match name {
+             "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]
+-            "get" | "remove" | "getOrDefault" => Some(CallModel::CollectionLoad(ret_ty(desc))),
++             /* ~ changed by cargo-mutants ~ */
+             "values" | "keySet" | "entrySet" => Some(CallModel::CollectionIterator),
+             _ => None,
+         };
+     }
+ 
+     if !is_collection_owner(owner) {
+         return None;
+     }

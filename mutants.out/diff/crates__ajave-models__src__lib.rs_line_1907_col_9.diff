@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/Collections" in is_total_jdk_signature
+@@ -1899,24 +1899,17 @@
+         // `Iterator`: specified to report whether more elements remain, with no
+         // failure mode. `nextElement` is deliberately absent -- it throws
+         // NoSuchElementException when exhausted, and that is its contract, not
+         // an edge case.
+         "java/util/Enumeration" => matches!((name, desc), ("hasMoreElements", "()Z")),
+         // `Collections` is not allowlisted as a class -- it has throwing
+         // members like `max` on an empty collection. These construct or return
+         // a shared immutable instance and cannot fail.
+-        "java/util/Collections" => matches!(
+-            (name, desc),
+-            ("emptyList", "()Ljava/util/List;")
+-                | ("emptySet", "()Ljava/util/Set;")
+-                | ("emptyMap", "()Ljava/util/Map;")
+-                | ("singleton", "(Ljava/lang/Object;)Ljava/util/Set;")
+-                | ("singletonList", "(Ljava/lang/Object;)Ljava/util/List;")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         _ => false,
+     }
+ }
+ 
+ #[cfg(test)]
+ mod contract_order_tests {
+     use super::*;

@@ -1,0 +1,34 @@
+--- crates/ajave-models/src/lib.rs
++++ replace exception_class -> Option<&'static str> with Some("")
+@@ -1569,30 +1569,17 @@
+     THROWABLE_ROOTS.contains(&class) || class.ends_with("Exception") || class.ends_with("Error")
+ }
+ 
+ /// The exception class an obligation kind raises, when it does. `Assertion`
+ /// has none: reaching it is the violation, independent of any handler --
+ /// SV-COMP's assert property is about the assert location being reached, not
+ /// about whether user code happens to catch `AssertionError` afterwards.
+ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
+-    use ajave_ir::ObligationKind::*;
+-    match kind {
+-        Assertion => None,
+-        DivByZero => Some("java/lang/ArithmeticException"),
+-        NullDeref => Some("java/lang/NullPointerException"),
+-        ArrayBounds => Some("java/lang/ArrayIndexOutOfBoundsException"),
+-        NegArraySize => Some("java/lang/NegativeArraySizeException"),
+-        ClassCast => Some("java/lang/ClassCastException"),
+-        ExplicitThrow => Some("java/lang/RuntimeException"),
+-        // A deadlock throws nothing — the program hangs. There is no
+-        // exception class to look for on replay, which is one reason the
+-        // no-deadlock property is answered outside the obligation system.
+-        Deadlock => None,
+-    }
++    Some("") /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Signatures the JDK specifies as total: no input can make them throw.
+ ///
+ /// # Why this lives here now
+ ///
+ /// It was a `match` inside the BMC, consulted only after `contract_of` returned
+ /// `None` -- so a third of the JDK surface the analyser actually asks about was

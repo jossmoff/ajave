@@ -1,0 +1,42 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Long" in is_math_call
+@@ -1302,38 +1302,17 @@
+                 | "compare"
+                 | "rotateLeft"
+                 | "rotateRight"
+                 | "bitCount"
+                 | "numberOfLeadingZeros"
+                 | "numberOfTrailingZeros"
+                 | "reverse"
+         ),
+-        "java/lang/Long" => matches!(
+-            name,
+-            "parseLong"
+-                | "max"
+-                | "min"
+-                | "sum"
+-                | "signum"
+-                | "divideUnsigned"
+-                | "remainderUnsigned"
+-                | "compareUnsigned"
+-                | "hashCode"
+-                | "compare"
+-                | "reverseBytes"
+-                | "highestOneBit"
+-                | "lowestOneBit"
+-                | "rotateLeft"
+-                | "rotateRight"
+-                | "bitCount"
+-                | "numberOfLeadingZeros"
+-                | "numberOfTrailingZeros"
+-                | "reverse"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Character" => matches!(
+             name,
+             "isDigit"
+                 | "isLetter"
+                 | "isLetterOrDigit"
+                 | "isUpperCase"
+                 | "isLowerCase"
+                 | "isWhitespace"

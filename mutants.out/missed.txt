@@ -100,3 +100,253 @@ crates/ajave-models/src/lib.rs:1139:9: delete match arm "java/util/TreeSet" | "j
 crates/ajave-models/src/lib.rs:1140:9: delete match arm "java/util/Iterator" | "java/util/ListIterator" in pure_owner_member_may_throw
 crates/ajave-models/src/lib.rs:1102:36: replace == with != in pure_owner_member_may_throw
 crates/ajave-models/src/lib.rs:1106:31: replace && with || in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1106:18: replace == with != in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1149:5: replace box_model -> Option<CallModel> with None
+crates/ajave-models/src/lib.rs:1150:9: delete match arm "java/lang/Boolean" in box_model
+crates/ajave-models/src/lib.rs:1161:9: delete match arm "java/lang/Integer" in box_model
+crates/ajave-models/src/lib.rs:1174:9: delete match arm "java/lang/Long" in box_model
+crates/ajave-models/src/lib.rs:1187:9: delete match arm "java/lang/Short" in box_model
+crates/ajave-models/src/lib.rs:1199:9: delete match arm "java/lang/Byte" in box_model
+crates/ajave-models/src/lib.rs:1211:9: delete match arm "java/lang/Character" in box_model
+crates/ajave-models/src/lib.rs:1218:9: delete match arm "java/lang/Double" in box_model
+crates/ajave-models/src/lib.rs:1232:9: delete match arm "java/lang/Float" in box_model
+crates/ajave-models/src/lib.rs:1153:13: delete match arm "logicalAnd" in box_model
+crates/ajave-models/src/lib.rs:1154:13: delete match arm "logicalOr" in box_model
+crates/ajave-models/src/lib.rs:1155:13: delete match arm "logicalXor" in box_model
+crates/ajave-models/src/lib.rs:1156:13: delete match arm "compare" in box_model
+crates/ajave-models/src/lib.rs:1157:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1158:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1151:26: replace match guard desc == "(Z)Ljava/lang/Boolean;" with true in box_model
+crates/ajave-models/src/lib.rs:1151:26: replace match guard desc == "(Z)Ljava/lang/Boolean;" with false in box_model
+crates/ajave-models/src/lib.rs:1152:31: replace match guard desc == "()Z" with true in box_model
+crates/ajave-models/src/lib.rs:1152:31: replace match guard desc == "()Z" with false in box_model
+crates/ajave-models/src/lib.rs:1151:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1152:36: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1169:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1170:13: delete match arm "toString" | "toHexString" | "toBinaryString" | "toOctalString" | "toUnsignedString" in box_model
+crates/ajave-models/src/lib.rs:1162:26: replace match guard desc == "(I)Ljava/lang/Integer;" with true in box_model
+crates/ajave-models/src/lib.rs:1162:26: replace match guard desc == "(I)Ljava/lang/Integer;" with false in box_model
+crates/ajave-models/src/lib.rs:1163:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1163:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1164:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1164:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1165:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1165:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1166:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1166:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1167:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1167:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1168:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1168:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1162:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1163:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1164:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1165:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1166:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1167:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1168:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1182:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1183:13: delete match arm "toString" | "toHexString" | "toBinaryString" | "toOctalString" | "toUnsignedString" in box_model
+crates/ajave-models/src/lib.rs:1175:26: replace match guard desc == "(J)Ljava/lang/Long;" with true in box_model
+crates/ajave-models/src/lib.rs:1175:26: replace match guard desc == "(J)Ljava/lang/Long;" with false in box_model
+crates/ajave-models/src/lib.rs:1176:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1176:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1177:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1177:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1178:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1178:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1179:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1179:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1180:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1180:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1181:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1181:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1175:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1176:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1177:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1178:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1179:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1180:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1181:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1195:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1196:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1188:26: replace match guard desc == "(S)Ljava/lang/Short;" with true in box_model
+crates/ajave-models/src/lib.rs:1188:26: replace match guard desc == "(S)Ljava/lang/Short;" with false in box_model
+crates/ajave-models/src/lib.rs:1189:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1189:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1190:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1190:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1191:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1191:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1192:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1192:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1193:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1193:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1194:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1194:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1188:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1189:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1190:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1191:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1192:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1193:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1194:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1207:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1208:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1200:26: replace match guard desc == "(B)Ljava/lang/Byte;" with true in box_model
+crates/ajave-models/src/lib.rs:1200:26: replace match guard desc == "(B)Ljava/lang/Byte;" with false in box_model
+crates/ajave-models/src/lib.rs:1201:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1201:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1202:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1202:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1203:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1203:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1204:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1204:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1205:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1205:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1206:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1206:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1200:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1201:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1202:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1203:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1204:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1205:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1206:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1214:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1215:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1212:26: replace match guard desc == "(C)Ljava/lang/Character;" with true in box_model
+crates/ajave-models/src/lib.rs:1212:26: replace match guard desc == "(C)Ljava/lang/Character;" with false in box_model
+crates/ajave-models/src/lib.rs:1213:28: replace match guard desc == "()C" with true in box_model
+crates/ajave-models/src/lib.rs:1213:28: replace match guard desc == "()C" with false in box_model
+crates/ajave-models/src/lib.rs:1212:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1213:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1224:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1225:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1219:26: replace match guard desc == "(D)Ljava/lang/Double;" with true in box_model
+crates/ajave-models/src/lib.rs:1219:26: replace match guard desc == "(D)Ljava/lang/Double;" with false in box_model
+crates/ajave-models/src/lib.rs:1220:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1220:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1221:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1221:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1222:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1222:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1223:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1223:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1226:24: replace match guard desc == "()Z" with true in box_model
+crates/ajave-models/src/lib.rs:1226:24: replace match guard desc == "()Z" with false in box_model
+crates/ajave-models/src/lib.rs:1227:29: replace match guard desc == "()Z" with true in box_model
+crates/ajave-models/src/lib.rs:1227:29: replace match guard desc == "()Z" with false in box_model
+crates/ajave-models/src/lib.rs:1228:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1228:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1229:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1229:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1219:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1220:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1221:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1222:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1223:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1226:29: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1227:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1228:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1229:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1238:13: delete match arm "compareTo" in box_model
+crates/ajave-models/src/lib.rs:1239:13: delete match arm "toString" in box_model
+crates/ajave-models/src/lib.rs:1233:26: replace match guard desc == "(F)Ljava/lang/Float;" with true in box_model
+crates/ajave-models/src/lib.rs:1233:26: replace match guard desc == "(F)Ljava/lang/Float;" with false in box_model
+crates/ajave-models/src/lib.rs:1234:29: replace match guard desc == "()F" with true in box_model
+crates/ajave-models/src/lib.rs:1234:29: replace match guard desc == "()F" with false in box_model
+crates/ajave-models/src/lib.rs:1235:27: replace match guard desc == "()I" with true in box_model
+crates/ajave-models/src/lib.rs:1235:27: replace match guard desc == "()I" with false in box_model
+crates/ajave-models/src/lib.rs:1236:28: replace match guard desc == "()J" with true in box_model
+crates/ajave-models/src/lib.rs:1236:28: replace match guard desc == "()J" with false in box_model
+crates/ajave-models/src/lib.rs:1237:30: replace match guard desc == "()D" with true in box_model
+crates/ajave-models/src/lib.rs:1237:30: replace match guard desc == "()D" with false in box_model
+crates/ajave-models/src/lib.rs:1240:24: replace match guard desc == "()Z" with true in box_model
+crates/ajave-models/src/lib.rs:1240:24: replace match guard desc == "()Z" with false in box_model
+crates/ajave-models/src/lib.rs:1241:29: replace match guard desc == "()Z" with true in box_model
+crates/ajave-models/src/lib.rs:1241:29: replace match guard desc == "()Z" with false in box_model
+crates/ajave-models/src/lib.rs:1242:28: replace match guard desc == "()B" with true in box_model
+crates/ajave-models/src/lib.rs:1242:28: replace match guard desc == "()B" with false in box_model
+crates/ajave-models/src/lib.rs:1243:29: replace match guard desc == "()S" with true in box_model
+crates/ajave-models/src/lib.rs:1243:29: replace match guard desc == "()S" with false in box_model
+crates/ajave-models/src/lib.rs:1233:31: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1234:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1235:32: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1236:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1237:35: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1240:29: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1241:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1242:33: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1243:34: replace == with != in box_model
+crates/ajave-models/src/lib.rs:1253:5: replace is_math_call -> bool with true
+crates/ajave-models/src/lib.rs:1253:5: replace is_math_call -> bool with false
+crates/ajave-models/src/lib.rs:1254:9: delete match arm "java/lang/Math" | "java/lang/StrictMath" in is_math_call
+crates/ajave-models/src/lib.rs:1287:9: delete match arm "java/lang/Integer" in is_math_call
+crates/ajave-models/src/lib.rs:1310:9: delete match arm "java/lang/Long" in is_math_call
+crates/ajave-models/src/lib.rs:1332:9: delete match arm "java/lang/Character" in is_math_call
+crates/ajave-models/src/lib.rs:1373:9: delete match arm "java/lang/Short" in is_math_call
+crates/ajave-models/src/lib.rs:1383:9: delete match arm "java/lang/Byte" in is_math_call
+crates/ajave-models/src/lib.rs:1387:9: delete match arm "java/lang/Boolean" in is_math_call
+crates/ajave-models/src/lib.rs:1391:9: delete match arm "java/lang/Float" in is_math_call
+crates/ajave-models/src/lib.rs:1405:9: delete match arm "java/lang/Double" in is_math_call
+crates/ajave-models/src/lib.rs:1425:5: replace is_collection_owner -> bool with true
+crates/ajave-models/src/lib.rs:1425:5: replace is_collection_owner -> bool with false
+crates/ajave-models/src/lib.rs:1447:5: replace is_map_owner -> bool with true
+crates/ajave-models/src/lib.rs:1447:5: replace is_map_owner -> bool with false
+crates/ajave-models/src/lib.rs:1459:5: replace is_iterator_owner -> bool with true
+crates/ajave-models/src/lib.rs:1459:5: replace is_iterator_owner -> bool with false
+crates/ajave-models/src/lib.rs:1463:5: replace is_map_entry_owner -> bool with true
+crates/ajave-models/src/lib.rs:1463:5: replace is_map_entry_owner -> bool with false
+crates/ajave-models/src/lib.rs:1476:5: replace collection_model -> Option<CallModel> with None
+crates/ajave-models/src/lib.rs:1478:13: delete match arm "next" | "previous" in collection_model
+crates/ajave-models/src/lib.rs:1487:13: delete match arm "getValue" | "getKey" in collection_model
+crates/ajave-models/src/lib.rs:1488:13: delete match arm "setValue" in collection_model
+crates/ajave-models/src/lib.rs:1496:13: delete match arm "put" | "putIfAbsent" in collection_model
+crates/ajave-models/src/lib.rs:1497:13: delete match arm "get" | "remove" | "getOrDefault" in collection_model
+crates/ajave-models/src/lib.rs:1498:13: delete match arm "values" | "keySet" | "entrySet" in collection_model
+crates/ajave-models/src/lib.rs:1503:8: delete ! in collection_model
+crates/ajave-models/src/lib.rs:1509:9: delete match arm "add" | "offer" in collection_model
+crates/ajave-models/src/lib.rs:1514:9: delete match arm "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" in collection_model
+crates/ajave-models/src/lib.rs:1517:9: delete match arm "set" in collection_model
+crates/ajave-models/src/lib.rs:1520:9: delete match arm "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll" | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element" | "elementAt" | "firstElement" | "lastElement" in collection_model
+crates/ajave-models/src/lib.rs:1527:9: delete match arm "iterator" | "listIterator" in collection_model
+crates/ajave-models/src/lib.rs:1531:19: replace match guard desc == "()I" with true in collection_model
+crates/ajave-models/src/lib.rs:1531:19: replace match guard desc == "()I" with false in collection_model
+crates/ajave-models/src/lib.rs:1532:22: replace match guard desc == "()Z" with true in collection_model
+crates/ajave-models/src/lib.rs:1532:22: replace match guard desc == "()Z" with false in collection_model
+crates/ajave-models/src/lib.rs:1531:24: replace == with != in collection_model
+crates/ajave-models/src/lib.rs:1532:27: replace == with != in collection_model
+crates/ajave-models/src/lib.rs:1541:5: replace is_transcendental_math -> bool with true
+crates/ajave-models/src/lib.rs:1541:5: replace is_transcendental_math -> bool with false
+crates/ajave-models/src/lib.rs:1542:9: replace && with || in is_transcendental_math
+crates/ajave-models/src/lib.rs:1569:5: replace is_throwable -> bool with true
+crates/ajave-models/src/lib.rs:1569:5: replace is_throwable -> bool with false
+crates/ajave-models/src/lib.rs:1569:70: replace || with && in is_throwable
+crates/ajave-models/src/lib.rs:1569:38: replace || with && in is_throwable
+crates/ajave-models/src/lib.rs:1577:5: replace exception_class -> Option<&'static str> with None
+crates/ajave-models/src/lib.rs:1577:5: replace exception_class -> Option<&'static str> with Some("")
+crates/ajave-models/src/lib.rs:1577:5: replace exception_class -> Option<&'static str> with Some("xyzzy")
+crates/ajave-models/src/lib.rs:1617:9: delete match arm "java/lang/Object" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1631:9: delete match arm "java/lang/String" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1648:9: delete match arm "java/lang/Integer" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1663:9: delete match arm "java/lang/Long" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1678:9: delete match arm "java/lang/Short" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1691:9: delete match arm "java/lang/Byte" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1705:9: delete match arm "java/lang/Float" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1720:9: delete match arm "java/lang/Double" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1763:9: delete match arm "java/lang/Math" | "java/lang/StrictMath" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1808:9: delete match arm "java/lang/System" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1819:9: delete match arm "java/lang/StringBuilder" | "java/lang/StringBuffer" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1850:9: delete match arm "java/io/PrintStream" | "java/io/PrintWriter" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1869:9: delete match arm "java/lang/Enum" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1882:9: delete match arm "java/util/ArrayList" | "java/util/LinkedList" | "java/util/HashSet" | "java/util/HashMap" | "java/util/LinkedHashMap" | "java/util/LinkedHashSet" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1897:9: delete match arm "java/util/Iterator" in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1825:17: replace || with && in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1821:17: replace || with && in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1826:21: replace && with || in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1825:26: replace == with != in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1864:17: replace || with && in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1852:17: replace && with || in is_total_jdk_signature
+crates/ajave-models/src/lib.rs:1889:17: replace || with && in is_total_jdk_signature

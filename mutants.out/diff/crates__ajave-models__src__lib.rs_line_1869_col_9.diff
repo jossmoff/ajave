@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Enum" in is_total_jdk_signature
+@@ -1861,24 +1861,17 @@
+                         | "(F)V"
+                         | "(Ljava/lang/Object;)V"
+                 ))
+                 || matches!((name, desc), ("flush", "()V"))
+         }
+ 
+         // `compareTo` can raise `ClassCastException` across enum types, so it
+         // is excluded; the rest are total.
+-        "java/lang/Enum" => matches!(
+-            (name, desc),
+-            ("ordinal", "()I")
+-                | ("name", "()Ljava/lang/String;")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("hashCode", "()I")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // Only the total queries on hash-based collections. `get`, `next`,
+         // `pop`, `peek` and the index-taking `add`/`remove` overloads are all
+         // partial. Sorted collections are excluded entirely: `TreeMap`/`TreeSet`
+         // throw NPE on a null key and `ClassCastException` on incomparable ones.
+         "java/util/ArrayList"
+         | "java/util/LinkedList"
+         | "java/util/HashSet"

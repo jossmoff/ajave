@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Byte" in is_math_call
+@@ -1375,20 +1375,17 @@
+             "parseShort"
+                 | "compare"
+                 | "compareTo"
+                 | "hashCode"
+                 | "reverseBytes"
+                 | "toUnsignedInt"
+                 | "toUnsignedLong"
+         ),
+-        "java/lang/Byte" => matches!(
+-            name,
+-            "parseByte" | "compare" | "compareTo" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Boolean" => matches!(
+             name,
+             "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
+         ),
+         "java/lang/Float" => matches!(
+             name,
+             "floatToRawIntBits"
+                 | "floatToIntBits"

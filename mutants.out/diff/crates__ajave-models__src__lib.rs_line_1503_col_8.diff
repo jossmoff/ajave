@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete ! in collection_model
+@@ -1495,17 +1495,17 @@
+         return match name {
+             "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]
+             "get" | "remove" | "getOrDefault" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+             "values" | "keySet" | "entrySet" => Some(CallModel::CollectionIterator),
+             _ => None,
+         };
+     }
+ 
+-    if !is_collection_owner(owner) {
++    if  /* ~ changed by cargo-mutants ~ */is_collection_owner(owner) {
+         return None;
+     }
+ 
+     // Collection/List/Set/Queue/Deque store methods
+     match name {
+         "add" | "offer" => {
+             // add(Object) → arg 0; add(int, Object) → arg 1
+             let elem_idx = if desc.starts_with("(I") { 1 } else { 0 };

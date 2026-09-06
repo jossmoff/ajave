@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()Z" with true in box_model
+@@ -1233,17 +1233,17 @@
+             "valueOf" if desc == "(F)Ljava/lang/Float;" => Some(CallModel::BoxStore(Ty::Int)),
+             "floatValue" if desc == "()F" => Some(CallModel::Unbox(Ty::Int)),
+             "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
++            "isInfinite" if true /* ~ changed by cargo-mutants ~ */ => Some(CallModel::MathCall(Some(Ty::Int))),
+             "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
+             _ => None,
+         },
+         _ => None,
+     }
+ }
+ 

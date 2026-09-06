@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace || with && in is_total_jdk_signature
+@@ -1881,17 +1881,17 @@
+         // throw NPE on a null key and `ClassCastException` on incomparable ones.
+         "java/util/ArrayList"
+         | "java/util/LinkedList"
+         | "java/util/HashSet"
+         | "java/util/HashMap"
+         | "java/util/LinkedHashMap"
+         | "java/util/LinkedHashSet" => {
+             matches!((name, desc), ("<init>", "()V"))
+-                || matches!(
++                && /* ~ changed by cargo-mutants ~ */ matches!(
+                     (name, desc),
+                     ("size", "()I") | ("isEmpty", "()Z") | ("clear", "()V")
+                 )
+         }
+ 
+         // `hasNext` is total; `next` throws `NoSuchElementException` when
+         // exhausted and `remove` throws `IllegalStateException`.
+         "java/util/Iterator" => matches!((name, desc), ("hasNext", "()Z")),

@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "iterator" | "listIterator" in collection_model
+@@ -1519,17 +1519,17 @@
+         // Collection/List/Queue/Deque load methods
+         "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
+         | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element"
+         | "elementAt" | "firstElement" | "lastElement" => {
+             Some(CallModel::CollectionLoad(ret_ty(desc)))
+         }
+ 
+         // Iterator creation — return the collection itself
+-        "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // Size queries read the tracked element count, which is what makes an
+         // `i < size` bound provable rather than merely stated.
+         "size" if desc == "()I" => Some(CallModel::CollectionSize),
+         "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),
+ 
+         _ => None,
+     }

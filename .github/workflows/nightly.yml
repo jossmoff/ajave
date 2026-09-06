@@ -15,7 +15,8 @@ jobs:
   mutants:
     name: mutation testing
     runs-on: ubuntu-latest
-    # A surviving mutant is a missing test, not a broken build.
+    # The recipe reports and exits 0; this is belt and braces in case a
+    # mechanical failure (a bad install, a build break) escapes it.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

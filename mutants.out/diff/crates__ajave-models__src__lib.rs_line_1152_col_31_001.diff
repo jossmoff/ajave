@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()Z" with false in box_model
+@@ -1144,17 +1144,17 @@
+     }
+ }
+ 
+ /// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.
+ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+     match owner {
+         "java/lang/Boolean" => match name {
+             "valueOf" if desc == "(Z)Ljava/lang/Boolean;" => Some(CallModel::BoxStore(Ty::Int)),
+-            "booleanValue" if desc == "()Z" => Some(CallModel::Unbox(Ty::Int)),
++            "booleanValue" if false /* ~ changed by cargo-mutants ~ */ => Some(CallModel::Unbox(Ty::Int)),
+             "logicalAnd" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::And)),
+             "logicalOr" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Or)),
+             "logicalXor" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Xor)),
+             "compare" => Some(CallModel::StaticBinOp(ajave_ir::BinOp::Sub)),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },

@@ -1,0 +1,33 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Byte" in is_total_jdk_signature
+@@ -1683,29 +1683,17 @@
+                 | ("doubleValue", "()D")
+                 | ("floatValue", "()F")
+                 | ("byteValue", "()B")
+                 | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(S)Ljava/lang/Short;")
+         ),
+-        "java/lang/Byte" => matches!(
+-            (name, desc),
+-            ("byteValue", "()B")
+-                | ("intValue", "()I")
+-                | ("longValue", "()J")
+-                | ("doubleValue", "()D")
+-                | ("floatValue", "()F")
+-                | ("shortValue", "()S")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-                | ("valueOf", "(B)Ljava/lang/Byte;")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         // Float/Double parsing throws; the accessors and primitive boxing do not.
+         "java/lang/Float" => matches!(
+             (name, desc),
+             ("floatValue", "()F")
+                 | ("doubleValue", "()D")
+                 | ("intValue", "()I")
+                 | ("longValue", "()J")
+                 | ("shortValue", "()S")

@@ -1,0 +1,53 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Math" | "java/lang/StrictMath" in is_math_call
+@@ -1246,49 +1246,17 @@
+         _ => None,
+     }
+ }
+ 
+ /// Check whether a Math/Integer/Long static method should be kept as a Call
+ /// so the SMT engine can model it precisely instead of havocing.
+ fn is_math_call(owner: &str, name: &str) -> bool {
+     match owner {
+-        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+-            name,
+-            "abs"
+-                | "min"
+-                | "max"
+-                | "addExact"
+-                | "subtractExact"
+-                | "multiplyExact"
+-                | "negateExact"
+-                | "floorDiv"
+-                | "floorMod"
+-                | "sin"
+-                | "cos"
+-                | "tan"
+-                | "asin"
+-                | "acos"
+-                | "atan"
+-                | "atan2"
+-                | "exp"
+-                | "log"
+-                | "log10"
+-                | "pow"
+-                | "sqrt"
+-                | "round"
+-                | "ceil"
+-                | "floor"
+-                | "toRadians"
+-                | "toDegrees"
+-                | "sinh"
+-                | "cosh"
+-                | "tanh"
+-                | "getExponent"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Integer" => matches!(
+             name,
+             "parseInt"
+                 | "max"
+                 | "min"
+                 | "sum"
+                 | "reverseBytes"
+                 | "highestOneBit"

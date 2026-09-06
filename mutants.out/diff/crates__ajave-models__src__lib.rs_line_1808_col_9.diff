@@ -1,0 +1,27 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/System" in is_total_jdk_signature
+@@ -1800,23 +1800,17 @@
+                 | "tanh"
+                 | "fma"
+                 | "scalb"
+                 | "getExponent"
+         ),
+ 
+         // `arraycopy` throws `IndexOutOfBounds`/`ArrayStore`/NPE and `exit` can
+         // raise `SecurityException`, so neither is listed.
+-        "java/lang/System" => matches!(
+-            (name, desc),
+-            ("currentTimeMillis", "()J")
+-                | ("nanoTime", "()J")
+-                | ("identityHashCode", "(Ljava/lang/Object;)I")
+-                | ("lineSeparator", "()Ljava/lang/String;")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // The no-arg constructor and the primitive/String appends. The
+         // capacity constructor throws `NegativeArraySizeException`, and the
+         // `(char[], int, int)` append throws `IndexOutOfBoundsException`.
+         "java/lang/StringBuilder" | "java/lang/StringBuffer" => {
+             matches!((name, desc), ("<init>", "()V"))
+                 || matches!(
+                     (name, desc),

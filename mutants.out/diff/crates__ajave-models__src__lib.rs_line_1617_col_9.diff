@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Object" in is_total_jdk_signature
+@@ -1609,24 +1609,17 @@
+ /// Every entry is still a soundness commitment under the rules in CLAUDE.md --
+ /// keyed on the full `(class, name, desc)`, never a whole class, never a
+ /// partial function -- but now there is exactly one place that states them.
+ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
+     match class {
+         // `Object`'s own implementations are total. (Overrides are not: a
+         // subclass `equals`/`toString` can throw, but those have bodies we
+         // inline, so they never reach this check as havoced calls.)
+-        "java/lang/Object" => matches!(
+-            (name, desc),
+-            ("<init>", "()V")
+-                | ("getClass", "()Ljava/lang/Class;")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // Only the no-argument queries. Anything taking a `String`/`CharSequence`
+         // throws NPE on null (`concat`, `contains`, `startsWith`, `replace`),
+         // anything taking an index throws (`charAt`, `substring`), the regex
+         // methods throw `PatternSyntaxException`, and `format` throws
+         // `IllegalFormatException`.
+         "java/lang/String" => matches!(
+             (name, desc),

@@ -1,0 +1,33 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Short" in is_total_jdk_signature
+@@ -1670,29 +1670,17 @@
+                 | ("byteValue", "()B")
+                 | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(J)Ljava/lang/Long;")
+                 | ("toString", "(J)Ljava/lang/String;")
+                 | ("compare", "(JJ)I")
+         ),
+-        "java/lang/Short" => matches!(
+-            (name, desc),
+-            ("shortValue", "()S")
+-                | ("intValue", "()I")
+-                | ("longValue", "()J")
+-                | ("doubleValue", "()D")
+-                | ("floatValue", "()F")
+-                | ("byteValue", "()B")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-                | ("valueOf", "(S)Ljava/lang/Short;")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Byte" => matches!(
+             (name, desc),
+             ("byteValue", "()B")
+                 | ("intValue", "()I")
+                 | ("longValue", "()J")
+                 | ("doubleValue", "()D")
+                 | ("floatValue", "()F")
+                 | ("shortValue", "()S")

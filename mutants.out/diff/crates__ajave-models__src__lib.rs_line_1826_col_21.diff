@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in is_total_jdk_signature
+@@ -1818,17 +1818,17 @@
+         // `(char[], int, int)` append throws `IndexOutOfBoundsException`.
+         "java/lang/StringBuilder" | "java/lang/StringBuffer" => {
+             matches!((name, desc), ("<init>", "()V"))
+                 || matches!(
+                     (name, desc),
+                     ("length", "()I") | ("toString", "()Ljava/lang/String;")
+                 )
+                 || (name == "append"
+-                    && matches!(
++                    || /* ~ changed by cargo-mutants ~ */ matches!(
+                         desc,
+                         "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+                             | "(Ljava/lang/String;)Ljava/lang/StringBuffer;"
+                             | "(I)Ljava/lang/StringBuilder;"
+                             | "(I)Ljava/lang/StringBuffer;"
+                             | "(J)Ljava/lang/StringBuilder;"
+                             | "(J)Ljava/lang/StringBuffer;"
+                             | "(C)Ljava/lang/StringBuilder;"

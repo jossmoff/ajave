@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace || with && in is_throwable
+@@ -1561,17 +1561,17 @@
+                 | "toRadians"
+                 | "toDegrees"
+         )
+ }
+ 
+ /// Does a `new` of this class need field tracking? Exception objects do not:
+ /// we care only that one was thrown.
+ pub fn is_throwable(class: &str) -> bool {
+-    THROWABLE_ROOTS.contains(&class) || class.ends_with("Exception") || class.ends_with("Error")
++    THROWABLE_ROOTS.contains(&class) && /* ~ changed by cargo-mutants ~ */ class.ends_with("Exception") || class.ends_with("Error")
+ }
+ 
+ /// The exception class an obligation kind raises, when it does. `Assertion`
+ /// has none: reaching it is the violation, independent of any handler --
+ /// SV-COMP's assert property is about the assert location being reached, not
+ /// about whether user code happens to catch `AssertionError` afterwards.
+ pub fn exception_class(kind: ajave_ir::ObligationKind) -> Option<&'static str> {
+     use ajave_ir::ObligationKind::*;

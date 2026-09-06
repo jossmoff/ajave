@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in is_total_jdk_signature
+@@ -1844,17 +1844,17 @@
+                     ))
+         }
+ 
+         // `print`/`println` swallow IOException and render null as "null".
+         // `format`/`printf` throw `IllegalFormatException`, and `print(char[])`
+         // throws NPE on a null array, so neither is listed.
+         "java/io/PrintStream" | "java/io/PrintWriter" => {
+             (matches!(name, "print" | "println")
+-                && matches!(
++                || /* ~ changed by cargo-mutants ~ */ matches!(
+                     desc,
+                     "()V"
+                         | "(Ljava/lang/String;)V"
+                         | "(I)V"
+                         | "(J)V"
+                         | "(C)V"
+                         | "(Z)V"
+                         | "(D)V"

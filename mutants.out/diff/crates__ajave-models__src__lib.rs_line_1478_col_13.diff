@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "next" | "previous" in collection_model
+@@ -1470,17 +1470,17 @@
+ 
+ /// Model collection add/get/put/iterator as synthetic field operations.
+ /// Returns `None` for methods we don't specifically model (they fall through
+ /// to `Pure` via `PURE_OWNERS`).
+ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+     // Iterator methods
+     if is_iterator_owner(owner) {
+         return match name {
+-            "next" | "previous" => Some(CallModel::CollectionLoad(ret_ty(desc))),
++             /* ~ changed by cargo-mutants ~ */
+             // hasNext → unconstrained boolean (Pure/Havoc)
+             _ => None,
+         };
+     }
+ 
+     // Map.Entry methods — getValue/getKey read from the same $coll_last
+     if is_map_entry_owner(owner) {
+         return match name {

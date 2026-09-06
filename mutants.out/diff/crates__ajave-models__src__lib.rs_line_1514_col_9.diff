@@ -1,0 +1,23 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" in collection_model
+@@ -1506,19 +1506,17 @@
+ 
+     // Collection/List/Set/Queue/Deque store methods
+     match name {
+         "add" | "offer" => {
+             // add(Object) → arg 0; add(int, Object) → arg 1
+             let elem_idx = if desc.starts_with("(I") { 1 } else { 0 };
+             Some(CallModel::CollectionStore(elem_idx))
+         }
+-        "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" => {
+-            Some(CallModel::CollectionStore(0))
+-        }
++         /* ~ changed by cargo-mutants ~ */
+         "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
+ 
+         // Collection/List/Queue/Deque load methods
+         "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
+         | "pollFirst" | "pollLast" | "pop" | "removeFirst" | "removeLast" | "element"
+         | "elementAt" | "firstElement" | "lastElement" => {
+             Some(CallModel::CollectionLoad(ret_ty(desc)))
+         }

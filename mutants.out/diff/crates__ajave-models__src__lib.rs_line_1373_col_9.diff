@@ -1,0 +1,30 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Short" in is_math_call
+@@ -1365,26 +1365,17 @@
+                 | "isTitleCase"
+                 | "isUnicodeIdentifierPart"
+                 | "isUnicodeIdentifierStart"
+                 | "isIdentifierIgnorable"
+                 | "getDirectionality"
+                 | "getNumericValue"
+                 | "isIdeographic"
+         ),
+-        "java/lang/Short" => matches!(
+-            name,
+-            "parseShort"
+-                | "compare"
+-                | "compareTo"
+-                | "hashCode"
+-                | "reverseBytes"
+-                | "toUnsignedInt"
+-                | "toUnsignedLong"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Byte" => matches!(
+             name,
+             "parseByte" | "compare" | "compareTo" | "hashCode" | "toUnsignedInt" | "toUnsignedLong"
+         ),
+         "java/lang/Boolean" => matches!(
+             name,
+             "logicalAnd" | "logicalOr" | "logicalXor" | "compare" | "hashCode"
+         ),

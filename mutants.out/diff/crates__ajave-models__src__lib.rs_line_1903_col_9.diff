@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/Enumeration" in is_total_jdk_signature
+@@ -1895,17 +1895,17 @@
+         // `hasNext` is total; `next` throws `NoSuchElementException` when
+         // exhausted and `remove` throws `IllegalStateException`.
+         "java/util/Iterator" => matches!((name, desc), ("hasNext", "()Z")),
+         // `hasMoreElements` is to `Enumeration` what `hasNext` is to
+         // `Iterator`: specified to report whether more elements remain, with no
+         // failure mode. `nextElement` is deliberately absent -- it throws
+         // NoSuchElementException when exhausted, and that is its contract, not
+         // an edge case.
+-        "java/util/Enumeration" => matches!((name, desc), ("hasMoreElements", "()Z")),
++         /* ~ changed by cargo-mutants ~ */
+         // `Collections` is not allowlisted as a class -- it has throwing
+         // members like `max` on an empty collection. These construct or return
+         // a shared immutable instance and cannot fail.
+         "java/util/Collections" => matches!(
+             (name, desc),
+             ("emptyList", "()Ljava/util/List;")
+                 | ("emptySet", "()Ljava/util/Set;")
+                 | ("emptyMap", "()Ljava/util/Map;")

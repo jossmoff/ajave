@@ -1,0 +1,62 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Math" | "java/lang/StrictMath" in is_total_jdk_signature
+@@ -1755,58 +1755,17 @@
+                 | ("isUpperCase", "(C)Z") | ("isLowerCase", "(C)Z")
+                 | ("isAlphabetic", "(I)Z") | ("isSpaceChar", "(C)Z")
+                 | ("toUpperCase", "(C)C") | ("toLowerCase", "(C)C")
+         ),
+ 
+         // Explicitly enumerated: the `*Exact` family throws `ArithmeticException`
+         // on overflow, and `floorDiv`/`floorMod`/`ceilDiv` throw on a zero
+         // divisor. The listed methods saturate to NaN/Infinity instead.
+-        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+-            name,
+-            "abs"
+-                | "min"
+-                | "max"
+-                | "sqrt"
+-                | "cbrt"
+-                | "sin"
+-                | "cos"
+-                | "tan"
+-                | "asin"
+-                | "acos"
+-                | "atan"
+-                | "atan2"
+-                | "exp"
+-                | "expm1"
+-                | "log"
+-                | "log10"
+-                | "log1p"
+-                | "pow"
+-                | "floor"
+-                | "ceil"
+-                | "rint"
+-                | "round"
+-                | "signum"
+-                | "hypot"
+-                | "random"
+-                | "toRadians"
+-                | "toDegrees"
+-                | "ulp"
+-                | "nextUp"
+-                | "nextDown"
+-                | "nextAfter"
+-                | "copySign"
+-                | "IEEEremainder"
+-                | "sinh"
+-                | "cosh"
+-                | "tanh"
+-                | "fma"
+-                | "scalb"
+-                | "getExponent"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // `arraycopy` throws `IndexOutOfBounds`/`ArrayStore`/NPE and `exit` can
+         // raise `SecurityException`, so neither is listed.
+         "java/lang/System" => matches!(
+             (name, desc),
+             ("currentTimeMillis", "()J")
+                 | ("nanoTime", "()J")
+                 | ("identityHashCode", "(Ljava/lang/Object;)I")

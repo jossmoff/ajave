@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()S" with false in box_model
+@@ -1235,17 +1235,17 @@
+             "intValue" if desc == "()I" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "longValue" if desc == "()J" => Some(CallModel::MathCall(Some(Ty::Long))),
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             "isNaN" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "isInfinite" if desc == "()Z" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "byteValue" if desc == "()B" => Some(CallModel::MathCall(Some(Ty::Int))),
+-            "shortValue" if desc == "()S" => Some(CallModel::MathCall(Some(Ty::Int))),
++            "shortValue" if false /* ~ changed by cargo-mutants ~ */ => Some(CallModel::MathCall(Some(Ty::Int))),
+             _ => None,
+         },
+         _ => None,
+     }
+ }
+ 
+ /// Check whether a Math/Integer/Long static method should be kept as a Call
+ /// so the SMT engine can model it precisely instead of havocing.

@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()Z" with true in collection_model
+@@ -1524,17 +1524,17 @@
+         }
+ 
+         // Iterator creation — return the collection itself
+         "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+ 
+         // Size queries read the tracked element count, which is what makes an
+         // `i < size` bound provable rather than merely stated.
+         "size" if desc == "()I" => Some(CallModel::CollectionSize),
+-        "isEmpty" if desc == "()Z" => Some(CallModel::CollectionIsEmpty),
++        "isEmpty" if true /* ~ changed by cargo-mutants ~ */ => Some(CallModel::CollectionIsEmpty),
+ 
+         _ => None,
+     }
+ }
+ 
+ /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+ /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
+ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {

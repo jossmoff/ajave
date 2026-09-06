@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in is_transcendental_math
+@@ -1534,17 +1534,17 @@
+         _ => None,
+     }
+ }
+ 
+ /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+ /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
+ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
+     matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
+-        && matches!(
++        || /* ~ changed by cargo-mutants ~ */ matches!(
+             name,
+             "sin"
+                 | "cos"
+                 | "tan"
+                 | "asin"
+                 | "acos"
+                 | "atan"
+                 | "atan2"

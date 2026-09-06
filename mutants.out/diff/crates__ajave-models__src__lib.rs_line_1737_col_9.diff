@@ -1,0 +1,29 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Boolean" in is_total_jdk_signature
+@@ -1729,25 +1729,17 @@
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(D)Ljava/lang/Double;")
+                 | ("isNaN", "(D)Z")
+                 | ("isInfinite", "(D)Z")
+         ),
+         // `parseBoolean`/`valueOf(String)` are null-tolerant by contract here:
+         // they return false rather than throwing.
+-        "java/lang/Boolean" => matches!(
+-            (name, desc),
+-            ("booleanValue", "()Z")
+-                | ("hashCode", "()I")
+-                | ("toString", "()Ljava/lang/String;")
+-                | ("equals", "(Ljava/lang/Object;)Z")
+-                | ("valueOf", "(Z)Ljava/lang/Boolean;")
+-                | ("parseBoolean", "(Ljava/lang/String;)Z")
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         "java/lang/Character" => matches!(
+             (name, desc),
+             ("charValue", "()C") | ("hashCode", "()I")
+                 | ("toString", "()Ljava/lang/String;")
+                 | ("equals", "(Ljava/lang/Object;)Z")
+                 | ("valueOf", "(C)Ljava/lang/Character;")
+                 // Classification predicates are total over the whole char range.
+                 | ("isDigit", "(C)Z") | ("isLetter", "(C)Z")

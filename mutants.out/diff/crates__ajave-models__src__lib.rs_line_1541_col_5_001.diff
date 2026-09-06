@@ -1,0 +1,43 @@
+--- crates/ajave-models/src/lib.rs
++++ replace is_transcendental_math -> bool with false
+@@ -1533,39 +1533,17 @@
+ 
+         _ => None,
+     }
+ }
+ 
+ /// Returns `true` if this is a transcendental Math method (sin, cos, exp, log,
+ /// pow, sqrt, etc.) that requires a nonlinear real arithmetic solver like dReal.
+ pub fn is_transcendental_math(owner: &str, name: &str) -> bool {
+-    matches!(owner, "java/lang/Math" | "java/lang/StrictMath")
+-        && matches!(
+-            name,
+-            "sin"
+-                | "cos"
+-                | "tan"
+-                | "asin"
+-                | "acos"
+-                | "atan"
+-                | "atan2"
+-                | "exp"
+-                | "log"
+-                | "log10"
+-                | "pow"
+-                | "sqrt"
+-                | "sinh"
+-                | "cosh"
+-                | "tanh"
+-                | "ceil"
+-                | "floor"
+-                | "toRadians"
+-                | "toDegrees"
+-        )
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Does a `new` of this class need field tracking? Exception objects do not:
+ /// we care only that one was thrown.
+ pub fn is_throwable(class: &str) -> bool {
+     THROWABLE_ROOTS.contains(&class) || class.ends_with("Exception") || class.ends_with("Error")
+ }
+ 

@@ -1,0 +1,47 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/StringBuilder" | "java/lang/StringBuffer" in is_total_jdk_signature
+@@ -1811,43 +1811,17 @@
+                 | ("nanoTime", "()J")
+                 | ("identityHashCode", "(Ljava/lang/Object;)I")
+                 | ("lineSeparator", "()Ljava/lang/String;")
+         ),
+ 
+         // The no-arg constructor and the primitive/String appends. The
+         // capacity constructor throws `NegativeArraySizeException`, and the
+         // `(char[], int, int)` append throws `IndexOutOfBoundsException`.
+-        "java/lang/StringBuilder" | "java/lang/StringBuffer" => {
+-            matches!((name, desc), ("<init>", "()V"))
+-                || matches!(
+-                    (name, desc),
+-                    ("length", "()I") | ("toString", "()Ljava/lang/String;")
+-                )
+-                || (name == "append"
+-                    && matches!(
+-                        desc,
+-                        "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+-                            | "(Ljava/lang/String;)Ljava/lang/StringBuffer;"
+-                            | "(I)Ljava/lang/StringBuilder;"
+-                            | "(I)Ljava/lang/StringBuffer;"
+-                            | "(J)Ljava/lang/StringBuilder;"
+-                            | "(J)Ljava/lang/StringBuffer;"
+-                            | "(C)Ljava/lang/StringBuilder;"
+-                            | "(C)Ljava/lang/StringBuffer;"
+-                            | "(Z)Ljava/lang/StringBuilder;"
+-                            | "(Z)Ljava/lang/StringBuffer;"
+-                            | "(D)Ljava/lang/StringBuilder;"
+-                            | "(D)Ljava/lang/StringBuffer;"
+-                            | "(F)Ljava/lang/StringBuilder;"
+-                            | "(F)Ljava/lang/StringBuffer;"
+-                            | "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+-                            | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;"
+-                    ))
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // `print`/`println` swallow IOException and render null as "null".
+         // `format`/`printf` throw `IllegalFormatException`, and `print(char[])`
+         // throws NPE on a null array, so neither is listed.
+         "java/io/PrintStream" | "java/io/PrintWriter" => {
+             (matches!(name, "print" | "println")
+                 && matches!(
+                     desc,

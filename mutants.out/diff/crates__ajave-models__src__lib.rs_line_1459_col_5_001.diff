@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace is_iterator_owner -> bool with false
+@@ -1451,17 +1451,17 @@
+             | "java/util/TreeMap"
+             | "java/util/LinkedHashMap"
+             | "java/util/AbstractMap"
+             | "java/util/Hashtable"
+     )
+ }
+ 
+ fn is_iterator_owner(owner: &str) -> bool {
+-    matches!(owner, "java/util/Iterator" | "java/util/ListIterator")
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn is_map_entry_owner(owner: &str) -> bool {
+     matches!(
+         owner,
+         "java/util/Map$Entry"
+             | "java/util/AbstractMap$SimpleEntry"
+             | "java/util/AbstractMap$SimpleImmutableEntry"

@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()S" with true in box_model
+@@ -1171,17 +1171,17 @@
+             | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Long" => match name {
+             "valueOf" if desc == "(J)Ljava/lang/Long;" => Some(CallModel::BoxStore(Ty::Long)),
+             "longValue" if desc == "()J" => Some(CallModel::Unbox(Ty::Long)),
+             "intValue" if desc == "()I" => Some(CallModel::Unbox(Ty::Long)),
+             "byteValue" if desc == "()B" => Some(CallModel::Unbox(Ty::Long)),
+-            "shortValue" if desc == "()S" => Some(CallModel::Unbox(Ty::Long)),
++            "shortValue" if true /* ~ changed by cargo-mutants ~ */ => Some(CallModel::Unbox(Ty::Long)),
+             "floatValue" if desc == "()F" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "doubleValue" if desc == "()D" => Some(CallModel::MathCall(Some(Ty::Double))),
+             "compareTo" => Some(CallModel::MathCall(Some(Ty::Int))),
+             "toString" | "toHexString" | "toBinaryString" | "toOctalString"
+             | "toUnsignedString" => Some(CallModel::MathCall(Some(Ty::Ref))),
+             _ => None,
+         },
+         "java/lang/Short" => match name {

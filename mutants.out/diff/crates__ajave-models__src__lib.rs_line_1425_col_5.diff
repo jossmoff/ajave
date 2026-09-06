@@ -1,0 +1,39 @@
+--- crates/ajave-models/src/lib.rs
++++ replace is_collection_owner -> bool with true
+@@ -1417,35 +1417,17 @@
+                 | "hashCode"
+         ),
+         _ => false,
+     }
+ }
+ 
+ /// Owners that are collection types (List, Set, Map, Queue, Deque + impls).
+ fn is_collection_owner(owner: &str) -> bool {
+-    matches!(
+-        owner,
+-        "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/Vector"
+-            | "java/util/Stack"
+-            | "java/util/Set"
+-            | "java/util/HashSet"
+-            | "java/util/TreeSet"
+-            | "java/util/LinkedHashSet"
+-            | "java/util/Collection"
+-            | "java/util/AbstractList"
+-            | "java/util/AbstractCollection"
+-            | "java/util/AbstractSet"
+-            | "java/util/Queue"
+-            | "java/util/Deque"
+-            | "java/util/ArrayDeque"
+-    )
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn is_map_owner(owner: &str) -> bool {
+     matches!(
+         owner,
+         "java/util/Map"
+             | "java/util/HashMap"
+             | "java/util/TreeMap"

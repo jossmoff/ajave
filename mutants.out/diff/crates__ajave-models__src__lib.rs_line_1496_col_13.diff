@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "put" | "putIfAbsent" in collection_model
+@@ -1488,17 +1488,17 @@
+             "setValue" => Some(CallModel::CollectionStore(0)),
+             _ => None,
+         };
+     }
+ 
+     // Map methods
+     if is_map_owner(owner) {
+         return match name {
+-            "put" | "putIfAbsent" => Some(CallModel::CollectionStore(1)), // put(key, val) → store arg[1]
++             /* ~ changed by cargo-mutants ~ */ // put(key, val) → store arg[1]
+             "get" | "remove" | "getOrDefault" => Some(CallModel::CollectionLoad(ret_ty(desc))),
+             "values" | "keySet" | "entrySet" => Some(CallModel::CollectionIterator),
+             _ => None,
+         };
+     }
+ 
+     if !is_collection_owner(owner) {
+         return None;
