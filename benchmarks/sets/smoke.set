@@ -211,3 +211,7 @@ sv-comp/securibench/Basic30.yml valid-assert
 sv-comp/securibench/Datastructures5.yml valid-assert
 sv-comp/securibench/Factories3.yml valid-assert
 sv-comp/securibench/Inter4.yml valid-assert
+
+# CHC: an obligation inside a catch needs exceptional edges in BOTH encoders
+sv-comp/jbmc-regression/ArrayIndexOutOfBoundsException1.yml valid-assert
+sv-comp/jbmc-regression/ClassCastException1.yml valid-assert

@@ -158,6 +158,11 @@ impl Engine for ChcEngine {
         // addition at all -- the same defect recorded for the BMC in
         // `smt_bmc/encode.rs`. Overflow guards do not help: the values were
         // never integers to begin with.
+        //
+        // Declining the whole program is heavier than it needs to be: havocing
+        // just the float-valued rvalues would be sound and would keep the
+        // programs whose assertion is about integers and whose `double` is
+        // incidental. That is 37 of the 142 unproven TRUE tasks. Not done yet.
         let uses_float = reachable_methods
             .iter()
             .any(|mk| prog.body(mk).is_some_and(body_uses_float_types));
@@ -1925,6 +1930,40 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             )
         };
 
+        // Exceptional edges, exactly as the inter-procedural encoder emits
+        // them -- and for the same reason, which had to be learned twice.
+        //
+        // Following normal control flow only makes a handler unreachable, so
+        // an obligation *inside* a handler is never examined and the program
+        // is declared safe. That is a wrong TRUE at -16. The decline that used
+        // to guard it was removed once the LIA encoder gained exceptional
+        // edges, but this is a second, separate encoder and it did not have
+        // them -- so the guard was removed for a path that still needed it.
+        // `ArrayIndexOutOfBoundsException1..3` and `ClassCastException1` all
+        // assert inside a `catch` and were all proved TRUE.
+        //
+        // Soundness is the same argument as the LIA case: a throw may occur
+        // anywhere in the block, so the handler is entered from the block's
+        // *entry* state with locals preserved (JVMS 2.6.1) and the operand
+        // stack free. The block's own assignments are deliberately excluded,
+        // since the throw may precede any of them. That admits a superset of
+        // the real handler states, which is the safe direction for an engine
+        // that may only discharge.
+        for edge in &block.exceptional {
+            let mut all = vec![block_app(block.id.0)];
+            for (i, vi) in body.vars.iter().enumerate() {
+                if matches!(vi.kind, VarKind::Local(_)) {
+                    all.push(format!("(= v{}p v{})", i, i));
+                }
+            }
+            out.push_str(&format!(
+                "(assert (forall ({}) (=> (and {}) {})))\n",
+                forall_both,
+                all.join(" "),
+                block_app_dst(edge.target.0)
+            ));
+        }
+
         match &block.term {
             Terminator::Goto(t) => {
                 out.push_str(&mk_trans(t.0, &[]));
@@ -2147,6 +2186,100 @@ mod tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    /// Both encoders must make an exception handler reachable.
+    ///
+    /// An encoding that follows normal control flow only leaves a handler
+    /// unreachable, so an obligation *inside* the handler is never examined
+    /// and the program is declared safe -- a wrong TRUE at -16.
+    ///
+    /// This has now been paid for twice. `argv-tasks/HttpTransport_false`
+    /// bought the decline that used to guard it; when the inter-procedural
+    /// encoder gained exceptional edges the decline was removed, but
+    /// `encode_chc_single` is a *separate* encoder that did not have them, so
+    /// the guard was withdrawn from a path that still needed it.
+    /// `ArrayIndexOutOfBoundsException1..3` and `ClassCastException1` -- all of
+    /// which assert inside a `catch` -- were then all proved TRUE.
+    ///
+    /// Hence the assertion over both encoders rather than the one that broke.
+    #[test]
+    fn both_encoders_make_a_handler_reachable() {
+        let main = mk("main", "([Ljava/lang/String;)V");
+        let mut prog = Program::default();
+        let (n, c) = (VarId(0), VarId(1));
+        let handler = BlockId(1);
+        let body = Body {
+            is_static: true,
+            key: main.clone(),
+            entry: BlockId(0),
+            vars: vec![int_var(0), int_var(1)],
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(c),
+                bytecode_offset: 0,
+                line: None,
+                guarded: true,
+            }],
+            blocks: vec![
+                // Guarded block: throws to the handler.
+                Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![Stmt::Assign(n, Rvalue::Nondet(Ty::Int, None))],
+                    term: Terminator::Return(None),
+                    exceptional: vec![ExcEdge {
+                        class: None,
+                        target: handler,
+                    }],
+                },
+                // The handler, holding `assert false`.
+                Block {
+                    id: handler,
+                    bytecode_offset: 1,
+                    stmts: vec![
+                        Stmt::Assign(c, Rvalue::Use(Operand::int(0))),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                },
+            ],
+        };
+        prog.bodies.insert(main.clone(), body.clone());
+        prog.entry = Some(main.clone());
+
+        // Mentioning the handler is not enough -- every block gets a
+        // `declare-fun` whether or not anything can reach it. What matters is
+        // a *clause whose head is the handler*, so this looks for an
+        // implication in which the guarded block appears in the body and the
+        // handler after it. Asserting mere mention passes with the fix
+        // removed, which was checked.
+        fn derives_handler(smt2: &str, guarded: &str, handler: &str) -> bool {
+            smt2.lines().filter(|l| l.starts_with("(assert")).any(|l| {
+                match (l.rfind(guarded), l.rfind(handler)) {
+                    (Some(g), Some(h)) => h > g,
+                    _ => false,
+                }
+            })
+        }
+
+        let single = encode_chc_single(&body, &[ObligationId(0)]);
+        assert!(
+            derives_handler(&single, "block_0", "block_1"),
+            "bitvector encoder has no clause deriving the handler:\n{single}"
+        );
+
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let interproc = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        assert!(
+            derives_handler(&interproc, "m0_b0", "m0_b1"),
+            "LIA encoder has no clause deriving the handler:\n{interproc}"
+        );
     }
 
     /// A callee's check must not become a precondition of its summary.

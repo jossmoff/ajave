@@ -3033,3 +3033,57 @@ because it is sound and will matter once the heap is modelled, and because
 `a_callee_check_does_not_become_a_summary_precondition` now holds the line. That
 test was verified to fail with the guard removed — a soundness test that cannot
 fail is the thing this file keeps warning about.
+
+## 2026-09-06 (later) — the free-constant fix un-masked a wrong TRUE in the other encoder
+
+Committing the fix above scored **799 with 5 wrong** on the full valid-assert
+corpus, against ~815 with none. Four were new wrong TRUEs from CHC:
+`ArrayIndexOutOfBoundsException1..3` and `ClassCastException1`. All four have
+the same shape:
+
+```java
+try { int[] a = new int[4]; a[size] = 0; }
+catch (ArrayIndexOutOfBoundsException exc) { assert false; }
+```
+
+The assertion is reachable **only through an exceptional edge**. An encoding
+that follows normal control flow leaves the handler unreachable, never examines
+the obligation, and declares the program safe.
+
+This was not created by the free-constant fix — it was *revealed* by it. The
+malformed query made every such task return `unknown`, so the unsoundness could
+not be observed. `CLAUDE.md` states the pattern exactly: *"Unsoundness masked by
+an unrelated conservative gate. Removing a gate does not create these; it
+reveals them."* This is the second entry it applies to.
+
+The underlying defect is the seam. There are **two** encoders — `encode_chc_lia`
+for programs with resolvable calls and `encode_chc_single`, a separate
+bitvector encoder, for those without. Exceptional edges were added to the first,
+and the decline that had guarded handlers was then removed for **both**. The
+guard was withdrawn from a path that never got the replacement. The decline had
+itself been bought by an earlier wrong TRUE (`argv-tasks/HttpTransport_false`),
+so this is the same -16 paid twice.
+
+The fix mirrors the edges into the bitvector encoder, with the same soundness
+argument: a throw may occur anywhere in the block, so the handler is entered
+from the block's *entry* state with locals preserved (JVMS 2.6.1) and the
+operand stack free, and the block's own assignments are excluded because the
+throw may precede any of them. That admits a superset of the real handler
+states, which is the safe direction for an engine that may only discharge.
+
+All four tasks return to UNKNOWN and all four proofs from the free-constant fix
+survive. `both_encoders_make_a_handler_reachable` holds the line over *both*
+encoders rather than the one that broke.
+
+Two notes on the test, because the first version of it was worthless. It
+initially asserted that the encoding mentioned the handler block, which passes
+whether or not the fix is present: every block gets a `declare-fun` regardless
+of reachability. It now requires a *clause whose head is the handler*, and was
+verified to fail with the fix removed. A soundness test that cannot fail is
+worse than none, since it reports coverage that does not exist.
+
+Smoke did not catch any of this: at 143 tasks it had no assertion inside a
+`catch`. Two canaries were added. The general lesson is that the smoke set is
+curated against known regressions and cannot be relied on to find a *new* class,
+which is what the full corpus run is for — and why a soundness change is not
+finished until one has been run.
