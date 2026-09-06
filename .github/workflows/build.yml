@@ -50,6 +50,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # The corpus test drives the real portfolio, and most engines shell out
+      # to Z3. Without it they return UNKNOWN and the test reports 30 tasks
+      # "regressed from correct" -- which is the runner missing a dependency,
+      # not a regression. Java alone was installed here, so this job could
+      # never have passed.
+      - run: sudo apt-get update && sudo apt-get install -y z3
+      - run: z3 --version
       - uses: extractions/setup-just@v2
       - run: just test
 

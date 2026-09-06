@@ -418,7 +418,7 @@ pub(crate) fn eval_math_call(
                 None => Value::Unknown,
             },
             "lowestOneBit" => match get_i32(0) {
-                Some(v) => Value::I32(v & v.wrapping_neg()),
+                Some(v) => Value::I32(v.isolate_lowest_one()),
                 None => Value::Unknown,
             },
             "signum" => match get_i32(0) {
