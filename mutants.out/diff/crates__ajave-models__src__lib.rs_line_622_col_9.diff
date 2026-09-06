@@ -1,0 +1,32 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "get",) in contract_of
+@@ -614,28 +614,17 @@
+             requires: &[Precondition::NonEmpty],
+             effect: Effect::Receiver,
+             may_return_null: true,
+         },
+ 
+         // ── Collections ─────────────────────────────────────────────────
+         // Now that element counts are tracked in `$$coll_size`, the bound on
+         // an indexed access is expressible, so these stop being dead ends.
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "get",
+-        ) => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         (
+             "java/util/List"
+             | "java/util/ArrayList"
+             | "java/util/LinkedList"
+             | "java/util/AbstractList"
+             | "java/util/Vector",
+             "size" | "isEmpty",
+         ) => Contract::TOTAL,

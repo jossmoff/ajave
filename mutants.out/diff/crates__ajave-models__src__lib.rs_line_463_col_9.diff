@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") in contract_of
+@@ -455,21 +455,17 @@
+             may_return_null: true,
+         },
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {
+             Contract::TOTAL
+         }
+         // `append` renders null as "null" for the reference overloads and is
+         // total for the primitive ones.
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── Boxing ──────────────────────────────────────────────────────
+         (
+             "java/lang/Integer"
+             | "java/lang/Long"
+             | "java/lang/Short"
+             | "java/lang/Byte"
+             | "java/lang/Float"

@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/String", "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray" | "toUpperCase" | "toLowerCase",) in contract_of
+@@ -360,21 +360,17 @@
+     // Index-into-receiver, e.g. `charAt`.
+     const IDX1: &[Precondition] = &[Precondition::IndexInRange { index: 1, seq: 0 }];
+     // Regex and format methods throw for reasons we cannot state over arguments.
+     const OPAQUE: &[Precondition] = &[Precondition::Unexpressible];
+ 
+     let c = match (class, name) {
+         // ── java.lang.String ────────────────────────────────────────────
+         // The no-argument queries are total.
+-        (
+-            "java/lang/String",
+-            "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray"
+-            | "toUpperCase" | "toLowerCase",
+-        ) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+         // `equals` is specified null-tolerant; the others throw NPE on null.
+         ("java/lang/String", "equals") => Contract::TOTAL,
+         (
+             "java/lang/String",
+             "contains"
+             | "startsWith"
+             | "endsWith"
+             | "concat"

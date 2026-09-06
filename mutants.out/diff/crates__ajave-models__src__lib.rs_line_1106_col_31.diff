@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in pure_owner_member_may_throw
+@@ -1098,17 +1098,17 @@
+         // `System.arraycopy` disappearance in issue #49, which is why that
+         // entry sits directly below.
+         "java/lang/Object" => matches!(name, "wait" | "notify" | "notifyAll"),
+         // IndexOutOfBounds / ArrayStore / NPE.
+         "java/lang/System" => name == "arraycopy",
+         // Boxing from a String parses, and parsing throws.
+         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+         | "java/lang/Float" | "java/lang/Double" => {
+-            name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
++            name == "valueOf" || /* ~ changed by cargo-mutants ~ */ desc.starts_with("(Ljava/lang/String;)")
+         }
+         // Bounds and comparator contracts.
+         "java/util/Arrays" => matches!(
+             name,
+             "copyOfRange" | "fill" | "sort" | "binarySearch" | "asList" | "setAll"
+         ),
+         // `max`/`min` throw on an empty collection; `nCopies` on a negative count.
+         "java/util/Collections" => matches!(

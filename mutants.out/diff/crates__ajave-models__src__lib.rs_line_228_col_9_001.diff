@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace Contract::preconditions_all_seeded -> bool with false
+@@ -220,17 +220,17 @@
+     /// *seeded*, not merely *expressible*: the guard skips a call only because
+     /// the obligations carry the burden instead. Declaring a condition
+     /// expressible while the lifter does not emit it reinstates exactly the
+     /// TRUE-by-vacuity bug this whole layer exists to remove — which is how
+     /// `CharAtOutOfBounds` regressed the moment the two drifted apart.
+     ///
+     /// Keep in lockstep with the seeding loop in `lift.rs`.
+     pub fn preconditions_all_seeded(&self) -> bool {
+-        self.requires.iter().all(|p| p.is_seeded())
++        false /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// Whether call preconditions are seeded as obligations.
+ ///
+ /// Lives here rather than in the lifter because both sides of one invariant
+ /// need it: the lifter decides whether to emit the obligations, and the BMC
+ /// decides whether a call may be treated as non-throwing *because* they were

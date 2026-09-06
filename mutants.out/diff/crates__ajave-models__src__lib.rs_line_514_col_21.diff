@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "subtractExact" in contract_of
+@@ -506,17 +506,17 @@
+         // ── Math ────────────────────────────────────────────────────────
+         ("java/lang/Math" | "java/lang/StrictMath", n) => {
+             if matches!(n, "addExact" | "subtractExact" | "multiplyExact") {
+                 // Overflow is expressible: widen both operands and check the
+                 // result stays in range.
+                 let width = if desc.starts_with("(JJ)") { 64 } else { 32 };
+                 let op = match n {
+                     "addExact" => ajave_ir::BinOp::Add,
+-                    "subtractExact" => ajave_ir::BinOp::Sub,
++                     /* ~ changed by cargo-mutants ~ */
+                     _ => ajave_ir::BinOp::Mul,
+                 };
+                 return Some(Contract {
+                     requires: Box::leak(Box::new([Precondition::NoOverflow {
+                         a: 0,
+                         b: 1,
+                         op,
+                         width,

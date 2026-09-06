@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace + with - in ret_ty
+@@ -800,17 +800,17 @@
+     CollectionIterator,
+     /// `size()` — read the synthetic `$$coll_size` field from the receiver.
+     CollectionSize,
+     /// `isEmpty()` — `$$coll_size == 0`.
+     CollectionIsEmpty,
+ }
+ 
+ fn ret_ty(desc: &str) -> Option<Ty> {
+-    let after = desc.rfind(')')? + 1;
++    let after = desc.rfind(')')? - /* ~ changed by cargo-mutants ~ */ 1;
+     match desc.as_bytes().get(after)? {
+         b'V' => None,
+         b'J' => Some(Ty::Long),
+         b'F' => Some(Ty::Float),
+         b'D' => Some(Ty::Double),
+         b'L' | b'[' => Some(Ty::Ref),
+         _ => Some(Ty::Int),
+     }

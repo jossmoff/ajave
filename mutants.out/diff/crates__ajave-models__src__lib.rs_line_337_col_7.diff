@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in returns_nonnull
+@@ -329,17 +329,17 @@
+         | ("java/lang/Object", "toString" | "getClass")
+         | ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short"
+             | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double"
+             | "java/lang/Boolean" | "java/lang/Character",
+             "valueOf" | "toString" | "toBinaryString" | "toHexString"
+             | "toOctalString")
+         | ("java/util/Objects", "requireNonNull" | "toString")
+         | ("java/util/Arrays", "asList" | "copyOf" | "copyOfRange" | "toString")
+-    ) && !desc.ends_with(")V")
++    ) || /* ~ changed by cargo-mutants ~ */ !desc.ends_with(")V")
+ }
+ 
+ pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
+     contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
+ }
+ 
+ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+     if perturbed(class, name) {

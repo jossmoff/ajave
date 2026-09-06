@@ -1,0 +1,31 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/Collections" in pure_owner_member_may_throw
+@@ -1106,27 +1106,17 @@
+             name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
+         }
+         // Bounds and comparator contracts.
+         "java/util/Arrays" => matches!(
+             name,
+             "copyOfRange" | "fill" | "sort" | "binarySearch" | "asList" | "setAll"
+         ),
+         // `max`/`min` throw on an empty collection; `nCopies` on a negative count.
+-        "java/util/Collections" => matches!(
+-            name,
+-            "max"
+-                | "min"
+-                | "nCopies"
+-                | "unmodifiableList"
+-                | "unmodifiableMap"
+-                | "unmodifiableSet"
+-                | "sort"
+-                | "binarySearch"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         // Partial by contract: out-of-range index, empty receiver, null key.
+         "java/util/List"
+         | "java/util/ArrayList"
+         | "java/util/LinkedList"
+         | "java/util/AbstractList" => matches!(name, "get" | "set" | "remove" | "add"),
+         "java/util/Map"
+         | "java/util/HashMap"
+         | "java/util/TreeMap"

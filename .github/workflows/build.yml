@@ -6,9 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+# Supersede in-flight runs on the same ref. Pushing a follow-up commit used to
+# leave the previous run compiling cvc5-sys for twelve minutes to produce a
+# result nobody would read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Debug info is the bulk of the target directory and nothing here reads a
+  # backtrace with line numbers.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 # The toolchain comes from rust-toolchain.toml, which pins an exact version
 # rather than "stable". An unpinned channel drifts between this repo and the
@@ -16,64 +27,53 @@ env:
 # unrelated change red -- which is how `manual_isolate_lowest_one` failed here
 # while `just clippy` passed locally.
 #
-# Every job runs a `just` recipe rather than an inline command. A local check
-# that differs from the remote one is how the two silently drift -- which is
-# exactly what happened to `boundaries` and `strategy-docs`, both of which
-# still read `crates/roast-*` after the rename and so failed on every run for
-# weeks without anyone noticing.
+# Every job runs a `just` recipe rather than an inline command, so the local
+# check and the remote one cannot diverge.
 jobs:
+  # Pure bash, no toolchain, no build. Seconds.
+  quick:
+    name: quick checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just boundaries
+      - run: just strategy-docs
+
+  # rustfmt only: `cargo fmt --check` parses, it does not compile dependencies,
+  # so this needs no cache and finishes long before the build jobs.
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: extractions/setup-just@v2
       - run: just fmt-check
 
-  clippy:
-    name: clippy
+  # Clippy and the tests share one job because they share one build. Split
+  # across two jobs they each compiled the workspace from scratch on a cold
+  # cache -- and `cvc5-sys` alone is ~12 minutes of C++, so the split cost more
+  # than it bought. Clippy runs first: it is the one that usually fails.
+  #
+  # `setup-rust-toolchain` caches by default, so no separate rust-cache step.
+  rust:
+    name: clippy + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
-      - run: just clippy
-
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      # The corpus test drives the real portfolio, and most engines shell out
-      # to Z3. Without it they return UNKNOWN and the test reports 30 tasks
-      # "regressed from correct" -- which is the runner missing a dependency,
-      # not a regression. Java alone was installed here, so this job could
-      # never have passed.
+      # Engines shell out to Z3. Without it they return UNKNOWN and a test
+      # reports regressions that are really a missing dependency, so the
+      # version is printed to make an absence visible in the log.
       - run: sudo apt-get update && sudo apt-get install -y z3
       - run: z3 --version
       - uses: extractions/setup-just@v2
+      - run: just clippy
       - run: just test
-
-  boundaries:
-    name: boundaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - run: just boundaries
-
-  strategy-docs:
-    name: strategy-docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - run: just strategy-docs

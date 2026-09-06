@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm b'D' in ret_ty
+@@ -805,17 +805,17 @@
+ }
+ 
+ fn ret_ty(desc: &str) -> Option<Ty> {
+     let after = desc.rfind(')')? + 1;
+     match desc.as_bytes().get(after)? {
+         b'V' => None,
+         b'J' => Some(Ty::Long),
+         b'F' => Some(Ty::Float),
+-        b'D' => Some(Ty::Double),
++         /* ~ changed by cargo-mutants ~ */
+         b'L' | b'[' => Some(Ty::Ref),
+         _ => Some(Ty::Int),
+     }
+ }
+ 
+ /// Classes whose instance methods we treat as pure with respect to our state.
+ /// String is genuinely immutable. StringBuilder is not, but we never read its
+ /// fields, so havocking results is sound *given* that we track nothing about it.

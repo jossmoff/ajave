@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in contract_of
+@@ -441,17 +441,17 @@
+ 
+         // ── StringBuilder / StringBuffer ────────────────────────────────
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+             Contract::TOTAL_MUT
+         }
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+             // `StringBuilder(int)` throws on a negative capacity;
+             // `StringBuilder(String)` throws NPE on null.
+-            requires: if desc == "(I)V" {
++            requires: if desc != /* ~ changed by cargo-mutants ~ */ "(I)V" {
+                 &[Precondition::NonNegative(1)]
+             } else {
+                 NN1
+             },
+             effect: Effect::Receiver,
+             may_return_null: true,
+         },
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {

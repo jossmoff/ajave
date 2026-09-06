@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace contract_for -> Contract with Default::default()
+@@ -333,17 +333,17 @@
+             "valueOf" | "toString" | "toBinaryString" | "toHexString"
+             | "toOctalString")
+         | ("java/util/Objects", "requireNonNull" | "toString")
+         | ("java/util/Arrays", "asList" | "copyOf" | "copyOfRange" | "toString")
+     ) && !desc.ends_with(")V")
+ }
+ 
+ pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
+-    contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+     if perturbed(class, name) {
+         return Some(Contract::OPAQUE);
+     }
+     // The signatures the JDK specifies as total, previously answered by a
+     // separate match inside the BMC. Consulted first so that everything the

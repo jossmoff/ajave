@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/TreeSet" | "java/util/Set" in pure_owner_member_may_throw
+@@ -1131,17 +1131,17 @@
+         | "java/util/HashMap"
+         | "java/util/TreeMap"
+         | "java/util/LinkedHashMap"
+         | "java/util/AbstractMap" => {
+             // Sorted maps throw on null/incomparable keys; the hash maps do not,
+             // but `TreeMap` shares this owner set, so stay conservative.
+             matches!(name, "put" | "get" | "remove")
+         }
+-        "java/util/TreeSet" | "java/util/Set" => matches!(name, "add" | "first" | "last"),
++         /* ~ changed by cargo-mutants ~ */
+         "java/util/Iterator" | "java/util/ListIterator" => {
+             matches!(name, "next" | "previous" | "remove")
+         }
+         _ => false,
+     }
+ }
+ 
+ /// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.

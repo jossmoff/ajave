@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete ! in contract_of
+@@ -346,17 +346,17 @@
+         return Some(Contract::OPAQUE);
+     }
+     // The signatures the JDK specifies as total, previously answered by a
+     // separate match inside the BMC. Consulted first so that everything the
+     // analyser asks about goes through this one function -- which is what makes
+     // the refinement order enforceable and the monotonicity test non-vacuous.
+     if is_total_jdk_signature(class, name, desc) {
+         return Some(Contract {
+-            may_return_null: !returns_nonnull(class, name, desc),
++            may_return_null:  /* ~ changed by cargo-mutants ~ */returns_nonnull(class, name, desc),
+             ..Contract::TOTAL
+         });
+     }
+     // Argument-null preconditions, the single most common shape in the JDK.
+     const NN1: &[Precondition] = &[Precondition::NonNull(1)];
+     // Index-into-receiver, e.g. `charAt`.
+     const IDX1: &[Precondition] = &[Precondition::IndexInRange { index: 1, seq: 0 }];
+     // Regex and format methods throw for reasons we cannot state over arguments.

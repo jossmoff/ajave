@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" in pure_owner_member_may_throw
+@@ -1118,20 +1118,17 @@
+                 | "nCopies"
+                 | "unmodifiableList"
+                 | "unmodifiableMap"
+                 | "unmodifiableSet"
+                 | "sort"
+                 | "binarySearch"
+         ),
+         // Partial by contract: out-of-range index, empty receiver, null key.
+-        "java/util/List"
+-        | "java/util/ArrayList"
+-        | "java/util/LinkedList"
+-        | "java/util/AbstractList" => matches!(name, "get" | "set" | "remove" | "add"),
++         /* ~ changed by cargo-mutants ~ */
+         "java/util/Map"
+         | "java/util/HashMap"
+         | "java/util/TreeMap"
+         | "java/util/LinkedHashMap"
+         | "java/util/AbstractMap" => {
+             // Sorted maps throw on null/incomparable keys; the hash maps do not,
+             // but `TreeMap` shares this owner set, so stay conservative.
+             matches!(name, "put" | "get" | "remove")

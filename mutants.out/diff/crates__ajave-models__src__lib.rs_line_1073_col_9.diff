@@ -1,0 +1,36 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Math" | "java/lang/StrictMath" in pure_owner_member_may_throw
+@@ -1065,32 +1065,17 @@
+ /// `RuntimeException`, and so must not be modelled as pure.
+ ///
+ /// Keyed on the descriptor where overloads differ in totality —
+ /// `Integer.valueOf(int)` is total, `Integer.valueOf(String)` throws
+ /// `NumberFormatException`.
+ fn pure_owner_member_may_throw(owner: &str, name: &str, desc: &str) -> bool {
+     match owner {
+         // Overflow (`*Exact`) and zero-divisor (`floorDiv`/`floorMod`) checks.
+-        "java/lang/Math" | "java/lang/StrictMath" => matches!(
+-            name,
+-            "addExact"
+-                | "subtractExact"
+-                | "multiplyExact"
+-                | "incrementExact"
+-                | "decrementExact"
+-                | "negateExact"
+-                | "absExact"
+-                | "toIntExact"
+-                | "floorDiv"
+-                | "floorMod"
+-                | "ceilDiv"
+-                | "ceilMod"
+-                | "divideExact"
+-        ),
++         /* ~ changed by cargo-mutants ~ */
+         // Monitor operations. All three throw `IllegalMonitorStateException`
+         // unless the caller owns the monitor, and `wait` also throws
+         // `InterruptedException`.
+         //
+         // Keeping them out of `Pure` matters for a second reason beyond
+         // throwing: `Pure` *erases* the call, and a void one disappears from
+         // the IR entirely. A `wait()` that is not in the IR cannot block, so a
+         // thread that waits forever appears to terminate and a program that

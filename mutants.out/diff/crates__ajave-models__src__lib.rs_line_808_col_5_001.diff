@@ -1,0 +1,29 @@
+--- crates/ajave-models/src/lib.rs
++++ replace ret_ty -> Option<Ty> with Some(Default::default())
+@@ -800,25 +800,17 @@
+     CollectionIterator,
+     /// `size()` — read the synthetic `$$coll_size` field from the receiver.
+     CollectionSize,
+     /// `isEmpty()` — `$$coll_size == 0`.
+     CollectionIsEmpty,
+ }
+ 
+ fn ret_ty(desc: &str) -> Option<Ty> {
+-    let after = desc.rfind(')')? + 1;
+-    match desc.as_bytes().get(after)? {
+-        b'V' => None,
+-        b'J' => Some(Ty::Long),
+-        b'F' => Some(Ty::Float),
+-        b'D' => Some(Ty::Double),
+-        b'L' | b'[' => Some(Ty::Ref),
+-        _ => Some(Ty::Int),
+-    }
++    Some(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Classes whose instance methods we treat as pure with respect to our state.
+ /// String is genuinely immutable. StringBuilder is not, but we never read its
+ /// fields, so havocking results is sound *given* that we track nothing about it.
+ /// String-related owners whose methods we keep in the IR as `Rvalue::Call`
+ /// so the concrete engine can evaluate them against tracked string content.
+ pub const STR_OWNERS: &[&str] = &[

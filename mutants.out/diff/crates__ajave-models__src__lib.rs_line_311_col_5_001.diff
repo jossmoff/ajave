@@ -1,0 +1,47 @@
+--- crates/ajave-models/src/lib.rs
++++ replace returns_nonnull -> bool with false
+@@ -303,43 +303,17 @@
+ /// TRUE. Omission only costs precision.
+ ///
+ /// Deliberately absent: anything that returns a *looked-up* value. `Map.get`,
+ /// `List.get` on a list of references, `getProperty`, `getHeader` and friends
+ /// all return null when the thing is not there, and that is their contract, not
+ /// an edge case.
+ pub fn returns_nonnull(class: &str, name: &str, desc: &str) -> bool {
+     // A constructor's result is the object; `new` never yields null.
+-    if name == "<init>" {
+-        return true;
+-    }
+-    matches!(
+-        (class, name),
+-        // Factories that construct or return a shared immutable instance.
+-        ("java/util/Collections",
+-            "singleton" | "singletonList" | "singletonMap" | "emptyList"
+-            | "emptySet" | "emptyMap" | "enumeration" | "unmodifiableList"
+-            | "unmodifiableSet" | "unmodifiableMap" | "unmodifiableCollection"
+-            | "synchronizedList" | "synchronizedSet" | "synchronizedMap"
+-            | "nCopies" | "list")
+-        // `toString` on these is specified to produce a String.
+-        | ("java/lang/StringBuilder" | "java/lang/StringBuffer", "toString" | "append")
+-        | ("java/lang/String",
+-            "toString" | "trim" | "toUpperCase" | "toLowerCase" | "concat"
+-            | "substring" | "replace" | "intern" | "toCharArray" | "valueOf"
+-            | "join" | "strip" | "repeat")
+-        | ("java/lang/Object", "toString" | "getClass")
+-        | ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short"
+-            | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double"
+-            | "java/lang/Boolean" | "java/lang/Character",
+-            "valueOf" | "toString" | "toBinaryString" | "toHexString"
+-            | "toOctalString")
+-        | ("java/util/Objects", "requireNonNull" | "toString")
+-        | ("java/util/Arrays", "asList" | "copyOf" | "copyOfRange" | "toString")
+-    ) && !desc.ends_with(")V")
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
+     contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
+ }
+ 
+ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+     if perturbed(class, name) {

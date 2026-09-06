@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "nondetString" in model_for
+@@ -916,17 +916,17 @@
+     "java/lang/UnsupportedOperationException",
+     "java/lang/StringIndexOutOfBoundsException",
+ ];
+ 
+ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
+     if owner == VERIFIER {
+         return match name {
+             "assume" => CallModel::Assume,
+-            "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
++             /* ~ changed by cargo-mutants ~ */
+             // nondetObject returns a factory-created object; must inline the
+             // factory body rather than treating it as a raw nondet ref.
+             "nondetObject" => CallModel::Unmodelled,
+             n if n.starts_with("nondet") => {
+                 let jvm_byte = desc
+                     .as_bytes()
+                     .get(desc.rfind(')').unwrap_or(0) + 1)
+                     .copied()

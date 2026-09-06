@@ -1,0 +1,30 @@
+--- crates/ajave-models/src/lib.rs
++++ replace Precondition::is_seeded -> bool with true
+@@ -84,26 +84,17 @@
+ impl Precondition {
+     /// Does the lifter emit this as an obligation today?
+     ///
+     /// Only these may let the verdict guard stand down. The index-range kinds
+     /// need the receiver's length, which means materialising a `length()` call
+     /// during lifting — worth doing, but until it exists they must keep
+     /// blocking rather than being silently assumed.
+     pub fn is_seeded(&self) -> bool {
+-        matches!(
+-            self,
+-            Precondition::NonNull(_)
+-                | Precondition::NonNegative(_)
+-                | Precondition::NonZero(_)
+-                | Precondition::IndexInRange { .. }
+-                | Precondition::RangeInBounds { .. }
+-                | Precondition::NoOverflow { .. }
+-                | Precondition::NonEmpty
+-        )
++        true /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// What an external method may write.
+ ///
+ /// Replaces the previous rule that any callee without a body clobbers every
+ /// field the program writes — which made the flat field abstraction nearly
+ /// useless as soon as a single library call appeared.

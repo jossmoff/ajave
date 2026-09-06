@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ replace Effect::rank -> u8 with 0
+@@ -116,21 +116,17 @@
+     /// May write anything; the conservative fallback.
+     Unknown,
+ }
+ 
+ impl Effect {
+     /// Position in the lattice `Pure < Receiver < Unknown`, where higher is
+     /// more conservative: assuming a call writes more can only lose precision.
+     pub fn rank(self) -> u8 {
+-        match self {
+-            Effect::Pure => 0,
+-            Effect::Receiver => 1,
+-            Effect::Unknown => 2,
+-        }
++        0 /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// Everything we claim about an external method, in one place.
+ ///
+ /// Previously this knowledge was spread across `could_throw_runtime_exception`,
+ /// `pure_owner_member_may_throw`, `str_call_can_throw`, `PURE_OWNERS` and the
+ /// field-abstraction clobber sets — five representations that drifted apart and

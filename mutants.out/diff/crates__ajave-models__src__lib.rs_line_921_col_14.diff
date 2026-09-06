@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in model_for
+@@ -913,17 +913,17 @@
+     "java/lang/IndexOutOfBoundsException",
+     "java/lang/ClassCastException",
+     "java/lang/NegativeArraySizeException",
+     "java/lang/UnsupportedOperationException",
+     "java/lang/StringIndexOutOfBoundsException",
+ ];
+ 
+ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
+-    if owner == VERIFIER {
++    if owner != /* ~ changed by cargo-mutants ~ */ VERIFIER {
+         return match name {
+             "assume" => CallModel::Assume,
+             "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
+             // nondetObject returns a factory-created object; must inline the
+             // factory body rather than treating it as a raw nondet ref.
+             "nondetObject" => CallModel::Unmodelled,
+             n if n.starts_with("nondet") => {
+                 let jvm_byte = desc

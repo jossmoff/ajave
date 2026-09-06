@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Thread", "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",) in contract_of
+@@ -720,20 +720,17 @@
+         // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
+         // shape as issue #49.
+         ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => Contract {
+             requires: OPAQUE,
+             effect: Effect::Unknown,
+             may_return_null: true,
+         },
+         // Queries that touch no shared state.
+-        (
+-            "java/lang/Thread",
+-            "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",
+-        ) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── The nondet source ───────────────────────────────────────────
+         (VERIFIER, _) => Contract::TOTAL,
+ 
+         _ => return None,
+     };
+     // Fill in the return-nullness for every path out of here, so a contract
+     // never silently claims a result may be null just because the arm that

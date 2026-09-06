@@ -1,0 +1,38 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "add",) in contract_of
+@@ -636,34 +636,17 @@
+             | "java/util/ArrayList"
+             | "java/util/LinkedList"
+             | "java/util/AbstractList"
+             | "java/util/Vector",
+             "size" | "isEmpty",
+         ) => Contract::TOTAL,
+         // Appending cannot fail for the unbounded collections; the indexed
+         // `add(int, E)` and `set(int, E)` overloads can.
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "add",
+-        ) => {
+-            if desc.starts_with("(I") {
+-                Contract {
+-                    requires: IDX1,
+-                    effect: Effect::Receiver,
+-                    may_return_null: true,
+-                }
+-            } else {
+-                Contract::TOTAL_MUT
+-            }
+-        }
++         /* ~ changed by cargo-mutants ~ */
+         (
+             "java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set",
+             "add" | "contains" | "size" | "isEmpty",
+         ) => Contract::TOTAL_MUT,
+         // Hash maps tolerate null keys; sorted maps do not, so they are absent.
+         (
+             "java/util/HashMap" | "java/util/LinkedHashMap",
+             "put" | "get" | "containsKey" | "size" | "isEmpty",

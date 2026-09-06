@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in model_for
+@@ -963,17 +963,17 @@
+     if owner == "java/lang/Enum" {
+         return CallModel::Pure(ret_ty(desc));
+     }
+ 
+     // Assertions are always enabled under SV-COMP rules.
+     // desiredAssertionStatus() returns true (1), so $assertionsDisabled = false (0).
+     // Modelling this as a constant rather than Havoc avoids tainting the
+     // assertion-enabled branch and lets the BMC check assertions precisely.
+-    if owner == "java/lang/Class" && name == "desiredAssertionStatus" {
++    if owner == "java/lang/Class" && name != /* ~ changed by cargo-mutants ~ */ "desiredAssertionStatus" {
+         return CallModel::AssertionsEnabled;
+     }
+ 
+     if STR_OWNERS.contains(&owner) {
+         return CallModel::StrCall(ret_ty(desc));
+     }
+ 
+     // Boxing: T.valueOf(primitive) → BoxStore, T.primitiveValue() → Unbox.

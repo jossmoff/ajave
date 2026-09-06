@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ replace Contract::at_least_as_conservative_as -> bool with true
+@@ -193,21 +193,17 @@
+     /// So only movement *up* this order is safe, and the two kinds of mistake
+     /// look identical without it. Issue #48 found 22 wrongly-allowlisted
+     /// methods that accumulated precisely because nothing could tell them
+     /// apart.
+     ///
+     /// More preconditions is more conservative; a wider effect is more
+     /// conservative.
+     pub fn at_least_as_conservative_as(&self, other: &Contract) -> bool {
+-        let covers = other
+-            .requires
+-            .iter()
+-            .all(|p| self.requires.iter().any(|q| q == p));
+-        covers && self.effect.rank() >= other.effect.rank()
++        true /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// The most conservative contract: assume it can throw for reasons we
+     /// cannot state, and that it writes anything.
+     pub const OPAQUE: Contract = Contract {
+         requires: &[Precondition::Unexpressible],
+         effect: Effect::Unknown,
+         may_return_null: true,

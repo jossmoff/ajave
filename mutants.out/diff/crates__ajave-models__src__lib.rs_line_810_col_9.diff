@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm b'V' in ret_ty
+@@ -802,17 +802,17 @@
+     CollectionSize,
+     /// `isEmpty()` — `$$coll_size == 0`.
+     CollectionIsEmpty,
+ }
+ 
+ fn ret_ty(desc: &str) -> Option<Ty> {
+     let after = desc.rfind(')')? + 1;
+     match desc.as_bytes().get(after)? {
+-        b'V' => None,
++         /* ~ changed by cargo-mutants ~ */
+         b'J' => Some(Ty::Long),
+         b'F' => Some(Ty::Float),
+         b'D' => Some(Ty::Double),
+         b'L' | b'[' => Some(Ty::Ref),
+         _ => Some(Ty::Int),
+     }
+ }
+ 

@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "size" | "isEmpty",) in contract_of
+@@ -626,24 +626,17 @@
+             | "java/util/AbstractList"
+             | "java/util/Vector",
+             "get",
+         ) => Contract {
+             requires: IDX1,
+             effect: Effect::Pure,
+             may_return_null: true,
+         },
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "size" | "isEmpty",
+-        ) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+         // Appending cannot fail for the unbounded collections; the indexed
+         // `add(int, E)` and `set(int, E)` overloads can.
+         (
+             "java/util/List"
+             | "java/util/ArrayList"
+             | "java/util/LinkedList"
+             | "java/util/AbstractList"
+             | "java/util/Vector",

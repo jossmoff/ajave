@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace match guard desc == "()V" with false in contract_of
+@@ -435,17 +435,17 @@
+             effect: Effect::Unknown,
+             may_return_null: true,
+         },
+         ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+             Contract::TOTAL
+         }
+ 
+         // ── StringBuilder / StringBuffer ────────────────────────────────
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
++        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if false /* ~ changed by cargo-mutants ~ */ => {
+             Contract::TOTAL_MUT
+         }
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+             // `StringBuilder(int)` throws on a negative capacity;
+             // `StringBuilder(String)` throws NPE on null.
+             requires: if desc == "(I)V" {
+                 &[Precondition::NonNegative(1)]
+             } else {

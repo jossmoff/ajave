@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/String", "equals") in contract_of
+@@ -366,17 +366,17 @@
+         // ── java.lang.String ────────────────────────────────────────────
+         // The no-argument queries are total.
+         (
+             "java/lang/String",
+             "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray"
+             | "toUpperCase" | "toLowerCase",
+         ) => Contract::TOTAL,
+         // `equals` is specified null-tolerant; the others throw NPE on null.
+-        ("java/lang/String", "equals") => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+         (
+             "java/lang/String",
+             "contains"
+             | "startsWith"
+             | "endsWith"
+             | "concat"
+             | "equalsIgnoreCase"
+             | "compareTo"

@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" in pure_owner_member_may_throw
+@@ -1096,20 +1096,17 @@
+         // thread that waits forever appears to terminate and a program that
+         // provably hangs is reported deadlock-free — the same shape as the
+         // `System.arraycopy` disappearance in issue #49, which is why that
+         // entry sits directly below.
+         "java/lang/Object" => matches!(name, "wait" | "notify" | "notifyAll"),
+         // IndexOutOfBounds / ArrayStore / NPE.
+         "java/lang/System" => name == "arraycopy",
+         // Boxing from a String parses, and parsing throws.
+-        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+-        | "java/lang/Float" | "java/lang/Double" => {
+-            name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
+-        }
++         /* ~ changed by cargo-mutants ~ */
+         // Bounds and comparator contracts.
+         "java/util/Arrays" => matches!(
+             name,
+             "copyOfRange" | "fill" | "sort" | "binarySearch" | "asList" | "setAll"
+         ),
+         // `max`/`min` throw on an empty collection; `nCopies` on a negative count.
+         "java/util/Collections" => matches!(
+             name,

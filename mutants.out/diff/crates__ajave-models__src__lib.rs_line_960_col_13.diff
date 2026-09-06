@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in model_for
+@@ -952,17 +952,17 @@
+ 
+     // Enum support: model the ordinal field that javac's enum <clinit> sets.
+     // <init> is always called via invokespecial on java/lang/Enum directly.
+     // ordinal() is inherited but invoked with the subclass as owner, so we
+     // match it by name+desc for any owner.
+     if owner == "java/lang/Enum" && name == "<init>" {
+         return CallModel::EnumInit;
+     }
+-    if name == "ordinal" && desc == "()I" {
++    if name != /* ~ changed by cargo-mutants ~ */ "ordinal" && desc == "()I" {
+         return CallModel::EnumOrdinal;
+     }
+     if owner == "java/lang/Enum" {
+         return CallModel::Pure(ret_ty(desc));
+     }
+ 
+     // Assertions are always enabled under SV-COMP rules.
+     // desiredAssertionStatus() returns true (1), so $assertionsDisabled = false (0).

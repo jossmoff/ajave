@@ -1,0 +1,32 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Character" | "java/lang/Boolean", "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue" | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",) in contract_of
+@@ -485,28 +485,17 @@
+                     requires: OPAQUE,
+                     effect: Effect::Pure,
+                     may_return_null: true,
+                 }
+             } else {
+                 Contract::TOTAL
+             }
+         }
+-        (
+-            "java/lang/Integer"
+-            | "java/lang/Long"
+-            | "java/lang/Short"
+-            | "java/lang/Byte"
+-            | "java/lang/Float"
+-            | "java/lang/Double"
+-            | "java/lang/Character"
+-            | "java/lang/Boolean",
+-            "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue"
+-            | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",
+-        ) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── Math ────────────────────────────────────────────────────────
+         ("java/lang/Math" | "java/lang/StrictMath", n) => {
+             if matches!(n, "addExact" | "subtractExact" | "multiplyExact") {
+                 // Overflow is expressible: widen both operands and check the
+                 // result stays in range.
+                 let width = if desc.starts_with("(JJ)") { 64 } else { 32 };
+                 let op = match n {

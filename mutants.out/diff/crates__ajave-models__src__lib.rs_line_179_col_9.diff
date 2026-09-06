@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace Contract::is_total -> bool with true
+@@ -171,17 +171,17 @@
+     const TOTAL_MUT: Contract = Contract {
+         requires: &[],
+         effect: Effect::Receiver,
+         may_return_null: true,
+     };
+ 
+     /// `true` when no input can make this call raise a `RuntimeException`.
+     pub fn is_total(&self) -> bool {
+-        self.requires.is_empty()
++        true /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Is this contract at least as conservative as `other`?
+     ///
+     /// # Why an order exists at all
+     ///
+     /// Contracts are not symmetric under error. One that is **too strong** --
+     /// claiming preconditions the real method does not have, or a broader

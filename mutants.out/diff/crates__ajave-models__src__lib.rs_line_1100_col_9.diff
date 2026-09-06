@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/lang/Object" in pure_owner_member_may_throw
+@@ -1092,17 +1092,17 @@
+         //
+         // Keeping them out of `Pure` matters for a second reason beyond
+         // throwing: `Pure` *erases* the call, and a void one disappears from
+         // the IR entirely. A `wait()` that is not in the IR cannot block, so a
+         // thread that waits forever appears to terminate and a program that
+         // provably hangs is reported deadlock-free — the same shape as the
+         // `System.arraycopy` disappearance in issue #49, which is why that
+         // entry sits directly below.
+-        "java/lang/Object" => matches!(name, "wait" | "notify" | "notifyAll"),
++         /* ~ changed by cargo-mutants ~ */
+         // IndexOutOfBounds / ArrayStore / NPE.
+         "java/lang/System" => name == "arraycopy",
+         // Boxing from a String parses, and parsing throws.
+         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+         | "java/lang/Float" | "java/lang/Double" => {
+             name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
+         }
+         // Bounds and comparator contracts.

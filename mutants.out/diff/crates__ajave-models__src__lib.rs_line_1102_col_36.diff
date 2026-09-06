@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in pure_owner_member_may_throw
+@@ -1094,17 +1094,17 @@
+         // throwing: `Pure` *erases* the call, and a void one disappears from
+         // the IR entirely. A `wait()` that is not in the IR cannot block, so a
+         // thread that waits forever appears to terminate and a program that
+         // provably hangs is reported deadlock-free — the same shape as the
+         // `System.arraycopy` disappearance in issue #49, which is why that
+         // entry sits directly below.
+         "java/lang/Object" => matches!(name, "wait" | "notify" | "notifyAll"),
+         // IndexOutOfBounds / ArrayStore / NPE.
+-        "java/lang/System" => name == "arraycopy",
++        "java/lang/System" => name != /* ~ changed by cargo-mutants ~ */ "arraycopy",
+         // Boxing from a String parses, and parsing throws.
+         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+         | "java/lang/Float" | "java/lang/Double" => {
+             name == "valueOf" && desc.starts_with("(Ljava/lang/String;)")
+         }
+         // Bounds and comparator contracts.
+         "java/util/Arrays" => matches!(
+             name,

@@ -1,0 +1,420 @@
+--- crates/ajave-models/src/lib.rs
++++ replace contract_of -> Option<Contract> with None
+@@ -337,416 +337,17 @@
+     ) && !desc.ends_with(")V")
+ }
+ 
+ pub fn contract_for(class: &str, name: &str, desc: &str) -> Contract {
+     contract_of(class, name, desc).unwrap_or(Contract::OPAQUE)
+ }
+ 
+ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
+-    if perturbed(class, name) {
+-        return Some(Contract::OPAQUE);
+-    }
+-    // The signatures the JDK specifies as total, previously answered by a
+-    // separate match inside the BMC. Consulted first so that everything the
+-    // analyser asks about goes through this one function -- which is what makes
+-    // the refinement order enforceable and the monotonicity test non-vacuous.
+-    if is_total_jdk_signature(class, name, desc) {
+-        return Some(Contract {
+-            may_return_null: !returns_nonnull(class, name, desc),
+-            ..Contract::TOTAL
+-        });
+-    }
+-    // Argument-null preconditions, the single most common shape in the JDK.
+-    const NN1: &[Precondition] = &[Precondition::NonNull(1)];
+-    // Index-into-receiver, e.g. `charAt`.
+-    const IDX1: &[Precondition] = &[Precondition::IndexInRange { index: 1, seq: 0 }];
+-    // Regex and format methods throw for reasons we cannot state over arguments.
+-    const OPAQUE: &[Precondition] = &[Precondition::Unexpressible];
+-
+-    let c = match (class, name) {
+-        // ── java.lang.String ────────────────────────────────────────────
+-        // The no-argument queries are total.
+-        (
+-            "java/lang/String",
+-            "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray"
+-            | "toUpperCase" | "toLowerCase",
+-        ) => Contract::TOTAL,
+-        // `equals` is specified null-tolerant; the others throw NPE on null.
+-        ("java/lang/String", "equals") => Contract::TOTAL,
+-        (
+-            "java/lang/String",
+-            "contains"
+-            | "startsWith"
+-            | "endsWith"
+-            | "concat"
+-            | "equalsIgnoreCase"
+-            | "compareTo"
+-            | "compareToIgnoreCase"
+-            | "indexOf"
+-            | "lastIndexOf"
+-            | "replace",
+-        ) => Contract {
+-            requires: NN1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-        // Index-bounded accessors.
+-        ("java/lang/String", "charAt" | "codePointAt") => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-        ("java/lang/String", "substring") => Contract {
+-            requires: &[Precondition::RangeInBounds {
+-                start: 1,
+-                end: None,
+-                seq: 0,
+-            }],
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-        // PatternSyntaxException / IllegalFormatException are not conditions
+-        // over the argument values we track.
+-        (
+-            "java/lang/String",
+-            "matches" | "split" | "replaceAll" | "replaceFirst" | "format" | "join",
+-        ) => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-
+-        // ── java.lang.Object ────────────────────────────────────────────
+-        // Monitor operations, listed before the class-level fallback below.
+-        //
+-        // `PURE_OWNERS` contains `java/lang/Object`, and a class-level entry is
+-        // exactly what this file warns against: `wait` blocks the calling
+-        // thread and *releases the monitor*, and `notify`/`notifyAll` move
+-        // other threads between wait sets. Treating them as pure let the
+-        // concurrency explorer step over a `wait()` as though it were free,
+-        // after which a thread that waits forever appeared to terminate and a
+-        // program that provably hangs was reported as deadlock-free — a wrong
+-        // TRUE. See benchmarks/ajave/concurrency/MissedSignalDeadlock.
+-        //
+-        // All three throw `IllegalMonitorStateException` unless the caller owns
+-        // the monitor, and `wait` also throws `InterruptedException`. That is
+-        // not expressible over the arguments, so it is `Unexpressible`.
+-        ("java/lang/Object", "wait" | "notify" | "notifyAll") => Contract {
+-            requires: &[Precondition::Unexpressible],
+-            effect: Effect::Unknown,
+-            may_return_null: true,
+-        },
+-        ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+-            Contract::TOTAL
+-        }
+-
+-        // ── StringBuilder / StringBuffer ────────────────────────────────
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+-            Contract::TOTAL_MUT
+-        }
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+-            // `StringBuilder(int)` throws on a negative capacity;
+-            // `StringBuilder(String)` throws NPE on null.
+-            requires: if desc == "(I)V" {
+-                &[Precondition::NonNegative(1)]
+-            } else {
+-                NN1
+-            },
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {
+-            Contract::TOTAL
+-        }
+-        // `append` renders null as "null" for the reference overloads and is
+-        // total for the primitive ones.
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-
+-        // ── Boxing ──────────────────────────────────────────────────────
+-        (
+-            "java/lang/Integer"
+-            | "java/lang/Long"
+-            | "java/lang/Short"
+-            | "java/lang/Byte"
+-            | "java/lang/Float"
+-            | "java/lang/Double"
+-            | "java/lang/Character"
+-            | "java/lang/Boolean",
+-            "valueOf",
+-        ) => {
+-            if desc.starts_with("(Ljava/lang/String;)") {
+-                // Parsing: NumberFormatException is not a condition over a
+-                // value we model.
+-                Contract {
+-                    requires: OPAQUE,
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                }
+-            } else {
+-                Contract::TOTAL
+-            }
+-        }
+-        (
+-            "java/lang/Integer"
+-            | "java/lang/Long"
+-            | "java/lang/Short"
+-            | "java/lang/Byte"
+-            | "java/lang/Float"
+-            | "java/lang/Double"
+-            | "java/lang/Character"
+-            | "java/lang/Boolean",
+-            "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue"
+-            | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",
+-        ) => Contract::TOTAL,
+-
+-        // ── Math ────────────────────────────────────────────────────────
+-        ("java/lang/Math" | "java/lang/StrictMath", n) => {
+-            if matches!(n, "addExact" | "subtractExact" | "multiplyExact") {
+-                // Overflow is expressible: widen both operands and check the
+-                // result stays in range.
+-                let width = if desc.starts_with("(JJ)") { 64 } else { 32 };
+-                let op = match n {
+-                    "addExact" => ajave_ir::BinOp::Add,
+-                    "subtractExact" => ajave_ir::BinOp::Sub,
+-                    _ => ajave_ir::BinOp::Mul,
+-                };
+-                return Some(Contract {
+-                    requires: Box::leak(Box::new([Precondition::NoOverflow {
+-                        a: 0,
+-                        b: 1,
+-                        op,
+-                        width,
+-                    }])),
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                });
+-            } else if matches!(
+-                n,
+-                "incrementExact" | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
+-            ) {
+-                // Single-operand overflow; not seeded yet.
+-                Contract {
+-                    requires: OPAQUE,
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                }
+-            } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
+-                Contract {
+-                    requires: &[Precondition::NonZero(2)],
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                }
+-            } else if matches!(
+-                n,
+-                "abs"
+-                    | "min"
+-                    | "max"
+-                    | "sqrt"
+-                    | "cbrt"
+-                    | "sin"
+-                    | "cos"
+-                    | "tan"
+-                    | "asin"
+-                    | "acos"
+-                    | "atan"
+-                    | "atan2"
+-                    | "exp"
+-                    | "expm1"
+-                    | "log"
+-                    | "log10"
+-                    | "log1p"
+-                    | "pow"
+-                    | "floor"
+-                    | "ceil"
+-                    | "rint"
+-                    | "round"
+-                    | "signum"
+-                    | "hypot"
+-                    | "random"
+-                    | "toRadians"
+-                    | "toDegrees"
+-                    | "ulp"
+-                    | "copySign"
+-                    | "fma"
+-            ) {
+-                Contract::TOTAL
+-            } else {
+-                return None;
+-            }
+-        }
+-
+-        // ── System ──────────────────────────────────────────────────────
+-        (
+-            "java/lang/System",
+-            "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",
+-        ) => Contract::TOTAL,
+-
+-        // ── Enum ────────────────────────────────────────────────────────
+-        ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
+-            Contract::TOTAL
+-        }
+-
+-        // `next()` on an exhausted iterator throws NoSuchElementException,
+-        // and `hasNext()` is total. We model an iterator as its collection, so
+-        // emptiness is `$$coll_size == 0`.
+-        ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => Contract {
+-            requires: &[Precondition::NonEmpty],
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-        ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") => {
+-            Contract::TOTAL
+-        }
+-        // Stack/Deque removal on an empty receiver throws.
+-        ("java/util/Stack", "pop" | "peek") => Contract {
+-            requires: &[Precondition::NonEmpty],
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-        (
+-            "java/util/ArrayDeque" | "java/util/LinkedList",
+-            "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast",
+-        ) => Contract {
+-            requires: &[Precondition::NonEmpty],
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-
+-        // ── Collections ─────────────────────────────────────────────────
+-        // Now that element counts are tracked in `$$coll_size`, the bound on
+-        // an indexed access is expressible, so these stop being dead ends.
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "get",
+-        ) => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "size" | "isEmpty",
+-        ) => Contract::TOTAL,
+-        // Appending cannot fail for the unbounded collections; the indexed
+-        // `add(int, E)` and `set(int, E)` overloads can.
+-        (
+-            "java/util/List"
+-            | "java/util/ArrayList"
+-            | "java/util/LinkedList"
+-            | "java/util/AbstractList"
+-            | "java/util/Vector",
+-            "add",
+-        ) => {
+-            if desc.starts_with("(I") {
+-                Contract {
+-                    requires: IDX1,
+-                    effect: Effect::Receiver,
+-                    may_return_null: true,
+-                }
+-            } else {
+-                Contract::TOTAL_MUT
+-            }
+-        }
+-        (
+-            "java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set",
+-            "add" | "contains" | "size" | "isEmpty",
+-        ) => Contract::TOTAL_MUT,
+-        // Hash maps tolerate null keys; sorted maps do not, so they are absent.
+-        (
+-            "java/util/HashMap" | "java/util/LinkedHashMap",
+-            "put" | "get" | "containsKey" | "size" | "isEmpty",
+-        ) => Contract::TOTAL_MUT,
+-
+-        // ── Output streams ──────────────────────────────────────────────
+-        // The constructors throw NPE on a null sink; printing is total and
+-        // renders null as "null". IOException is checked, so irrelevant here.
+-        ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => Contract {
+-            requires: NN1,
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-        (
+-            "java/io/PrintWriter" | "java/io/PrintStream",
+-            "println" | "print" | "write" | "flush" | "close" | "append",
+-        ) => {
+-            // `format`/`printf` are excluded: IllegalFormatException is not a
+-            // condition over a value we track.
+-            Contract::TOTAL_MUT
+-        }
+-        ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
+-
+-        // ── CharSequence ────────────────────────────────────────────────
+-        ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
+-        ("java/lang/CharSequence", "charAt") => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-
+-        // ── java.util.Objects ───────────────────────────────────────────
+-        ("java/util/Objects", "requireNonNull") => Contract {
+-            requires: NN1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
+-        ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") => {
+-            Contract::TOTAL
+-        }
+-
+-        // ── Threads ─────────────────────────────────────────────────────
+-        // `start()` runs the thread body, which we do not yet explore, so it
+-        // must not be treated as total: claiming no runtime exception while
+-        // never looking inside `run()` is a wrong TRUE. `Unexpressible` is the
+-        // honest classification until the concurrency engine lands — see
+-        // docs/strategies/concurrency.md.
+-        //
+-        // Thread was previously in PURE_OWNERS, which made the lifter erase
+-        // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
+-        // shape as issue #49.
+-        ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Unknown,
+-            may_return_null: true,
+-        },
+-        // Queries that touch no shared state.
+-        (
+-            "java/lang/Thread",
+-            "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",
+-        ) => Contract::TOTAL,
+-
+-        // ── The nondet source ───────────────────────────────────────────
+-        (VERIFIER, _) => Contract::TOTAL,
+-
+-        _ => return None,
+-    };
+-    // Fill in the return-nullness for every path out of here, so a contract
+-    // never silently claims a result may be null just because the arm that
+-    // built it predates the field.
+-    Some(Contract {
+-        may_return_null: c.may_return_null && !returns_nonnull(class, name, desc),
+-        ..c
+-    })
++    None /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum CallModel {
+     /// No observable effect; drop it. Constructors of exception types and
+     /// `Object.<init>` land here.
+     NoOp,
+     /// `Verifier.assume(cond)`.

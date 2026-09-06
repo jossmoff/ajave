@@ -1,0 +1,161 @@
+--- crates/ajave-models/src/lib.rs
++++ replace model_for -> CallModel with Default::default()
+@@ -913,157 +913,17 @@
+     "java/lang/IndexOutOfBoundsException",
+     "java/lang/ClassCastException",
+     "java/lang/NegativeArraySizeException",
+     "java/lang/UnsupportedOperationException",
+     "java/lang/StringIndexOutOfBoundsException",
+ ];
+ 
+ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
+-    if owner == VERIFIER {
+-        return match name {
+-            "assume" => CallModel::Assume,
+-            "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
+-            // nondetObject returns a factory-created object; must inline the
+-            // factory body rather than treating it as a raw nondet ref.
+-            "nondetObject" => CallModel::Unmodelled,
+-            n if n.starts_with("nondet") => {
+-                let jvm_byte = desc
+-                    .as_bytes()
+-                    .get(desc.rfind(')').unwrap_or(0) + 1)
+-                    .copied()
+-                    .unwrap_or(b'I');
+-                CallModel::Nondet(ret_ty(desc), jvm_byte)
+-            }
+-            _ => CallModel::Unmodelled,
+-        };
+-    }
+-
+-    if name == "<init>" && THROWABLE_ROOTS.contains(&owner) {
+-        return CallModel::NoOp;
+-    }
+-    if owner == "java/lang/Object" && name == "<init>" {
+-        return CallModel::NoOp;
+-    }
+-    // Constructors of pure/collection classes: no tracked state to set up.
+-    // The lifter preserves Pure(None) as a Call, so taint analysis can see
+-    // argument flow (e.g. `new StringTokenizer(taintedStr)`).
+-    if name == "<init>" && PURE_OWNERS.contains(&owner) {
+-        return CallModel::Pure(None);
+-    }
+-
+-    // Enum support: model the ordinal field that javac's enum <clinit> sets.
+-    // <init> is always called via invokespecial on java/lang/Enum directly.
+-    // ordinal() is inherited but invoked with the subclass as owner, so we
+-    // match it by name+desc for any owner.
+-    if owner == "java/lang/Enum" && name == "<init>" {
+-        return CallModel::EnumInit;
+-    }
+-    if name == "ordinal" && desc == "()I" {
+-        return CallModel::EnumOrdinal;
+-    }
+-    if owner == "java/lang/Enum" {
+-        return CallModel::Pure(ret_ty(desc));
+-    }
+-
+-    // Assertions are always enabled under SV-COMP rules.
+-    // desiredAssertionStatus() returns true (1), so $assertionsDisabled = false (0).
+-    // Modelling this as a constant rather than Havoc avoids tainting the
+-    // assertion-enabled branch and lets the BMC check assertions precisely.
+-    if owner == "java/lang/Class" && name == "desiredAssertionStatus" {
+-        return CallModel::AssertionsEnabled;
+-    }
+-
+-    if STR_OWNERS.contains(&owner) {
+-        return CallModel::StrCall(ret_ty(desc));
+-    }
+-
+-    // Boxing: T.valueOf(primitive) → BoxStore, T.primitiveValue() → Unbox.
+-    // This models the value flowing through the boxed object so that
+-    // unboxing returns the same value that was boxed, rather than havoc.
+-    if let Some(model) = box_model(owner, name, desc) {
+-        return model;
+-    }
+-
+-    // Math/Integer/Long methods the SMT engine can model precisely.
+-    if is_math_call(owner, name) {
+-        return CallModel::MathCall(ret_ty(desc));
+-    }
+-
+-    // Collection methods: add/get/put modelled as synthetic field ops.
+-    // Must come before the PURE_OWNERS catch-all so we intercept these.
+-    if let Some(model) = collection_model(owner, name, desc) {
+-        return model;
+-    }
+-
+-    // Methods that can throw RuntimeException (NumberFormatException,
+-    // IllegalArgumentException, etc.) must NOT be Pure — the call must
+-    // remain visible so the BMC can flag it as potentially throwing for NRE.
+-    if matches!(
+-        name,
+-        "parseInt"
+-            | "parseLong"
+-            | "parseShort"
+-            | "parseByte"
+-            | "parseFloat"
+-            | "parseDouble"
+-            | "parseUnsignedInt"
+-            | "parseUnsignedLong"
+-            | "decode"
+-    ) {
+-        return CallModel::Unmodelled;
+-    }
+-
+-    // `Integer.getInteger(name, default)` / `Long.getLong(name, default)` read
+-    // a *system property* and return `default` when it is absent, empty, or
+-    // not numeric — they do not throw, unlike `parseInt`, which is why they
+-    // were wrong to sit in the list above.
+-    //
+-    // No benchmark sets a system property (it would have to call
+-    // `System.setProperty`, which would be in the code), and the replay JVM is
+-    // launched without `-D` for arbitrary names. So the property is absent and
+-    // the method returns its default argument *exactly*. That makes this a
+-    // precise model rather than an approximation, and — the point — it makes
+-    // the witness replayable: the real JVM takes the same branch.
+-    if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+-        && matches!(name, "getInteger" | "getLong")
+-    {
+-        return match desc {
+-            // (String, int) -> Integer / (String, long) -> Long: box the default.
+-            "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+-            "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
+-            // (String, Integer) -> Integer: the default is already boxed.
+-            "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+-            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {
+-                CallModel::ReturnArg(1, None)
+-            }
+-            // The one-argument forms return null when the property is absent,
+-            // which is a different fact and not modelled here.
+-            _ => CallModel::Unmodelled,
+-        };
+-    }
+-
+-    // Members of `PURE_OWNERS` classes that are *not* total. `Pure` erases the
+-    // call — the lifter rewrites it to a `Havoc`, or drops it entirely when the
+-    // return type is void — so no engine ever sees a call node, and neither the
+-    // NRE allowlist nor the verdict guard can fire. For a method that throws,
+-    // that is a silent wrong TRUE: `System.arraycopy` out of bounds simply
+-    // disappeared from the IR (issue #49).
+-    //
+-    // These must stay `Unmodelled` so the call survives into the IR and the
+-    // engines can reason about its exceptional behaviour.
+-    if pure_owner_member_may_throw(owner, name, desc) {
+-        return CallModel::Unmodelled;
+-    }
+-
+-    if PURE_OWNERS.contains(&owner) {
+-        return CallModel::Pure(ret_ty(desc));
+-    }
+-
+-    CallModel::Unmodelled
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `true` for members of `PURE_OWNERS` classes that can raise a
+ /// `RuntimeException`, and so must not be modelled as pure.
+ ///
+ /// Keyed on the descriptor where overloads differ in totality —
+ /// `Integer.valueOf(int)` is total, `Integer.valueOf(String)` throws
+ /// `NumberFormatException`.

@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/CharSequence", "length" | "toString") in contract_of
+@@ -687,17 +687,17 @@
+         }
+         ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => Contract {
+             requires: OPAQUE,
+             effect: Effect::Receiver,
+             may_return_null: true,
+         },
+ 
+         // ── CharSequence ────────────────────────────────────────────────
+-        ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+         ("java/lang/CharSequence", "charAt") => Contract {
+             requires: IDX1,
+             effect: Effect::Pure,
+             may_return_null: true,
+         },
+ 
+         // ── java.util.Objects ───────────────────────────────────────────
+         ("java/util/Objects", "requireNonNull") => Contract {

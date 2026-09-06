@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/String", "matches" | "split" | "replaceAll" | "replaceFirst" | "format" | "join",) in contract_of
+@@ -401,24 +401,17 @@
+                 end: None,
+                 seq: 0,
+             }],
+             effect: Effect::Pure,
+             may_return_null: true,
+         },
+         // PatternSyntaxException / IllegalFormatException are not conditions
+         // over the argument values we track.
+-        (
+-            "java/lang/String",
+-            "matches" | "split" | "replaceAll" | "replaceFirst" | "format" | "join",
+-        ) => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── java.lang.Object ────────────────────────────────────────────
+         // Monitor operations, listed before the class-level fallback below.
+         //
+         // `PURE_OWNERS` contains `java/lang/Object`, and a class-level entry is
+         // exactly what this file warns against: `wait` blocks the calling
+         // thread and *releases the monitor*, and `notify`/`notifyAll` move
+         // other threads between wait sets. Treating them as pure let the

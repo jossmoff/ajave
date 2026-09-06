@@ -1,0 +1,94 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Math" | "java/lang/StrictMath", n) in contract_of
+@@ -499,90 +499,17 @@
+             | "java/lang/Double"
+             | "java/lang/Character"
+             | "java/lang/Boolean",
+             "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue"
+             | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",
+         ) => Contract::TOTAL,
+ 
+         // ── Math ────────────────────────────────────────────────────────
+-        ("java/lang/Math" | "java/lang/StrictMath", n) => {
+-            if matches!(n, "addExact" | "subtractExact" | "multiplyExact") {
+-                // Overflow is expressible: widen both operands and check the
+-                // result stays in range.
+-                let width = if desc.starts_with("(JJ)") { 64 } else { 32 };
+-                let op = match n {
+-                    "addExact" => ajave_ir::BinOp::Add,
+-                    "subtractExact" => ajave_ir::BinOp::Sub,
+-                    _ => ajave_ir::BinOp::Mul,
+-                };
+-                return Some(Contract {
+-                    requires: Box::leak(Box::new([Precondition::NoOverflow {
+-                        a: 0,
+-                        b: 1,
+-                        op,
+-                        width,
+-                    }])),
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                });
+-            } else if matches!(
+-                n,
+-                "incrementExact" | "decrementExact" | "negateExact" | "absExact" | "toIntExact"
+-            ) {
+-                // Single-operand overflow; not seeded yet.
+-                Contract {
+-                    requires: OPAQUE,
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                }
+-            } else if matches!(n, "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod") {
+-                Contract {
+-                    requires: &[Precondition::NonZero(2)],
+-                    effect: Effect::Pure,
+-                    may_return_null: true,
+-                }
+-            } else if matches!(
+-                n,
+-                "abs"
+-                    | "min"
+-                    | "max"
+-                    | "sqrt"
+-                    | "cbrt"
+-                    | "sin"
+-                    | "cos"
+-                    | "tan"
+-                    | "asin"
+-                    | "acos"
+-                    | "atan"
+-                    | "atan2"
+-                    | "exp"
+-                    | "expm1"
+-                    | "log"
+-                    | "log10"
+-                    | "log1p"
+-                    | "pow"
+-                    | "floor"
+-                    | "ceil"
+-                    | "rint"
+-                    | "round"
+-                    | "signum"
+-                    | "hypot"
+-                    | "random"
+-                    | "toRadians"
+-                    | "toDegrees"
+-                    | "ulp"
+-                    | "copySign"
+-                    | "fma"
+-            ) {
+-                Contract::TOTAL
+-            } else {
+-                return None;
+-            }
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── System ──────────────────────────────────────────────────────
+         (
+             "java/lang/System",
+             "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",
+         ) => Contract::TOTAL,
+ 
+         // ── Enum ────────────────────────────────────────────────────────

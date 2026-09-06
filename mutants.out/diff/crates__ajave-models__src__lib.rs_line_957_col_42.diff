@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in model_for
+@@ -949,17 +949,17 @@
+     if name == "<init>" && PURE_OWNERS.contains(&owner) {
+         return CallModel::Pure(None);
+     }
+ 
+     // Enum support: model the ordinal field that javac's enum <clinit> sets.
+     // <init> is always called via invokespecial on java/lang/Enum directly.
+     // ordinal() is inherited but invoked with the subclass as owner, so we
+     // match it by name+desc for any owner.
+-    if owner == "java/lang/Enum" && name == "<init>" {
++    if owner == "java/lang/Enum" && name != /* ~ changed by cargo-mutants ~ */ "<init>" {
+         return CallModel::EnumInit;
+     }
+     if name == "ordinal" && desc == "()I" {
+         return CallModel::EnumOrdinal;
+     }
+     if owner == "java/lang/Enum" {
+         return CallModel::Pure(ret_ty(desc));
+     }

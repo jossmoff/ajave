@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in model_for
+@@ -941,17 +941,17 @@
+         return CallModel::NoOp;
+     }
+     if owner == "java/lang/Object" && name == "<init>" {
+         return CallModel::NoOp;
+     }
+     // Constructors of pure/collection classes: no tracked state to set up.
+     // The lifter preserves Pure(None) as a Call, so taint analysis can see
+     // argument flow (e.g. `new StringTokenizer(taintedStr)`).
+-    if name == "<init>" && PURE_OWNERS.contains(&owner) {
++    if name != /* ~ changed by cargo-mutants ~ */ "<init>" && PURE_OWNERS.contains(&owner) {
+         return CallModel::Pure(None);
+     }
+ 
+     // Enum support: model the ordinal field that javac's enum <clinit> sets.
+     // <init> is always called via invokespecial on java/lang/Enum directly.
+     // ordinal() is inherited but invoked with the subclass as owner, so we
+     // match it by name+desc for any owner.
+     if owner == "java/lang/Enum" && name == "<init>" {

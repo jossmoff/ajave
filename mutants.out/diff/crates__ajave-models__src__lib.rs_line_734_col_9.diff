@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm (VERIFIER, _) in contract_of
+@@ -726,17 +726,17 @@
+         },
+         // Queries that touch no shared state.
+         (
+             "java/lang/Thread",
+             "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",
+         ) => Contract::TOTAL,
+ 
+         // ── The nondet source ───────────────────────────────────────────
+-        (VERIFIER, _) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+ 
+         _ => return None,
+     };
+     // Fill in the return-nullness for every path out of here, so a contract
+     // never silently claims a result may be null just because the arm that
+     // built it predates the field.
+     Some(Contract {
+         may_return_null: c.may_return_null && !returns_nonnull(class, name, desc),

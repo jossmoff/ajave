@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace >= with < in Contract::at_least_as_conservative_as
+@@ -197,17 +197,17 @@
+     ///
+     /// More preconditions is more conservative; a wider effect is more
+     /// conservative.
+     pub fn at_least_as_conservative_as(&self, other: &Contract) -> bool {
+         let covers = other
+             .requires
+             .iter()
+             .all(|p| self.requires.iter().any(|q| q == p));
+-        covers && self.effect.rank() >= other.effect.rank()
++        covers && self.effect.rank() < /* ~ changed by cargo-mutants ~ */ other.effect.rank()
+     }
+ 
+     /// The most conservative contract: assume it can throw for reasons we
+     /// cannot state, and that it writes anything.
+     pub const OPAQUE: Contract = Contract {
+         requires: &[Precondition::Unexpressible],
+         effect: Effect::Unknown,
+         may_return_null: true,

@@ -1,0 +1,31 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") in contract_of
+@@ -438,27 +438,17 @@
+         ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+             Contract::TOTAL
+         }
+ 
+         // ── StringBuilder / StringBuffer ────────────────────────────────
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+             Contract::TOTAL_MUT
+         }
+-        ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+-            // `StringBuilder(int)` throws on a negative capacity;
+-            // `StringBuilder(String)` throws NPE on null.
+-            requires: if desc == "(I)V" {
+-                &[Precondition::NonNegative(1)]
+-            } else {
+-                NN1
+-            },
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") => {
+             Contract::TOTAL
+         }
+         // `append` renders null as "null" for the reference overloads and is
+         // total for the primitive ones.
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") => Contract::TOTAL_MUT,
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") => Contract {
+             requires: IDX1,

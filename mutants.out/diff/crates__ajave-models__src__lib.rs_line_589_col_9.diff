@@ -1,0 +1,23 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") in contract_of
+@@ -581,19 +581,17 @@
+ 
+         // ── System ──────────────────────────────────────────────────────
+         (
+             "java/lang/System",
+             "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",
+         ) => Contract::TOTAL,
+ 
+         // ── Enum ────────────────────────────────────────────────────────
+-        ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
+-            Contract::TOTAL
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // `next()` on an exhausted iterator throws NoSuchElementException,
+         // and `hasNext()` is total. We model an iterator as its collection, so
+         // emptiness is `$$coll_size == 0`.
+         ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => Contract {
+             requires: &[Precondition::NonEmpty],
+             effect: Effect::Receiver,
+             may_return_null: true,

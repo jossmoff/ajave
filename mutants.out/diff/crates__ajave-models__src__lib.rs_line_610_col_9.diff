@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/ArrayDeque" | "java/util/LinkedList", "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast",) in contract_of
+@@ -602,24 +602,17 @@
+             Contract::TOTAL
+         }
+         // Stack/Deque removal on an empty receiver throws.
+         ("java/util/Stack", "pop" | "peek") => Contract {
+             requires: &[Precondition::NonEmpty],
+             effect: Effect::Receiver,
+             may_return_null: true,
+         },
+-        (
+-            "java/util/ArrayDeque" | "java/util/LinkedList",
+-            "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast",
+-        ) => Contract {
+-            requires: &[Precondition::NonEmpty],
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── Collections ─────────────────────────────────────────────────
+         // Now that element counts are tracked in `$$coll_size`, the bound on
+         // an indexed access is expressible, so these stop being dead ends.
+         (
+             "java/util/List"
+             | "java/util/ArrayList"
+             | "java/util/LinkedList"

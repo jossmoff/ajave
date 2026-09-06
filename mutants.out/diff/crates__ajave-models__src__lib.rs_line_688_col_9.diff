@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") in contract_of
+@@ -680,21 +680,17 @@
+         (
+             "java/io/PrintWriter" | "java/io/PrintStream",
+             "println" | "print" | "write" | "flush" | "close" | "append",
+         ) => {
+             // `format`/`printf` are excluded: IllegalFormatException is not a
+             // condition over a value we track.
+             Contract::TOTAL_MUT
+         }
+-        ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── CharSequence ────────────────────────────────────────────────
+         ("java/lang/CharSequence", "length" | "toString") => Contract::TOTAL,
+         ("java/lang/CharSequence", "charAt") => Contract {
+             requires: IDX1,
+             effect: Effect::Pure,
+             may_return_null: true,
+         },

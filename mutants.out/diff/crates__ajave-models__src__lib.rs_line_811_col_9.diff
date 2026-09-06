@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm b'J' in ret_ty
+@@ -803,17 +803,17 @@
+     /// `isEmpty()` — `$$coll_size == 0`.
+     CollectionIsEmpty,
+ }
+ 
+ fn ret_ty(desc: &str) -> Option<Ty> {
+     let after = desc.rfind(')')? + 1;
+     match desc.as_bytes().get(after)? {
+         b'V' => None,
+-        b'J' => Some(Ty::Long),
++         /* ~ changed by cargo-mutants ~ */
+         b'F' => Some(Ty::Float),
+         b'D' => Some(Ty::Double),
+         b'L' | b'[' => Some(Ty::Ref),
+         _ => Some(Ty::Int),
+     }
+ }
+ 
+ /// Classes whose instance methods we treat as pure with respect to our state.

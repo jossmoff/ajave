@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;" | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" in model_for
+@@ -1026,20 +1026,17 @@
+     if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+         && matches!(name, "getInteger" | "getLong")
+     {
+         return match desc {
+             // (String, int) -> Integer / (String, long) -> Long: box the default.
+             "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+             "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
+             // (String, Integer) -> Integer: the default is already boxed.
+-            "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+-            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {
+-                CallModel::ReturnArg(1, None)
+-            }
++             /* ~ changed by cargo-mutants ~ */
+             // The one-argument forms return null when the property is absent,
+             // which is a different fact and not modelled here.
+             _ => CallModel::Unmodelled,
+         };
+     }
+ 
+     // Members of `PURE_OWNERS` classes that are *not* total. `Pure` erases the
+     // call — the lifter rewrites it to a `Havoc`, or drops it entirely when the

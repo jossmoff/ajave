@@ -1,0 +1,17 @@
+crates/ajave-models/src/lib.rs:124:9: replace Effect::rank -> u8 with 0
+crates/ajave-models/src/lib.rs:124:9: replace Effect::rank -> u8 with 1
+crates/ajave-models/src/lib.rs:179:9: replace Contract::is_total -> bool with true
+crates/ajave-models/src/lib.rs:179:9: replace Contract::is_total -> bool with false
+crates/ajave-models/src/lib.rs:201:9: replace Contract::at_least_as_conservative_as -> bool with true
+crates/ajave-models/src/lib.rs:201:9: replace Contract::at_least_as_conservative_as -> bool with false
+crates/ajave-models/src/lib.rs:205:16: replace && with || in Contract::at_least_as_conservative_as
+crates/ajave-models/src/lib.rs:205:38: replace >= with < in Contract::at_least_as_conservative_as
+crates/ajave-models/src/lib.rs:268:5: replace perturbed -> bool with true
+crates/ajave-models/src/lib.rs:311:5: replace returns_nonnull -> bool with true
+crates/ajave-models/src/lib.rs:311:5: replace returns_nonnull -> bool with false
+crates/ajave-models/src/lib.rs:311:13: replace == with != in returns_nonnull
+crates/ajave-models/src/lib.rs:337:7: replace && with || in returns_nonnull
+crates/ajave-models/src/lib.rs:337:10: delete ! in returns_nonnull
+crates/ajave-models/src/lib.rs:345:5: replace contract_of -> Option<Contract> with None
+crates/ajave-models/src/lib.rs:443:77: replace match guard desc == "()V" with true in contract_of
+crates/ajave-models/src/lib.rs:443:82: replace == with != in contract_of

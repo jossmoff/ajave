@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") in contract_of
+@@ -588,21 +588,17 @@
+         // ── Enum ────────────────────────────────────────────────────────
+         ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
+             Contract::TOTAL
+         }
+ 
+         // `next()` on an exhausted iterator throws NoSuchElementException,
+         // and `hasNext()` is total. We model an iterator as its collection, so
+         // emptiness is `$$coll_size == 0`.
+-        ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") => Contract {
+-            requires: &[Precondition::NonEmpty],
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") => {
+             Contract::TOTAL
+         }
+         // Stack/Deque removal on an empty receiver throws.
+         ("java/util/Stack", "pop" | "peek") => Contract {
+             requires: &[Precondition::NonEmpty],
+             effect: Effect::Receiver,
+             may_return_null: true,

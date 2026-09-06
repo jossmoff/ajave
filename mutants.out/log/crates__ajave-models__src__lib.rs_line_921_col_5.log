@@ -1,0 +1,257 @@
+
+*** crates/ajave-models/src/lib.rs:921:5: replace model_for -> CallModel with Default::default()
+
+*** mutation diff:
+--- crates/ajave-models/src/lib.rs
++++ replace model_for -> CallModel with Default::default()
+@@ -913,157 +913,17 @@
+     "java/lang/IndexOutOfBoundsException",
+     "java/lang/ClassCastException",
+     "java/lang/NegativeArraySizeException",
+     "java/lang/UnsupportedOperationException",
+     "java/lang/StringIndexOutOfBoundsException",
+ ];
+ 
+ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
+-    if owner == VERIFIER {
+-        return match name {
+-            "assume" => CallModel::Assume,
+-            "nondetString" => CallModel::Nondet(Some(Ty::Str), b'L'),
+-            // nondetObject returns a factory-created object; must inline the
+-            // factory body rather than treating it as a raw nondet ref.
+-            "nondetObject" => CallModel::Unmodelled,
+-            n if n.starts_with("nondet") => {
+-                let jvm_byte = desc
+-                    .as_bytes()
+-                    .get(desc.rfind(')').unwrap_or(0) + 1)
+-                    .copied()
+-                    .unwrap_or(b'I');
+-                CallModel::Nondet(ret_ty(desc), jvm_byte)
+-            }
+-            _ => CallModel::Unmodelled,
+-        };
+-    }
+-
+-    if name == "<init>" && THROWABLE_ROOTS.contains(&owner) {
+-        return CallModel::NoOp;
+-    }
+-    if owner == "java/lang/Object" && name == "<init>" {
+-        return CallModel::NoOp;
+-    }
+-    // Constructors of pure/collection classes: no tracked state to set up.
+-    // The lifter preserves Pure(None) as a Call, so taint analysis can see
+-    // argument flow (e.g. `new StringTokenizer(taintedStr)`).
+-    if name == "<init>" && PURE_OWNERS.contains(&owner) {
+-        return CallModel::Pure(None);
+-    }
+-
+-    // Enum support: model the ordinal field that javac's enum <clinit> sets.
+-    // <init> is always called via invokespecial on java/lang/Enum directly.
+-    // ordinal() is inherited but invoked with the subclass as owner, so we
+-    // match it by name+desc for any owner.
+-    if owner == "java/lang/Enum" && name == "<init>" {
+-        return CallModel::EnumInit;
+-    }
+-    if name == "ordinal" && desc == "()I" {
+-        return CallModel::EnumOrdinal;
+-    }
+-    if owner == "java/lang/Enum" {
+-        return CallModel::Pure(ret_ty(desc));
+-    }
+-
+-    // Assertions are always enabled under SV-COMP rules.
+-    // desiredAssertionStatus() returns true (1), so $assertionsDisabled = false (0).
+-    // Modelling this as a constant rather than Havoc avoids tainting the
+-    // assertion-enabled branch and lets the BMC check assertions precisely.
+-    if owner == "java/lang/Class" && name == "desiredAssertionStatus" {
+-        return CallModel::AssertionsEnabled;
+-    }
+-
+-    if STR_OWNERS.contains(&owner) {
+-        return CallModel::StrCall(ret_ty(desc));
+-    }
+-
+-    // Boxing: T.valueOf(primitive) → BoxStore, T.primitiveValue() → Unbox.
+-    // This models the value flowing through the boxed object so that
+-    // unboxing returns the same value that was boxed, rather than havoc.
+-    if let Some(model) = box_model(owner, name, desc) {
+-        return model;
+-    }
+-
+-    // Math/Integer/Long methods the SMT engine can model precisely.
+-    if is_math_call(owner, name) {
+-        return CallModel::MathCall(ret_ty(desc));
+-    }
+-
+-    // Collection methods: add/get/put modelled as synthetic field ops.
+-    // Must come before the PURE_OWNERS catch-all so we intercept these.
+-    if let Some(model) = collection_model(owner, name, desc) {
+-        return model;
+-    }
+-
+-    // Methods that can throw RuntimeException (NumberFormatException,
+-    // IllegalArgumentException, etc.) must NOT be Pure — the call must
+-    // remain visible so the BMC can flag it as potentially throwing for NRE.
+-    if matches!(
+-        name,
+-        "parseInt"
+-            | "parseLong"
+-            | "parseShort"
+-            | "parseByte"
+-            | "parseFloat"
+-            | "parseDouble"
+-            | "parseUnsignedInt"
+-            | "parseUnsignedLong"
+-            | "decode"
+-    ) {
+-        return CallModel::Unmodelled;
+-    }
+-
+-    // `Integer.getInteger(name, default)` / `Long.getLong(name, default)` read
+-    // a *system property* and return `default` when it is absent, empty, or
+-    // not numeric — they do not throw, unlike `parseInt`, which is why they
+-    // were wrong to sit in the list above.
+-    //
+-    // No benchmark sets a system property (it would have to call
+-    // `System.setProperty`, which would be in the code), and the replay JVM is
+-    // launched without `-D` for arbitrary names. So the property is absent and
+-    // the method returns its default argument *exactly*. That makes this a
+-    // precise model rather than an approximation, and — the point — it makes
+-    // the witness replayable: the real JVM takes the same branch.
+-    if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+-        && matches!(name, "getInteger" | "getLong")
+-    {
+-        return match desc {
+-            // (String, int) -> Integer / (String, long) -> Long: box the default.
+-            "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+-            "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
+-            // (String, Integer) -> Integer: the default is already boxed.
+-            "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+-            | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {
+-                CallModel::ReturnArg(1, None)
+-            }
+-            // The one-argument forms return null when the property is absent,
+-            // which is a different fact and not modelled here.
+-            _ => CallModel::Unmodelled,
+-        };
+-    }
+-
+-    // Members of `PURE_OWNERS` classes that are *not* total. `Pure` erases the
+-    // call — the lifter rewrites it to a `Havoc`, or drops it entirely when the
+-    // return type is void — so no engine ever sees a call node, and neither the
+-    // NRE allowlist nor the verdict guard can fire. For a method that throws,
+-    // that is a silent wrong TRUE: `System.arraycopy` out of bounds simply
+-    // disappeared from the IR (issue #49).
+-    //
+-    // These must stay `Unmodelled` so the call survives into the IR and the
+-    // engines can reason about its exceptional behaviour.
+-    if pure_owner_member_may_throw(owner, name, desc) {
+-        return CallModel::Unmodelled;
+-    }
+-
+-    if PURE_OWNERS.contains(&owner) {
+-        return CallModel::Pure(ret_ty(desc));
+-    }
+-
+-    CallModel::Unmodelled
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `true` for members of `PURE_OWNERS` classes that can raise a
+ /// `RuntimeException`, and so must not be modelled as pure.
+ ///
+ /// Keyed on the descriptor where overloads differ in totality —
+ /// `Integer.valueOf(int)` is total, `Integer.valueOf(String)` throws
+ /// `NumberFormatException`.
+
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --no-run --verbose --workspace
+       Fresh memchr v2.8.3
+       Fresh unicode-ident v1.0.24
+       Fresh log v0.4.33
+       Dirty ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models): the file `crates/ajave-models/src/lib.rs` has changed (1788697342.586217809s, 7s after last build at 1788697335.941467681s)
+   Compiling ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+       Fresh glob v0.3.4
+       Fresh minimal-lexical v0.2.1
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta`
+       Fresh cfg-if v1.0.4
+       Fresh equivalent v1.0.2
+       Fresh hashbrown v0.17.1
+       Fresh proc-macro2 v1.0.107
+       Fresh serde_core v1.0.229
+       Fresh libloading v0.8.9
+       Fresh indexmap v2.14.0
+       Fresh libc v0.2.189
+       Fresh nom v7.1.3
+       Fresh toml_write v0.1.2
+       Fresh winnow v0.7.15
+       Fresh quote v1.0.47
+       Fresh serde v1.0.229
+       Fresh either v1.17.0
+       Fresh clang-sys v1.9.1
+       Fresh cexpr v0.6.0
+       Fresh bitflags v2.13.1
+       Fresh find-msvc-tools v0.1.9
+       Fresh shlex v1.3.0
+       Fresh toml_datetime v0.6.11
+       Fresh serde_spanned v0.6.9
+       Fresh syn v2.0.119
+       Fresh itertools v0.13.0
+       Fresh shlex v2.0.1
+       Fresh unicode-segmentation v1.13.3
+       Fresh rustc-hash v2.1.3
+       Fresh utf8parse v0.2.2
+       Fresh aho-corasick v1.1.4
+       Fresh toml_edit v0.22.27
+       Fresh convert_case v0.11.0
+       Fresh bindgen v0.72.1
+       Fresh cc v1.4.0
+       Fresh anstyle-parse v1.0.0
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh anstyle v1.0.14
+       Fresh anstyle-query v1.1.5
+       Fresh colorchoice v1.0.5
+       Fresh regex-syntax v0.8.11
+       Fresh toml v0.8.23
+       Fresh regex-automata v0.4.16
+       Fresh anstream v1.0.0
+       Fresh syn v3.0.3
+       Fresh strsim v0.11.1
+       Fresh heck v0.5.0
+       Fresh clap_lex v1.1.0
+       Fresh jiff-core v0.1.0
+       Fresh regex v1.13.1
+       Fresh clap_derive v4.6.4
+       Fresh jiff v0.2.35
+       Fresh clap_builder v4.6.2
+       Fresh ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib`
+       Fresh env_filter v2.0.0
+       Fresh clap v4.6.4
+       Fresh cvc5-sys v0.4.0
+       Fresh env_logger v0.11.11
+       Fresh cvc5 v0.4.0
+error[E0277]: the trait bound `CallModel: Default` is not satisfied
+   --> crates/ajave-models/src/lib.rs:921:5
+    |
+921 |     Default::default() /* ~ changed by cargo-mutants ~ */
+    |     ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Default` is not implemented for `CallModel`
+   --> crates/ajave-models/src/lib.rs:748:1
+    |
+748 | pub enum CallModel {
+    | ^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `ajave-models` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `ajave-models` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib` (exit status: 1)
+
+*** result: Failure(101)

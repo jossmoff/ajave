@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in model_for
+@@ -1019,17 +1019,17 @@
+     //
+     // No benchmark sets a system property (it would have to call
+     // `System.setProperty`, which would be in the code), and the replay JVM is
+     // launched without `-D` for arbitrary names. So the property is absent and
+     // the method returns its default argument *exactly*. That makes this a
+     // precise model rather than an approximation, and — the point — it makes
+     // the witness replayable: the real JVM takes the same branch.
+     if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+-        && matches!(name, "getInteger" | "getLong")
++        || /* ~ changed by cargo-mutants ~ */ matches!(name, "getInteger" | "getLong")
+     {
+         return match desc {
+             // (String, int) -> Integer / (String, long) -> Long: box the default.
+             "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+             "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
+             // (String, Integer) -> Integer: the default is already boxed.
+             "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+             | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {

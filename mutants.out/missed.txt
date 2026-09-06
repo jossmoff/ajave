@@ -1,0 +1,102 @@
+crates/ajave-models/src/lib.rs:92:9: replace Precondition::is_seeded -> bool with true
+crates/ajave-models/src/lib.rs:92:9: replace Precondition::is_seeded -> bool with false
+crates/ajave-models/src/lib.rs:204:53: replace == with != in Contract::at_least_as_conservative_as
+crates/ajave-models/src/lib.rs:228:9: replace Contract::preconditions_all_seeded -> bool with true
+crates/ajave-models/src/lib.rs:228:9: replace Contract::preconditions_all_seeded -> bool with false
+crates/ajave-models/src/lib.rs:268:5: replace perturbed -> bool with false
+crates/ajave-models/src/lib.rs:354:13: delete field may_return_null from struct Contract expression in contract_of
+crates/ajave-models/src/lib.rs:354:30: delete ! in contract_of
+crates/ajave-models/src/lib.rs:368:9: delete match arm ("java/lang/String", "length" | "isEmpty" | "hashCode" | "toString" | "intern" | "trim" | "toCharArray" | "toUpperCase" | "toLowerCase",) in contract_of
+crates/ajave-models/src/lib.rs:374:9: delete match arm ("java/lang/String", "equals") in contract_of
+crates/ajave-models/src/lib.rs:375:9: delete match arm ("java/lang/String", "contains" | "startsWith" | "endsWith" | "concat" | "equalsIgnoreCase" | "compareTo" | "compareToIgnoreCase" | "indexOf" | "lastIndexOf" | "replace",) in contract_of
+crates/ajave-models/src/lib.rs:393:9: delete match arm ("java/lang/String", "charAt" | "codePointAt") in contract_of
+crates/ajave-models/src/lib.rs:398:9: delete match arm ("java/lang/String", "substring") in contract_of
+crates/ajave-models/src/lib.rs:409:9: delete match arm ("java/lang/String", "matches" | "split" | "replaceAll" | "replaceFirst" | "format" | "join",) in contract_of
+crates/ajave-models/src/lib.rs:433:9: delete match arm ("java/lang/Object", "wait" | "notify" | "notifyAll") in contract_of
+crates/ajave-models/src/lib.rs:438:9: delete match arm ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") in contract_of
+crates/ajave-models/src/lib.rs:446:9: delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") in contract_of
+crates/ajave-models/src/lib.rs:457:9: delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "length" | "toString") in contract_of
+crates/ajave-models/src/lib.rs:462:9: delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "append") in contract_of
+crates/ajave-models/src/lib.rs:463:9: delete match arm ("java/lang/StringBuilder" | "java/lang/StringBuffer", "charAt") in contract_of
+crates/ajave-models/src/lib.rs:470:9: delete match arm ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Character" | "java/lang/Boolean", "valueOf",) in contract_of
+crates/ajave-models/src/lib.rs:493:9: delete match arm ("java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Character" | "java/lang/Boolean", "intValue" | "longValue" | "shortValue" | "byteValue" | "floatValue" | "doubleValue" | "charValue" | "booleanValue" | "hashCode" | "toString" | "equals",) in contract_of
+crates/ajave-models/src/lib.rs:507:9: delete match arm ("java/lang/Math" | "java/lang/StrictMath", n) in contract_of
+crates/ajave-models/src/lib.rs:583:9: delete match arm ("java/lang/System", "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",) in contract_of
+crates/ajave-models/src/lib.rs:589:9: delete match arm ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") in contract_of
+crates/ajave-models/src/lib.rs:596:9: delete match arm ("java/util/Iterator" | "java/util/ListIterator", "next" | "previous") in contract_of
+crates/ajave-models/src/lib.rs:601:9: delete match arm ("java/util/Iterator" | "java/util/ListIterator", "hasNext" | "hasPrevious") in contract_of
+crates/ajave-models/src/lib.rs:605:9: delete match arm ("java/util/Stack", "pop" | "peek") in contract_of
+crates/ajave-models/src/lib.rs:610:9: delete match arm ("java/util/ArrayDeque" | "java/util/LinkedList", "pop" | "removeFirst" | "removeLast" | "getFirst" | "getLast",) in contract_of
+crates/ajave-models/src/lib.rs:622:9: delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "get",) in contract_of
+crates/ajave-models/src/lib.rs:634:9: delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "size" | "isEmpty",) in contract_of
+crates/ajave-models/src/lib.rs:644:9: delete match arm ("java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" | "java/util/Vector", "add",) in contract_of
+crates/ajave-models/src/lib.rs:662:9: delete match arm ("java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set", "add" | "contains" | "size" | "isEmpty",) in contract_of
+crates/ajave-models/src/lib.rs:667:9: delete match arm ("java/util/HashMap" | "java/util/LinkedHashMap", "put" | "get" | "containsKey" | "size" | "isEmpty",) in contract_of
+crates/ajave-models/src/lib.rs:675:9: delete match arm ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") in contract_of
+crates/ajave-models/src/lib.rs:680:9: delete match arm ("java/io/PrintWriter" | "java/io/PrintStream", "println" | "print" | "write" | "flush" | "close" | "append",) in contract_of
+crates/ajave-models/src/lib.rs:688:9: delete match arm ("java/io/PrintWriter" | "java/io/PrintStream", "format" | "printf") in contract_of
+crates/ajave-models/src/lib.rs:695:9: delete match arm ("java/lang/CharSequence", "length" | "toString") in contract_of
+crates/ajave-models/src/lib.rs:696:9: delete match arm ("java/lang/CharSequence", "charAt") in contract_of
+crates/ajave-models/src/lib.rs:703:9: delete match arm ("java/util/Objects", "requireNonNull") in contract_of
+crates/ajave-models/src/lib.rs:708:9: delete match arm ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") in contract_of
+crates/ajave-models/src/lib.rs:722:9: delete match arm ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") in contract_of
+crates/ajave-models/src/lib.rs:728:9: delete match arm ("java/lang/Thread", "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",) in contract_of
+crates/ajave-models/src/lib.rs:734:9: delete match arm (VERIFIER, _) in contract_of
+crates/ajave-models/src/lib.rs:443:77: replace match guard desc == "()V" with false in contract_of
+crates/ajave-models/src/lib.rs:449:31: replace == with != in contract_of
+crates/ajave-models/src/lib.rs:513:21: delete match arm "addExact" in contract_of
+crates/ajave-models/src/lib.rs:514:21: delete match arm "subtractExact" in contract_of
+crates/ajave-models/src/lib.rs:742:9: delete field may_return_null from struct Contract expression in contract_of
+crates/ajave-models/src/lib.rs:742:44: replace && with || in contract_of
+crates/ajave-models/src/lib.rs:742:47: delete ! in contract_of
+crates/ajave-models/src/lib.rs:808:5: replace ret_ty -> Option<Ty> with None
+crates/ajave-models/src/lib.rs:808:34: replace + with - in ret_ty
+crates/ajave-models/src/lib.rs:808:34: replace + with * in ret_ty
+crates/ajave-models/src/lib.rs:810:9: delete match arm b'V' in ret_ty
+crates/ajave-models/src/lib.rs:811:9: delete match arm b'J' in ret_ty
+crates/ajave-models/src/lib.rs:812:9: delete match arm b'F' in ret_ty
+crates/ajave-models/src/lib.rs:813:9: delete match arm b'D' in ret_ty
+crates/ajave-models/src/lib.rs:814:9: delete match arm b'L' | b'[' in ret_ty
+crates/ajave-models/src/lib.rs:921:14: replace == with != in model_for
+crates/ajave-models/src/lib.rs:923:13: delete match arm "assume" in model_for
+crates/ajave-models/src/lib.rs:924:13: delete match arm "nondetString" in model_for
+crates/ajave-models/src/lib.rs:927:13: delete match arm "nondetObject" in model_for
+crates/ajave-models/src/lib.rs:928:18: replace match guard n.starts_with("nondet") with true in model_for
+crates/ajave-models/src/lib.rs:928:18: replace match guard n.starts_with("nondet") with false in model_for
+crates/ajave-models/src/lib.rs:931:55: replace + with - in model_for
+crates/ajave-models/src/lib.rs:931:55: replace + with * in model_for
+crates/ajave-models/src/lib.rs:940:25: replace && with || in model_for
+crates/ajave-models/src/lib.rs:940:13: replace == with != in model_for
+crates/ajave-models/src/lib.rs:943:36: replace && with || in model_for
+crates/ajave-models/src/lib.rs:943:14: replace == with != in model_for
+crates/ajave-models/src/lib.rs:943:44: replace == with != in model_for
+crates/ajave-models/src/lib.rs:949:25: replace && with || in model_for
+crates/ajave-models/src/lib.rs:949:13: replace == with != in model_for
+crates/ajave-models/src/lib.rs:957:34: replace && with || in model_for
+crates/ajave-models/src/lib.rs:957:14: replace == with != in model_for
+crates/ajave-models/src/lib.rs:957:42: replace == with != in model_for
+crates/ajave-models/src/lib.rs:960:26: replace && with || in model_for
+crates/ajave-models/src/lib.rs:960:13: replace == with != in model_for
+crates/ajave-models/src/lib.rs:960:34: replace == with != in model_for
+crates/ajave-models/src/lib.rs:963:14: replace == with != in model_for
+crates/ajave-models/src/lib.rs:971:35: replace && with || in model_for
+crates/ajave-models/src/lib.rs:971:14: replace == with != in model_for
+crates/ajave-models/src/lib.rs:971:43: replace == with != in model_for
+crates/ajave-models/src/lib.rs:1027:9: replace && with || in model_for
+crates/ajave-models/src/lib.rs:1031:13: delete match arm "(Ljava/lang/String;I)Ljava/lang/Integer;" in model_for
+crates/ajave-models/src/lib.rs:1032:13: delete match arm "(Ljava/lang/String;J)Ljava/lang/Long;" in model_for
+crates/ajave-models/src/lib.rs:1034:13: delete match arm "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;" | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" in model_for
+crates/ajave-models/src/lib.rs:1071:5: replace pure_owner_member_may_throw -> bool with true
+crates/ajave-models/src/lib.rs:1071:5: replace pure_owner_member_may_throw -> bool with false
+crates/ajave-models/src/lib.rs:1073:9: delete match arm "java/lang/Math" | "java/lang/StrictMath" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1100:9: delete match arm "java/lang/Object" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1102:9: delete match arm "java/lang/System" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1104:9: delete match arm "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1109:9: delete match arm "java/util/Arrays" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1114:9: delete match arm "java/util/Collections" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1126:9: delete match arm "java/util/List" | "java/util/ArrayList" | "java/util/LinkedList" | "java/util/AbstractList" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1130:9: delete match arm "java/util/Map" | "java/util/HashMap" | "java/util/TreeMap" | "java/util/LinkedHashMap" | "java/util/AbstractMap" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1139:9: delete match arm "java/util/TreeSet" | "java/util/Set" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1140:9: delete match arm "java/util/Iterator" | "java/util/ListIterator" in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1102:36: replace == with != in pure_owner_member_may_throw
+crates/ajave-models/src/lib.rs:1106:31: replace && with || in pure_owner_member_may_throw

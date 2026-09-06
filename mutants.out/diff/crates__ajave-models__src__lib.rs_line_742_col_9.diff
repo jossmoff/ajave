@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete field may_return_null from struct Contract expression in contract_of
+@@ -734,17 +734,17 @@
+         (VERIFIER, _) => Contract::TOTAL,
+ 
+         _ => return None,
+     };
+     // Fill in the return-nullness for every path out of here, so a contract
+     // never silently claims a result may be null just because the arm that
+     // built it predates the field.
+     Some(Contract {
+-        may_return_null: c.may_return_null && !returns_nonnull(class, name, desc),
++         /* ~ changed by cargo-mutants ~ */
+         ..c
+     })
+ }
+ 
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum CallModel {
+     /// No observable effect; drop it. Constructors of exception types and
+     /// `Object.<init>` land here.

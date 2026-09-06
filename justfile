@@ -139,11 +139,17 @@ jdk-allowlist:
 # ---------------------------------------------------------------------------
 
 # A surviving mutant is a missing test. Needs: cargo install cargo-mutants
+#
+# `--test-workspace true` matters and is not optional: the tests that cover
+# `ajave-models` live in `ajave-engines`, so mutating one package and running
+# only that package's tests reported 335 of 381 mutants "missed" when most had
+# no test executed against them at all. A mutation score is meaningless unless
+# the suite that covers the code is the suite that runs.
 # Mutation testing where a wrong answer is most expensive.
 mutants:
-    cargo mutants --package ajave-models --file '**/lib.rs' --timeout 120
-    cargo mutants --package ajave-core --file '**/blackboard.rs' --timeout 120
-    cargo mutants --package ajave-engines --file '**/liveness.rs' --timeout 120
+    cargo mutants --package ajave-models --file '**/lib.rs' --test-workspace true --timeout 300
+    cargo mutants --package ajave-core --file '**/blackboard.rs' --test-workspace true --timeout 300
+    cargo mutants --package ajave-engines --file '**/liveness.rs' --test-workspace true --timeout 300
 
 # Verdicts must not depend on hash iteration order or leftover state; a flake
 # here is a defect, not noise.

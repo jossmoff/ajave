@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "(Ljava/lang/String;J)Ljava/lang/Long;" in model_for
+@@ -1024,17 +1024,17 @@
+     // precise model rather than an approximation, and — the point — it makes
+     // the witness replayable: the real JVM takes the same branch.
+     if matches!(owner, "java/lang/Integer" | "java/lang/Long")
+         && matches!(name, "getInteger" | "getLong")
+     {
+         return match desc {
+             // (String, int) -> Integer / (String, long) -> Long: box the default.
+             "(Ljava/lang/String;I)Ljava/lang/Integer;" => CallModel::ReturnArg(1, Some(Ty::Int)),
+-            "(Ljava/lang/String;J)Ljava/lang/Long;" => CallModel::ReturnArg(1, Some(Ty::Long)),
++             /* ~ changed by cargo-mutants ~ */
+             // (String, Integer) -> Integer: the default is already boxed.
+             "(Ljava/lang/String;Ljava/lang/Integer;)Ljava/lang/Integer;"
+             | "(Ljava/lang/String;Ljava/lang/Long;)Ljava/lang/Long;" => {
+                 CallModel::ReturnArg(1, None)
+             }
+             // The one-argument forms return null when the property is absent,
+             // which is a different fact and not modelled here.
+             _ => CallModel::Unmodelled,

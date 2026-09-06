@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") in contract_of
+@@ -667,21 +667,17 @@
+         (
+             "java/util/HashMap" | "java/util/LinkedHashMap",
+             "put" | "get" | "containsKey" | "size" | "isEmpty",
+         ) => Contract::TOTAL_MUT,
+ 
+         // ── Output streams ──────────────────────────────────────────────
+         // The constructors throw NPE on a null sink; printing is total and
+         // renders null as "null". IOException is checked, so irrelevant here.
+-        ("java/io/PrintWriter" | "java/io/PrintStream", "<init>") => Contract {
+-            requires: NN1,
+-            effect: Effect::Receiver,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         (
+             "java/io/PrintWriter" | "java/io/PrintStream",
+             "println" | "print" | "write" | "flush" | "close" | "append",
+         ) => {
+             // `format`/`printf` are excluded: IllegalFormatException is not a
+             // condition over a value we track.
+             Contract::TOTAL_MUT
+         }

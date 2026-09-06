@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") in contract_of
+@@ -714,21 +714,17 @@
+         // must not be treated as total: claiming no runtime exception while
+         // never looking inside `run()` is a wrong TRUE. `Unexpressible` is the
+         // honest classification until the concurrency engine lands — see
+         // docs/strategies/concurrency.md.
+         //
+         // Thread was previously in PURE_OWNERS, which made the lifter erase
+         // `start()` to a Havoc entirely — the same call-disappears-from-the-IR
+         // shape as issue #49.
+-        ("java/lang/Thread", "start" | "run" | "join" | "interrupt" | "sleep") => Contract {
+-            requires: OPAQUE,
+-            effect: Effect::Unknown,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         // Queries that touch no shared state.
+         (
+             "java/lang/Thread",
+             "currentThread" | "getName" | "getId" | "isAlive" | "isDaemon" | "getPriority",
+         ) => Contract::TOTAL,
+ 
+         // ── The nondet source ───────────────────────────────────────────
+         (VERIFIER, _) => Contract::TOTAL,

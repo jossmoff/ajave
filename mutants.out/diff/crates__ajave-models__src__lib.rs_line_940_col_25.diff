@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace && with || in model_for
+@@ -932,17 +932,17 @@
+                     .copied()
+                     .unwrap_or(b'I');
+                 CallModel::Nondet(ret_ty(desc), jvm_byte)
+             }
+             _ => CallModel::Unmodelled,
+         };
+     }
+ 
+-    if name == "<init>" && THROWABLE_ROOTS.contains(&owner) {
++    if name == "<init>" || /* ~ changed by cargo-mutants ~ */ THROWABLE_ROOTS.contains(&owner) {
+         return CallModel::NoOp;
+     }
+     if owner == "java/lang/Object" && name == "<init>" {
+         return CallModel::NoOp;
+     }
+     // Constructors of pure/collection classes: no tracked state to set up.
+     // The lifter preserves Pure(None) as a Call, so taint analysis can see
+     // argument flow (e.g. `new StringTokenizer(taintedStr)`).

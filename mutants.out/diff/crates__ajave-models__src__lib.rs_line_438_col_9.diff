@@ -1,0 +1,23 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") in contract_of
+@@ -430,19 +430,17 @@
+         // All three throw `IllegalMonitorStateException` unless the caller owns
+         // the monitor, and `wait` also throws `InterruptedException`. That is
+         // not expressible over the arguments, so it is `Unexpressible`.
+         ("java/lang/Object", "wait" | "notify" | "notifyAll") => Contract {
+             requires: &[Precondition::Unexpressible],
+             effect: Effect::Unknown,
+             may_return_null: true,
+         },
+-        ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+-            Contract::TOTAL
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── StringBuilder / StringBuffer ────────────────────────────────
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+             Contract::TOTAL_MUT
+         }
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") => Contract {
+             // `StringBuilder(int)` throws on a negative capacity;
+             // `StringBuilder(String)` throws NPE on null.

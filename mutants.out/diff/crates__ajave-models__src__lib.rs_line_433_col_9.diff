@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/Object", "wait" | "notify" | "notifyAll") in contract_of
+@@ -425,21 +425,17 @@
+         // concurrency explorer step over a `wait()` as though it were free,
+         // after which a thread that waits forever appeared to terminate and a
+         // program that provably hangs was reported as deadlock-free — a wrong
+         // TRUE. See benchmarks/ajave/concurrency/MissedSignalDeadlock.
+         //
+         // All three throw `IllegalMonitorStateException` unless the caller owns
+         // the monitor, and `wait` also throws `InterruptedException`. That is
+         // not expressible over the arguments, so it is `Unexpressible`.
+-        ("java/lang/Object", "wait" | "notify" | "notifyAll") => Contract {
+-            requires: &[Precondition::Unexpressible],
+-            effect: Effect::Unknown,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         ("java/lang/Object", "<init>" | "getClass" | "hashCode" | "toString" | "equals") => {
+             Contract::TOTAL
+         }
+ 
+         // ── StringBuilder / StringBuffer ────────────────────────────────
+         ("java/lang/StringBuilder" | "java/lang/StringBuffer", "<init>") if desc == "()V" => {
+             Contract::TOTAL_MUT
+         }

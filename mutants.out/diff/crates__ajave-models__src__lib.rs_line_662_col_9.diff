@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set", "add" | "contains" | "size" | "isEmpty",) in contract_of
+@@ -654,20 +654,17 @@
+                     requires: IDX1,
+                     effect: Effect::Receiver,
+                     may_return_null: true,
+                 }
+             } else {
+                 Contract::TOTAL_MUT
+             }
+         }
+-        (
+-            "java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/Set",
+-            "add" | "contains" | "size" | "isEmpty",
+-        ) => Contract::TOTAL_MUT,
++         /* ~ changed by cargo-mutants ~ */
+         // Hash maps tolerate null keys; sorted maps do not, so they are absent.
+         (
+             "java/util/HashMap" | "java/util/LinkedHashMap",
+             "put" | "get" | "containsKey" | "size" | "isEmpty",
+         ) => Contract::TOTAL_MUT,
+ 
+         // ── Output streams ──────────────────────────────────────────────
+         // The constructors throw NPE on a null sink; printing is total and

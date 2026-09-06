@@ -1,0 +1,28 @@
+--- crates/ajave-models/src/lib.rs
++++ replace perturbed -> bool with true
+@@ -260,24 +260,17 @@
+ /// different verdict.
+ ///
+ /// This is what makes the order in `at_least_as_conservative_as` checkable
+ /// rather than merely stated: `tools/contract_monotonicity.py` perturbs each
+ /// contract in turn and looks for a flip. A flip means some consumer is not
+ /// monotone, which is the defect class behind #48 -- and one that no amount of
+ /// reading the table can reveal.
+ fn perturbed(class: &str, name: &str) -> bool {
+-    static SPEC: std::sync::OnceLock<Option<(String, String)>> = std::sync::OnceLock::new();
+-    let spec = SPEC.get_or_init(|| {
+-        std::env::var("AJAVE_PERTURB_CONTRACT").ok().and_then(|v| {
+-            let (c, n) = v.split_once(':')?;
+-            Some((c.to_string(), n.to_string()))
+-        })
+-    });
+-    matches!(spec, Some((c, n)) if c == class && n == name)
++    true /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// The contract for a method, always.
+ ///
+ /// # Why a total function, and why `OPAQUE` is the default
+ ///
+ /// `contract_of` returns `Option`, and that `None` conflates two different
+ /// things: "this method is specified to throw for some inputs" and "we have

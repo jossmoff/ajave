@@ -1,0 +1,23 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm "java/util/Iterator" | "java/util/ListIterator" in pure_owner_member_may_throw
+@@ -1132,19 +1132,17 @@
+         | "java/util/TreeMap"
+         | "java/util/LinkedHashMap"
+         | "java/util/AbstractMap" => {
+             // Sorted maps throw on null/incomparable keys; the hash maps do not,
+             // but `TreeMap` shares this owner set, so stay conservative.
+             matches!(name, "put" | "get" | "remove")
+         }
+         "java/util/TreeSet" | "java/util/Set" => matches!(name, "add" | "first" | "last"),
+-        "java/util/Iterator" | "java/util/ListIterator" => {
+-            matches!(name, "next" | "previous" | "remove")
+-        }
++         /* ~ changed by cargo-mutants ~ */
+         _ => false,
+     }
+ }
+ 
+ /// Match boxing (`valueOf`) and unboxing (`*Value()`) methods on wrapper types.
+ fn box_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
+     match owner {
+         "java/lang/Boolean" => match name {

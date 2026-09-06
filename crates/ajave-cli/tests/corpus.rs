@@ -221,12 +221,21 @@ fn run(property: &str, inputs: &[PathBuf]) -> String {
     let out = match child.wait_with_output() {
         Ok(o) => o,
         Err(_) => {
+            // Not reaped on this path, so the group is still ours to kill.
             kill_group(pid);
             return "ERROR".into();
         }
     };
-    // Belt and braces: ajave exiting does not guarantee its solver did.
-    kill_group(pid);
+    // No `kill_group` here.
+    //
+    // `wait_with_output` reaps the child, and once reaped the PID is free for
+    // the OS to reissue. `kill -9 -<pid>` then addresses whatever process
+    // group has since been given that number -- which on a busy machine with
+    // rapid process churn is a real possibility, and the failure it produces
+    // (something unrelated dying by signal) looks nothing like its cause.
+    //
+    // The timeout path above still kills the group, and that one is safe: the
+    // child has not been reaped there, so the PID is still its own.
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .rfind(|l| !l.trim().is_empty())

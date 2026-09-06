@@ -47,19 +47,13 @@ jobs:
       # the rule existed and nothing enforced it.
       - run: just determinism
 
-  corpus:
-    name: corpus regression
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - run: sudo apt-get update && sudo apt-get install -y z3
-      - uses: extractions/setup-just@v2
-      # Every task's verdict against its declared ground truth. Release-mode
-      # and slow, which is why it is here and not on the push path.
-      - run: just test-corpus
+# The corpus regression test is deliberately NOT here.
+#
+# It runs 6 workers with a 90s per-task budget, and its own comment says "a
+# timeout here means something hung rather than that the machine was busy" --
+# an assumption that is false on a 2-core shared runner. Both attempts were
+# killed by signal after ~2 minutes, which reads as a failure and says nothing.
+# CLAUDE.md makes the same point about scoring runs: contention manufactures
+# regressions that are not there.
+#
+# Run it on a machine you control: `just test-corpus`.

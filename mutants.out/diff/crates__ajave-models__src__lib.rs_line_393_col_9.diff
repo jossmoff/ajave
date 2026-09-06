@@ -1,0 +1,25 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/String", "charAt" | "codePointAt") in contract_of
+@@ -385,21 +385,17 @@
+             | "lastIndexOf"
+             | "replace",
+         ) => Contract {
+             requires: NN1,
+             effect: Effect::Pure,
+             may_return_null: true,
+         },
+         // Index-bounded accessors.
+-        ("java/lang/String", "charAt" | "codePointAt") => Contract {
+-            requires: IDX1,
+-            effect: Effect::Pure,
+-            may_return_null: true,
+-        },
++         /* ~ changed by cargo-mutants ~ */
+         ("java/lang/String", "substring") => Contract {
+             requires: &[Precondition::RangeInBounds {
+                 start: 1,
+                 end: None,
+                 seq: 0,
+             }],
+             effect: Effect::Pure,
+             may_return_null: true,

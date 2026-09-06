@@ -1,0 +1,23 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") in contract_of
+@@ -700,19 +700,17 @@
+         },
+ 
+         // ── java.util.Objects ───────────────────────────────────────────
+         ("java/util/Objects", "requireNonNull") => Contract {
+             requires: NN1,
+             effect: Effect::Pure,
+             may_return_null: true,
+         },
+-        ("java/util/Objects", "equals" | "hashCode" | "toString" | "isNull" | "nonNull") => {
+-            Contract::TOTAL
+-        }
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── Threads ─────────────────────────────────────────────────────
+         // `start()` runs the thread body, which we do not yet explore, so it
+         // must not be treated as total: claiming no runtime exception while
+         // never looking inside `run()` is a wrong TRUE. `Unexpressible` is the
+         // honest classification until the concurrency engine lands — see
+         // docs/strategies/concurrency.md.
+         //

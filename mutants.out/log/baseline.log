@@ -1,0 +1,38 @@
+
+*** baseline
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --no-run --verbose --package=ajave-models@0.1.0
+   Compiling ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_ir --edition=2021 crates/ajave-ir/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=fc12ff988a18f0e4 -C extra-filename=-de43b848364d2ccc --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps`
+   Compiling ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=535c12e05a026dd3 -C extra-filename=-54847896c0885a7f --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rmeta`
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc --crate-name ajave_models --edition=2021 crates/ajave-models/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc5677e765f8f4c6 -C extra-filename=-ab732c077cd498a9 --out-dir /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C incremental=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/incremental -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s
+  Executable `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_models-ab732c077cd498a9`
+
+*** result: Success
+
+*** /Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --verbose --package=ajave-models@0.1.0
+       Fresh ajave-ir v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-ir)
+       Fresh ajave-models v0.1.0 (/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/ajave_models-ab732c077cd498a9`
+
+running 5 tests
+test contract_order_tests::a_total_contract_is_the_bottom_and_is_what_licenses_a_discharge ... ok
+test contract_order_tests::more_preconditions_is_more_conservative ... ok
+test contract_order_tests::a_wider_effect_is_more_conservative ... ok
+test contract_order_tests::opaque_is_the_top_of_the_order ... ok
+test contract_order_tests::the_order_is_reflexive_and_transitive_where_it_should_be ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ajave_models
+     Running `/Users/joss/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustdoc --edition=2021 --crate-type lib --color auto --crate-name ajave_models --test crates/ajave-models/src/lib.rs --test-run-directory /private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/crates/ajave-models --extern ajave_ir=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_ir-de43b848364d2ccc.rlib --extern ajave_models=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps/libajave_models-54847896c0885a7f.rlib -L dependency=/private/var/folders/xq/wc8304x52tn2sw3bkvsv7fvc0000gn/T/cargo-mutants-roast-D3SVQL.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+*** result: Success

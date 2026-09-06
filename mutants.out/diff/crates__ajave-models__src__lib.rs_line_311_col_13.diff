@@ -1,0 +1,21 @@
+--- crates/ajave-models/src/lib.rs
++++ replace == with != in returns_nonnull
+@@ -303,17 +303,17 @@
+ /// TRUE. Omission only costs precision.
+ ///
+ /// Deliberately absent: anything that returns a *looked-up* value. `Map.get`,
+ /// `List.get` on a list of references, `getProperty`, `getHeader` and friends
+ /// all return null when the thing is not there, and that is their contract, not
+ /// an edge case.
+ pub fn returns_nonnull(class: &str, name: &str, desc: &str) -> bool {
+     // A constructor's result is the object; `new` never yields null.
+-    if name == "<init>" {
++    if name != /* ~ changed by cargo-mutants ~ */ "<init>" {
+         return true;
+     }
+     matches!(
+         (class, name),
+         // Factories that construct or return a shared immutable instance.
+         ("java/util/Collections",
+             "singleton" | "singletonList" | "singletonMap" | "emptyList"
+             | "emptySet" | "emptyMap" | "enumeration" | "unmodifiableList"

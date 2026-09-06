@@ -1,0 +1,24 @@
+--- crates/ajave-models/src/lib.rs
++++ delete match arm ("java/lang/System", "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",) in contract_of
+@@ -575,20 +575,17 @@
+             ) {
+                 Contract::TOTAL
+             } else {
+                 return None;
+             }
+         }
+ 
+         // ── System ──────────────────────────────────────────────────────
+-        (
+-            "java/lang/System",
+-            "currentTimeMillis" | "nanoTime" | "identityHashCode" | "lineSeparator",
+-        ) => Contract::TOTAL,
++         /* ~ changed by cargo-mutants ~ */
+ 
+         // ── Enum ────────────────────────────────────────────────────────
+         ("java/lang/Enum", "ordinal" | "name" | "toString" | "hashCode" | "equals") => {
+             Contract::TOTAL
+         }
+ 
+         // `next()` on an exhausted iterator throws NoSuchElementException,
+         // and `hasNext()` is total. We model an iterator as its collection, so
