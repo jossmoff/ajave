@@ -104,7 +104,8 @@ impl<'a> ExploreCtx<'a> {
             "java/lang/Boolean" => matches!(target.name.as_str(), "compareTo" | "hashCode"),
             "java/lang/Float" => matches!(
                 target.name.as_str(),
-                "floatToRawIntBits"
+                "parseFloat"
+                    | "floatToRawIntBits"
                     | "floatToIntBits"
                     | "intBitsToFloat"
                     | "isNaN"
@@ -124,7 +125,8 @@ impl<'a> ExploreCtx<'a> {
             ),
             "java/lang/Double" => matches!(
                 target.name.as_str(),
-                "doubleToRawLongBits"
+                "parseDouble"
+                    | "doubleToRawLongBits"
                     | "doubleToLongBits"
                     | "longBitsToDouble"
                     | "isNaN"
@@ -457,12 +459,16 @@ impl<'a> ExploreCtx<'a> {
                 let inner = self.solver.ite(eq, zero, one);
                 self.solver.ite(lt, mone, inner)
             }
+            ("java/lang/Float", "parseFloat") | ("java/lang/Double", "parseDouble") => {
+                let w = if class == "java/lang/Double" { 64 } else { 32 };
+                self.encode_parse_float_with_cases(args.first(), w)
+            }
             ("java/lang/Integer", "parseInt")
             | ("java/lang/Long", "parseLong")
             | ("java/lang/Short", "parseShort")
             | ("java/lang/Byte", "parseByte") => {
                 let w = if class == "java/lang/Long" { 64 } else { 32 };
-                self.solver.fresh_bv("parse", w)
+                self.encode_parse_with_cases(args.first(), w)
             }
 
             // ── compare / compareTo / hashCode ──────────────────────────
@@ -1804,5 +1810,136 @@ impl<'a> ExploreCtx<'a> {
         result = self.solver.ite(is_special, special_result, result);
         result = self.solver.ite(is_zero, zero_result, result);
         result
+    }
+}
+
+impl<'a> ExploreCtx<'a> {
+    /// Relate a `parse*` result to the string it came from.
+    ///
+    /// Returns a fresh bitvector, exactly as before, and additionally records
+    /// two alternative constraint sets tying it to the string:
+    ///
+    /// ```text
+    ///   case A:  0 <= str.to_int(s) <= MAX,   result == str.to_int(s)
+    ///   case B:  s[0] == '-',                 result == -str.to_int(s[1..])
+    /// ```
+    ///
+    /// These are recorded in `parse_cases`, not `path_constraints`. Nothing
+    /// asserts them on the path: `check_sat_with_path_and_witness` *tries*
+    /// them for a witness and falls back to the unconstrained query when none
+    /// fits. That is what keeps the model sound -- Java accepts strings these
+    /// cases do not describe (a leading `+`, a radix other than 10), and
+    /// requiring a case would make those paths infeasible.
+    ///
+    /// The two cases are kept apart rather than disjoined on purpose.
+    /// Measured 2026-09-06: identical terms solve in 0.01s when asserted and
+    /// time out at 45s inside an `(or ...)`. The asymmetry is striking -- with
+    /// the disjunction, a *negative* target solves in 0.14s while a positive
+    /// one never returns -- and it is why the previous attempt (#92) was
+    /// misdiagnosed as `str.to_int` being slow to invert. It is not; it is
+    /// 0.01s on its own.
+    ///
+    /// The upper bounds matter. Without them the negative case is satisfiable
+    /// only near 2^32, so the solver hunts for a ten-digit string that cannot
+    /// exist inside the `int` range.
+    pub(super) fn encode_parse_with_cases(&mut self, arg: Option<&Operand>, w: u32) -> Term {
+        let fresh = self.solver.fresh_bv("parse", w);
+        let Some(s) = arg.and_then(|a| self.encode_str_operand(a)) else {
+            return fresh;
+        };
+        let max = if w > 32 { i64::MAX } else { i32::MAX as i64 };
+
+        // Case A: a non-negative decimal literal.
+        let n = self.solver.str_to_int(s);
+        let zero = self.solver.int_const(0);
+        let hi = self.solver.int_const(max);
+        let ge = self.solver.int_ge(n, zero);
+        let le = self.solver.int_le(n, hi);
+        let as_bv = self.solver.int_to_bv(n, w);
+        let eq = self.solver.bveq(fresh, as_bv);
+        let a1 = self.solver.and(ge, le);
+        let case_pos = self.solver.and(a1, eq);
+
+        // Case B: '-' followed by a non-negative decimal literal.
+        let one = self.solver.int_const(1);
+        let len = self.solver.str_len(s);
+        let tail_len = self.solver.int_sub(len, one);
+        let tail = self.solver.str_substr(s, one, tail_len);
+        let m = self.solver.str_to_int(tail);
+        let first = self.solver.str_at(s, zero);
+        let minus = self.solver.str_const("-");
+        let is_minus = self.solver.str_eq(first, minus);
+        let m_ge = self.solver.int_ge(m, zero);
+        let m_le = self.solver.int_le(m, hi);
+        let m_bv = self.solver.int_to_bv(m, w);
+        let negated = self.solver.bvneg(m_bv);
+        let eq_neg = self.solver.bveq(fresh, negated);
+        let b1 = self.solver.and(is_minus, m_ge);
+        let b2 = self.solver.and(b1, m_le);
+        let case_neg = self.solver.and(b2, eq_neg);
+
+        self.parse_cases.push(vec![case_pos, case_neg]);
+        fresh
+    }
+}
+
+impl<'a> ExploreCtx<'a> {
+    /// `Float.parseFloat` / `Double.parseDouble`, for the integer-valued
+    /// strings this can describe.
+    ///
+    /// Same two cases as `encode_parse_with_cases`, with the value converted
+    /// to a float afterwards. `Float.parseFloat` accepts far more than this --
+    /// a decimal point, an exponent, `0x1p3`, `Infinity`, `NaN`, a trailing
+    /// `f` -- which is precisely why the cases are *tried* rather than
+    /// asserted: requiring one would make every such string infeasible.
+    ///
+    /// The conversion is exact for the integers it covers. A `float` holds
+    /// every integer up to 2^24 exactly, so a witness inside that range parses
+    /// on a real JVM to the value the solver chose; beyond it,
+    /// `fp_from_sbv`'s rounding is the JVM's own (JLS 5.1.2), so the relation
+    /// still holds.
+    pub(super) fn encode_parse_float_with_cases(&mut self, arg: Option<&Operand>, w: u32) -> Term {
+        let fresh = self.solver.fresh_bv("parsef", w);
+        let Some(s) = arg.and_then(|a| self.encode_str_operand(a)) else {
+            return fresh;
+        };
+        let zero = self.solver.int_const(0);
+        // Bounded well inside the exactly-representable range, so a witness
+        // cannot land where the conversion rounds.
+        let hi = self.solver.int_const(1 << 20);
+
+        let mut to_bits = |ctx: &mut Self, n_int: Term| -> Term {
+            let n_bv = ctx.solver.int_to_bv(n_int, 32);
+            let f = ctx.solver.fp_from_sbv(n_bv, w);
+            ctx.solver.fp_to_bits(f, w)
+        };
+
+        let n = self.solver.str_to_int(s);
+        let ge = self.solver.int_ge(n, zero);
+        let le = self.solver.int_le(n, hi);
+        let pos_bits = to_bits(self, n);
+        let eq = self.solver.bveq(fresh, pos_bits);
+        let a1 = self.solver.and(ge, le);
+        let case_pos = self.solver.and(a1, eq);
+
+        let one = self.solver.int_const(1);
+        let len = self.solver.str_len(s);
+        let tail_len = self.solver.int_sub(len, one);
+        let tail = self.solver.str_substr(s, one, tail_len);
+        let m = self.solver.str_to_int(tail);
+        let first = self.solver.str_at(s, zero);
+        let minus = self.solver.str_const("-");
+        let is_minus = self.solver.str_eq(first, minus);
+        let m_ge = self.solver.int_ge(m, zero);
+        let m_le = self.solver.int_le(m, hi);
+        let neg_int = self.solver.int_sub(zero, m);
+        let neg_bits = to_bits(self, neg_int);
+        let eq_neg = self.solver.bveq(fresh, neg_bits);
+        let b1 = self.solver.and(is_minus, m_ge);
+        let b2 = self.solver.and(b1, m_le);
+        let case_neg = self.solver.and(b2, eq_neg);
+
+        self.parse_cases.push(vec![case_pos, case_neg]);
+        fresh
     }
 }

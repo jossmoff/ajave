@@ -542,6 +542,26 @@ impl Solver for SmtLib {
         self.alloc(name, Sort::Int)
     }
 
+    fn int_to_bv(&mut self, t: Term, width: u32) -> Term {
+        let tn = self.name(t).to_string();
+        self.define_term("t", &format!("((_ int2bv {width}) {tn})"), Sort::Bv(width))
+    }
+
+    fn int_sub(&mut self, a: Term, b: Term) -> Term {
+        let (x, y) = (self.name(a).to_string(), self.name(b).to_string());
+        self.define_term("t", &format!("(- {x} {y})"), Sort::Int)
+    }
+
+    fn int_ge(&mut self, a: Term, b: Term) -> Term {
+        let (x, y) = (self.name(a).to_string(), self.name(b).to_string());
+        self.define_term("b", &format!("(>= {x} {y})"), Sort::Bool)
+    }
+
+    fn int_le(&mut self, a: Term, b: Term) -> Term {
+        let (x, y) = (self.name(a).to_string(), self.name(b).to_string());
+        self.define_term("b", &format!("(<= {x} {y})"), Sort::Bool)
+    }
+
     fn int_to_bv32(&mut self, t: Term) -> Term {
         // Z3: ((_ int2bv 32) x) — requires non-negative x for predictable results.
         let tn = self.name(t).to_string();

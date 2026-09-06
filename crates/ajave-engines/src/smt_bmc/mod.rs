@@ -54,6 +54,11 @@ impl FK {
 /// Maximum number of solver check-sat calls per run to prevent hangs.
 const MAX_SOLVER_CALLS: u32 = 10_000;
 
+/// Cap on the parse-case cross product. Two cases per call, so this allows
+/// four `parse*` calls on one path before falling back to the unconstrained
+/// query.
+const MAX_PARSE_COMBINATIONS: usize = 16;
+
 /// Maximum number of violations to collect before stopping exploration.
 const MAX_VIOLATIONS: usize = 50;
 
@@ -610,6 +615,7 @@ impl Engine for SmtBmc {
             inline_throw: None,
             current_block: None,
             path_constraints: Vec::new(),
+            parse_cases: Vec::new(),
             inlined_methods: HashSet::new(),
             ascii_only: self.ascii_only,
             ai_hints: Self::collect_ai_hints(bb, entry),
@@ -1093,6 +1099,14 @@ struct ExploreCtx<'a> {
     /// Current block being explored (for exception edge checks).
     current_block: Option<BlockId>,
     path_constraints: Vec<Term>,
+    /// Alternative constraint sets, one entry per modelled `parse*` call.
+    ///
+    /// Each inner `Vec` holds the mutually exclusive cases for one call (a
+    /// non-negative parse, and a negative one). They are *not* path
+    /// constraints: asserting them would exclude strings Java accepts. They
+    /// are tried, one combination at a time, only to obtain a witness that
+    /// replays -- see `check_sat_with_path_and_witness`.
+    parse_cases: Vec<Vec<Term>>,
     inlined_methods: HashSet<MethodKey>,
     ascii_only: bool,
     /// Interval bounds from AI, keyed by (block, var). Sound over-approximation:
@@ -1653,6 +1667,48 @@ impl<'a> ExploreCtx<'a> {
             self.exhausted = true;
             return (SatResult::Unknown, None);
         }
+        // Try the parse cases first, then fall back to the unconstrained
+        // query.
+        //
+        // A `parse*` result is otherwise a fresh bitvector unrelated to its
+        // string, so the solver may claim `parseInt(s) == 7` while leaving `s`
+        // free -- and the witness it prints ("A") throws
+        // `NumberFormatException` on replay. Asserting one case binds the two
+        // together and yields a string that really parses to the value.
+        //
+        // Two properties make this safe:
+        //
+        // * The cases are **tried, never required**. If none is satisfiable we
+        //   fall back to the plain query below, so no path Java can reach is
+        //   ever excluded. `Unsat` is therefore only ever concluded from the
+        //   unconstrained query, which is what keeps discharge sound and is
+        //   why this needs no completeness flag.
+        // * The result is monotone: a case that works replaces an
+        //   unreplayable witness with a replayable one, and a case that does
+        //   not leaves behaviour exactly as it was.
+        //
+        // Cases are asserted one combination at a time rather than disjoined.
+        // Measured 2026-09-06: identical terms are 0.01s when asserted and
+        // time out at 45s inside an `(or ...)`, because Z3's string solver
+        // does not case-split over string constraints (#90).
+        for combo in self.parse_case_combinations() {
+            self.solver.push();
+            for &pc in &self.path_constraints {
+                self.solver.assert(pc);
+            }
+            self.solver.assert(extra);
+            for &c in &combo {
+                self.solver.assert(c);
+            }
+            let res = self.solver.check_sat();
+            if res == SatResult::Sat {
+                let w = self.extract_witness();
+                self.solver.pop();
+                return (SatResult::Sat, Some(w));
+            }
+            self.solver.pop();
+        }
+
         self.solver.push();
         for &pc in &self.path_constraints {
             self.solver.assert(pc);
@@ -1666,6 +1722,38 @@ impl<'a> ExploreCtx<'a> {
         };
         self.solver.pop();
         (res, witness)
+    }
+
+    /// One combination per parse call, capped.
+    ///
+    /// The cross product is exponential in the number of parse calls, so it is
+    /// abandoned past `MAX_PARSE_COMBINATIONS`; the fallback query still runs,
+    /// which is exactly today's behaviour.
+    fn parse_case_combinations(&self) -> Vec<Vec<Term>> {
+        if self.parse_cases.is_empty() {
+            return Vec::new();
+        }
+        let total: usize = self
+            .parse_cases
+            .iter()
+            .try_fold(1usize, |acc, c| acc.checked_mul(c.len().max(1)))
+            .unwrap_or(usize::MAX);
+        if total > MAX_PARSE_COMBINATIONS {
+            return Vec::new();
+        }
+        let mut out: Vec<Vec<Term>> = vec![Vec::new()];
+        for alts in &self.parse_cases {
+            let mut next = Vec::with_capacity(out.len() * alts.len());
+            for base in &out {
+                for &a in alts {
+                    let mut v = base.clone();
+                    v.push(a);
+                    next.push(v);
+                }
+            }
+            out = next;
+        }
+        out
     }
 
     fn extract_witness(&mut self) -> Witness {

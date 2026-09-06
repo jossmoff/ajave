@@ -131,6 +131,14 @@ pub trait Solver {
 
     fn int_const(&mut self, value: i64) -> Term;
     fn int_to_bv32(&mut self, t: Term) -> Term;
+    /// `((_ int2bv w) t)`, for a width other than 32.
+    fn int_to_bv(&mut self, t: Term, width: u32) -> Term;
+    /// Arithmetic and comparison over the unbounded `Int` sort. String lengths
+    /// and `str.to_int` results live there, so relating them to a bitvector
+    /// needs these before the conversion.
+    fn int_sub(&mut self, a: Term, b: Term) -> Term;
+    fn int_ge(&mut self, a: Term, b: Term) -> Term;
+    fn int_le(&mut self, a: Term, b: Term) -> Term;
     fn bv32_to_int(&mut self, t: Term) -> Term;
 
     // -- String theory --
