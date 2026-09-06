@@ -287,14 +287,10 @@ impl Engine for ChcEngine {
         trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(4000)]);
 
         let mut advanced = false;
-        match run_chc_solver(&self.solver_binary, &smt2, &obs_ids) {
+        match run_chc_solver(&self.solver_binary, &smt2, &obs) {
             Ok(results) => {
-                for (oid, safe) in results {
+                for (oref, safe) in results {
                     if safe {
-                        let oref = ObligationRef {
-                            method: entry.clone(),
-                            id: oid,
-                        };
                         debug!("chc: discharged {}", oref);
                         let _ = bb.publish_with(
                             self.id(),
@@ -1770,11 +1766,21 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 // Solver interaction
 // ---------------------------------------------------------------------------
 
+/// Run the Horn solver and report which obligations it proved safe.
+///
+/// Takes `ObligationRef`, not `ObligationId`. An id indexes into *one* `Body`,
+/// so two methods can each have id 3 -- and since assertions may now live
+/// outside the entry method, keying the result by id alone would attribute a
+/// discharge to whichever obligation happened to share the number. `CLAUDE.md`
+/// records that exact hazard costing 32 points once already.
+///
+/// A `sat` answer means no obligation in the batch is violated: the encoding
+/// routes them all to one `error` predicate, so they are proved together.
 fn run_chc_solver(
     binary: &str,
     smt2: &str,
-    obligations: &[ObligationId],
-) -> Result<Vec<(ObligationId, bool)>, String> {
+    obligations: &[ObligationRef],
+) -> Result<Vec<(ObligationRef, bool)>, String> {
     let mut child = Command::new(binary)
         .args([
             "-in",
@@ -1814,7 +1820,7 @@ fn run_chc_solver(
 
     // In CHC mode: `sat` means error is unreachable (safe), `unsat` means reachable (unsafe).
     match result_line {
-        "sat" => Ok(obligations.iter().map(|oid| (*oid, true)).collect()),
+        "sat" => Ok(obligations.iter().map(|o| (o.clone(), true)).collect()),
         _ => Ok(vec![]),
     }
 }
@@ -1952,7 +1958,11 @@ mod tests {
              `error`; without that, unbounded Int makes `x + 1 > x` valid, \
              which it is not in Java"
         );
-        let proved = run_chc_solver("z3", &smt2, &[ObligationId(0)]).unwrap_or_default();
+        let refs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let proved = run_chc_solver("z3", &smt2, &refs).unwrap_or_default();
         assert!(
             proved.is_empty(),
             "CHC proved `inc(n) > n`, which fails at Integer.MAX_VALUE. That is \
