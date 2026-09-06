@@ -201,15 +201,47 @@ impl Engine for ChcEngine {
         // 18 in — measured, not assumed.
         let _ = has_unresolved;
 
-        // Only attempt Assertion obligations (NegArraySize etc. require heap).
-        let obs: Vec<ObligationId> = open
+        // Assertion obligations in any *reachable* method, not just the entry.
+        //
+        // The filter used to be `oref.method == *entry`, which quietly
+        // discarded every assertion living in a helper. `MinePump`'s tasks put
+        // theirs in `Specification1..5`, so CHC reached them with five open
+        // obligations and encoded none -- the single commonest reason it did
+        // nothing, measured across the unproven-TRUE set.
+        //
+        // Sound, and in fact stronger than needed: a method's precondition is
+        // unconstrained here, so the assertion is proved for *every* argument
+        // tuple rather than only those its callers can produce. That may fail
+        // where a caller-sensitive proof would succeed, which is a precision
+        // limit, not a correctness one.
+        let reachable_set: std::collections::BTreeSet<MethodKey> =
+            reachable_methods.iter().cloned().collect();
+        let obs: Vec<ObligationRef> = open
             .iter()
-            .filter(|oref| oref.method == *entry)
-            .filter(|oref| body.obligation(oref.id).kind == ObligationKind::Assertion)
-            .map(|oref| oref.id)
+            .filter(|oref| reachable_set.contains(&oref.method))
+            .filter(|oref| {
+                prog.body(&oref.method)
+                    .is_some_and(|b| b.obligation(oref.id).kind == ObligationKind::Assertion)
+            })
+            .cloned()
             .collect();
 
+        // The single-method encoder and the solver still speak plain ids.
+        let obs_ids: Vec<ObligationId> = obs.iter().map(|o| o.id).collect();
+
         if obs.is_empty() {
+            debug!(
+                "chc: nothing to encode — {} open obligation(s), none an Assertion in {:?}; \
+                 kinds present: {:?}",
+                open.len(),
+                entry,
+                open.iter()
+                    .filter_map(|o| prog.body(&o.method).map(|b| (
+                        o.method.name.clone(),
+                        format!("{:?}", b.obligation(o.id).kind)
+                    )))
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
             return Progress::Exhausted;
         }
 
@@ -242,10 +274,10 @@ impl Engine for ChcEngine {
 
         let smt2 = if has_interproc_calls {
             info!("chc: using inter-procedural LIA encoding");
-            encode_chc_interproc(prog, entry, &obs, &invariants)
+            drop_empty_quantifiers(&encode_chc_interproc(prog, entry, &obs, &invariants))
         } else {
             info!("chc: using single-method BV encoding");
-            encode_chc_single(body, &obs)
+            drop_empty_quantifiers(&encode_chc_single(body, &obs_ids))
         };
 
         debug!("chc: generated {} bytes of CHC encoding", smt2.len());
@@ -255,7 +287,7 @@ impl Engine for ChcEngine {
         trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(4000)]);
 
         let mut advanced = false;
-        match run_chc_solver(&self.solver_binary, &smt2, &obs) {
+        match run_chc_solver(&self.solver_binary, &smt2, &obs_ids) {
             Ok(results) => {
                 for (oid, safe) in results {
                     if safe {
@@ -682,7 +714,7 @@ fn lia_rvalue(
 fn encode_chc_interproc(
     prog: &Program,
     entry: &MethodKey,
-    obligations: &[ObligationId],
+    obligations: &[ObligationRef],
     // Interval bounds another engine established, as (method, block) -> [(var, lo, hi)].
     //
     // Candidate invariants, in the Horn-solver sense: facts that are true of
@@ -813,6 +845,10 @@ fn encode_chc_interproc(
     // objects are separated by `ref`, which the lifter already gives a unique
     // value per allocation -- the role JayHorn's `allocSite` plays.
     let heap_closed = heap_is_closed(prog, &all_methods);
+    log::info!(
+        "chc: heap_closed={heap_closed} (space invariants {})",
+        if heap_closed { "enabled" } else { "disabled" }
+    );
     let mut alloc_site: i64 = 0;
     if heap_closed {
         out.push_str("; space invariants for the heap\n");
@@ -1170,7 +1206,9 @@ fn encode_chc_interproc(
                             v
                         ));
                     }
-                    Stmt::Check(oid) if is_entry && obligations.contains(oid) => {
+                    Stmt::Check(oid)
+                        if obligations.iter().any(|o| o.method == *mk && o.id == *oid) =>
+                    {
                         let ob = body.obligation(*oid);
                         let cond_expr = lia_operand(&ob.cond, &var_map);
                         let mut conds = constraints.clone();
@@ -1241,12 +1279,10 @@ fn encode_chc_interproc(
 
                 let body_expr = and_expr(&all);
                 let q = add_extra_forall_lia(&forall_both, &fresh);
-                out.push_str(&format!(
-                    "(assert (forall ({}) (=> {} {})))\n",
-                    q,
-                    body_expr,
-                    block_app_dst(target_bid)
-                ));
+                let body_s = body_expr;
+                let head_s = block_app_dst(target_bid);
+                let q = tighten_forall(&q, &body_s, &head_s);
+                out.push_str(&clause(&q, &body_s, &head_s));
             };
 
             // Facts about objects created in this block. Like heap writes,
@@ -1257,12 +1293,10 @@ fn encode_chc_interproc(
                 conds.extend(bindings.iter().cloned());
                 conds.push(block_app_src(block.id.0));
                 let q = add_extra_forall_lia(&forall_src, &fresh);
-                out.push_str(&format!(
-                    "(assert (forall ({}) (=> {} {})))\n",
-                    q,
-                    and_expr(&conds),
-                    fact
-                ));
+                let body_s = and_expr(&conds);
+                let head_s = fact;
+                let q = tighten_forall(&q, &body_s, &head_s);
+                out.push_str(&clause(&q, &body_s, &head_s));
             }
 
             // Exceptional edges, so that an obligation inside a `catch` is
@@ -1303,12 +1337,10 @@ fn encode_chc_interproc(
                 }
                 let body_expr = and_expr(&all);
                 let q = add_extra_forall_lia(&forall_both, &fresh);
-                out.push_str(&format!(
-                    "(assert (forall ({}) (=> {} {})))\n",
-                    q,
-                    body_expr,
-                    block_app_dst(edge.target.0)
-                ));
+                let body_s = body_expr;
+                let head_s = block_app_dst(edge.target.0);
+                let q = tighten_forall(&q, &body_s, &head_s);
+                out.push_str(&clause(&q, &body_s, &head_s));
             }
 
             match &block.term {
@@ -1407,6 +1439,103 @@ fn add_extra_forall_lia(base: &str, fresh: &FreshGen) -> String {
     } else {
         format!("{} {}", base, fresh.forall_str())
     }
+}
+
+/// Keep only the binders the clause actually mentions.
+///
+/// Every clause used to quantify over *all* source and destination variables
+/// of the method whether or not it referred to them. Measured on
+/// `algorithms/BellmanFord-FunSat01`: **234 binders per clause**, 120 clauses,
+/// 312 KB of text, and Spacer returned `unknown` in 90ms -- it gave up rather
+/// than worked. For comparison `aastore_aaload1` is 39 KB and solves in 0.03s.
+///
+/// An unused binder is logically harmless -- the clause means exactly the same
+/// thing -- but it is not free: the solver carries every quantified variable
+/// through its reasoning about the clause.
+///
+/// Matching is on whole tokens. `v1` must not match inside `v10`, so a binder
+/// is kept only when its name appears bounded by a non-identifier character.
+/// Wrap a clause in `forall` only when there is something to quantify.
+///
+/// SMT-LIB rejects `(forall () ...)` -- "invalid quantifier, list of sorted
+/// variables is empty" -- and the error aborts the *whole file*, so one such
+/// clause silently costs every proof in it. That is what tightening the binder
+/// lists introduced: once unused binders are dropped, a clause over only
+/// constants has none left.
+/// Remove degenerate `(forall () ...)` wrappers from a finished encoding.
+///
+/// SMT-LIB rejects an empty binder list, and the error aborts the **whole
+/// file** -- so a single such clause silently costs every proof in it. They
+/// appear wherever a method has no live variables at a program point, which
+/// MinePump has several of, and they became common once binder lists were
+/// tightened to the variables a clause actually mentions.
+///
+/// Done as a pass over the finished text rather than at each of the ten
+/// emission sites, so a site added later cannot reintroduce it.
+fn drop_empty_quantifiers(smt2: &str) -> String {
+    smt2.replace("(forall () ", "(__NOQ__ ")
+        .lines()
+        .map(|l| {
+            if !l.contains("(__NOQ__ ") {
+                return l.to_string();
+            }
+            // `(assert (__NOQ__ X))` is just `(assert X)`: drop the wrapper
+            // and the parenthesis it opened.
+            let unwrapped = l.replace("(__NOQ__ ", "");
+            match unwrapped.strip_suffix("))") {
+                Some(rest) => format!("{rest})"),
+                None => unwrapped,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clause(binders: &str, body: &str, head: &str) -> String {
+    if binders.trim().is_empty() {
+        format!("(assert (=> {} {}))\n", body, head)
+    } else {
+        format!("(assert (forall ({}) (=> {} {})))\n", binders, body, head)
+    }
+}
+
+fn tighten_forall(binders: &str, clause_body: &str, clause_head: &str) -> String {
+    let mut kept = Vec::new();
+    for decl in binders.split(") (") {
+        let name = decl
+            .trim_start_matches('(')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if mentions(clause_body, name) || mentions(clause_head, name) {
+            kept.push(format!("({} Int)", name));
+        }
+    }
+    kept.join(" ")
+}
+
+/// Does `text` contain `name` as a whole token?
+fn mentions(text: &str, name: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(name) {
+        let at = from + rel;
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let after = at + name.len();
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 // ---------------------------------------------------------------------------
