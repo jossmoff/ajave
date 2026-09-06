@@ -1908,7 +1908,7 @@ impl<'a> ExploreCtx<'a> {
         // cannot land where the conversion rounds.
         let hi = self.solver.int_const(1 << 20);
 
-        let mut to_bits = |ctx: &mut Self, n_int: Term| -> Term {
+        let to_bits = |ctx: &mut Self, n_int: Term| -> Term {
             let n_bv = ctx.solver.int_to_bv(n_int, 32);
             let f = ctx.solver.fp_from_sbv(n_bv, w);
             ctx.solver.fp_to_bits(f, w)
