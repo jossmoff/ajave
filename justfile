@@ -33,9 +33,15 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Unit and integration tests across the workspace.
+# Unit and integration tests across the workspace. Excludes the corpus test,
+# which is `#[ignore]`d because debug-mode engines cannot finish it in CI.
 test:
     cargo test --workspace
+
+# The corpus regression test: every task's verdict against its declared ground
+# truth. Release, because debug is roughly an order of magnitude too slow.
+test-corpus:
+    cargo test --release --test corpus -- --ignored --nocapture
 
 # Assert the crate dependency graph matches docs/architecture.md.
 boundaries:

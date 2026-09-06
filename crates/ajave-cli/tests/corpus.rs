@@ -293,7 +293,15 @@ fn read_baseline(root: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+// Ignored by default: this drives the whole portfolio over the corpus, and
+// `cargo test` builds in debug, where the engines are far too slow to finish
+// inside a CI job -- the run is killed by signal, which reads as a failure and
+// tells you nothing. It takes ~7 minutes locally in release.
+//
+// Run it with `just test-corpus`, which uses release and passes `--ignored`.
+// The nightly workflow does exactly that.
 #[test]
+#[ignore = "slow: drives the corpus; run via `just test-corpus` in release"]
 fn corpus_verdicts_match_declared_ground_truth() {
     let root = workspace_root();
     let tasks = find_tasks(&root);
