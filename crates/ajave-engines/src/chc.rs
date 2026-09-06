@@ -647,7 +647,10 @@ fn lia_rvalue(
 ) -> String {
     match rv {
         Rvalue::Use(o) => lia_operand(o, var_map),
-        Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => fresh.fresh(),
+        Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => {
+            log::debug!("chc-imprecision: Nondet/Havoc");
+            fresh.fresh()
+        }
         Rvalue::Bin(op, a, b) => {
             // LIA has no bitwise or shift operators, and its `div`/`mod` are
             // Euclidean where Java's truncate toward zero. `encode_binop`
@@ -662,6 +665,35 @@ fn lia_rvalue(
             // over-approximating engine: it contains the real one, so any
             // proof over it holds of the program.
             if !theory.models_binop(op) {
+                // Bitwise operators on boolean-valued operands are exactly
+                // expressible in LIA, and that covers most of their uses here:
+                // the lifter lowers `&&`, `||` and `^` on booleans to the
+                // bitwise opcodes, so the operands are 0 or 1.
+                //
+                // Measured across 16 failing tasks: `And` was the joint-largest
+                // source of unconstrained values (104 occurrences), and an
+                // unconstrained value in a guard makes the guarded block
+                // reachable -- which is how blocks holding `assert false`
+                // became reachable and the encoding admitted a counterexample
+                // that the program does not have.
+                //
+                // Shape: exact when both operands are in {0,1}, unconstrained
+                // otherwise. The `ite` keeps that in one expression, so no
+                // side-channel for constraints is needed, and the fallback
+                // branch is exactly what this returned before.
+                if matches!(op, BinOp::And | BinOp::Or | BinOp::Xor) {
+                    let l = lia_operand(a, var_map);
+                    let r = lia_operand(b, var_map);
+                    let free = fresh.fresh();
+                    let both_bool = format!("(and (>= {l} 0) (<= {l} 1) (>= {r} 0) (<= {r} 1))");
+                    let exact = match op {
+                        BinOp::And => format!("(ite (and (= {l} 1) (= {r} 1)) 1 0)"),
+                        BinOp::Or => format!("(ite (or (= {l} 1) (= {r} 1)) 1 0)"),
+                        _ => format!("(ite (= {l} {r}) 0 1)"),
+                    };
+                    return format!("(ite {both_bool} {exact} {free})");
+                }
+                log::debug!("chc-imprecision: binop {:?}", op);
                 return fresh.fresh();
             }
             let l = lia_operand(a, var_map);
@@ -683,6 +715,7 @@ fn lia_rvalue(
             // Narrowing truncates, which LIA cannot express; same reasoning as
             // the operators above.
             if !theory.models_cast(to, from) {
+                log::debug!("chc-imprecision: cast {:?}->{:?}", from, to);
                 return fresh.fresh();
             }
             let v = lia_operand(o, var_map);
@@ -694,7 +727,22 @@ fn lia_rvalue(
             format!("(ite (< {} {}) (- 1) (ite (= {} {}) 0 1))", l, r, l, r)
         }
         Rvalue::New(_) => fresh.fresh(),
-        _ => fresh.fresh(),
+        other => {
+            log::debug!(
+                "chc-imprecision: rvalue {}",
+                match other {
+                    Rvalue::GetStatic(_) => "GetStatic",
+                    Rvalue::GetField { .. } => "GetField",
+                    Rvalue::ArrayLoad { .. } => "ArrayLoad",
+                    Rvalue::ArrayLength(_) => "ArrayLength",
+                    Rvalue::NewArray { .. } => "NewArray",
+                    Rvalue::InstanceOf { .. } => "InstanceOf",
+                    Rvalue::Call { .. } => "Call",
+                    _ => "other",
+                }
+            );
+            fresh.fresh()
+        }
     }
 }
 
@@ -865,6 +913,12 @@ fn encode_chc_interproc(
         // different loop iterations still share a site, which the paper
         // accepts.
         out.push_str("(declare-fun phi_site (Int Int) Bool)\n");
+        // Static fields. `GetStatic` was an unconstrained value and
+        // `PutStatic` was dropped outright, so static state was lost entirely
+        // -- measured as the joint-largest source of unconstrained values
+        // across failing tasks (104 occurrences in 16 programs). Same shape as
+        // the instance-field invariant, without a receiver.
+        out.push_str("(declare-fun phi_static (Int Int) Bool)\n");
     }
 
     for mk in &all_methods {
@@ -1127,6 +1181,12 @@ fn encode_chc_interproc(
                             constraints.push(format!("(phi_arr {} {} {})", a, i, v));
                             var_map.insert(vid.0 as usize, v);
                         }
+                        Rvalue::GetStatic(field) if heap_closed => {
+                            let f = field_id(field);
+                            let v = fresh.fresh();
+                            constraints.push(format!("(phi_static {} {})", f, v));
+                            var_map.insert(vid.0 as usize, v);
+                        }
                         Rvalue::GetField { obj, field } if heap_closed => {
                             let o = lia_operand(obj, &var_map);
                             let f = field_id(field);
@@ -1186,6 +1246,18 @@ fn encode_chc_interproc(
                             i,
                             v
                         ));
+                    }
+                    Stmt::PutStatic(field, val) if heap_closed => {
+                        let f = field_id(field);
+                        let v = lia_operand(val, &var_map);
+                        let mut conds = constraints.clone();
+                        conds.extend(bindings.iter().cloned());
+                        conds.push(block_app_src(block.id.0));
+                        let q = add_extra_forall_lia(&forall_src, &fresh);
+                        let body_s = and_expr(&conds);
+                        let head_s = format!("(phi_static {} {})", f, v);
+                        let q = tighten_forall(&q, &body_s, &head_s);
+                        out.push_str(&clause(&q, &body_s, &head_s));
                     }
                     Stmt::PutField { obj, field, val } if heap_closed => {
                         let o = lia_operand(obj, &var_map);
@@ -1998,18 +2070,37 @@ mod lia_unmodelled_operator_tests {
     /// the program.
     #[test]
     fn an_operator_lia_cannot_model_is_havoced_not_encoded() {
-        for op in [
-            BinOp::Div,
-            BinOp::Rem,
-            BinOp::And,
-            BinOp::Or,
-            BinOp::Xor,
-            BinOp::Shl,
-            BinOp::Shr,
-            BinOp::UShr,
-        ] {
+        for op in [BinOp::Div, BinOp::Rem, BinOp::Shl, BinOp::Shr, BinOp::UShr] {
             let e = encode(&Rvalue::Bin(op, Operand::int(7), Operand::int(3)));
             assert!(e.starts_with("_f"), "{op:?} must be havoced, got {e}");
+        }
+    }
+
+    /// `And`/`Or`/`Xor` are the exception, and the distinction matters.
+    ///
+    /// The lifter lowers `&&`, `||` and `^` on booleans to the bitwise
+    /// opcodes, so their operands are 0 or 1 -- a case LIA expresses exactly.
+    /// The encoding is `(ite both-operands-in-{0,1} exact-value fresh)`, which
+    /// keeps the guarantee this module exists for: on any operand outside
+    /// {0,1} the guard is false and the value is an unconstrained binder, so
+    /// nothing is invented. #77 was CHC encoding such operators as the literal
+    /// `0`, which is not a conservative unknown but a specific wrong value.
+    #[test]
+    fn boolean_bitwise_operators_are_exact_and_fall_back_to_a_binder() {
+        for op in [BinOp::And, BinOp::Or, BinOp::Xor] {
+            let e = encode(&Rvalue::Bin(op, Operand::int(7), Operand::int(3)));
+            assert!(
+                e.starts_with("(ite "),
+                "{op:?} should be conditional, got {e}"
+            );
+            assert!(
+                e.contains("_f"),
+                "{op:?} must fall back to an unconstrained binder, got {e}"
+            );
+            assert!(
+                !e.ends_with(" 0)"),
+                "{op:?} must not fall back to a literal value (#77), got {e}"
+            );
         }
     }
 
