@@ -1288,11 +1288,85 @@ fn encode_chc_interproc(
 
                         let body_expr = and_expr(&conds);
                         let q = add_extra_forall_lia(&forall_src, &fresh);
-                        out.push_str(&format!(
-                            "(assert (forall ({}) (=> {} error)))\n",
-                            q, body_expr
-                        ));
+                        let head_s = "error".to_string();
+                        let q = tighten_forall(&q, &body_expr, &head_s);
+                        out.push_str(&clause(&q, &body_expr, &head_s));
+
+                        // Past the assertion, its condition holds: the failing
+                        // case has already been routed to `error`.
+                        constraints.push(format!("(not (= {} 0))", cond_expr));
                     }
+                    // Every other `Check` constrains the normal path.
+                    //
+                    // A `Check` is the lifter's record of a condition the JVM
+                    // tests before continuing -- a null receiver, an array
+                    // index, a division by zero. If it fails, execution does
+                    // *not* proceed to the next statement; it takes the
+                    // exceptional edge. So the continuation may assume it.
+                    //
+                    // These were ignored entirely, and that is what made
+                    // unreachable code look reachable. `jbmc-regression/
+                    // synchronized` is three lines of it:
+                    //
+                    //     final Object o = null;
+                    //     try { synchronized (o) {} assert false; }
+                    //     catch (NullPointerException e) { return; }
+                    //
+                    // `monitorenter` on null throws (JVMS 6.5), so the assert
+                    // is dead. Without the assumption the encoding walks
+                    // straight past the check into the assert, derives `error`,
+                    // and the task is unprovable -- which is exactly the
+                    // spurious counterexample Eldarica reported as `unsat`
+                    // where Spacer only said `unknown`.
+                    //
+                    // Exact rather than approximate: the failing case is not
+                    // discarded, it is reachable through the exceptional edge
+                    // this encoding already emits.
+                    // A failing check throws, so the *normal* successor is
+                    // only taken when the condition holds -- assuming it here
+                    // cuts spurious paths.
+                    //
+                    // Sound only in the entry method. This encoding is
+                    // relational: a callee becomes a summary `m_s(args, ret)`,
+                    // and a call site is an application of it. An assumption
+                    // made inside a callee therefore does not constrain a
+                    // path, it narrows the summary's *domain* -- it becomes an
+                    // unstated preconditon. Every call site that cannot
+                    // establish it then has an unsatisfiable application, so
+                    // the successor of the call silently disappears and
+                    // everything downstream is vacuously safe.
+                    //
+                    // Measured on `objects/objects14`: assuming a NullDeref
+                    // inside a callee gave the summary the precondition
+                    // `receiver != 0`, while the caller's inferred invariant
+                    // had `v1 = 0`. The edge out of the call died, `main`'s
+                    // blocks b3..b11 became empty, and a reachable
+                    // `assert false` was proved TRUE (-16).
+                    //
+                    // The entry method has no caller and no summary, so the
+                    // assumption constrains a path there and nothing else.
+                    Stmt::Check(oid) if *mk == *entry => {
+                        let ob = body.obligation(*oid);
+                        let cond_expr = lia_operand(&ob.cond, &var_map);
+                        constraints.push(format!("(not (= {} 0))", cond_expr));
+                    }
+                    // NOTE: the inter-procedural encoder deliberately does
+                    // *not* assume a non-query `Check`'s condition here, though
+                    // the bitvector encoder does.
+                    //
+                    // Doing so scored a wrong TRUE (-16) on `objects/objects14`,
+                    // whose object comes from `Verifier.nondetObject`. Measured
+                    // by isolation: with the assumption the task is proved
+                    // TRUE, without it the task is UNKNOWN and nothing else
+                    // regresses. The exact interaction is not yet understood --
+                    // the LIA path carries havoc-derived values, seeded
+                    // interval invariants and summary applications through the
+                    // same `constraints` list, and one of those combinations
+                    // makes the assumption exclude a reachable state.
+                    //
+                    // Left out until that is explained. An unexplained
+                    // soundness win is a wrong answer waiting for a different
+                    // benchmark.
                     _ => {}
                 }
             }
@@ -1532,6 +1606,47 @@ fn add_extra_forall_lia(base: &str, fresh: &FreshGen) -> String {
 /// clause silently costs every proof in it. That is what tightening the binder
 /// lists introduced: once unused binders are dropped, a clause over only
 /// constants has none left.
+/// Quantify fresh values inside the clauses that use them.
+///
+/// Takes the finished text and, for each `(assert (forall (BINDERS) BODY))`,
+/// adds a binder for every fresh name the clause mentions. A clause with no
+/// binders at all gains a `forall`; `drop_empty_quantifiers` then has nothing
+/// to remove from it.
+fn bind_free_constants(smt2: &str, fresh: &[(String, u32)]) -> String {
+    if fresh.is_empty() {
+        return smt2.to_string();
+    }
+    smt2.lines()
+        .map(|line| {
+            if !line.starts_with("(assert ") {
+                return line.to_string();
+            }
+            let used: Vec<String> = fresh
+                .iter()
+                .filter(|(n, _)| mentions(line, n))
+                .map(|(n, w)| format!("({} (_ BitVec {}))", n, w))
+                .collect();
+            if used.is_empty() {
+                return line.to_string();
+            }
+            let extra = used.join(" ");
+            match line.find("(forall (") {
+                // Splice into the existing binder list.
+                Some(at) => {
+                    let open = at + "(forall (".len();
+                    format!("{}{} {}", &line[..open], extra, &line[open..])
+                }
+                // No quantifier yet: wrap the whole assertion in one.
+                None => {
+                    let inner = line.trim_start_matches("(assert ").trim_end_matches(')');
+                    format!("(assert (forall ({}) {}))", extra, inner)
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Remove degenerate `(forall () ...)` wrappers from a finished encoding.
 ///
 /// SMT-LIB rejects an empty binder list, and the error aborts the **whole
@@ -1756,6 +1871,27 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                         "(assert (forall ({}) (=> {} error)))\n",
                         forall_src, body_expr
                     ));
+
+                    // Past the assertion its condition holds; the failing case
+                    // is already routed to `error`.
+                    constraints.push(BitvectorTheory.encode_nonzero(&cond_expr));
+                }
+                // Every other `Check` constrains the normal path.
+                //
+                // The same fix as in the inter-procedural encoder, and it has
+                // to be made twice because these are two separate encoders --
+                // small programs with no resolvable calls take this bitvector
+                // path, which is why fixing only the LIA one left
+                // `jbmc-regression/synchronized` unprovable.
+                //
+                // A `Check` records a condition the JVM tests before
+                // continuing. If it fails, control takes the exceptional edge
+                // rather than the next statement, so the continuation may
+                // assume it. Exact, not approximate.
+                Stmt::Check(oid) => {
+                    let ob = body.obligation(*oid);
+                    let cond_expr = smt_text::encode_operand(&BitvectorTheory, &ob.cond, &var_map);
+                    constraints.push(BitvectorTheory.encode_nonzero(&cond_expr));
                 }
                 _ => {}
             }
@@ -1819,14 +1955,25 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         }
     }
 
-    if !fresh_decls.is_empty() {
-        let insert_pos = out.find("(assert ").unwrap_or(out.len());
-        let decl_block: String = fresh_decls
-            .iter()
-            .map(|(name, width)| format!("(declare-fun {} () (_ BitVec {}))\n", name, width))
-            .collect();
-        out.insert_str(insert_pos, &decl_block);
-    }
+    // Bind fresh values inside each clause instead of declaring them globally.
+    //
+    // They used to be emitted as `(declare-fun bvf_f0 () (_ BitVec 32))`, and
+    // that is not a Horn clause: every variable in a rule must be universally
+    // quantified. Both solvers refuse it, in their own words --
+    //
+    //   z3:       (:reason-unknown "Uninterpreted 'bvf_f0' in <null>: ...")
+    //   Eldarica: "Uninterpreted functions or constants in clauses are not
+    //              supported"
+    //
+    // -- and z3's refusal surfaces as a bare `unknown`, which reads as "could
+    // not find an invariant" rather than "would not look". That is why this
+    // survived: the engine appeared merely weak. It was rejected outright.
+    //
+    // The global form is also the wrong semantics. One constant shared across
+    // every clause says all havocs in the program yield the *same* unknown
+    // value; a per-clause binder says each is independent, which is what a
+    // havoc means.
+    out = bind_free_constants(&out, &fresh_decls);
 
     out.push_str("(assert (not error))\n");
     out.push_str("(check-sat)\n");
@@ -2000,6 +2147,69 @@ mod tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    /// A callee's check must not become a precondition of its summary.
+    ///
+    /// This encoding is relational: a callee is a summary `m_s(args, ret)` and
+    /// a call site applies it. Assuming a check's condition inside a callee
+    /// therefore does not cut a path -- it narrows the summary's *domain*. Any
+    /// call site that cannot establish the condition then has an unsatisfiable
+    /// application, so the successor of the call disappears and everything
+    /// after it is vacuously safe.
+    ///
+    /// `objects/objects14` is the case that paid for this test. A NullDeref
+    /// assumed inside a callee gave its summary the precondition
+    /// `receiver != 0`; the caller's inferred invariant had `v1 = 0`; the edge
+    /// out of the call died; `main`'s blocks b3..b11 became empty; and a
+    /// reachable `assert false` was proved TRUE, for -16.
+    ///
+    /// The entry method has no caller and so has no summary, which is why the
+    /// assumption is kept there and only there.
+    #[test]
+    fn a_callee_check_does_not_become_a_summary_precondition() {
+        let inc = mk("inc", "(I)I");
+        let main = mk("main", "([Ljava/lang/String;)V");
+        let (prog, _) = overflow_program();
+        let mut prog = prog;
+
+        // Give the callee a check of its own. Under the bug this contributed
+        // `(not (= v0 0))` to every clause of `inc`, and thus to its summary.
+        let guard = VarId(2);
+        let b = prog.bodies.get_mut(&inc).expect("callee body");
+        b.vars.push(int_var(2));
+        b.obligations.push(Obligation {
+            id: ObligationId(0),
+            kind: ObligationKind::NullDeref,
+            cond: Operand::Var(guard),
+            bytecode_offset: 0,
+            line: None,
+            guarded: false,
+        });
+        b.blocks[0].stmts.push(Stmt::Check(ObligationId(0)));
+
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+
+        // Isolate the callee's clauses -- the entry method legitimately
+        // carries assumptions, so a whole-file search would not discriminate.
+        let callee_clauses: Vec<&str> = smt2
+            .lines()
+            .filter(|l| l.contains("(inc_") || l.contains("m1_"))
+            .collect();
+        let assumed = callee_clauses
+            .iter()
+            .filter(|l| l.contains("(not (= v2 0))"))
+            .count();
+        assert_eq!(
+            assumed,
+            0,
+            "callee check leaked into its summary as a precondition:\n{}",
+            callee_clauses.join("\n")
+        );
     }
 
     /// The regression this file's bitvector port exists for (#77).

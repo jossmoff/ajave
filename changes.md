@@ -2981,3 +2981,55 @@ because it rounds `0.49999999999999994` up. Committing to that identity would
 have been a wrong model producing wrong answers.
 `benchmarks/ajave/jvm-floats/RoundIsNotFloorOfPlusHalf` pins it, and ajave
 proves it.
+
+## 2026-09-06 — CHC: free constants are existentials, and a callee's check is a precondition
+
+Two defects in the CHC encoder, both in the same place: what a clause *binds*.
+
+**1. Fresh values were emitted as global constants.** The bitvector encoder
+declared each havoced value as `(declare-fun bvf_f0 () (_ BitVec 32))`. That is
+not a Horn clause. Two things follow, and the second is the dangerous one:
+
+- Z3 and Eldarica both refuse it. `(get-info :reason-unknown)` says
+  `Uninterpreted 'bvf_f0' in <null>: block_9(...) :- block_8(...)`. This is what
+  the engine's `unknown` verdicts had been hiding — not solver weakness, a
+  malformed query. Every `unknown` was a refusal to read the file.
+- A free constant in a Horn query is **existentially** chosen by the solver: it
+  is part of the model, not universally quantified. So where a solver does
+  accept one, it may pick the value that makes the property hold. A havoc
+  encoded this way means "there is some value" when it must mean "for every
+  value".
+
+`bind_free_constants` splices the binders into each clause's own `forall`.
+Measured on the 142 unproven TRUE tasks: CHC went from 1 task proved to 4, and
+16 tasks moved `unknown` → `unsat` — the solver now answers instead of refusing.
+
+**2. Assuming a callee's check narrows its summary's domain.** A failing check
+throws, so the normal successor is only taken when the condition holds, and
+assuming it cuts spurious paths. That reasoning is correct for a path and wrong
+for this encoder, which is *relational*: a callee is a summary `m_s(args, ret)`
+and a call site applies it. An assumption inside a callee therefore does not
+constrain a path — it becomes an unstated **precondition**. Every call site that
+cannot establish it has an unsatisfiable application, so the call's successor
+disappears and everything downstream is vacuously safe.
+
+`objects/objects14` paid for this. A NullDeref assumed inside a callee gave the
+summary the precondition `receiver != 0`; the caller's inferred invariant had
+`v1 = 0`; the edge out of the call died; `main`'s blocks b3..b11 became empty;
+and a reachable `assert false` was proved TRUE, for −16. Z3's model is what
+showed it — the block predicates are printed, and nine of them were `false`.
+
+The assumption is kept in the entry method, which has no caller and so has no
+summary, and in the bitvector encoder, which is selected only when there are no
+resolvable calls and therefore has no summaries either. That split was found by
+isolation before it was explained, and the explanation predicts exactly the
+split that was measured.
+
+It is worth naming the shape, because `CLAUDE.md` already lists it: a producer
+and a consumer disagreeing about an artifact. Here the artifact is a summary,
+the producer thought it was encoding a path, and the consumer read it as a
+relation. The assumption gains **0 measured points** today; it is retained
+because it is sound and will matter once the heap is modelled, and because
+`a_callee_check_does_not_become_a_summary_precondition` now holds the line. That
+test was verified to fail with the guard removed — a soundness test that cannot
+fail is the thing this file keeps warning about.
