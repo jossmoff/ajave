@@ -906,7 +906,9 @@ fn encode_chc_interproc(
         let n_vars = body.vars.len();
         let param_indices = method_params.get(mk).cloned().unwrap_or_default();
         let ret_ch = return_type_char(&mk.desc);
-        let is_entry = mk == entry;
+        // Obligations are no longer entry-only, so this is kept only for the
+        // summary/return clauses that still distinguish the entry method.
+        let _is_entry = mk == entry;
 
         let src_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}", i)).collect();
         let dst_vars: Vec<String> = (0..n_vars).map(|i| format!("w{}", i)).collect();
@@ -1295,8 +1297,8 @@ fn encode_chc_interproc(
                 let q = add_extra_forall_lia(&forall_src, &fresh);
                 let body_s = and_expr(&conds);
                 let head_s = fact;
-                let q = tighten_forall(&q, &body_s, &head_s);
-                out.push_str(&clause(&q, &body_s, &head_s));
+                let q = tighten_forall(&q, &body_s, head_s);
+                out.push_str(&clause(&q, &body_s, head_s));
             }
 
             // Exceptional edges, so that an obligation inside a `catch` is
@@ -1939,7 +1941,11 @@ mod tests {
         // No seeded invariants: this test is about the overflow encoding, and
         // an empty map is the "nothing known" case the engine starts from.
         let no_invariants = HashMap::new();
-        let smt2 = encode_chc_interproc(&prog, &main, &[ObligationId(0)], &no_invariants);
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &no_invariants);
         assert!(
             smt2.contains("; overflow"),
             "the inter-procedural encoding must route 32-bit overflow to \
