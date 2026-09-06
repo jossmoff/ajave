@@ -19,7 +19,7 @@ MAIN=crates/ajave-cli/src/main.rs
 
 # Engines whose doc is still owed. Every entry is a known gap, not a licence:
 # adding to this list needs a reason, and the list is meant to shrink.
-KNOWN_GAPS="nra float_search ranges kinduction chc imc cegar"
+KNOWN_GAPS="nra float_search ranges kinduction imc cegar"
 
 fail=0
 registered=$(grep -oE 'ajave_engines::[a-z_]+::[A-Za-z]+::new' "$MAIN" \

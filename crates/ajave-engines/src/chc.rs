@@ -123,17 +123,10 @@ impl Engine for ChcEngine {
         // them without this guard turned a precision limit into a soundness
         // bug — a correct guard overridden by a wrong argument about which
         // direction the approximation ran.
-        let has_handlers = reachable_methods.iter().any(|mk| {
-            prog.body(mk)
-                .is_some_and(|b| b.blocks.iter().any(|blk| !blk.exceptional.is_empty()))
-        });
-        if has_handlers {
-            info!(
-                "chc: skipping — reachable methods have exception handlers, \
-                   whose obligations this encoding cannot reach"
-            );
-            return Progress::Stalled;
-        }
+        // No handler decline any more: exceptional edges are encoded above.
+        // The guard that used to sit here refused every program with a
+        // `catch`, which was correct for an encoding that could not reach
+        // handler obligations, and cost 157 of 580 records.
 
         // Heap reads are *not* a reason to decline.
         //
@@ -354,6 +347,42 @@ fn body_uses_heap_ops(body: &Body) -> bool {
 
 /// Check if the program has calls from the entry method (or its callees)
 /// to methods that we have bodies for — i.e. inter-procedural reasoning helps.
+/// Can every value that reaches the heap be accounted for by a write clause?
+///
+/// Space invariants are only sound when the encoding is **closed**. `phi_obj`
+/// and `phi_arr` are uninterpreted, so they are constrained *only* by the
+/// write clauses we emit. If a value can enter the heap by a route we do not
+/// encode, no clause forces the invariant to admit it -- and a predicate with
+/// no positive clauses may be interpreted as identically **false**, which
+/// makes every `assume phi(...)` read path infeasible. The obligation then
+/// becomes unreachable and the program is declared safe.
+///
+/// That is not hypothetical: `objects/objects14` obtains its object from
+/// `Verifier.nondetObject`, an unmodelled factory, and scored a wrong TRUE
+/// (-16) the first time this encoding ran.
+///
+/// So the invariants are used only when every reachable method is lifted and
+/// every call resolves. Anything else falls back to unconstrained reads, which
+/// is what the engine did before and is over-approximate.
+fn heap_is_closed(prog: &Program, reachable: &[MethodKey]) -> bool {
+    reachable.iter().all(|mk| {
+        prog.body(mk).is_some_and(|b| {
+            b.is_fully_lifted()
+                && b.blocks.iter().all(|blk| {
+                    blk.stmts.iter().all(|st| match st {
+                        // An unresolved call may write anywhere.
+                        Stmt::Assign(_, Rvalue::Call { target, .. }) => prog.body(target).is_some(),
+                        // A havoced reference is an object we never built, so
+                        // nothing constrains its fields.
+                        Stmt::Assign(_, Rvalue::Havoc(ty, _)) => !matches!(ty, Ty::Ref | Ty::Str),
+                        Stmt::Assign(_, Rvalue::Nondet(ty, _)) => !matches!(ty, Ty::Ref | Ty::Str),
+                        _ => true,
+                    })
+                })
+        })
+    })
+}
+
 fn prog_has_resolvable_calls(prog: &Program, entry: &MethodKey) -> bool {
     let Some(body) = prog.body(entry) else {
         return false;
@@ -760,6 +789,36 @@ fn encode_chc_interproc(
         set.into_iter().collect()
     };
 
+    // Space invariants for the heap (Kahsai/Kersten/Rummer/Schaf, LPAR-21).
+    //
+    // A heap read was a fresh unconstrained variable and a heap write was
+    // dropped, so any obligation depending on stored data was unprovable --
+    // and the encoding reported `unsat`, a *spurious* counterexample, on safe
+    // programs. `jbmc-regression/aastore_aaload1` is one.
+    //
+    // Rather than model the heap as an array and hope interpolation copes
+    // (which it does not), abstract it with one predicate per heap shape,
+    // describing *every* object of that shape at once:
+    //
+    //     phi_arr(ref, idx, val)      an array cell
+    //     phi_obj(ref, field, val)    an instance field
+    //
+    // A read becomes `assume phi(...)` over a fresh value; a write becomes
+    // `assert phi(...)`. The Horn solver then has to *infer* phi, which is
+    // implicitly a quantified invariant over unboundedly many cells -- exactly
+    // the thing Craig interpolation is bad at producing directly.
+    //
+    // Fields are identified by a small integer rather than by name so that one
+    // predicate serves every class, which keeps the arity at three. Distinct
+    // objects are separated by `ref`, which the lifter already gives a unique
+    // value per allocation -- the role JayHorn's `allocSite` plays.
+    let heap_closed = heap_is_closed(prog, &all_methods);
+    if heap_closed {
+        out.push_str("; space invariants for the heap\n");
+        out.push_str("(declare-fun phi_arr (Int Int Int) Bool)\n");
+        out.push_str("(declare-fun phi_obj (Int Int Int) Bool)\n");
+    }
+
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = &method_ids[mk];
@@ -956,6 +1015,50 @@ fn encode_chc_interproc(
                                 }
                             }
                         }
+                        // Allocation yields a non-null reference.
+                        //
+                        // JLS 15.9.4: evaluating a class instance creation
+                        // expression either completes abruptly or produces a
+                        // reference to a *new* object. It is never null.
+                        // Likewise JLS 15.10.2 for array creation.
+                        //
+                        // Without this the reference is unconstrained, so the
+                        // solver may take it to be 0, and any space invariant
+                        // it flows into admits null. `aastore_aaload1` fills an
+                        // array with `new A()` and asserts every element is
+                        // non-null: unprovable until allocation says so.
+                        //
+                        // The lifter represents null as 0, so "non-null" is
+                        // `> 0`. Asserting a fact the JVM guarantees narrows no
+                        // reachable behaviour, so this cannot hide a violation.
+                        Rvalue::New(_) | Rvalue::NewArray { .. } => {
+                            let r = fresh.fresh();
+                            constraints.push(format!("(> {} 0)", r));
+                            if let Rvalue::NewArray { len, .. } = rv {
+                                // JLS 15.10.1: a negative dimension throws
+                                // `NegativeArraySizeException`, so a *created*
+                                // array has a non-negative length.
+                                let l = lia_operand(len, &var_map);
+                                constraints.push(format!("(>= {} 0)", l));
+                            }
+                            var_map.insert(vid.0 as usize, r);
+                        }
+                        // Heap reads: a fresh value constrained by the space
+                        // invariant, rather than an unconstrained one.
+                        Rvalue::ArrayLoad { arr, idx } if heap_closed => {
+                            let a = lia_operand(arr, &var_map);
+                            let i = lia_operand(idx, &var_map);
+                            let v = fresh.fresh();
+                            constraints.push(format!("(phi_arr {} {} {})", a, i, v));
+                            var_map.insert(vid.0 as usize, v);
+                        }
+                        Rvalue::GetField { obj, field } if heap_closed => {
+                            let o = lia_operand(obj, &var_map);
+                            let f = field_id(field);
+                            let v = fresh.fresh();
+                            constraints.push(format!("(phi_obj {} {} {})", o, f, v));
+                            var_map.insert(vid.0 as usize, v);
+                        }
                         _ => {
                             let expr = lia_rvalue(
                                 rv,
@@ -988,6 +1091,43 @@ fn encode_chc_interproc(
                     Stmt::Assume(op) => {
                         let expr = lia_operand(op, &var_map);
                         constraints.push(format!("(not (= {} 0))", expr));
+                    }
+                    // Heap writes: the space invariant must admit the stored
+                    // value, which is what forces the solver to make it strong
+                    // enough to be useful at the matching reads.
+                    Stmt::ArrayStore { arr, idx, val } if heap_closed => {
+                        let a = lia_operand(arr, &var_map);
+                        let i = lia_operand(idx, &var_map);
+                        let v = lia_operand(val, &var_map);
+                        let mut conds = constraints.clone();
+                        conds.extend(bindings.iter().cloned());
+                        conds.push(block_app_src(block.id.0));
+                        let q = add_extra_forall_lia(&forall_src, &fresh);
+                        out.push_str(&format!(
+                            "(assert (forall ({}) (=> {} (phi_arr {} {} {}))))\n",
+                            q,
+                            and_expr(&conds),
+                            a,
+                            i,
+                            v
+                        ));
+                    }
+                    Stmt::PutField { obj, field, val } if heap_closed => {
+                        let o = lia_operand(obj, &var_map);
+                        let f = field_id(field);
+                        let v = lia_operand(val, &var_map);
+                        let mut conds = constraints.clone();
+                        conds.extend(bindings.iter().cloned());
+                        conds.push(block_app_src(block.id.0));
+                        let q = add_extra_forall_lia(&forall_src, &fresh);
+                        out.push_str(&format!(
+                            "(assert (forall ({}) (=> {} (phi_obj {} {} {}))))\n",
+                            q,
+                            and_expr(&conds),
+                            o,
+                            f,
+                            v
+                        ));
                     }
                     Stmt::Check(oid) if is_entry && obligations.contains(oid) => {
                         let ob = body.obligation(*oid);
@@ -1067,6 +1207,52 @@ fn encode_chc_interproc(
                     block_app_dst(target_bid)
                 ));
             };
+
+            // Exceptional edges, so that an obligation inside a `catch` is
+            // reachable in the encoding.
+            //
+            // Previously this encoding followed normal control flow only, so a
+            // handler was unreachable, its obligations were never examined,
+            // and the program was declared safe -- a wrong TRUE, which
+            // `argv-tasks/HttpTransport_false` scored. The engine then
+            // *declined* every program with a handler, which is correct but
+            // cost it 157 of 580 records in the 2026-09-06 survey: by far its
+            // biggest limitation.
+            //
+            // JayHorn's answer is to remove exceptional flow before encoding
+            // (methods return a value/exception pair and callers branch on
+            // it). The same effect, expressed directly in the clauses: the
+            // handler is reachable from *anywhere* in the guarded block.
+            //
+            // Soundness. A throw can occur at any point in the block, so the
+            // real program reaches the handler in some state we cannot pin
+            // down. This clause allows the handler to be entered from the
+            // block's entry state with locals preserved -- JVMS 2.6.1, the
+            // frame's local variables survive -- and the operand stack free,
+            // since it is discarded and replaced by the exception object. The
+            // set of handler states we admit is therefore a *superset* of the
+            // reachable ones, which is the safe direction for an engine that
+            // may only discharge: proving the obligation over more states
+            // proves it over fewer.
+            //
+            // The block's own assignments are deliberately *not* included. The
+            // throw may precede any of them.
+            for edge in &block.exceptional {
+                let mut all = vec![block_app_src(block.id.0)];
+                for (i, vi) in body.vars.iter().enumerate() {
+                    if matches!(vi.kind, VarKind::Local(_)) {
+                        all.push(format!("(= w{} v{})", i, i));
+                    }
+                }
+                let body_expr = and_expr(&all);
+                let q = add_extra_forall_lia(&forall_both, &fresh);
+                out.push_str(&format!(
+                    "(assert (forall ({}) (=> {} {})))\n",
+                    q,
+                    body_expr,
+                    block_app_dst(edge.target.0)
+                ));
+            }
 
             match &block.term {
                 Terminator::Goto(t) => {
@@ -1169,6 +1355,22 @@ fn add_extra_forall_lia(base: &str, fresh: &FreshGen) -> String {
 // ---------------------------------------------------------------------------
 // Single-method BV encoding (original, for non-recursive programs)
 // ---------------------------------------------------------------------------
+
+/// A stable small integer naming a field.
+///
+/// Fields are identified by a number rather than by name so that a single
+/// `phi_obj` predicate of arity three serves every class. Two distinct fields
+/// sharing an id would let a read of one see a write of the other, which is an
+/// over-approximation -- more values admitted, never fewer -- so a collision
+/// costs precision and not soundness. A 32-bit hash makes them rare.
+fn field_id(f: &FieldKey) -> String {
+    let mut h: u32 = 2166136261;
+    for b in format!("{}.{}", f.class, f.name).bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    (h % 100_000).to_string()
+}
 
 fn width_of(ty: &Ty) -> u32 {
     match ty {

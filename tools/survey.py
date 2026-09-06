@@ -54,12 +54,39 @@ CALL = re.compile(
 
 
 def _sources(task):
+    """Java files belonging to *this* task, not its shared support code.
+
+    Several categories put every task's sources in one directory that every
+    task then includes -- `securibench/micro`, `juliet-java/testcasesupport`.
+    Walking all inputs therefore attributed the whole corpus's library calls to
+    each task, and the `calls` projection reported 73/73 tasks using
+    `Arrays.asList` when it was really one shared tree counted 73 times.
+
+    The task's own directory is the input whose basename matches the task file,
+    so prefer that and fall back to the last input, which is where BenchExec
+    conventionally puts it.
+    """
+    stem = os.path.basename(task["yml"]).removesuffix(".yml")
+    own_dirs = [i for i in task["inputs"] if os.path.isdir(i) and os.path.basename(i) == stem]
+    if not own_dirs:
+        dirs = [i for i in task["inputs"] if os.path.isdir(i)]
+        own_dirs = dirs[-1:] if dirs else []
+
     out = []
-    for inp in task["inputs"]:
-        if not os.path.isdir(inp) or inp.endswith("common"):
-            continue
+    for inp in own_dirs:
         for root, _, files in os.walk(inp):
             out += [os.path.join(root, f) for f in files if f.endswith(".java")]
+
+    # securibench keeps a thin `Main.java` driver in the task directory and the
+    # logic in the shared tree under the task's own name, so pick that file out
+    # of the shared inputs too -- without dragging in its 100-odd siblings.
+    for inp in task["inputs"]:
+        if not os.path.isdir(inp) or inp in own_dirs or inp.endswith("common"):
+            continue
+        for root, _, files in os.walk(inp):
+            for f in files:
+                if f == f"{stem}.java":
+                    out.append(os.path.join(root, f))
     return out
 
 
