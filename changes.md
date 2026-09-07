@@ -3211,3 +3211,48 @@ python3 tools/metamorphic.py --set smoke     # reports the flip
 # or directly: copy argv-tasks/HttpTransport_false, apply
 # metamorphic.add_unrelated_method to Main.java, run --property assert
 ```
+
+## 2026-09-07 — CHC was never asked about the no-runtime-exception property
+
+Survey of the 810 unclaimed points, bucketed by what each task needs:
+
+| | need PROOF (expected TRUE) | need WITNESS (expected FALSE) |
+|---|---|---|
+| valid-assert | 137 -> 274 pts | 152 -> 152 pts |
+| no-runtime-exception | 180 -> 360 pts | 24 -> 24 pts |
+
+Proofs dominate, and the largest bucket is NRE. Probing CHC over those 180
+tasks found the solver ran **zero times**: 94 reached the engine and encoded
+nothing, 52 timed out, 30 had nothing open, 4 skipped for float.
+
+The cause is one line in the obligation filter:
+
+```rust
+.is_some_and(|b| b.obligation(oref.id).kind == ObligationKind::Assertion)
+```
+
+The entire no-runtime-exception surface is `NullDeref`, `ArrayBounds`,
+`ClassCast` and `ExplicitThrow`, so CHC was structurally absent from a
+360-point property. Not failing to prove — never asked.
+
+The encoding already carries what a `NullDeref` proof needs: `New`/`NewArray`
+are constrained `> 0` (JLS 15.9.4) and a created array's length `>= 0` (JLS
+15.10.1). Admitting every kind is sound in general because an obligation this
+encoding cannot model contributes a condition over unconstrained values, which
+can only *add* reachable error states — `cond == 0` stays satisfiable, the
+query comes back `unsat`, and nothing is discharged.
+
+**Measured: NRE 1118 -> 1120, valid-assert 866 -> 869. Five points.**
+
+That is a small return for a structural fix, and the reason is worth recording
+because it redirects the next piece of work. Almost every NRE obligation's
+condition traces back to a *havoced* read — a field, an array element, an
+unresolved call's return — not to an allocation. `New > 0` only helps when the
+reference reaches the obligation directly from `new` in the same encoding, which
+is rare. So the filter was a necessary condition for CHC to contribute here and
+nowhere near a sufficient one: **issue #18 (model the heap and arrays) is the
+actual prerequisite**, and this change is what makes finishing it pay.
+
+Kept because it is sound, costs nothing measurable (NRE timeouts 42 -> 41,
+valid-assert 57 -> 54), and removes a blind spot that would otherwise silently
+cap any future heap work at zero.

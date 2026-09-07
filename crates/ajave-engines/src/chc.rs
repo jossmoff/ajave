@@ -224,10 +224,29 @@ impl Engine for ChcEngine {
         let obs: Vec<ObligationRef> = open
             .iter()
             .filter(|oref| reachable_set.contains(&oref.method))
-            .filter(|oref| {
-                prog.body(&oref.method)
-                    .is_some_and(|b| b.obligation(oref.id).kind == ObligationKind::Assertion)
-            })
+            // Every obligation kind, not just `Assertion`.
+            //
+            // Restricting to assertions made CHC structurally absent from the
+            // no-runtime-exception property, whose obligations are all
+            // `NullDeref`, `ArrayBounds`, `ClassCast` and `ExplicitThrow`.
+            // Measured over the 180 unproven NRE tasks that need a proof: CHC
+            // reached 94 of them and encoded *nothing*, and the solver ran
+            // zero times across the whole set. That is 360 points the engine
+            // was never asked about.
+            //
+            // The encoding already carries what a `NullDeref` proof needs:
+            // `New`/`NewArray` are constrained `> 0` (JLS 15.9.4, an
+            // allocation is never null) and a created array's length `>= 0`
+            // (JLS 15.10.1). An obligation whose condition comes from an
+            // allocation is therefore provable; one whose condition comes from
+            // a havoced read is not, and fails in the safe direction --
+            // `cond == 0` stays satisfiable, so `error` is reachable, the
+            // query is `unsat`, and nothing is discharged.
+            //
+            // That is the general argument for admitting every kind: an
+            // obligation this encoding cannot model contributes a condition
+            // over unconstrained values, which can only *add* reachable error
+            // states. The failure mode is a proof that does not go through.
             .cloned()
             .collect();
 
