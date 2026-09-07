@@ -3374,3 +3374,109 @@ Worth stating plainly, because it is the third measurement this week where the
 honest answer was "no": an over-conservative approximation is not automatically
 worth removing. Removing one costs exploration time immediately and pays only
 when *every* reason the obligation was refused is gone.
+
+## 2026-09-07 — full scoring run, and a census of the 787 unclaimed points
+
+Both properties, full `sv-comp` set, 60s timeout, 6 workers, each run idle-gated
+at start (they end contended, so both understate an idle machine):
+
+| property | score | correct | unproven | timeouts | wrong |
+|---|---|---|---|---|---|
+| valid-assert | **867** | 724 | 288 | 55 | 1 |
+| no-runtime-exception | **1140** | 578 | 193 | 42 | **0** |
+
+The single valid-assert "wrong" is the mislabelled `ReverseInterpolator_true`,
+where ajave is right — so the corpus-adjusted figure is **869 + 1140 with 0 real
+wrong answers**. Run-to-run spread on valid-assert is 865–869; quote the range,
+not a point.
+
+### Where the remaining points are
+
+| | need PROOF (expected TRUE) | need WITNESS (expected FALSE) |
+|---|---|---|
+| valid-assert | 137 → **274 pts** | 151 → **151 pts** |
+| no-runtime-exception | 169 → **338 pts** | 24 → 24 pts |
+
+**787 points unclaimed.** Proofs are 78% of it.
+
+### 1. no-runtime-exception proofs — 338 pts, the largest bucket
+
+What is still open when the verdict is UNKNOWN:
+
+| kind | tasks blocked | obligations |
+|---|---|---|
+| NullDeref | 73 | 7459 |
+| ArrayBounds | 48 | 1017 |
+| NegArraySize | 17 | 114 |
+| ClassCast | 13 | 36 |
+| DivByZero | 12 | 18 |
+
+Every elementary nullness fact already works — `this`, `new`, string literals,
+a guarded `!= null`, a constant array index. What does not work is
+`for (i = 0; i < v.length; i++) v[i] = ...`, which needs the **relational**
+fact `i < v.length`. An interval domain cannot express a relation between two
+variables, so this is not a tuning problem.
+
+This is the same wall as issue #18: CHC could express it, but every field and
+array read is havoced there, so it answers `unsat` and proves nothing. **#18 is
+the prerequisite for this whole bucket**, and CHC's obligation-kind filter being
+fixed is what makes finishing it pay rather than cap at zero.
+
+### 2. valid-assert witnesses — 151 pts, and the reason is not what it looks like
+
+Of the 151 tasks expected FALSE that scored nothing:
+
+- **76 — the engine found a violation and JVM replay `Refuted` it.**
+- 40 — timeout.
+- 35 — no violation found at all.
+
+The 76 are the interesting ones, and the census says why. **56 of them have
+all-zero witness values**, 68 exited cleanly (`exit="0"` — the assertion simply
+did not fire), and 8 exited non-zero having thrown something else entirely
+(`StringIndexOutOfBoundsException` ×5, `ArrayIndexOutOfBounds`,
+`StackOverflowError`, `NoSuchElementException`), which for valid-assert is
+correctly refused. 74 of the 77 were published by `smt-bmc`.
+
+The mechanism: the witness pins only the **nondet inputs**. When the path to the
+violation ran through a *havoced* value, the solver is free to assign it 0, and
+replay then recomputes that value for real and gets something else. So the
+satisfying assignment is not an execution. Concentrated in
+`float-nonlinear-calculation` (20) and `autostub` (17) — exactly the places
+where the model is least faithful.
+
+Two things follow, and they pull in opposite directions:
+
+- Replay is **earning its keep**. These 76 would otherwise be wrong FALSEs at
+  −32 apiece — about 2,400 points of damage prevented.
+- Recovering the 76 is not a certification problem. It needs the *model* to be
+  faithful enough that the witness reproduces: real float semantics for
+  `float-nonlinear-calculation`, real JDK behaviour for `autostub`. Tightening
+  replay would gain nothing; loosening it would be catastrophic.
+
+Worth stating as a rule: **an Under engine must not publish a violation whose
+satisfiability rests on a value it havoced.** That is the direction discipline
+the blackboard already encodes, applied to witnesses rather than to statuses.
+
+### 3. valid-assert proofs — 274 pts
+
+`all_paths_complete` blocks 51, taint (`skipped_obligation`) 31, `violated` 9.
+The taint origins are dominated by `Math.sin`/`pow`/`log`, which have no body to
+inline — see the void-return entry above for why fixing only *part* of a task's
+taint gains nothing.
+
+### 4. Timeouts — 97 tasks across both properties
+
+55 valid-assert and 42 no-runtime-exception. Contention-sensitive, so some of
+these are the measurement rather than the engine, but 40 of the valid-assert
+witness bucket are timeouts, which is a real ceiling.
+
+### Ranked
+
+1. **Heap and arrays in CHC (#18)** — unlocks the 338-point NRE bucket, and
+   nothing else can. Needs `i < arr.length` to be expressible.
+2. **Faithful float in the BMC** — 20 refuted witnesses in
+   `float-nonlinear-calculation` alone, plus it is the same defect class the
+   `benchmarks/ajave/jvm-floats/` suite exists to pin.
+3. **Transcendental taint** — unblocks part of the 31, and is the prerequisite
+   that makes the void-return fix pay.
+4. **`autostub` JDK modelling** — 17 refuted witnesses in one directory.
