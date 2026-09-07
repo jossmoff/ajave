@@ -3163,3 +3163,51 @@ the same treatment in the bitvector encoder to move.
 `float_arithmetic_is_havoced_not_computed_on_bit_patterns` asserts the havoc for
 each form and also asserts that integer addition is *still encoded*, so an
 encoder that havoced everything would not pass it.
+
+## 2026-09-06 — open: the BMC loses a violation when an unrelated method is added
+
+`tools/metamorphic.py --set smoke` reports one **flip**, which is a defect by
+construction — the transformation cannot change what is true of the program:
+
+```
+FLIPPED sv-comp/argv-tasks/HttpTransport_false [assert]
+        under add-unrelated-method: UNKNOWN -> TRUE
+```
+
+Reproduced outside the harness. Applying `add_unrelated_method` (which inserts
+a reachable, always-safe helper, changing only the set of obligation ids in
+play) and running the two side by side:
+
+```
+UNMODIFIED   16 bodies, 28 obligations   smt-bmc discharged=1 violated=1  -> UNKNOWN
+TRANSFORMED  17 bodies, 42 obligations   smt-bmc discharged=2 violated=0  -> TRUE
+```
+
+Adding a method makes the BMC **stop finding a violation it had found, and
+discharge that obligation instead**. Not CHC: `AJAVE_DISABLE=chc` reproduces it.
+Not an obvious truncation effect either — the debug counts for `max_depth`,
+`unresolved`, `all_paths_complete` and budget are identical between the two
+runs, so whatever differs is in what the engine concludes rather than in how far
+it got.
+
+This does not affect the scored corpus today. The unmodified task ends UNKNOWN,
+because the violation the BMC finds is not certified by JVM replay, so no FALSE
+is published and the task scores 0. But it is a live wrong-TRUE generator that
+only needs a program where the ids fall differently, and `HttpTransport_false`
+is *the* task that originally bought the CHC handler decline — the third time
+this one program has exposed a distinct soundness defect.
+
+The shape to suspect first is the one `CLAUDE.md` already names: a
+context-relative identifier used as a global key. `violated_oids` and
+`skipped_obligations` were keyed by `ObligationId` alone once before, and
+`add_unrelated_method` exists precisely because it makes obligation ids collide.
+Not yet diagnosed; recorded here with the reproduction so it is not rediscovered
+from scratch.
+
+Reproduction:
+
+```
+python3 tools/metamorphic.py --set smoke     # reports the flip
+# or directly: copy argv-tasks/HttpTransport_false, apply
+# metamorphic.add_unrelated_method to Main.java, run --property assert
+```
