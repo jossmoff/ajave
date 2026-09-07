@@ -166,8 +166,8 @@ impl Engine for ChcEngine {
         let uses_float = reachable_methods
             .iter()
             .any(|mk| prog.body(mk).is_some_and(body_uses_float_types));
-        if uses_float {
-            info!("chc: skipping — reachable methods use float/double arithmetic");
+        if uses_float && !prog_has_resolvable_calls(prog, entry) {
+            info!("chc: skipping — float/double arithmetic, and no LIA encoding applies");
             return Progress::Stalled;
         }
         // Skip if any reachable method has calls to non-Verifier library methods
@@ -642,14 +642,41 @@ fn lia_operand(op: &Operand, var_map: &HashMap<usize, String>) -> String {
         Operand::Const(_) => "0".to_string(),
     }
 }
+/// Whether an rvalue's *result* or any operand it computes over is
+/// floating-point. Only the arithmetic forms matter: a `Use` of a float merely
+/// copies a value that was itself havoced where it was produced, and the
+/// unmodelled forms already havoc.
+fn rvalue_is_float(rv: &Rvalue, is_float: &dyn Fn(&Operand) -> bool) -> bool {
+    match rv {
+        Rvalue::Bin(_, a, b) => is_float(a) || is_float(b),
+        Rvalue::Neg(o) => is_float(o),
+        Rvalue::Cmp(_, a, b) => is_float(a) || is_float(b),
+        Rvalue::Cast(to, from, _) => matches!(
+            (to, from),
+            (Ty::Float | Ty::Double, _) | (_, Ty::Float | Ty::Double)
+        ),
+        _ => false,
+    }
+}
+
 fn lia_rvalue(
     rv: &Rvalue,
     var_map: &HashMap<usize, String>,
     fresh: &mut FreshGen,
     is_wide: &dyn Fn(&Operand) -> bool,
+    is_float: &dyn Fn(&Operand) -> bool,
     overflow: &mut Vec<String>,
     theory: &LiaTheory,
 ) -> String {
+    // Floating-point values have no integer encoding. Computing on their bit
+    // patterns is not floating-point arithmetic -- it is a different function
+    // that happens to be total, which is wrong rather than coarse. Havoc is the
+    // sound answer for an over-approximating engine, and it is what this file
+    // already does for `Div`, `Rem` and the shifts.
+    if rvalue_is_float(rv, is_float) {
+        log::debug!("chc-imprecision: float-valued rvalue");
+        return fresh.fresh();
+    }
     match rv {
         Rvalue::Use(o) => lia_operand(o, var_map),
         Rvalue::Nondet(..) | Rvalue::Havoc(_, _) => {
@@ -1087,6 +1114,16 @@ fn encode_chc_interproc(
                     _ => false,
                 }
             };
+            let is_float = |op: &Operand| -> bool {
+                match op {
+                    Operand::Const(Const::Float(_)) | Operand::Const(Const::Double(_)) => true,
+                    Operand::Var(v) => body
+                        .vars
+                        .get(v.0 as usize)
+                        .is_some_and(|vi| matches!(vi.ty, Ty::Float | Ty::Double)),
+                    _ => false,
+                }
+            };
             let mut var_map: HashMap<usize, String> = HashMap::new();
             let mut call_constraints: Vec<String> = Vec::new();
 
@@ -1205,6 +1242,7 @@ fn encode_chc_interproc(
                                 &var_map,
                                 &mut fresh,
                                 &is_wide,
+                                &is_float,
                                 &mut overflow,
                                 &theory,
                             );
@@ -2397,7 +2435,16 @@ mod lia_unmodelled_operator_tests {
         let var_map: HashMap<usize, String> = HashMap::new();
         let is_wide = |_: &Operand| false;
         let mut overflow = Vec::new();
-        lia_rvalue(rv, &var_map, &mut fresh, &is_wide, &mut overflow, &theory)
+        let is_float = |_: &Operand| false;
+        lia_rvalue(
+            rv,
+            &var_map,
+            &mut fresh,
+            &is_wide,
+            &is_float,
+            &mut overflow,
+            &theory,
+        )
     }
 
     /// LIA has no bitwise or shift operators, and its `div`/`mod` are Euclidean
@@ -2417,6 +2464,78 @@ mod lia_unmodelled_operator_tests {
             let e = encode(&Rvalue::Bin(op, Operand::int(7), Operand::int(3)));
             assert!(e.starts_with("_f"), "{op:?} must be havoced, got {e}");
         }
+    }
+
+    /// Float arithmetic is havoced, not computed on bit patterns.
+    ///
+    /// `lia_operand` turns a float constant into its raw bits, so encoding
+    /// `Add` over them computes integer addition of two bit patterns -- a
+    /// different function that happens to be total. That is wrong rather than
+    /// coarse, and it is the defect already recorded for the BMC in
+    /// `smt_bmc/encode.rs`.
+    ///
+    /// The engine used to decline any program with a float-typed variable
+    /// anywhere in any reachable method, which is sound but refused 37 of the
+    /// 142 unproven TRUE tasks -- including every one whose assertion is about
+    /// integers and whose `double` is incidental. Havocing is the sound answer
+    /// for an over-approximating engine: an unconstrained value contains the
+    /// real one, so a proof over it holds of the program.
+    #[test]
+    fn float_arithmetic_is_havoced_not_computed_on_bit_patterns() {
+        let theory = LiaTheory::new("t_");
+        let is_wide = |_: &Operand| false;
+        // Only the float operands are declared float; everything else is not,
+        // so a `true`-returning stub could not be what makes this pass.
+        let is_float = |op: &Operand| {
+            matches!(
+                op,
+                Operand::Const(Const::Float(_)) | Operand::Const(Const::Double(_))
+            )
+        };
+        let f = || Operand::Const(Const::Float(1.5));
+
+        for rv in [
+            Rvalue::Bin(BinOp::Add, f(), f()),
+            Rvalue::Bin(BinOp::Mul, f(), Operand::int(2)),
+            Rvalue::Neg(f()),
+            Rvalue::Cmp(CmpKind::FloatG, f(), f()),
+            Rvalue::Cast(Ty::Int, Ty::Float, f()),
+        ] {
+            let mut fresh = FreshGen::new();
+            let mut overflow = Vec::new();
+            let e = lia_rvalue(
+                &rv,
+                &HashMap::new(),
+                &mut fresh,
+                &is_wide,
+                &is_float,
+                &mut overflow,
+                &theory,
+            );
+            assert!(e.starts_with("_f"), "{rv:?} must be havoced, got {e}");
+            assert!(
+                overflow.is_empty(),
+                "{rv:?} must not contribute an integer overflow guard, got {overflow:?}"
+            );
+        }
+
+        // The integer case must still be encoded, or the check above would
+        // pass for an encoder that havoced everything.
+        let mut fresh = FreshGen::new();
+        let mut overflow = Vec::new();
+        let e = lia_rvalue(
+            &Rvalue::Bin(BinOp::Add, Operand::int(1), Operand::int(2)),
+            &HashMap::new(),
+            &mut fresh,
+            &is_wide,
+            &is_float,
+            &mut overflow,
+            &theory,
+        );
+        assert!(
+            e.contains('+'),
+            "integer addition must still be encoded, got {e}"
+        );
     }
 
     /// `And`/`Or`/`Xor` are the exception, and the distinction matters.

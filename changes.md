@@ -3126,3 +3126,40 @@ holds. ajave said TRUE and was right; the benchmark was wrong. Only after
 enumerating candidates on a real JVM did `20000002.0f` — whose half is odd —
 give the intended violation. An engine finding written from reasoning alone had
 been about to be committed as a wrong-answer benchmark.
+
+## 2026-09-06 — CHC: havoc float arithmetic instead of declining the program
+
+CHC declined any program with a float-typed variable in **any** reachable
+method. The reasoning was sound as far as it went — `lia_operand` turns a float
+constant into its raw bits, so encoding `Add` over them computes integer
+addition of two bit patterns, which is a different function that happens to be
+total, and that is wrong rather than coarse.
+
+But declining is not the only sound answer, and it is not the cheap one. Havoc
+is: an unconstrained value contains the real one, so a proof over it holds of
+the program. This file already does exactly that for `Div`, `Rem` and the
+shifts, which LIA also cannot express. The float case simply never got the same
+treatment, and `body_uses_float_types` is maximally coarse — one unused `double`
+in one reachable method refused the whole program.
+
+`rvalue_is_float` now havocs the float-valued arithmetic forms (`Bin`, `Neg`,
+`Cmp`, and casts to or from a float type) and contributes no integer overflow
+guard for them. The whole-program decline survives only for the bitvector
+encoder, which has no such treatment and is selected only when nothing
+resolvable is called.
+
+Measured. The skip bucket over the 142 unproven TRUE tasks fell from **37 to
+16**, and CHC proved two more: `argv-tasks/Piecewise_true` and
+`jpf-regression/ExSymExeFNEG_true`. Full valid-assert corpus went **863 to 866**
+with no new wrong answers.
+
+That is a small return for the bucket it emptied, and the reason is worth
+recording: most of those 37 tasks are float tasks whose *property* is about the
+float values, so havocing them removes the decline and leaves the obligation
+unprovable anyway. The tasks it wins are the ones where the float was
+incidental. The remaining 16 are the no-resolvable-calls case, which would need
+the same treatment in the bitvector encoder to move.
+
+`float_arithmetic_is_havoced_not_computed_on_bit_patterns` asserts the havoc for
+each form and also asserts that integer addition is *still encoded*, so an
+encoder that havoced everything would not pass it.
