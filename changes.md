@@ -3087,3 +3087,42 @@ Smoke did not catch any of this: at 143 tasks it had no assertion inside a
 curated against known regressions and cannot be relied on to find a *new* class,
 which is what the full corpus run is for — and why a soundness change is not
 finished until one has been run.
+
+## 2026-09-06 — the last wrong answer on valid-assert is a mislabelled benchmark
+
+After the two CHC fixes the full valid-assert run scored **863 with 1 wrong**,
+and that one is `argv-tasks/ReverseInterpolator_true` — where ajave is right and
+the benchmark's label is wrong.
+
+The task asserts, for `|t| <= 100`:
+
+```java
+float x = t * 2.0f;
+float result = (t < 0.5f) ? 0.5f*x*x*x*x*x : 0.5f*x*x*x*x*x + 1;
+assert Math.abs(t*t*t*t*t*16.0f - result) < 1.1f;
+```
+
+The two quintics are **bit-identical**, not merely close. Every factor pulled
+across is an exact power of two, and scaling by a power of two commutes with
+rounding, so `0.5f*x*x*x*x*x` with `x = 2t` and `t*t*t*t*t*16.0f` round
+identically at every step. The assertion therefore reduces to
+`|v - (v + 1.0f)| < 1.1f`.
+
+That is false for large `v`. A float has a 24-bit significand, so near 2e7 the
+spacing is 2.0 and `v + 1` lands exactly halfway between neighbours; IEEE-754
+round-to-nearest-even sends it up whenever `v/2` is odd. Under the guard's
+`|t| <= 100`, `v` reaches ~1.6e11, where ulp is ~16384.
+
+ajave reports FALSE with witness `t = 16.342388f`. Run on a real JVM under
+`-ea`, that input throws `AssertionError` with `|diff| = 2.0`. The witness is
+genuine, the verdict is correct, and SV-COMP charges -32 for it. Corrected for
+the label, the run is **896 with 0 wrong**.
+
+`benchmarks/ajave/jvm-floats/UlpExceedsAddedConstant` reduces the mechanism to
+three lines. Writing it repaid the rule that says to establish ground truth from
+the spec **and confirm it on a JVM**: the first draft used `2.0e7f`, whose half
+is even, so the tie breaks *downward*, `big + 1.0f == big`, and the assertion
+holds. ajave said TRUE and was right; the benchmark was wrong. Only after
+enumerating candidates on a real JVM did `20000002.0f` — whose half is odd —
+give the intended violation. An engine finding written from reasoning alone had
+been about to be committed as a wrong-answer benchmark.
