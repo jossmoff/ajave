@@ -173,6 +173,46 @@ impl Orchestrator {
             }
         }
 
+        // What is still open, and of what kind.
+        //
+        // Without this the only way to ask "why is this task UNKNOWN" was to
+        // read each engine's own refusal log and hope one of them mentioned
+        // the obligation that mattered. A survey of the unproven corpus needs
+        // the answer directly: an UNKNOWN verdict is one or more obligations
+        // nobody closed, and their *kind* is what says which engine ought to
+        // have.
+        let still_open = self.bb.open();
+        if !still_open.is_empty() {
+            let mut by_kind: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for oref in &still_open {
+                let kind = prog
+                    .body(&oref.method)
+                    .map(|b| format!("{:?}", b.obligation(oref.id).kind))
+                    .unwrap_or_else(|| "?".to_string());
+                *by_kind.entry(kind).or_default() += 1;
+            }
+            let summary = by_kind
+                .iter()
+                .map(|(k, n)| format!("{k}={n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            info!(
+                "orchestrator: {} obligation(s) still open — {}",
+                still_open.len(),
+                summary
+            );
+            for oref in still_open.iter().take(6) {
+                if let Some(b) = prog.body(&oref.method) {
+                    let ob = b.obligation(oref.id);
+                    debug!(
+                        "orchestrator:   open {:?} in {}.{} line={:?} bytecode={}",
+                        ob.kind, oref.method.class, oref.method.name, ob.line, ob.bytecode_offset
+                    );
+                }
+            }
+        }
+
         let verdict = self.bb.verdict();
         info!("orchestrator: done, verdict={verdict:?}");
         verdict

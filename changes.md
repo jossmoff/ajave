@@ -3256,3 +3256,74 @@ actual prerequisite**, and this change is what makes finishing it pay.
 Kept because it is sound, costs nothing measurable (NRE timeouts 42 -> 41,
 valid-assert 57 -> 54), and removes a blind spot that would otherwise silently
 cap any future heap work at zero.
+
+## 2026-09-07 — a caught exception is never null, and the allowlist validator was checking nothing
+
+Surveying what actually stays open on the 180 no-runtime-exception tasks that
+need a proof (using a new `orchestrator: N obligation(s) still open — <kinds>`
+line, because nothing reported it before):
+
+| kind | tasks blocked | obligations |
+|---|---|---|
+| NullDeref | 73 | 7459 |
+| ArrayBounds | 48 | 1017 |
+| NegArraySize | 17 | 114 |
+| ClassCast | 13 | 36 |
+| DivByZero | 12 | 18 |
+
+Six tasks were blocked by a *single* NullDeref, which made them cheap to read.
+Three distinct causes, all of them facts we simply were not stating:
+
+1. `e.printStackTrace()` in a `catch` — the exception object. JVMS 6.5: throwing
+   `null` raises a `NullPointerException` instead, so a handler's exception is
+   always a real object, and the implicitly thrown ones are constructed by the
+   JVM. The interval CPA now sets the handler's entry stack slot `NonNull` on
+   the exceptional edge. The lifter gives a handler an entry stack of exactly
+   one `Ty::Ref`, and `stack_slot` keys stack variables by `(depth, ty)`, so
+   that object is the unique `Stack(0)`/`Ref` variable.
+2. `System.out.println(...)` — deliberately not non-null, and correctly so.
+   Left alone.
+3. `String.valueOf(charArray)` — a JDK method whose result was an unconstrained
+   reference.
+
+**The downgrade gate turned out to be bigger than any of them.** 32 of the 180
+tasks were *proved* and then thrown away by "calls a library method whose
+exceptions we do not model" — 64 points, behind a short list of signatures.
+Added the ones the JLS makes total, each with both required pieces of evidence:
+`String.valueOf` on every primitive overload, `String.<init>()`,
+`Double.isFinite`, `Character.isDefined`, `StringBuilder.capacity` and
+`reverse`.
+
+Deliberately **not** `String.valueOf(Ljava/lang/Object;)`. It is
+`obj == null ? "null" : obj.toString()`, so a user class decides whether it
+throws. It is listed in `MUST_THROW` next to the primitive overloads, because
+that pair is the entire argument for keying on descriptors.
+
+### The validator was vacuous, and loudly so
+
+`tools/validate_jdk_allowlist.py` is one of the two pieces of evidence
+`CLAUDE.md` requires for any allowlist change. It decided whether a signature
+was allowlisted by **scraping `smt_bmc/explore.rs` for strings**, which was
+wrong twice over:
+
+- `CLAUDE.md` already warns that a source-text check cannot distinguish
+  overloads. This one matched any descriptor within 2600 bytes of the class
+  name.
+- The table had *moved* to `ajave_models::contract_of`. What remains in
+  `explore.rs` is the **test module** — so the harness was matching its own
+  fixtures and reporting them as allowlist entries. It printed **27 "reachable
+  wrong TRUEs" that did not exist**, and had been doing so for long enough that
+  the number was simply part of the output.
+
+A gate that cries wolf 27 times is a gate nobody reads, which is the same
+outcome as not having one — and it is worse than the failure `CLAUDE.md`
+predicted, because false alarms train the reader to ignore real ones.
+
+Fixed by giving it a real oracle: `contract_query`, a small binary that asks
+`ajave_models::contract_for` directly. Every probe now carries a full
+descriptor, and the harness *refuses to run* on a probe without one, since
+keying on `(class, name)` is the bug it exists to catch. It reports **0
+violations** against real JVM behaviour.
+
+**Measured: NRE 1120 -> 1140, 0 wrong. valid-assert unchanged at 869**, which
+is expected — these are facts about runtime exceptions.

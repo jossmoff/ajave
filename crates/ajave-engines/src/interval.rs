@@ -1581,6 +1581,37 @@ impl Cpa for IntervalCpa {
                         next = s;
                     }
                 }
+                // A handler is entered with the exception object on the stack,
+                // and that object is never null.
+                //
+                // JVMS 6.5 `athrow`: throwing `null` raises a
+                // `NullPointerException` *instead*, so the reference that
+                // reaches a handler is always a real object; the implicitly
+                // thrown exceptions (NPE, AIOOBE, ClassCast, ...) are
+                // constructed by the JVM and non-null by the same argument.
+                //
+                // Without this, `catch (Exception e) { e.printStackTrace(); }`
+                // leaves an undischargeable NullDeref on `e`. That single
+                // obligation is the whole reason
+                // `jbmc-regression/BufferedReaderReadLine` scores nothing.
+                //
+                // The lifter gives a handler block an entry stack of exactly
+                // one `Ty::Ref` (see `lift.rs`, "Handler blocks are entered
+                // with the exception object on the stack"), and `stack_slot`
+                // keys stack variables by `(depth, ty)`, so the object is the
+                // unique variable with kind `Stack(0)` and type `Ref`.
+                if body
+                    .block(*block)
+                    .exceptional
+                    .iter()
+                    .any(|e| e.target == to.block)
+                {
+                    for (i, vi) in body.vars.iter().enumerate() {
+                        if matches!(vi.kind, ajave_ir::VarKind::Stack(0)) && vi.ty == Ty::Ref {
+                            next.set_nullness(VarId(i as u32), Nullness::NonNull);
+                        }
+                    }
+                }
                 if next.is_bottom() {
                     return vec![];
                 }

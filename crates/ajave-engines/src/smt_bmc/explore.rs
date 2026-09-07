@@ -1828,6 +1828,22 @@ mod jdk_allowlist_tests {
     /// asserts the allowlist agrees. Issue #48 found 22 of these wrongly
     /// allowlisted, each a reachable wrong TRUE (-16).
     const MUST_THROW: &[(&str, &str, &str)] = &[
+        // The `valueOf` overloads that are *not* total, listed next to the
+        // primitive ones above because the pair is the whole point: this table
+        // is keyed by descriptor, and `(class, name)` cannot tell them apart.
+        //
+        // `valueOf(Object)` is `obj == null ? "null" : obj.toString()`, so a
+        // user class decides whether it throws; `valueOf(char[])` dereferences
+        // its argument.
+        ("java/lang/String", "valueOf", "([C)Ljava/lang/String;"),
+        (
+            "java/lang/String",
+            "valueOf",
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+        ),
+        ("java/lang/String", "<init>", "(Ljava/lang/String;)V"),
+        ("java/lang/String", "matches", "(Ljava/lang/String;)Z"),
+        ("java/util/BitSet", "<init>", "(I)V"),
         // Partial functions: throw on empty/out-of-range receivers.
         ("java/util/ArrayList", "get", "(I)Ljava/lang/Object;"),
         ("java/util/ArrayList", "add", "(ILjava/lang/Object;)V"),
@@ -1916,6 +1932,23 @@ mod jdk_allowlist_tests {
 
     /// Signatures verified total on a real JVM under adversarial arguments.
     const MUST_NOT_THROW: &[(&str, &str, &str)] = &[
+        // `valueOf` is total on every primitive overload. Each delegates to
+        // the matching wrapper's `toString`, which is itself total.
+        ("java/lang/String", "valueOf", "(Z)Ljava/lang/String;"),
+        ("java/lang/String", "valueOf", "(C)Ljava/lang/String;"),
+        ("java/lang/String", "valueOf", "(I)Ljava/lang/String;"),
+        ("java/lang/String", "valueOf", "(J)Ljava/lang/String;"),
+        ("java/lang/String", "valueOf", "(F)Ljava/lang/String;"),
+        ("java/lang/String", "valueOf", "(D)Ljava/lang/String;"),
+        ("java/lang/String", "<init>", "()V"),
+        ("java/lang/Double", "isFinite", "(D)Z"),
+        ("java/lang/Character", "isDefined", "(C)Z"),
+        ("java/lang/StringBuilder", "capacity", "()I"),
+        (
+            "java/lang/StringBuilder",
+            "reverse",
+            "()Ljava/lang/StringBuilder;",
+        ),
         ("java/lang/Object", "hashCode", "()I"),
         ("java/lang/String", "length", "()I"),
         ("java/lang/String", "trim", "()Ljava/lang/String;"),

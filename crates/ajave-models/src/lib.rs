@@ -1641,6 +1641,25 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                 | ("toLowerCase", "()Ljava/lang/String;")
                 // `equals` is null-tolerant by contract (returns false).
                 | ("equals", "(Ljava/lang/Object;)Z")
+                // `valueOf` on a *primitive* is total: each delegates to the
+                // corresponding wrapper's `toString`, which is total.
+                //
+                // Deliberately NOT `valueOf(Ljava/lang/Object;)`. It is
+                // `obj == null ? "null" : obj.toString()`, so on a user class
+                // it calls a method that may throw anything. Total for the JDK
+                // types it is usually applied to is not total, and this table
+                // is keyed by signature, not by how a benchmark happens to
+                // call it.
+                //
+                // Also NOT `valueOf([C)`, which throws NPE on a null array.
+                | ("valueOf", "(Z)Ljava/lang/String;")
+                | ("valueOf", "(C)Ljava/lang/String;")
+                | ("valueOf", "(I)Ljava/lang/String;")
+                | ("valueOf", "(J)Ljava/lang/String;")
+                | ("valueOf", "(F)Ljava/lang/String;")
+                | ("valueOf", "(D)Ljava/lang/String;")
+                // The no-argument constructor takes nothing to be wrong about.
+                | ("<init>", "()V")
         ),
 
         // Unboxing accessors are total. `valueOf` only for the *primitive*
@@ -1731,6 +1750,10 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                 | ("valueOf", "(D)Ljava/lang/Double;")
                 | ("isNaN", "(D)Z")
                 | ("isInfinite", "(D)Z")
+                // Total for the same reason as its two neighbours: a
+                // classification predicate over the whole `double` domain,
+                // NaN and both infinities included.
+                | ("isFinite", "(D)Z")
         ),
         // `parseBoolean`/`valueOf(String)` are null-tolerant by contract here:
         // they return false rather than throwing.
@@ -1755,6 +1778,8 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                 | ("isUpperCase", "(C)Z") | ("isLowerCase", "(C)Z")
                 | ("isAlphabetic", "(I)Z") | ("isSpaceChar", "(C)Z")
                 | ("toUpperCase", "(C)C") | ("toLowerCase", "(C)C")
+                // Also a classification predicate over the whole char range.
+                | ("isDefined", "(C)Z")
         ),
 
         // Explicitly enumerated: the `*Exact` family throws `ArithmeticException`
@@ -1821,6 +1846,12 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                 || matches!(
                     (name, desc),
                     ("length", "()I") | ("toString", "()Ljava/lang/String;")
+                        // Reads a field of a well-formed builder.
+                        | ("capacity", "()I")
+                        // Permutes the existing buffer in place; allocates
+                        // nothing and indexes nothing out of range.
+                        | ("reverse", "()Ljava/lang/StringBuilder;")
+                        | ("reverse", "()Ljava/lang/StringBuffer;")
                 )
                 || (name == "append"
                     && matches!(
