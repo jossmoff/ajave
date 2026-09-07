@@ -218,6 +218,20 @@ impl<'a> ExploreCtx<'a> {
         if self.call_depth >= MAX_CALL_DEPTH || self.budget_exhausted() {
             if self.call_depth >= MAX_CALL_DEPTH {
                 self.completeness.has_depth_limited_havoc = true;
+                log::debug!(
+                    "smt-bmc: NO-INLINE depth {}.{}{} (call_depth {})",
+                    target.class,
+                    target.name,
+                    target.desc,
+                    self.call_depth
+                );
+            } else {
+                log::debug!(
+                    "smt-bmc: NO-INLINE budget {}.{}{}",
+                    target.class,
+                    target.name,
+                    target.desc
+                );
             }
             return false;
         }
@@ -281,6 +295,17 @@ impl<'a> ExploreCtx<'a> {
         };
 
         if targets.iter().any(|t| self.prog.body(t).is_none()) {
+            log::debug!(
+                "smt-bmc: NO-INLINE nobody {}.{}{} (targets: {})",
+                target.class,
+                target.name,
+                target.desc,
+                targets
+                    .iter()
+                    .map(|t| format!("{}.{}{}", t.class, t.name, t.desc))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
             return false;
         }
 
@@ -383,7 +408,46 @@ impl<'a> ExploreCtx<'a> {
         }
 
         let ret_w = Self::ret_width_from_desc(&target.desc);
+        // NOTE: a `void` callee legitimately has no `inline_return`, so this
+        // fabricates a value for it (`ret_width_from_desc` answers 32 for
+        // `)V`) and taints the path. That is over-conservative -- there is no
+        // return value to be unconstrained by -- and *not* fixing it is a
+        // deliberate, measured choice.
+        //
+        // Conditioning the taint on `explored_any && returns_void` was tried.
+        // It is more faithful and it gained **nothing**: valid-assert 869 ->
+        // 865 and no-runtime-exception unchanged at 1140, reproduced exactly
+        // (722 correct / 290 unproven / 57 timeouts on both runs). The three
+        // tasks that moved -- `HebrewDate`, `SunTimes_false` and one autostub
+        // -- all went TRUE/FALSE -> TIMEOUT, never to a wrong answer: removing
+        // the taint makes the BMC explore paths it used to abandon.
+        //
+        // It gained nothing because the tasks it targets have *other* taint
+        // sources. Of the 31 valid-assert tasks refused with
+        // `skipped_obligation`, the void-method origins sit alongside
+        // `Math.sin`/`pow`/`log`, which have no body to inline, so the path
+        // stays tainted either way.
+        //
+        // Path forward: this becomes worth doing once the transcendental calls
+        // stop tainting -- then the two fixes compose instead of the second
+        // paying the exploration cost for a path the first still refuses.
         let ret_t = self.inline_return.unwrap_or_else(|| {
+            // The origin of taint: a call whose body we did not explore, so
+            // its result is an unconstrained value. Everything downstream that
+            // touches it becomes untrusted, and an obligation on a tainted
+            // path is refused with `skipped_obligation`.
+            //
+            // Naming the call here is what makes that refusal answerable.
+            // Taint had no instrumentation at all, so the only way to ask
+            // "which method cost us this task" was to guess -- and the
+            // propagation sites, which is all a reader could find, say nothing
+            // about where it started.
+            log::debug!(
+                "smt-bmc: TAINT-ORIGIN {}.{}{}",
+                target.class,
+                target.name,
+                target.desc
+            );
             ret_tainted = true;
             self.solver.fresh_bv(&format!("ret_{}", target.name), ret_w)
         });

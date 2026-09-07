@@ -3327,3 +3327,50 @@ violations** against real JVM behaviour.
 
 **Measured: NRE 1120 -> 1140, 0 wrong. valid-assert unchanged at 869**, which
 is expected — these are facts about runtime exceptions.
+
+## 2026-09-07 — taint had no instrumentation; and the void-return fix that did not pay
+
+`skipped_obligation` refuses an obligation because its path is tainted, and it
+blocks **31 of the 136** valid-assert tasks that need a proof. Taint had *no*
+instrumentation anywhere: the eight `path_tainted = true` sites are all
+propagation, and none of them says where the taint started. The only way to ask
+"which call cost us this task" was to guess.
+
+`smt-bmc: TAINT-ORIGIN <class>.<name><desc>` now names the call whose body was
+not explored. The survey it enables was immediately surprising — the origins are
+**user methods, not JDK ones**:
+
+```
+  7  Main.<init>()V
+  2  Main.initialize()V        2  Main.test(D)V
+  2  Main.Own_Above_Threat()Z  1  JPFBenchmark.benchmark23(DDDD)V
+```
+
+Most are `void`. A void callee legitimately has no `inline_return` even when
+its body was fully explored, and the code fabricated a 32-bit value for it
+(`ret_width_from_desc` answers 32 for `)V`) and then tainted the path. So
+calling an ordinary void method — a constructor, an `initialize` — poisoned the
+rest of the path over a value that does not exist.
+
+**Fixing it gained nothing and cost 4 points, so it was reverted.**
+valid-assert 869 -> 865, no-runtime-exception unchanged at 1140, reproduced
+exactly: 722 correct / 290 unproven / 57 timeouts on both runs. The three tasks
+that moved (`HebrewDate`, `SunTimes_false`, one autostub) went TRUE/FALSE ->
+**TIMEOUT**, never to a wrong answer — removing the taint makes the BMC explore
+paths it used to abandon, and three of them cross the 60s budget.
+
+It gained nothing because the tasks it targets have *other* taint sources. The
+void origins sit alongside `Math.sin`, `Math.pow` and `Math.log`, which have no
+body to inline (`smt-bmc: NO-INLINE nobody`, also newly instrumented), so those
+paths stay tainted either way. The fix removes one of two padlocks.
+
+Kept: both instrumentation points, and the reasoning as a comment at the site so
+the next person does not re-derive it. Reverted: the behaviour change. It
+becomes worth doing once the transcendental calls stop tainting, at which point
+the two compose instead of the second paying an exploration cost for a path the
+first still refuses.
+
+Worth stating plainly, because it is the third measurement this week where the
+honest answer was "no": an over-conservative approximation is not automatically
+worth removing. Removing one costs exploration time immediately and pays only
+when *every* reason the obligation was refused is gone.
