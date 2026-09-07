@@ -3480,3 +3480,103 @@ witness bucket are timeouts, which is a real ceiling.
 3. **Transcendental taint** — unblocks part of the 31, and is the prerequisite
    that makes the void-return fix pay.
 4. **`autostub` JDK modelling** — 17 refuted witnesses in one directory.
+
+## 2026-09-07 — arrays in CHC: ghost lengths, and three defects the work uncovered
+
+Issue #18 asked for a heap model in CHC because `ArrayBounds` blocks 48 of the
+no-runtime-exception tasks that need a proof and `NullDeref` blocks 73. The
+diagnosis turned out to be wrong in an instructive way, so the findings matter
+more than the feature.
+
+### What the encoder actually did
+
+Four minimal programs separate the cases:
+
+| case | before | after |
+|---|---|---|
+| `new int[10]`, loop to `v.length` | TRUE | TRUE (interval-ai) |
+| `new int[n]`, loop to `n` | UNKNOWN | UNKNOWN (bitvector encoder) |
+| `new int[n]`, loop to `v.length` | UNKNOWN | UNKNOWN (bitvector encoder) |
+| length crosses a call | UNKNOWN | **TRUE** |
+
+The space invariants (`phi_arr`, `phi_obj`, `phi_static`, `phi_len`) were
+enabled on 28 of 169 tasks and proved **none** of them.
+
+### Ghost lengths
+
+Array length is the one heap quantity carrying most of the weight, and JLS 10.7
+makes it immutable — so it needs no heap. Each reference whose length is read
+gets a shadow integer threaded alongside it: written at `new T[n]`, copied on
+assignment, invalidated to an unconstrained non-negative `int` on any other
+assignment, and *read as a term*.
+
+It is deliberately not a predicate or an uninterpreted function. **Both are
+interpreted by the solver**, which may choose the interpretation that falsifies
+the read — `phi ≡ false`, `arrlen ≡ λ_. 0` — making the path vacuously safe. A
+ghost variable is ordinary universally quantified state, so nothing the solver
+chooses can make a read infeasible, and it needs no closure condition.
+
+### Three defects, none of them about the heap
+
+**1. The query clause omitted `bindings`.** `var_map` holds a name per variable
+and `bindings` holds the `(= name expr)` defining it. The clause deciding an
+obligation extended with `constraints` and `call_constraints` but **not**
+`bindings`, so the obligation's condition — and the entire chain computing it —
+was unconstrained in the one clause that decides whether it is violated.
+`(= cond 0)` was satisfiable for any condition that is a named value, which is
+all of the interesting ones. Every other clause in the function extends with
+`bindings`; this one did not.
+
+This is why issue #18 stayed open. `unsat` on a safe program reads as "our
+over-approximation admits a spurious counterexample", and the natural inference
+is that the heap is too coarse. The heap was irrelevant.
+
+**2. A method's entry fact was a bare conjunction.**
+`(assert (forall (..) (and (m_b0 ..) <ranges>)))` is not a Horn rule. Z3
+rewrites it into one with a negative predicate and refuses the whole query:
+`(:reason-unknown "Rule contains negative predicate ... P!!1(#0) :- not
+m1_b0(#0).")`. Every program with a resolvable callee produced one per method.
+
+**3. The overflow guard conjoined the callee summary.** In
+`addition(m + 1, n - 1)` the guard's body held `(m1_s (+ v2 1) (- v0 1) _f2)`
+beside `(+ v2 1) > INT_MAX`, and a summary is only ever established for
+in-range arguments — so the one state that should reach `error` was the one
+state the summary could not describe. The guard never fired.
+`jayhorn-recursive/UnsatAddition02`, whose FALSE depends entirely on `m + n`
+wrapping, was proved TRUE. **The whole LIA encoding rests on that guard**: LIA
+agrees with Java only on overflow-free paths.
+
+### The space invariants were unsound and are gone
+
+Fixing (2) made queries well-formed, and that immediately produced wrong TRUEs
+on `MinePump/spec1-5_product45` and `java-ranger-regression/TCAS_prop1`. Both
+came from the space invariants, exactly as their own comment predicted: an
+uninterpreted predicate in a clause body may be interpreted as empty, killing
+the read path. `heap_is_closed` was never the right guard — closure of the
+*program* says nothing about whether the *invariant* is constrained.
+
+Removed. Field and array **contents** are unconstrained reads again; array
+**length** is exact, and sound.
+
+That is the third time in this file that repairing a well-formedness bug
+revealed a soundness one. The pattern is worth stating as a rule: **an
+`unknown` from the solver is not evidence of anything until the query is known
+to be well-formed.** `(get-info :reason-unknown)` answers this directly.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| valid-assert | 867 | **860** |
+| no-runtime-exception | 1140 | **1150** |
+
+Net +3, no new wrong answers on either property. The valid-assert loss is
+timeouts (55 → 59), not verdicts: CHC now engages on tasks it used to refuse
+with `unknown`, and on valid-assert that costs solver time without paying back.
+
+Ghost slots were first given to *every* reference, which doubled the block
+predicate state and cost 9 points on valid-assert — this file already records a
+program that times out at 14-ary and is `sat` in 0.01s over two variables.
+Restricting them to references whose length is actually read (seeded from
+`ArrayLength` operands, closed backwards through copies) recovered 2 of those
+and cut smoke from 107s to 78s.

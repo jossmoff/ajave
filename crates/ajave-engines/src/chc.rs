@@ -397,44 +397,6 @@ fn body_uses_heap_ops(body: &Body) -> bool {
     false
 }
 
-/// Check if the program has calls from the entry method (or its callees)
-/// to methods that we have bodies for — i.e. inter-procedural reasoning helps.
-/// Can every value that reaches the heap be accounted for by a write clause?
-///
-/// Space invariants are only sound when the encoding is **closed**. `phi_obj`
-/// and `phi_arr` are uninterpreted, so they are constrained *only* by the
-/// write clauses we emit. If a value can enter the heap by a route we do not
-/// encode, no clause forces the invariant to admit it -- and a predicate with
-/// no positive clauses may be interpreted as identically **false**, which
-/// makes every `assume phi(...)` read path infeasible. The obligation then
-/// becomes unreachable and the program is declared safe.
-///
-/// That is not hypothetical: `objects/objects14` obtains its object from
-/// `Verifier.nondetObject`, an unmodelled factory, and scored a wrong TRUE
-/// (-16) the first time this encoding ran.
-///
-/// So the invariants are used only when every reachable method is lifted and
-/// every call resolves. Anything else falls back to unconstrained reads, which
-/// is what the engine did before and is over-approximate.
-fn heap_is_closed(prog: &Program, reachable: &[MethodKey]) -> bool {
-    reachable.iter().all(|mk| {
-        prog.body(mk).is_some_and(|b| {
-            b.is_fully_lifted()
-                && b.blocks.iter().all(|blk| {
-                    blk.stmts.iter().all(|st| match st {
-                        // An unresolved call may write anywhere.
-                        Stmt::Assign(_, Rvalue::Call { target, .. }) => prog.body(target).is_some(),
-                        // A havoced reference is an object we never built, so
-                        // nothing constrains its fields.
-                        Stmt::Assign(_, Rvalue::Havoc(ty, _)) => !matches!(ty, Ty::Ref | Ty::Str),
-                        Stmt::Assign(_, Rvalue::Nondet(ty, _)) => !matches!(ty, Ty::Ref | Ty::Str),
-                        _ => true,
-                    })
-                })
-        })
-    })
-}
-
 fn prog_has_resolvable_calls(prog: &Program, entry: &MethodKey) -> bool {
     let Some(body) = prog.body(entry) else {
         return false;
@@ -904,6 +866,58 @@ fn encode_chc_interproc(
     // exactly why it showed up as an unprovable safe program rather than a
     // wrong answer -- but it destroys the summary, which is the whole point of
     // the inter-procedural encoding.
+    // Ghost state: a reference-typed variable `i` may carry a shadow integer
+    // at slot `n_vars + i` holding the length of the array it refers to. See
+    // `GHOST LENGTHS` below for why this is a variable rather than a predicate
+    // or an uninterpreted function.
+    let ghost_of = |n_vars: usize, i: usize| -> usize { n_vars + i };
+
+    // Only the references whose length is actually read.
+    //
+    // Every predicate argument costs the solver, and sharply: this file
+    // already records a five-line program that times out with 14-ary block
+    // predicates and is `sat` in 0.01s over its two live variables. Giving a
+    // shadow to *every* reference doubled the state and cost 9 points on
+    // valid-assert -- 7 more timeouts -- while gaining nothing there, because
+    // an assertion is rarely about an array bound.
+    //
+    // So the set is seeded from the operands of `ArrayLength` and closed
+    // backwards through copies: if `a.length` is read and `a = b`, then `b`
+    // needs the shadow too, or the length does not survive the assignment
+    // chain the lifter produces between a `new` and its use.
+    let ghost_vars: HashMap<MethodKey, BTreeSet<usize>> = all_methods
+        .iter()
+        .filter_map(|mk| prog.body(mk).map(|b| (mk.clone(), b)))
+        .map(|(mk, b)| {
+            let mut want: BTreeSet<usize> = BTreeSet::new();
+            for blk in &b.blocks {
+                for st in &blk.stmts {
+                    if let Stmt::Assign(_, Rvalue::ArrayLength(Operand::Var(v))) = st {
+                        want.insert(v.0 as usize);
+                    }
+                }
+            }
+            // Copies propagate the need backwards; iterate to a fixpoint
+            // because the chain can run through several blocks.
+            loop {
+                let before = want.len();
+                for blk in &b.blocks {
+                    for st in &blk.stmts {
+                        if let Stmt::Assign(d, Rvalue::Use(Operand::Var(src))) = st {
+                            if want.contains(&(d.0 as usize)) {
+                                want.insert(src.0 as usize);
+                            }
+                        }
+                    }
+                }
+                if want.len() == before {
+                    break;
+                }
+            }
+            (mk, want)
+        })
+        .collect();
+
     let live_at = |mk: &MethodKey, bid: u32| -> Vec<usize> {
         let mut set: BTreeSet<usize> = live
             .get(mk)
@@ -913,64 +927,55 @@ fn encode_chc_interproc(
         if let Some(ps) = method_params.get(mk) {
             set.extend(ps.iter().copied());
         }
+        // A live reference drags its ghost length along: the length has to be
+        // in the block predicate, or it cannot survive the edge into a loop
+        // body, which is exactly where array bounds are proved.
+        if let Some(b) = prog.body(mk) {
+            let n = b.vars.len();
+            let want = ghost_vars.get(mk);
+            let refs: Vec<usize> = set
+                .iter()
+                .filter(|i| b.vars.get(**i).is_some_and(|vi| vi.ty == Ty::Ref))
+                .filter(|i| want.is_some_and(|w| w.contains(*i)))
+                .map(|i| ghost_of(n, *i))
+                .collect();
+            set.extend(refs);
+        }
         set.into_iter().collect()
     };
 
-    // Space invariants for the heap (Kahsai/Kersten/Rummer/Schaf, LPAR-21).
+    // No space invariants. This encoder used to abstract the heap with one
+    // uninterpreted predicate per shape -- `phi_arr(ref, idx, val)`,
+    // `phi_obj(ref, field, val)`, `phi_static(field, val)`,
+    // `phi_len(ref, len)` -- after JayHorn (Kahsai/Kersten/Ruemmer/Schaef,
+    // LPAR-21). A read became `assume phi(..)`, a write `assert phi(..)`, and
+    // the Horn solver had to infer the invariant.
     //
-    // A heap read was a fresh unconstrained variable and a heap write was
-    // dropped, so any obligation depending on stored data was unprovable --
-    // and the encoding reported `unsat`, a *spurious* counterexample, on safe
-    // programs. `jbmc-regression/aastore_aaload1` is one.
+    // **It was unsound, in exactly the way its own comment described.** A
+    // predicate appearing in a clause *body* is chosen by the solver, and
+    // nothing forces it to be large. Choosing it empty makes every
+    // `assume phi(..)` unsatisfiable, so the read path dies, everything
+    // downstream becomes unreachable, and the program is declared safe.
     //
-    // Rather than model the heap as an array and hope interpolation copes
-    // (which it does not), abstract it with one predicate per heap shape,
-    // describing *every* object of that shape at once:
+    // The guard was `heap_is_closed`: every reachable method lifted, no
+    // unresolved call, no havoced reference. That is not the right condition
+    // and could not be, because closure of the *program* says nothing about
+    // whether the *invariant* is adequately constrained. Measured, it held on
+    // 28 of 169 tasks, proved none of them, and produced wrong TRUEs on
+    // `MinePump/spec1-5_product45` and `java-ranger-regression/TCAS_prop1`.
     //
-    //     phi_arr(ref, idx, val)      an array cell
-    //     phi_obj(ref, field, val)    an instance field
+    // Those two were invisible until the malformed entry fact below was fixed:
+    // Z3 had been refusing every such query with `unknown`. That is the third
+    // time in this file that repairing a well-formedness bug revealed a
+    // soundness one -- `CLAUDE.md` calls it "unsoundness masked by an
+    // unrelated conservative gate".
     //
-    // A read becomes `assume phi(...)` over a fresh value; a write becomes
-    // `assert phi(...)`. The Horn solver then has to *infer* phi, which is
-    // implicitly a quantified invariant over unboundedly many cells -- exactly
-    // the thing Craig interpolation is bad at producing directly.
-    //
-    // Fields are identified by a small integer rather than by name so that one
-    // predicate serves every class, which keeps the arity at three. Distinct
-    // objects are separated by `ref`, which the lifter already gives a unique
-    // value per allocation -- the role JayHorn's `allocSite` plays.
-    let heap_closed = heap_is_closed(prog, &all_methods);
-    log::info!(
-        "chc: heap_closed={heap_closed} (space invariants {})",
-        if heap_closed { "enabled" } else { "disabled" }
-    );
-    let mut alloc_site: i64 = 0;
-    if heap_closed {
-        out.push_str("; space invariants for the heap\n");
-        out.push_str("(declare-fun phi_arr (Int Int Int) Bool)\n");
-        out.push_str("(declare-fun phi_obj (Int Int Int) Bool)\n");
-        // Array length, which the JLS pins exactly: `array.length` is the
-        // dimension the array was created with (JLS 10.7), and it never
-        // changes. It was unconstrained, so every `ArrayIndexOutOfBounds`
-        // obligation -- the bulk of the no-runtime-exception property -- was
-        // unprovable no matter how obvious the bound.
-        out.push_str("(declare-fun phi_len (Int Int) Bool)\n");
-        // The allocation site an object came from, recorded as a pseudo-field.
-        //
-        // JayHorn's point: without an immutable distinguishing feature the
-        // space invariant cannot separate two objects of the same class and
-        // collapses to something useless. `allocSite` is final, so it is
-        // exactly such a feature. Objects created at the same `new` in
-        // different loop iterations still share a site, which the paper
-        // accepts.
-        out.push_str("(declare-fun phi_site (Int Int) Bool)\n");
-        // Static fields. `GetStatic` was an unconstrained value and
-        // `PutStatic` was dropped outright, so static state was lost entirely
-        // -- measured as the joint-largest source of unconstrained values
-        // across failing tasks (104 occurrences in 16 programs). Same shape as
-        // the instance-field invariant, without a receiver.
-        out.push_str("(declare-fun phi_static (Int Int) Bool)\n");
-    }
+    // The one case that carried the argument for space invariants was array
+    // *length*, and it is now a ghost variable (see `GHOST LENGTHS`) --
+    // ordinary threaded state rather than a solver-chosen interpretation, so
+    // it cannot make a read infeasible, and it needs no closure condition.
+    // Field and array *contents* are unconstrained reads again: less precise,
+    // and honest.
 
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
@@ -1011,8 +1016,13 @@ fn encode_chc_interproc(
         // summary/return clauses that still distinguish the entry method.
         let _is_entry = mk == entry;
 
-        let src_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}", i)).collect();
-        let dst_vars: Vec<String> = (0..n_vars).map(|i| format!("w{}", i)).collect();
+        // Slots `0..n_vars` are the program's variables; `n_vars..2*n_vars`
+        // are the ghost lengths, one per variable, used only for the
+        // reference-typed ones. Indexing them at a fixed offset keeps the
+        // mapping between a reference and its length a single addition.
+        let total_slots = 2 * n_vars;
+        let src_vars: Vec<String> = (0..total_slots).map(|i| format!("v{}", i)).collect();
+        let dst_vars: Vec<String> = (0..total_slots).map(|i| format!("w{}", i)).collect();
 
         let forall_src: String = src_vars
             .iter()
@@ -1067,6 +1077,16 @@ fn encode_chc_interproc(
                     Ty::Float | Ty::Double | Ty::Ref | Ty::Str => {}
                 }
             }
+            // Ghost lengths are outside `body.vars`, so the loop above skips
+            // them. An array's length is a non-negative `int` (JLS 10.7)
+            // whatever else we know, and saying so is what lets a bound like
+            // `i < a.length` rule out a negative index.
+            for i in live_at(mk, bid) {
+                if i >= n_vars {
+                    parts.push(format!("(<= 0 v{})", i));
+                    parts.push(format!("(<= v{} {})", i, INT_MAX));
+                }
+            }
 
             let Some(bounds) = invariants.get(&(mk.clone(), BlockId(bid))) else {
                 return if parts.len() == 1 {
@@ -1102,11 +1122,53 @@ fn encode_chc_interproc(
             app_of(&mid, bid, &args)
         };
 
+        // The entry fact: any state satisfying the side conditions reaches
+        // the entry block.
+        //
+        // This was emitted as `(assert (forall (..) (and (m_b0 ..) ranges)))`
+        // -- a bare conjunction with the predicate inside it, which is not a
+        // Horn rule. Z3 rewrites such an assertion into a rule with a
+        // *negative* predicate and then refuses the entire query:
+        //
+        //     (:reason-unknown "Rule contains negative predicate <null>:
+        //      P!!1(#0) :- not m1_b0(#0).")
+        //
+        // So every program with a resolvable callee produced one malformed
+        // clause per method and the whole file came back `unknown` -- the
+        // second time a well-formedness bug has been masquerading as solver
+        // weakness in this encoder, after the free constants. The side
+        // conditions belong in the antecedent, where they constrain the entry
+        // state instead of being asserted as global truths.
+        let entry_body = {
+            let full = block_app_src(body.entry.0);
+            let app = app_of(&mid, body.entry.0, &{
+                live_at(mk, body.entry.0)
+                    .iter()
+                    .map(|i| src_vars[*i].clone())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+            if full == app {
+                app
+            } else {
+                // `block_app_src` returns `(and <app> <conds>..)`; the
+                // antecedent is everything except the application.
+                let inner = full
+                    .strip_prefix("(and ")
+                    .and_then(|t| t.strip_suffix(')'))
+                    .unwrap_or_default()
+                    .replacen(&app, "", 1);
+                let conds = inner.trim();
+                if conds.is_empty() {
+                    app
+                } else {
+                    format!("(=> (and {}) {})", conds, app)
+                }
+            }
+        };
         out.push_str(&format!(
             "; === {} ===\n(assert (forall ({}) {}))\n",
-            mk,
-            forall_src,
-            block_app_src(body.entry.0)
+            mk, forall_src, entry_body
         ));
 
         for block in &body.blocks {
@@ -1115,11 +1177,6 @@ fn encode_chc_interproc(
             // Overflow conditions from this block's arithmetic; any one of them
             // makes `error` reachable.
             let mut overflow: Vec<String> = Vec::new();
-            // Facts about objects created in this block -- their allocation
-            // site and, for arrays, their length. Emitted as clauses after the
-            // statements, like heap writes, because they must hold whenever
-            // the block is reached.
-            let mut heap_facts: Vec<String> = Vec::new();
             // `(= name expr)` for each named intermediate value.
             let mut bindings: Vec<String> = Vec::new();
             let is_wide = |op: &Operand| -> bool {
@@ -1146,145 +1203,196 @@ fn encode_chc_interproc(
             let mut var_map: HashMap<usize, String> = HashMap::new();
             let mut call_constraints: Vec<String> = Vec::new();
 
-            for i in 0..n_vars {
+            for i in 0..total_slots {
                 var_map.insert(i, format!("v{}", i));
             }
 
             for stmt in &block.stmts {
                 match stmt {
-                    Stmt::Assign(vid, rv) => match rv {
-                        Rvalue::Call { target, args, .. } => {
-                            let callee_ret_ch = return_type_char(&target.desc);
-                            if let Some(callee_mid) = method_ids.get(target) {
-                                if callee_ret_ch != 'V' {
-                                    let callee_params =
-                                        method_params.get(target).cloned().unwrap_or_default();
-                                    let mut call_args: Vec<String> = Vec::new();
-                                    for (i, arg) in args.iter().enumerate() {
-                                        if i < callee_params.len() {
-                                            call_args.push(lia_operand(arg, &var_map));
+                    Stmt::Assign(vid, rv) => {
+                        // Assigning a reference invalidates its ghost length.
+                        //
+                        // This default runs *before* the arms below, which
+                        // override it where they know better -- `NewArray`
+                        // records the creation dimension, a copy carries the
+                        // source's length across. Everything else leaves the
+                        // length unconstrained, which is the honest answer for
+                        // an array we did not see created.
+                        //
+                        // Getting this wrong is a soundness bug, not a
+                        // precision one: without it a variable reassigned from
+                        // `new int[10]` to something unknown would keep
+                        // reporting 10, and a bounds check against a stale
+                        // length is exactly a wrong TRUE.
+                        if body
+                            .vars
+                            .get(vid.0 as usize)
+                            .is_some_and(|vi| vi.ty == Ty::Ref)
+                        {
+                            let g = ghost_of(n_vars, vid.0 as usize);
+                            let f = fresh.fresh();
+                            // Any array's length is a non-negative `int`
+                            // (JLS 10.7), even one we know nothing else about.
+                            constraints.push(format!("(>= {} 0)", f));
+                            constraints.push(format!("(<= {} {})", f, INT_MAX));
+                            var_map.insert(g, f);
+                        }
+                        // A copy carries the length with it.
+                        if let Rvalue::Use(Operand::Var(src)) = rv {
+                            if body
+                                .vars
+                                .get(vid.0 as usize)
+                                .is_some_and(|vi| vi.ty == Ty::Ref)
+                            {
+                                let sg = ghost_of(n_vars, src.0 as usize);
+                                if let Some(sv) = var_map.get(&sg).cloned() {
+                                    log::debug!(
+                                        "chc-ghost: copy v{} <- v{} ({})",
+                                        vid.0,
+                                        src.0,
+                                        sv
+                                    );
+                                    var_map.insert(ghost_of(n_vars, vid.0 as usize), sv);
+                                }
+                            }
+                        }
+                        match rv {
+                            Rvalue::Call { target, args, .. } => {
+                                let callee_ret_ch = return_type_char(&target.desc);
+                                if let Some(callee_mid) = method_ids.get(target) {
+                                    if callee_ret_ch != 'V' {
+                                        let callee_params =
+                                            method_params.get(target).cloned().unwrap_or_default();
+                                        let mut call_args: Vec<String> = Vec::new();
+                                        for (i, arg) in args.iter().enumerate() {
+                                            if i < callee_params.len() {
+                                                call_args.push(lia_operand(arg, &var_map));
+                                            }
                                         }
-                                    }
-                                    while call_args.len() < callee_params.len() {
-                                        call_args.push("0".to_string());
-                                    }
+                                        while call_args.len() < callee_params.len() {
+                                            call_args.push("0".to_string());
+                                        }
 
-                                    let ret_var = fresh.fresh();
-                                    call_args.push(ret_var.clone());
-                                    call_constraints.push(format!(
-                                        "({}_s {})",
-                                        callee_mid,
-                                        call_args.join(" ")
-                                    ));
-                                    var_map.insert(vid.0 as usize, ret_var);
-                                }
-                            } else {
-                                if callee_ret_ch != 'V' {
-                                    let v = fresh.fresh();
-                                    var_map.insert(vid.0 as usize, v);
-                                }
-                            }
-                        }
-                        // Allocation yields a non-null reference.
-                        //
-                        // JLS 15.9.4: evaluating a class instance creation
-                        // expression either completes abruptly or produces a
-                        // reference to a *new* object. It is never null.
-                        // Likewise JLS 15.10.2 for array creation.
-                        //
-                        // Without this the reference is unconstrained, so the
-                        // solver may take it to be 0, and any space invariant
-                        // it flows into admits null. `aastore_aaload1` fills an
-                        // array with `new A()` and asserts every element is
-                        // non-null: unprovable until allocation says so.
-                        //
-                        // The lifter represents null as 0, so "non-null" is
-                        // `> 0`. Asserting a fact the JVM guarantees narrows no
-                        // reachable behaviour, so this cannot hide a violation.
-                        Rvalue::New(_) | Rvalue::NewArray { .. } => {
-                            let r = fresh.fresh();
-                            constraints.push(format!("(> {} 0)", r));
-                            if heap_closed {
-                                // Record where this object came from, so the
-                                // invariant can tell it from others.
-                                alloc_site += 1;
-                                heap_facts.push(format!("(phi_site {} {})", r, alloc_site));
-                            }
-                            if let Rvalue::NewArray { len, .. } = rv {
-                                // JLS 15.10.1: a negative dimension throws
-                                // `NegativeArraySizeException`, so a *created*
-                                // array has a non-negative length.
-                                let l = lia_operand(len, &var_map);
-                                constraints.push(format!("(>= {} 0)", l));
-                                if heap_closed {
-                                    // JLS 10.7: `length` is the creation
-                                    // dimension, and it is final.
-                                    heap_facts.push(format!("(phi_len {} {})", r, l));
+                                        let ret_var = fresh.fresh();
+                                        call_args.push(ret_var.clone());
+                                        call_constraints.push(format!(
+                                            "({}_s {})",
+                                            callee_mid,
+                                            call_args.join(" ")
+                                        ));
+                                        var_map.insert(vid.0 as usize, ret_var);
+                                    }
+                                } else {
+                                    if callee_ret_ch != 'V' {
+                                        let v = fresh.fresh();
+                                        var_map.insert(vid.0 as usize, v);
+                                    }
                                 }
                             }
-                            var_map.insert(vid.0 as usize, r);
-                        }
-                        Rvalue::ArrayLength(arr) if heap_closed => {
-                            let a = lia_operand(arr, &var_map);
-                            let v = fresh.fresh();
-                            constraints.push(format!("(phi_len {} {})", a, v));
-                            // `length` is non-negative for any array that
-                            // exists, whether or not we saw it created.
-                            constraints.push(format!("(>= {} 0)", v));
-                            var_map.insert(vid.0 as usize, v);
-                        }
-                        // Heap reads: a fresh value constrained by the space
-                        // invariant, rather than an unconstrained one.
-                        Rvalue::ArrayLoad { arr, idx } if heap_closed => {
-                            let a = lia_operand(arr, &var_map);
-                            let i = lia_operand(idx, &var_map);
-                            let v = fresh.fresh();
-                            constraints.push(format!("(phi_arr {} {} {})", a, i, v));
-                            var_map.insert(vid.0 as usize, v);
-                        }
-                        Rvalue::GetStatic(field) if heap_closed => {
-                            let f = field_id(field);
-                            let v = fresh.fresh();
-                            constraints.push(format!("(phi_static {} {})", f, v));
-                            var_map.insert(vid.0 as usize, v);
-                        }
-                        Rvalue::GetField { obj, field } if heap_closed => {
-                            let o = lia_operand(obj, &var_map);
-                            let f = field_id(field);
-                            let v = fresh.fresh();
-                            constraints.push(format!("(phi_obj {} {} {})", o, f, v));
-                            var_map.insert(vid.0 as usize, v);
-                        }
-                        _ => {
-                            let expr = lia_rvalue(
-                                rv,
-                                &var_map,
-                                &mut fresh,
-                                &is_wide,
-                                &is_float,
-                                &mut overflow,
-                                &theory,
-                            );
-                            fresh.note(&expr);
-                            // Name the value instead of substituting its text.
+                            // Allocation yields a non-null reference.
                             //
-                            // `var_map` used to hold the *expression* for each
-                            // variable, so `x = a + b; y = x * x;` became
-                            // `(* (+ a b) (+ a b))` and a chain of assignments
-                            // duplicated whole subtrees. Fibonacci encoded to
-                            // 24 KB and Ackermann to 48 KB, which is a formula
-                            // shaped by textual sharing rather than by the
-                            // program. Binding makes it linear in statements.
-                            let expr = if is_atom(&expr) {
-                                expr
-                            } else {
-                                let name = fresh.fresh();
-                                bindings.push(format!("(= {} {})", name, expr));
-                                name
-                            };
-                            var_map.insert(vid.0 as usize, expr);
+                            // JLS 15.9.4: evaluating a class instance creation
+                            // expression either completes abruptly or produces a
+                            // reference to a *new* object. It is never null.
+                            // Likewise JLS 15.10.2 for array creation.
+                            //
+                            // Without this the reference is unconstrained, so the
+                            // solver may take it to be 0, and any space invariant
+                            // it flows into admits null. `aastore_aaload1` fills an
+                            // array with `new A()` and asserts every element is
+                            // non-null: unprovable until allocation says so.
+                            //
+                            // The lifter represents null as 0, so "non-null" is
+                            // `> 0`. Asserting a fact the JVM guarantees narrows no
+                            // reachable behaviour, so this cannot hide a violation.
+                            Rvalue::New(_) | Rvalue::NewArray { .. } => {
+                                let r = fresh.fresh();
+                                constraints.push(format!("(> {} 0)", r));
+                                if let Rvalue::NewArray { len, .. } = rv {
+                                    // JLS 15.10.1: a negative dimension throws
+                                    // `NegativeArraySizeException`, so a *created*
+                                    // array has a non-negative length.
+                                    let l = lia_operand(len, &var_map);
+                                    constraints.push(format!("(>= {} 0)", l));
+                                    // JLS 10.7: `length` *is* the creation
+                                    // dimension, and it is final. Record it in the
+                                    // reference's ghost slot, where every later
+                                    // block can still read it.
+                                    var_map.insert(ghost_of(n_vars, vid.0 as usize), l.clone());
+                                }
+                                var_map.insert(vid.0 as usize, r);
+                            }
+                            // GHOST LENGTHS.
+                            //
+                            // `array.length` reads the reference's ghost slot as a
+                            // *term*. It assumes nothing, which is the whole point.
+                            //
+                            // This replaces a `phi_len(ref, len)` predicate, and
+                            // the difference is a soundness one rather than a
+                            // matter of taste. An uninterpreted predicate in a
+                            // clause *body* is chosen by the solver, and it may
+                            // choose one that is empty -- then `assume phi_len(a,
+                            // v)` is unsatisfiable, the read path dies, the
+                            // obligation becomes unreachable and the program is
+                            // declared safe. That is the vacuity `heap_is_closed`
+                            // exists to prevent, and it is why the whole space
+                            // invariant is gated on a closure condition that holds
+                            // for 28 of 169 tasks.
+                            //
+                            // An uninterpreted *function* `arrlen : Int -> Int`
+                            // has exactly the same defect: the solver picks its
+                            // interpretation too, and `arrlen = \_. 0` falsifies
+                            // every `(= v (arrlen a))` assumption.
+                            //
+                            // A ghost variable has neither problem. It is ordinary
+                            // universally quantified state, threaded across edges
+                            // like any other variable, so nothing the solver
+                            // chooses can make a read infeasible. It needs no
+                            // closure condition, and an array we never saw created
+                            // simply has an unconstrained length -- the correct
+                            // over-approximation.
+                            Rvalue::ArrayLength(Operand::Var(arr)) => {
+                                log::debug!("chc-ghost: ArrayLength(v{}) -> ghost", arr.0);
+                                let g = ghost_of(n_vars, arr.0 as usize);
+                                let v = var_map
+                                    .get(&g)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("v{}", g));
+                                var_map.insert(vid.0 as usize, v);
+                            }
+                            // Heap reads: a fresh value constrained by the space
+                            // invariant, rather than an unconstrained one.
+                            _ => {
+                                let expr = lia_rvalue(
+                                    rv,
+                                    &var_map,
+                                    &mut fresh,
+                                    &is_wide,
+                                    &is_float,
+                                    &mut overflow,
+                                    &theory,
+                                );
+                                fresh.note(&expr);
+                                // Name the value instead of substituting its text.
+                                //
+                                // `var_map` used to hold the *expression* for each
+                                // variable, so `x = a + b; y = x * x;` became
+                                // `(* (+ a b) (+ a b))` and a chain of assignments
+                                // duplicated whole subtrees. Fibonacci encoded to
+                                // 24 KB and Ackermann to 48 KB, which is a formula
+                                // shaped by textual sharing rather than by the
+                                // program. Binding makes it linear in statements.
+                                let expr = if is_atom(&expr) {
+                                    expr
+                                } else {
+                                    let name = fresh.fresh();
+                                    bindings.push(format!("(= {} {})", name, expr));
+                                    name
+                                };
+                                var_map.insert(vid.0 as usize, expr);
+                            }
                         }
-                    },
+                    }
                     Stmt::Assume(op) => {
                         let expr = lia_operand(op, &var_map);
                         constraints.push(format!("(not (= {} 0))", expr));
@@ -1292,58 +1400,34 @@ fn encode_chc_interproc(
                     // Heap writes: the space invariant must admit the stored
                     // value, which is what forces the solver to make it strong
                     // enough to be useful at the matching reads.
-                    Stmt::ArrayStore { arr, idx, val } if heap_closed => {
-                        let a = lia_operand(arr, &var_map);
-                        let i = lia_operand(idx, &var_map);
-                        let v = lia_operand(val, &var_map);
-                        let mut conds = constraints.clone();
-                        conds.extend(bindings.iter().cloned());
-                        conds.push(block_app_src(block.id.0));
-                        let q = add_extra_forall_lia(&forall_src, &fresh);
-                        out.push_str(&format!(
-                            "(assert (forall ({}) (=> {} (phi_arr {} {} {}))))\n",
-                            q,
-                            and_expr(&conds),
-                            a,
-                            i,
-                            v
-                        ));
-                    }
-                    Stmt::PutStatic(field, val) if heap_closed => {
-                        let f = field_id(field);
-                        let v = lia_operand(val, &var_map);
-                        let mut conds = constraints.clone();
-                        conds.extend(bindings.iter().cloned());
-                        conds.push(block_app_src(block.id.0));
-                        let q = add_extra_forall_lia(&forall_src, &fresh);
-                        let body_s = and_expr(&conds);
-                        let head_s = format!("(phi_static {} {})", f, v);
-                        let q = tighten_forall(&q, &body_s, &head_s);
-                        out.push_str(&clause(&q, &body_s, &head_s));
-                    }
-                    Stmt::PutField { obj, field, val } if heap_closed => {
-                        let o = lia_operand(obj, &var_map);
-                        let f = field_id(field);
-                        let v = lia_operand(val, &var_map);
-                        let mut conds = constraints.clone();
-                        conds.extend(bindings.iter().cloned());
-                        conds.push(block_app_src(block.id.0));
-                        let q = add_extra_forall_lia(&forall_src, &fresh);
-                        out.push_str(&format!(
-                            "(assert (forall ({}) (=> {} (phi_obj {} {} {}))))\n",
-                            q,
-                            and_expr(&conds),
-                            o,
-                            f,
-                            v
-                        ));
-                    }
                     Stmt::Check(oid)
                         if obligations.iter().any(|o| o.method == *mk && o.id == *oid) =>
                     {
                         let ob = body.obligation(*oid);
                         let cond_expr = lia_operand(&ob.cond, &var_map);
                         let mut conds = constraints.clone();
+                        // The definitions of every named intermediate value.
+                        //
+                        // `var_map` holds a *name* per variable and `bindings`
+                        // holds the `(= name expr)` that defines it. This
+                        // clause omitted them, so the obligation's condition
+                        // -- and the whole chain it is computed from -- was
+                        // unconstrained in the one clause that decides whether
+                        // the obligation is violated.
+                        //
+                        // `(= cond 0)` was therefore satisfiable for *any*
+                        // obligation whose condition is a named value, which
+                        // is all of the interesting ones: an array bounds
+                        // check is `idx >= 0 & idx < len`, three names deep.
+                        // `error` was reachable in every such program and the
+                        // query came back `unsat` -- read as "the encoding
+                        // admits a spurious counterexample", which it did, but
+                        // for this reason rather than an imprecise heap.
+                        //
+                        // Every other clause built in this function extends
+                        // with `bindings`; this one did not, and that seam is
+                        // the whole defect.
+                        conds.extend(bindings.iter().cloned());
                         conds.extend(call_constraints.iter().cloned());
                         conds.push(format!("(= {} 0)", cond_expr));
                         conds.push(block_app_src(block.id.0));
@@ -1441,7 +1525,23 @@ fn encode_chc_interproc(
             if !overflow.is_empty() {
                 let mut conds = constraints.clone();
                 conds.extend(bindings.iter().cloned());
-                conds.extend(call_constraints.iter().cloned());
+                // Deliberately *not* `call_constraints`.
+                //
+                // An overflow happens while evaluating an argument, before the
+                // call it feeds. Requiring the callee's summary to hold as
+                // well makes the guard unsatisfiable exactly when it matters:
+                // in `addition(m + 1, n - 1)` the guard's body contained
+                // `(m1_s (+ v2 1) (- v0 1) _f2)` alongside the condition
+                // `(+ v2 1) > INT_MAX`, and the summary is only ever
+                // established for in-range arguments. So the one state that
+                // should reach `error` was the one state the summary could not
+                // describe, the guard never fired, and
+                // `jayhorn-recursive/UnsatAddition02` -- whose FALSE depends
+                // entirely on `m + n` wrapping -- was proved TRUE.
+                //
+                // Dropping them is sound in the safe direction: without the
+                // summary the call's result is an unconstrained value, so
+                // `error` becomes *more* reachable, never less.
                 conds.push(if overflow.len() == 1 {
                     overflow[0].clone()
                 } else {
@@ -1457,7 +1557,7 @@ fn encode_chc_interproc(
             }
 
             let mut assign_conds: Vec<String> = Vec::new();
-            for i in 0..n_vars {
+            for i in 0..total_slots {
                 let val = var_map
                     .get(&i)
                     .cloned()
@@ -1494,16 +1594,6 @@ fn encode_chc_interproc(
             // Facts about objects created in this block. Like heap writes,
             // these are conclusions rather than assumptions: reaching the
             // block establishes them.
-            for fact in &heap_facts {
-                let mut conds = constraints.clone();
-                conds.extend(bindings.iter().cloned());
-                conds.push(block_app_src(block.id.0));
-                let q = add_extra_forall_lia(&forall_src, &fresh);
-                let body_s = and_expr(&conds);
-                let head_s = fact;
-                let q = tighten_forall(&q, &body_s, head_s);
-                out.push_str(&clause(&q, &body_s, head_s));
-            }
 
             // Exceptional edges, so that an obligation inside a `catch` is
             // reachable in the encoding.
@@ -1788,22 +1878,6 @@ fn is_ident_byte(b: u8) -> bool {
 // ---------------------------------------------------------------------------
 // Single-method BV encoding (original, for non-recursive programs)
 // ---------------------------------------------------------------------------
-
-/// A stable small integer naming a field.
-///
-/// Fields are identified by a number rather than by name so that a single
-/// `phi_obj` predicate of arity three serves every class. Two distinct fields
-/// sharing an id would let a read of one see a write of the other, which is an
-/// over-approximation -- more values admitted, never fewer -- so a collision
-/// costs precision and not soundness. A 32-bit hash makes them rare.
-fn field_id(f: &FieldKey) -> String {
-    let mut h: u32 = 2166136261;
-    for b in format!("{}.{}", f.class, f.name).bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16777619);
-    }
-    (h % 100_000).to_string()
-}
 
 fn width_of(ty: &Ty) -> u32 {
     match ty {
@@ -2337,6 +2411,178 @@ mod tests {
             derives_handler(&interproc, "m0_b0", "m0_b1"),
             "LIA encoder has no clause deriving the handler:\n{interproc}"
         );
+    }
+
+    /// The query clause must define the values its condition is built from.
+    ///
+    /// `var_map` holds a *name* per variable and `bindings` holds the
+    /// `(= name expr)` that defines it. The clause deciding an obligation
+    /// omitted `bindings`, so the obligation's condition -- and the whole
+    /// chain computing it -- was unconstrained in the one clause that decides
+    /// whether the obligation is violated. `(= cond 0)` was satisfiable for
+    /// any condition that is a named value, which is all the interesting ones:
+    /// an array bounds check is `idx >= 0 & idx < len`, three names deep.
+    ///
+    /// So `error` was reachable in every such program and the query came back
+    /// `unsat`. That was read as "the encoding admits a spurious
+    /// counterexample", which it did -- but because of this seam rather than
+    /// an imprecise heap, and the mistaken reading is what kept issue #18 open.
+    #[test]
+    fn the_query_clause_defines_the_values_its_condition_uses() {
+        let (prog, main) = overflow_program();
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+
+        // `main`'s obligation is `c`, defined by `c = inc(n) > n`. The clause
+        // whose head is `error` must therefore constrain whatever name `c` is
+        // bound to. Counting in the *body* only: the `forall` binder list
+        // mentions every variable regardless, so counting the whole clause
+        // would pass even with the defect present.
+        let err_clause = smt2
+            .lines()
+            .find(|l| l.starts_with("(assert") && l.trim_end().ends_with("error)))"))
+            .expect("an error clause");
+        let body = err_clause.split_once("(=> ").expect("an implication").1;
+        let cond = body
+            .split("(= ")
+            .find_map(|seg| {
+                let name = seg.split(' ').next()?;
+                seg.split_once(" 0)").map(|_| name.to_string())
+            })
+            .expect("an `(= <cond> 0)` conjunct");
+        assert!(
+            body.matches(&cond).count() > 1,
+            "`{cond}` occurs once in the clause body, so nothing defines it \
+             -- `bindings` is missing:\n{err_clause}"
+        );
+    }
+
+    /// An overflow guard must not depend on the call its value feeds.
+    ///
+    /// An overflow happens while evaluating an argument, before the call that
+    /// consumes it. Conjoining the callee's summary makes the guard
+    /// unsatisfiable exactly when it matters: for `addition(m + 1, n - 1)` the
+    /// body held `(m1_s (+ v2 1) (- v0 1) _f2)` next to `(+ v2 1) > INT_MAX`,
+    /// and a summary is only ever established for in-range arguments. The one
+    /// state that should reach `error` was the one state the summary could not
+    /// describe.
+    ///
+    /// `jayhorn-recursive/UnsatAddition02` is the task that paid for it: its
+    /// FALSE depends entirely on `m + n` wrapping, and it was proved TRUE.
+    /// Which makes this the guard for the property the whole LIA encoding
+    /// rests on -- LIA agrees with Java only on overflow-free paths, so an
+    /// overflow guard that cannot fire makes every proof here unsound.
+    #[test]
+    fn an_overflow_guard_does_not_depend_on_the_call_it_feeds() {
+        // The overflow must feed a *call*, which is the shape that breaks.
+        // `overflow_program`'s `n + 1` is computed inside `inc`, not passed to
+        // it, so it does not exercise this and an earlier draft of the test
+        // passed with the defect reintroduced.
+        let inc = mk("inc", "(I)I");
+        let main = mk("main", "([Ljava/lang/String;)V");
+        let (mut prog, _) = overflow_program();
+        let (n, t, r) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![int_var(0), int_var(1), int_var(2)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(r),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(n, Rvalue::Nondet(Ty::Int, None)),
+                        // `t = n + 1` can overflow ...
+                        Stmt::Assign(t, Rvalue::Bin(BinOp::Add, Operand::Var(n), Operand::int(1))),
+                        // ... and is then passed to a call.
+                        Stmt::Assign(
+                            r,
+                            Rvalue::Call {
+                                target: inc.clone(),
+                                args: vec![Operand::Var(t)],
+                                is_virtual: false,
+                            },
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+
+        let guards: Vec<&str> = smt2
+            .lines()
+            .zip(smt2.lines().skip(1))
+            .filter(|(c, _)| c.starts_with("; overflow guard"))
+            .map(|(_, clause)| clause)
+            .collect();
+        assert!(!guards.is_empty(), "no overflow guard emitted:\n{smt2}");
+        for g in guards {
+            assert!(
+                !g.contains("_s "),
+                "overflow guard conjoins a callee summary, so it cannot fire \
+                 on the overflowing argument:\n{g}"
+            );
+        }
+    }
+
+    /// A method's entry fact must be a Horn rule, not a bare conjunction.
+    ///
+    /// It was emitted as `(assert (forall (..) (and (m_b0 ..) <ranges>)))`.
+    /// That is not a rule: Z3 rewrites it into one containing a *negative*
+    /// predicate and then refuses the whole query --
+    ///
+    /// ```text
+    /// (:reason-unknown "Rule contains negative predicate <null>:
+    ///  P!!1(#0) :- not m1_b0(#0).")
+    /// ```
+    ///
+    /// -- so every program with a resolvable callee produced one malformed
+    /// clause per method and came back `unknown`. That is the second
+    /// well-formedness bug in this file to masquerade as solver weakness,
+    /// after the free constants, and the third to hide a soundness bug behind
+    /// itself: fixing it exposed the space invariants as unsound.
+    #[test]
+    fn a_method_entry_fact_is_an_implication_not_a_conjunction() {
+        let (prog, main) = overflow_program();
+        let obs = [ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+
+        for line in smt2.lines().filter(|l| l.starts_with("(assert")) {
+            // An entry fact is the only assertion with no implication in it.
+            if line.contains("=>") {
+                continue;
+            }
+            assert!(
+                !line.contains("(and "),
+                "entry fact asserts a conjunction containing a predicate, \
+                 which is not a Horn rule:\n{line}"
+            );
+        }
     }
 
     /// A callee's check must not become a precondition of its summary.

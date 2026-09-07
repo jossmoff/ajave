@@ -215,3 +215,7 @@ sv-comp/securibench/Inter4.yml valid-assert
 # CHC: an obligation inside a catch needs exceptional edges in BOTH encoders
 sv-comp/jbmc-regression/ArrayIndexOutOfBoundsException1.yml valid-assert
 sv-comp/jbmc-regression/ClassCastException1.yml valid-assert
+
+# CHC: uninterpreted space invariants can be read as empty (vacuous proof)
+sv-comp/MinePump/spec1-5_product45.yml valid-assert
+sv-comp/java-ranger-regression/TCAS_prop1.yml valid-assert

@@ -2,7 +2,7 @@
 
 **Direction:** Over
 **Tier:** 5
-**Status:** working, but proves nothing on the corpus — see "Measured reality"
+**Status:** working; array bounds provable via ghost lengths, heap contents unmodelled — see "Measured reality"
 **Source:** `ajave-engines/src/chc.rs`
 
 ## What Constrained Horn Clauses are, and what they are good at
@@ -82,7 +82,13 @@ Measured here on 2026-09-06: a five-line recursive program whose summary is
 `f(n) ≥ 0` timed out with 14-ary block predicates, while the same program
 written over its two live variables is `sat` in 0.01s.
 
-### The heap: space invariants
+### The heap: space invariants, and why we do not use them
+
+**We tried this and removed it. It is unsound as stated, and the reason is
+worth writing down because the shape recurs.**
+
+The paper's design is described first; what we do instead is in *Ghost
+lengths* below.
 
 Rather than modelling the heap as an array and hoping interpolation copes —
 which it does not — JayHorn abstracts it with **space invariants**. For each
@@ -104,6 +110,57 @@ distinguishing features — dynamic type, final fields, and an `allocSite`
 integer identifying the `new` statement that produced the object. Without
 those, the solver cannot tell two objects of the same class apart and the
 space invariant collapses to something useless.
+
+### Ghost lengths: what replaced the space invariants here
+
+A space invariant is an **uninterpreted predicate that appears in a clause
+body**. A Horn solver does not merely have to satisfy such a predicate — it
+*chooses its interpretation*, and nothing forces that interpretation to be
+large. Choosing `φ ≡ false` makes every `assume φ(…)` unsatisfiable, so the
+read path becomes infeasible, everything downstream of it becomes unreachable,
+and the program is declared safe. **A vacuous proof, not a proof.**
+
+Our encoder guarded this with a closure condition — every reachable method
+lifted, no unresolved call, no havoced reference — on the theory that if
+nothing can enter the heap by an unmodelled route then the write clauses
+constrain `φ` adequately. That is the wrong condition and cannot be made
+right: closure of the *program* says nothing about whether the *invariant* is
+adequately constrained. Measured on 2026-09-07, the guard held on 28 of 169
+tasks, proved none of them, and produced wrong TRUEs on
+`MinePump/spec1-5_product45` and `java-ranger-regression/TCAS_prop1`.
+
+An uninterpreted **function** `arrlen : Ref → Int` has exactly the same defect
+and is worth naming, because it looks safer and is not: the solver picks its
+interpretation too, and `arrlen ≡ λ_. 0` falsifies every `v = arrlen(a)`
+assumption just as thoroughly.
+
+What works is **ghost state**. Array length is the one heap quantity that
+carries most of the weight — `ArrayIndexOutOfBounds` is the bulk of the
+no-runtime-exception property — and it is *immutable*: JLS 10.7 fixes
+`array.length` as the creation dimension. So it does not need a heap at all.
+Each reference-typed variable `i` gets a shadow integer at slot `n_vars + i`:
+
+- `v = new T[n]` writes the shadow: `len(v)′ = n`, with `n ≥ 0` from JLS
+  15.10.1.
+- `v = w` copies it.
+- **Any other assignment to `v` invalidates it** to an unconstrained
+  non-negative `int`. Getting this wrong is a soundness bug, not a precision
+  one: a stale length is a wrong bounds proof.
+- `v.length` *reads* the shadow as a term. It assumes nothing, which is the
+  whole point.
+
+A ghost variable is ordinary universally-quantified state, threaded across
+edges like any other variable, so no interpretation the solver chooses can
+make a read infeasible. It needs no closure condition, and an array we never
+saw created simply has an unconstrained length — the correct
+over-approximation. The shadow is live exactly when its reference is, so it
+survives into loop bodies, which is where bounds are actually proved.
+
+What this does *not* give us is field and array **contents**. Those are
+unconstrained reads again. That is a real precision loss against the paper,
+and it is the honest position until contents are modelled by something whose
+minimal interpretation cannot be weaponised — explicit heap threading with the
+theory of arrays being the standard answer.
 
 ### Exceptions
 
@@ -153,32 +210,39 @@ the clauses we already generate is cheap and untested.
 
 ## Measured reality of *this* engine
 
-From the 2026-09-06 survey over 580 (task, property) records:
+The 2026-09-06 survey over 580 (task, property) records found `chc` running on
+**68 of 580 (12%)** and discharging **0** obligations, with exception handlers
+(157) and floats (14) the dominant declines. Both of those are fixed —
+exceptional edges are encoded in both encoders, floats are havoced rather than
+declined — and the picture on 2026-09-07 is different in kind.
 
-| | |
-|---|---|
-| records where `chc` ran at all | **68 of 580 (12%)** |
-| of those, obligations discharged | **0** |
-| declined: reachable method has an exception handler | 157 |
-| declined: reachable method uses float/double | 14 |
+Over the 169 no-runtime-exception tasks that need a proof, CHC's **solver ran
+zero times**: 94 reached the engine and encoded nothing, because the obligation
+filter admitted only `ObligationKind::Assertion` while the whole
+no-runtime-exception surface is `NullDeref`/`ArrayBounds`/`ClassCast`. It was
+not failing to prove; it was never asked.
 
-So there are two independent failures, and fixing either alone changes
-nothing:
+With that filter lifted and the three defects below fixed, the honest summary
+is:
 
-1. **It almost never runs.** The exception-handler guard is the dominant
-   cause. That guard is correct *given the current encoding* — it was added
-   after `argv-tasks/HttpTransport_false` scored a wrong TRUE, because the
-   encoding follows normal control flow only, so an obligation inside a
-   `catch` is unreachable and gets vacuously discharged. The fix is not to
-   remove the guard but to **encode exceptions**, as JayHorn does.
-2. **When it runs it proves nothing.** Predicate arity is the measured cause;
-   see above. Liveness-restricted arity plus JLS range constraints moved z3
-   from `unsat` (a spurious counterexample) to `unknown` (an honest "no
-   invariant found") on `jayhorn-recursive`, which is progress in kind but
-   still not a proof.
+| defect | symptom it produced | how it read before |
+|---|---|---|
+| fresh values as global constants | `unknown` on every affected query | "Spacer is weak" |
+| entry fact as a bare conjunction | `unknown`, via a rewritten negative predicate | "Spacer is weak" |
+| query clause omitting `bindings` | `unsat` on safe programs | "the heap encoding is imprecise" |
+| space invariants read as empty | **wrong TRUE** | invisible behind the `unknown`s |
 
-It also declines on heap operations entirely, where the literature's answer —
-space invariants — is the single largest missing capability.
+The third is the one that kept issue #18 open. `unsat` on a program that is
+actually safe reads as "our over-approximation admits a spurious
+counterexample", and the natural inference is that the *heap* is too coarse.
+The real cause was that the obligation's condition — `idx >= 0 & idx < len`,
+three names deep — had **none of its defining equations in the clause that
+decides it**, so `error` was reachable in every such program regardless of how
+the heap was modelled.
+
+The lesson generalises past this engine: when an encoding reports a spurious
+counterexample, check that the clause deciding the property actually defines
+the terms it mentions, before concluding the abstraction is too coarse.
 
 ## What it assumes, and where it is unsound if the assumption breaks
 
@@ -187,15 +251,44 @@ space invariants — is the single largest missing capability.
 - Overflow reaching `error` rather than wrapping silently. Comments once
   claimed this while `INT_MIN`/`INT_MAX` were declared and never read (#77);
   the constants are now referenced by the range constraints.
-- Declining every program shape the encoding does not model — heap, floats,
-  unresolved calls, exception handlers. Each decline is a precision loss and
-  the reason the engine is currently harmless.
+- **Every unmodelled construct becoming an unconstrained value rather than a
+  declined program.** Heap reads, floats, unresolved calls and the operators
+  LIA lacks are all havoced. That is the safe direction for an engine that may
+  only discharge: a proof over more states holds of fewer.
+
+  This replaced a policy of *declining* such programs outright, which was
+  sound but refused almost the whole corpus — one `GetStatic` anywhere in any
+  reachable method used to refuse the lot.
+
+- **Nothing the solver interprets appearing in a clause body as an
+  assumption.** This is the rule the space invariants broke, and it is the one
+  to check first when adding anything to this encoder. A predicate or function
+  the solver interprets can be given its *minimal* interpretation, which makes
+  the assumption unsatisfiable and the path vacuously safe. Facts must be
+  carried as universally quantified state (ghost variables), or asserted as
+  clause *heads*, never assumed from something the solver gets to choose.
+
+- **Every clause being a well-formed Horn rule.** Three separate violations of
+  this have been found here, and each masqueraded as solver weakness while
+  hiding a soundness bug behind an `unknown`: fresh values emitted as global
+  constants, a method entry fact emitted as a bare conjunction, and — not a
+  well-formedness bug but the same shape of seam — the query clause omitting
+  the `bindings` that define the values its condition is built from.
+
+  `(get-info :reason-unknown)` names all of these directly. Run it before
+  concluding that Spacer is weak.
 
 ## Known incompleteness
 
-Everything it declines, plus: no quantified heap reasoning, no bitwise
-operators (LIA has none, and `Encoder` allocates an unconstrained binder
-instead of inventing a value — #77), and Euclidean vs truncating division.
+- Field and array **contents** are unconstrained reads (see *Ghost lengths*).
+  Array **length** is exact.
+- No bitwise operators — LIA has none, and `Encoder` allocates an
+  unconstrained binder rather than inventing a value (#77).
+- Euclidean vs truncating division.
+- Floats are havoced, not modelled.
+- The single-method bitvector encoder, selected when nothing resolvable is
+  called, has neither ghost lengths nor exceptional-edge support parity, so
+  `new int[n]` with a symbolic `n` is still unprovable there.
 
 ## How it is certified
 
