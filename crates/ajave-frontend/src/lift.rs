@@ -2370,13 +2370,18 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             // multianewarray
             0xc5 => {
                 let dims = self.insn.keys.first().copied().unwrap_or(1).max(1);
+                let mut lens: Vec<Operand> = Vec::new();
                 for _ in 0..dims {
                     let len = self.pop()?;
-                    let nonneg = self.assign(Ty::Int, Rvalue::Bin(BinOp::Ge, len, Operand::int(0)));
+                    let nonneg = self.assign(
+                        Ty::Int,
+                        Rvalue::Bin(BinOp::Ge, len.clone(), Operand::int(0)),
+                    );
                     let id = self
                         .lifter
                         .obligation(ObligationKind::NegArraySize, nonneg, off);
                     self.stmts.push(Stmt::Check(id));
+                    lens.push(len);
                 }
                 // `Havoc`, not `Nondet`. The distinction is load-bearing.
                 //
@@ -2399,7 +2404,42 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // (#88). `Nondet` now always carries `Some(jvm_byte)` because
                 // it is always a real `Verifier` call; anything unmodelled is
                 // `Havoc`.
-                let result = self.assign(Ty::Ref, Rvalue::Havoc(Ty::Ref, None));
+                // The *outer* array is an ordinary allocation, so say so.
+                //
+                // This was a bare `Havoc`, which threw away two facts the JVM
+                // guarantees: `multianewarray` produces a reference (JLS
+                // 15.10.1, never null) whose `length` is the first dimension
+                // (JLS 10.7). Without them `new int[4][5]` had an
+                // unconstrained receiver, so `D.length`, `D[i]` and every
+                // dereference below it were unprovable -- a fully constant,
+                // trivially safe program came back UNKNOWN with four
+                // `ArrayBounds` and four `NullDeref` open.
+                //
+                // JVMS: the dimensions are pushed outermost-first, so the
+                // *last* value popped above is the outer length.
+                //
+                // What is still not modelled is the *elements*: the JVM
+                // creates every sub-array, so `D[i]` is non-null for an
+                // in-range `i`, and that is a fact about array contents which
+                // no engine here can hold yet (#95). Leaving the element type
+                // as the declared one keeps the outer array honest without
+                // claiming anything about what is inside it.
+                let elem = self
+                    .lifter
+                    .cf
+                    .class_name(self.insn.imm as u16)
+                    .unwrap_or_else(|_| "?".into());
+                let elem = elem.strip_prefix('[').unwrap_or(&elem).to_string();
+                let result = match lens.last() {
+                    Some(outer) => self.assign(
+                        Ty::Ref,
+                        Rvalue::NewArray {
+                            elem,
+                            len: outer.clone(),
+                        },
+                    ),
+                    None => self.assign(Ty::Ref, Rvalue::Havoc(Ty::Ref, None)),
+                };
                 self.stack.push(result);
             }
             // arraylength

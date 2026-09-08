@@ -3733,3 +3733,57 @@ them at all.
 
 So the ranked opportunity is unchanged: **heap contents (#95)** gates ~60 of 80
 tasks and is a capability every Over engine needs, not an engine to revive.
+
+## 2026-09-08 — multianewarray was a bare havoc
+
+`new int[4][5]` — fully constant, trivially safe — came back UNKNOWN with four
+`ArrayBounds` and four `NullDeref` open. The lifter turned `multianewarray`
+into `Rvalue::Havoc(Ty::Ref, None)`, discarding two facts the JVM guarantees:
+the result is a reference (JLS 15.10.1, never null) whose `length` is the first
+dimension (JLS 10.7). Every dereference below an unconstrained receiver is
+unprovable, so the whole shape was invisible to every engine at once.
+
+It now lifts to `Rvalue::NewArray` over the outer dimension. JVMS pushes the
+dimensions outermost-first, so the *last* value popped is the outer length.
+
+**Measured: no-runtime-exception 1168 → 1169, valid-assert unchanged at 862,
+0 wrong.** One point, for a modelling gap that looked much larger — worth
+recording why.
+
+Making the outer array concrete removes the taint that was suppressing
+violations below it, and the *elements* are still unmodelled: the JVM creates
+every sub-array, so `D[i]` is non-null for an in-range `i`, but nothing here
+can say so. An under-approximating engine now proposes `D[i] == null` as a
+violation, JVM replay refutes it, and the task ends UNKNOWN by a different
+route than before.
+
+That is not a regression in score and it *is* a latent wrong FALSE held back
+only by replay — the shape `CLAUDE.md` warns about, and the same one the
+refuted-witness census found on 76 valid-assert tasks. The element fact is
+array **contents**, which is #95. Recorded here rather than left to be
+rediscovered.
+
+## Engine census, corrected
+
+The earlier table in this file counted `orchestrator: timing step <engine>`
+lines, which are emitted `if *ms > 0` — so it measured *engines whose step took
+at least a millisecond*, not engines that ran or discharged. The conclusion
+drawn from it ("interval-ai runs on only 57 of 172") was an artefact.
+
+Re-measured with `--trace`, which prints the discharging engine per obligation:
+
+| engine | tasks it discharged on | obligations | violated on |
+|---|---|---|---|
+| interval-ai | **119 of 172** | 4646 | 0 |
+| smt-bmc | 30 | 2512 | 12 |
+| chc | 4 | 48 | 0 |
+| k-induction | 1 | 28 | 0 |
+| imc, cegar, smt-bmc-fpa, presolve | **0** | 0 | 0 |
+
+`interval-ai` is not one engine among several — it discharges on two thirds of
+the corpus and is the only one with no violated column at all. Four engines
+contribute nothing to this property.
+
+The lesson for measurement is the general one this file keeps recording: a
+count derived from a log line is a count of *that log line's emission
+condition*. Check it before drawing a conclusion.
