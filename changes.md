@@ -3647,3 +3647,38 @@ obligations instead.
 
 **Measured: no-runtime-exception 1150 → 1168, valid-assert unchanged at 860,
 0 wrong on either.**
+
+## 2026-09-08 — ghost lengths in the bitvector encoder too (0 points, kept anyway)
+
+`jbmc-regression/array1` stayed unprovable after the array work, and the reason
+is the seam this file keeps recording: **there are two CHC encoders**, and a
+capability added to one is simply absent from the other.
+
+`encode_chc_interproc` is selected when something with a body is called;
+otherwise `encode_chc_single`, the single-method bitvector encoder, is. The
+small array benchmarks call only `Verifier.nondet*`, which is not resolvable —
+so the encoder that got ghost lengths was the one those tasks never reach.
+
+Reducing `array1` found it precisely. `sink = id(v[7])` after a loop proves,
+`if (v[7] != 7) sink = 1;` does not — not because of the branch, but because
+removing the *call* switched encoders.
+
+Ghost lengths are now in both, with two fixes the port needed:
+
+- **Binder names come from the slot id, not the position.** The bitvector
+  encoder built its `forall` lists with `.enumerate()`, which agreed with the
+  slot id only while the slot space was exactly the program's variables.
+- **The transfer loop ran `0..n_vars`**, so ghost slots never crossed an edge
+  and the length did not survive into the loop body — which is the only place
+  the bound is ever proved.
+
+**Measured: no change. valid-assert 860, no-runtime-exception 1168, identical
+to the run before it.** The micro-case it fixes (`a3`: a loop bounded by
+`v.length` over a symbolically-sized array, no resolvable calls) does now
+prove, and `LengthBoundNoResolvableCall` pins it, but no corpus task turns on
+that shape alone.
+
+Kept regardless, for a reason that is not "it might help later": the asymmetry
+between the two encoders is itself the defect this file has now recorded three
+times — exceptional edges, the check assumption, and array lengths. Leaving one
+encoder behind is how the next capability silently fails to apply.

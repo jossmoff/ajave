@@ -1892,7 +1892,7 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     let mut out = String::new();
     out.push_str("(set-logic HORN)\n");
 
-    let var_widths: Vec<(usize, u32)> = body
+    let mut var_widths: Vec<(usize, u32)> = body
         .vars
         .iter()
         .enumerate()
@@ -1900,8 +1900,52 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         .collect();
     let width_map: HashMap<usize, u32> = var_widths.iter().cloned().collect();
     let mut fresh_decls: Vec<(String, u32)> = Vec::new();
+    let n_vars = var_widths.len();
+
+    // GHOST LENGTHS, in the bitvector encoder too.
+    //
+    // Same mechanism and same reasons as the inter-procedural encoder: a
+    // shadow integer per reference whose length is read, so `a.length` is a
+    // term rather than an unconstrained value.
+    //
+    // This has to be written twice because these are two separate encoders,
+    // and leaving it out of this one is what kept `jbmc-regression/array1`
+    // unprovable after the other was fixed. The bitvector path is selected
+    // when nothing resolvable is called -- which is the *common* case for the
+    // small array benchmarks, so the gap covered most of what the work was
+    // supposed to fix.
+    let mut ghost_want: BTreeSet<usize> = BTreeSet::new();
+    for blk in &body.blocks {
+        for st in &blk.stmts {
+            if let Stmt::Assign(_, Rvalue::ArrayLength(Operand::Var(v))) = st {
+                ghost_want.insert(v.0 as usize);
+            }
+        }
+    }
+    loop {
+        let before = ghost_want.len();
+        for blk in &body.blocks {
+            for st in &blk.stmts {
+                if let Stmt::Assign(d, Rvalue::Use(Operand::Var(src))) = st {
+                    if ghost_want.contains(&(d.0 as usize)) {
+                        ghost_want.insert(src.0 as usize);
+                    }
+                }
+            }
+        }
+        if ghost_want.len() == before {
+            break;
+        }
+    }
+    let ghost_want: Vec<usize> = ghost_want
+        .into_iter()
+        .filter(|i| body.vars.get(*i).is_some_and(|vi| vi.ty == Ty::Ref))
+        .collect();
+    let ghost_of = |i: usize| -> usize { n_vars + i };
+    for i in &ghost_want {
+        var_widths.push((ghost_of(*i), 32));
+    }
     let var_indices = &var_widths;
-    let n_vars = var_indices.len();
 
     for block in &body.blocks {
         let sig: String = var_indices
@@ -1916,24 +1960,27 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     }
     out.push_str("(declare-fun error () Bool)\n");
 
-    let src_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}", i)).collect();
-    let dst_vars: Vec<String> = (0..n_vars).map(|i| format!("v{}p", i)).collect();
+    let src_vars: Vec<String> = var_indices.iter().map(|(i, _)| format!("v{}", i)).collect();
+    let dst_vars: Vec<String> = var_indices
+        .iter()
+        .map(|(i, _)| format!("v{}p", i))
+        .collect();
 
+    // Binder names come from the *slot id*, not the position. Ghost slots are
+    // appended at `n_vars + var`, so those two stopped agreeing the moment the
+    // slot space grew past the program's own variables.
     let forall_src: String = var_indices
         .iter()
-        .enumerate()
-        .map(|(i, (_, w))| format!("(v{} (_ BitVec {}))", i, w))
+        .map(|(i, w)| format!("(v{} (_ BitVec {}))", i, w))
         .collect::<Vec<_>>()
         .join(" ");
     let forall_both: String = {
         let src = var_indices
             .iter()
-            .enumerate()
-            .map(|(i, (_, w))| format!("(v{} (_ BitVec {}))", i, w));
+            .map(|(i, w)| format!("(v{} (_ BitVec {}))", i, w));
         let dst = var_indices
             .iter()
-            .enumerate()
-            .map(|(i, (_, w))| format!("(v{}p (_ BitVec {}))", i, w));
+            .map(|(i, w)| format!("(v{}p (_ BitVec {}))", i, w));
         src.chain(dst).collect::<Vec<_>>().join(" ")
     };
 
@@ -1956,8 +2003,8 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         let mut constraints: Vec<String> = Vec::new();
         let mut var_map: HashMap<usize, String> = HashMap::new();
 
-        for i in 0..n_vars {
-            var_map.insert(i, format!("v{}", i));
+        for (i, _) in var_indices.iter() {
+            var_map.insert(*i, format!("v{}", i));
         }
         let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
         let is_wide = |op: &Operand| -> bool {
@@ -1975,6 +2022,54 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
+                    // Ghost length maintenance, mirroring the LIA encoder.
+                    //
+                    // Assigning a reference invalidates its shadow; `NewArray`
+                    // then records the creation dimension (JLS 10.7) and a
+                    // copy carries the source's across. A stale length is a
+                    // wrong bounds proof, so the invalidation is the part that
+                    // has to be right.
+                    if body
+                        .vars
+                        .get(vid.0 as usize)
+                        .is_some_and(|vi| vi.ty == Ty::Ref)
+                        && ghost_want.contains(&(vid.0 as usize))
+                    {
+                        let g = ghost_of(vid.0 as usize);
+                        match rv {
+                            Rvalue::NewArray { len, .. } => {
+                                let l = smt_text::encode_operand(&BitvectorTheory, len, &var_map);
+                                var_map.insert(g, l);
+                            }
+                            Rvalue::Use(Operand::Var(src))
+                                if ghost_want.contains(&(src.0 as usize)) =>
+                            {
+                                let sg = ghost_of(src.0 as usize);
+                                if let Some(sv) = var_map.get(&sg).cloned() {
+                                    var_map.insert(g, sv);
+                                }
+                            }
+                            _ => {
+                                let f = format!("bvg_{}_{}", block.id.0, g);
+                                if !fresh_decls.iter().any(|(n, _)| n == &f) {
+                                    fresh_decls.push((f.clone(), 32));
+                                }
+                                var_map.insert(g, f);
+                            }
+                        }
+                    }
+                    // `array.length` reads the shadow as a term.
+                    if let Rvalue::ArrayLength(Operand::Var(arr)) = rv {
+                        if ghost_want.contains(&(arr.0 as usize)) {
+                            let g = ghost_of(arr.0 as usize);
+                            let v = var_map
+                                .get(&g)
+                                .cloned()
+                                .unwrap_or_else(|| format!("v{}", g));
+                            var_map.insert(vid.0 as usize, v);
+                            continue;
+                        }
+                    }
                     // The encoder reports its own binders, so the old
                     // recover-by-string-prefix on "bv_fresh" is gone.
                     let expr = enc.rvalue(rv, &var_map, &is_wide);
@@ -2034,8 +2129,12 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         }
 
         let mut assign_constraints: Vec<String> = Vec::new();
-        for i in 0..n_vars {
-            let val = var_map.get(&i).unwrap();
+        // Every slot, not just the program's own variables: the ghost lengths
+        // live above `n_vars` and have to cross the edge like anything else,
+        // or the length does not survive into the loop body where the bound is
+        // actually proved.
+        for (i, _) in var_indices.iter() {
+            let Some(val) = var_map.get(i) else { continue };
             if *val != format!("v{}p", i) {
                 assign_constraints.push(format!("(= v{}p {})", i, val));
             }
