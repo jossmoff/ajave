@@ -389,6 +389,79 @@ pub fn contract_of(class: &str, name: &str, desc: &str) -> Option<Contract> {
             effect: Effect::Pure,
             may_return_null: true,
         },
+        // Constructors, which are descriptor-sensitive in a way the arms
+        // above are not: `new String()` takes nothing to be wrong about, while
+        // the others dereference or index their argument.
+        //
+        // These are contracts with *preconditions*, not totality claims. The
+        // lifter seeds each precondition as an obligation, so `new String(s)`
+        // stops vetoing the verdict and instead asks the engines to prove
+        // `s != null` -- which they can when it is a literal or a checked
+        // value. `first_unmodelled_throwing_call` already honours this via
+        // `preconditions_all_seeded`; the methods simply had no contract, so
+        // they fell through to `could_throw_runtime_exception` and blocked the
+        // program outright.
+        ("java/lang/String", "<init>") => match desc {
+            "()V" => Contract::TOTAL,
+            // `(String)`, `(char[])`, `(StringBuilder)`, `(StringBuffer)`:
+            // all dereference the argument.
+            "(Ljava/lang/String;)V"
+            | "([C)V"
+            | "(Ljava/lang/StringBuilder;)V"
+            | "(Ljava/lang/StringBuffer;)V" => Contract {
+                requires: NN1,
+                effect: Effect::Pure,
+                may_return_null: false,
+            },
+            // `(char[], int, int)` -- null *and* a range into the array.
+            "([CII)V" => Contract {
+                requires: &[
+                    Precondition::NonNull(1),
+                    Precondition::RangeInBounds {
+                        start: 2,
+                        end: None,
+                        seq: 1,
+                    },
+                ],
+                effect: Effect::Pure,
+                may_return_null: false,
+            },
+            // Charset-decoding constructors throw `UnsupportedEncodingException`
+            // (checked) and more besides; nothing to claim.
+            _ => Contract::OPAQUE,
+        },
+        // Wraps the string and immediately reads its length, so a null
+        // argument is an NPE at construction.
+        ("java/io/StringReader", "<init>") => Contract {
+            requires: NN1,
+            effect: Effect::Pure,
+            may_return_null: false,
+        },
+        // A negative size is `NegativeArraySizeException`.
+        ("java/util/BitSet", "<init>") => match desc {
+            "()V" => Contract::TOTAL,
+            "(I)V" => Contract {
+                requires: &[Precondition::NonNegative(1)],
+                effect: Effect::Pure,
+                may_return_null: false,
+            },
+            _ => Contract::OPAQUE,
+        },
+        // Both overloads dereference the `String other` argument; its position
+        // differs, which is exactly why this cannot be keyed on the name.
+        ("java/lang/String", "regionMatches") => match desc {
+            "(ILjava/lang/String;II)Z" => Contract {
+                requires: &[Precondition::NonNull(2)],
+                effect: Effect::Pure,
+                may_return_null: false,
+            },
+            "(ZILjava/lang/String;II)Z" => Contract {
+                requires: &[Precondition::NonNull(3)],
+                effect: Effect::Pure,
+                may_return_null: false,
+            },
+            _ => Contract::OPAQUE,
+        },
         // Index-bounded accessors.
         ("java/lang/String", "charAt" | "codePointAt") => Contract {
             requires: IDX1,
@@ -1778,8 +1851,10 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                 | ("isUpperCase", "(C)Z") | ("isLowerCase", "(C)Z")
                 | ("isAlphabetic", "(I)Z") | ("isSpaceChar", "(C)Z")
                 | ("toUpperCase", "(C)C") | ("toLowerCase", "(C)C")
-                // Also a classification predicate over the whole char range.
+                // Also classification predicates over the whole char range.
                 | ("isDefined", "(C)Z")
+                | ("isJavaIdentifierStart", "(C)Z")
+                | ("isJavaIdentifierPart", "(C)Z")
         ),
 
         // Explicitly enumerated: the `*Exact` family throws `ArithmeticException`
@@ -1848,6 +1923,10 @@ pub fn is_total_jdk_signature(class: &str, name: &str, desc: &str) -> bool {
                     ("length", "()I") | ("toString", "()Ljava/lang/String;")
                         // Reads a field of a well-formed builder.
                         | ("capacity", "()I")
+                        // A no-op for a non-positive argument; only grows the
+                        // buffer otherwise. `OutOfMemoryError` is an `Error`,
+                        // not a `RuntimeException`.
+                        | ("ensureCapacity", "(I)V")
                         // Permutes the existing buffer in place; allocates
                         // nothing and indexes nothing out of range.
                         | ("reverse", "()Ljava/lang/StringBuilder;")

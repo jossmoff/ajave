@@ -3580,3 +3580,70 @@ program that times out at 14-ary and is `sat` in 0.01s over two variables.
 Restricting them to references whose length is actually read (seeded from
 `ArrayLength` operands, closed backwards through copies) recovered 2 of those
 and cut smoke from 107s to 78s.
+
+## 2026-09-08 — System.out is non-null in a program that never reassigns it
+
+`GetStatic` was the unmodelled rvalue on 28 of the 80 blocked
+no-runtime-exception tasks, and inspecting them showed the field is almost
+always **`java.lang.System.out`** — eight reads in one juliet task alone. The
+NullDeref on `System.out.println`'s receiver was the whole reason several tasks
+had nothing else open.
+
+`is_nonnull_static` deliberately excludes the standard streams, and that
+exclusion is **correct**: they are not `static final`, and `System.setOut(null)`
+is legal. Verified on OpenJDK 21 rather than assumed — it returns normally and
+leaves `System.out` null, after which the next `println` throws NPE.
+
+But that is a fact about the *setters*, not the fields. A program that never
+calls `setOut`/`setErr`/`setIn` cannot observe a null stream: the JVM
+initialises all three before `main`, and only those three methods change them.
+So this is a whole-program fact, which is why it belongs on the CPA
+(`nonnull_statics`) rather than in `is_nonnull_static`, whose answer must hold
+for *any* program.
+
+Scope stated honestly: the scan covers lifted methods. A library method we do
+not model could in principle call a setter, and nothing here rules that out —
+it rests on the same footing as every other statement in `contract_of` about
+external code. No JDK method we model reassigns a stream, and **no benchmark in
+the corpus calls a setter at all**.
+
+## 2026-09-08 — contracts with preconditions, not totality claims
+
+26 no-runtime-exception tasks were *proved* and then discarded by the
+"calls a library method whose exception behaviour is not modelled" gate. Only
+two of the offending signatures are actually total; the rest genuinely throw.
+
+The gate already had the right mechanism and the methods simply had no
+contract: `first_unmodelled_throwing_call` skips a call whose contract's
+preconditions are all *seeded*, because then the lifter has emitted them as
+obligations and the engines carry the burden explicitly. With no contract at
+all they fell through to `could_throw_runtime_exception` and vetoed the whole
+program.
+
+So the fix is not to claim these are total — they are not — but to say *when*
+they throw:
+
+- `String.<init>`: `()V` is total; `(String)`, `(char[])`, `(StringBuilder)`,
+  `(StringBuffer)` require a non-null argument; `([CII)` also requires the
+  range. Charset constructors stay opaque.
+- `StringReader.<init>(String)` — wraps the string and reads its length.
+- `BitSet.<init>(I)` — non-negative.
+- `String.regionMatches` — both overloads dereference the `String other`
+  argument, **at different positions** (2 and 3). Exactly why this cannot be
+  keyed on the name.
+- `Character.isJavaIdentifierStart/Part` and `StringBuilder.ensureCapacity` are
+  genuinely total (`ensureCapacity` is a no-op for a non-positive argument, and
+  `OutOfMemoryError` is an `Error`).
+
+Every entry carries both required pieces of evidence: a case in the Rust
+`jdk_allowlist_tests` tables and an adversarial probe in
+`tools/validate_jdk_allowlist.py`, which reports 0 violations against real JVM
+behaviour. The precondition entries are listed in **`MUST_THROW`** — they must
+*not* be treated as total, since the burden is carried by the seeded
+obligations instead.
+
+`jbmc-regression/calc` now blocks on `Integer.parseInt` and the juliet task on
+`Socket.<init>`, both of which genuinely throw. Those are honest refusals.
+
+**Measured: no-runtime-exception 1150 → 1168, valid-assert unchanged at 860,
+0 wrong on either.**

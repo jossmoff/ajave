@@ -1908,6 +1908,18 @@ mod jdk_allowlist_tests {
         ("java/lang/String", "<init>", "(Ljava/lang/String;)V"),
         ("java/lang/String", "matches", "(Ljava/lang/String;)Z"),
         ("java/util/BitSet", "<init>", "(I)V"),
+        // Given *preconditions* rather than totality: they throw only when the
+        // precondition fails, the lifter seeds it as an obligation, and the
+        // engines carry the burden explicitly. So they must still not be
+        // treated as total.
+        ("java/io/StringReader", "<init>", "(Ljava/lang/String;)V"),
+        ("java/lang/String", "<init>", "([C)V"),
+        ("java/lang/String", "<init>", "([CII)V"),
+        (
+            "java/lang/String",
+            "regionMatches",
+            "(ILjava/lang/String;II)Z",
+        ),
         // Partial functions: throw on empty/out-of-range receivers.
         ("java/util/ArrayList", "get", "(I)Ljava/lang/Object;"),
         ("java/util/ArrayList", "add", "(ILjava/lang/Object;)V"),
@@ -2008,6 +2020,9 @@ mod jdk_allowlist_tests {
         ("java/lang/Double", "isFinite", "(D)Z"),
         ("java/lang/Character", "isDefined", "(C)Z"),
         ("java/lang/StringBuilder", "capacity", "()I"),
+        ("java/lang/StringBuilder", "ensureCapacity", "(I)V"),
+        ("java/lang/Character", "isJavaIdentifierStart", "(C)Z"),
+        ("java/lang/Character", "isJavaIdentifierPart", "(C)Z"),
         (
             "java/lang/StringBuilder",
             "reverse",

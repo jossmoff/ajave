@@ -1339,6 +1339,14 @@ pub struct IntervalCpa {
     pub nonnull_fields: std::collections::HashSet<ajave_ir::FieldKey>,
     /// Methods known to always return non-null.
     pub nonnull_returns: std::collections::HashSet<ajave_ir::MethodKey>,
+    /// Static fields this *program* cannot have made null.
+    ///
+    /// Distinct from `is_nonnull_static`, which answers for any program at all
+    /// and so may only list `static final` fields with non-null initialisers.
+    /// `System.out` is not one of those -- `System.setOut(null)` is legal --
+    /// but a program that never calls a stream setter cannot observe it null.
+    /// See `ai::stable_stream_statics`.
+    pub nonnull_statics: std::collections::HashSet<ajave_ir::FieldKey>,
 }
 
 impl Cpa for IntervalCpa {
@@ -1417,6 +1425,16 @@ impl Cpa for IntervalCpa {
                         }
                         // Track nullness for reference-producing rvalues.
                         let mut n = next.eval_nullness(rv);
+                        // Program-level static nullness, which `eval_nullness`
+                        // cannot answer because it is a fact about this
+                        // program rather than about the field.
+                        if n == Nullness::Unknown {
+                            if let Rvalue::GetStatic(fk) = rv {
+                                if self.nonnull_statics.contains(fk) {
+                                    n = Nullness::NonNull;
+                                }
+                            }
+                        }
                         // Field nullness: if loading from a NonNull object and
                         // the field is known-initialized in the constructor,
                         // the result is NonNull.

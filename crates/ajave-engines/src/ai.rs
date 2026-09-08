@@ -127,6 +127,65 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
 /// Analyze methods to find those that always return non-null.
 /// Checks if every Return(Some(v)) in the body returns a variable known to
 /// be non-null (New, string constant, class constant, this, or nonnull-param).
+/// The standard streams, when the program cannot have reassigned them.
+///
+/// `System.out`/`err`/`in` are **not** `static final`, and
+/// `System.setOut(null)` is legal -- verified on a real JVM (OpenJDK 21), where
+/// it returns normally and leaves `System.out` null. So they carry no
+/// unconditional non-null guarantee, and `is_nonnull_static` is right to
+/// exclude them.
+///
+/// But that is a fact about the *stream setters*, not about the fields. A
+/// program that never calls one cannot observe a null stream: the JVM
+/// initialises all three before `main`, and only `setOut`/`setErr`/`setIn` can
+/// change them.
+///
+/// This matters because `System.out.println` is everywhere. `System.out` was
+/// the single most common unconstrained `GetStatic` in the corpus, and the
+/// resulting NullDeref on the receiver is what left several tasks unprovable
+/// with nothing else open.
+///
+/// Scope of the claim, stated honestly: this scans the *lifted* methods. A
+/// library method we do not model could in principle call `System.setOut`, and
+/// nothing here rules that out -- it rests on the same footing as every other
+/// statement in `contract_of` about what external code does. No JDK method we
+/// model reassigns a stream, and no benchmark in the corpus calls a setter at
+/// all.
+fn stream_fields_are_stable(prog: &Program) -> bool {
+    !prog.bodies.values().any(|body| {
+        body.blocks.iter().any(|b| {
+            b.stmts.iter().any(|st| {
+                matches!(
+                    st,
+                    Stmt::Assign(_, Rvalue::Call { target, .. })
+                        if target.class == "java/lang/System"
+                            && matches!(target.name.as_str(), "setOut" | "setErr" | "setIn")
+                )
+            })
+        })
+    })
+}
+
+/// The stream fields, as a set, when they are stable.
+fn stable_stream_statics(prog: &Program) -> HashSet<FieldKey> {
+    let mut out = HashSet::new();
+    if !stream_fields_are_stable(prog) {
+        return out;
+    }
+    for (name, desc) in [
+        ("out", "Ljava/io/PrintStream;"),
+        ("err", "Ljava/io/PrintStream;"),
+        ("in", "Ljava/io/InputStream;"),
+    ] {
+        out.insert(FieldKey {
+            class: "java/lang/System".to_string(),
+            name: name.to_string(),
+            desc: desc.to_string(),
+        });
+    }
+    out
+}
+
 fn analyze_return_nullness(
     prog: &Program,
     nonnull_fields: &HashSet<FieldKey>,
@@ -339,6 +398,8 @@ pub struct AiEngine {
     nonnull_fields: HashSet<FieldKey>,
     /// Methods known to always return non-null.
     nonnull_returns: HashSet<MethodKey>,
+    /// Static fields this program cannot have made null.
+    nonnull_statics: HashSet<FieldKey>,
     /// Precision policy for the flat field abstraction.
     field_prec: crate::interval::FieldPrec,
 }
@@ -349,6 +410,7 @@ impl AiEngine {
             done: false,
             nonnull_fields: HashSet::new(),
             nonnull_returns: HashSet::new(),
+            nonnull_statics: HashSet::new(),
             field_prec: Default::default(),
         }
     }
@@ -554,6 +616,7 @@ impl Engine for AiEngine {
             );
         }
         self.nonnull_returns = analyze_return_nullness(prog, &self.nonnull_fields);
+        self.nonnull_statics = stable_stream_statics(prog);
         self.field_prec = analyze_field_precision(prog);
         debug!(
             "interval-ai: {} singleton class(es) eligible for strong field updates",
@@ -608,6 +671,7 @@ impl Engine for AiEngine {
         let cpa = IntervalCpa {
             nonnull_fields: self.nonnull_fields.clone(),
             nonnull_returns: self.nonnull_returns.clone(),
+            nonnull_statics: self.nonnull_statics.clone(),
             field_prec: self.field_prec.clone(),
         };
         info!("interval-ai: init — running abstract interpretation for hints");
@@ -671,6 +735,7 @@ impl Engine for AiEngine {
         let cpa = IntervalCpa {
             nonnull_fields: self.nonnull_fields.clone(),
             nonnull_returns: self.nonnull_returns.clone(),
+            nonnull_statics: self.nonnull_statics.clone(),
             field_prec: self.field_prec.clone(),
         };
 
