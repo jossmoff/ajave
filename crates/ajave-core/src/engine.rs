@@ -25,11 +25,33 @@ pub struct Budget {
     /// Soft cap on units of work per `step`. Units are engine-defined —
     /// unrolling depth, states explored, solver calls.
     pub work: u64,
+    /// When this step must stop, in wall-clock time.
+    ///
+    /// `work` alone cannot bound a step: the BMC counts solver calls, and one
+    /// solver call may take a minute. Measured over 20 sampled tasks that hit
+    /// the 60s budget, **`smt-bmc` held the process on 18 of 18** — so `chc`,
+    /// `k-induction`, `imc` and `cegar` never ran at all on exactly the tasks
+    /// that needed a different angle.
+    ///
+    /// `None` means unbounded, which is the behaviour when no `--timeout` is
+    /// given and keeps every existing invocation identical.
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl Budget {
+    /// Whether the wall-clock slice for this step is spent.
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+    }
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Budget { work: 1_000 }
+        Budget {
+            work: 1_000,
+            deadline: None,
+        }
     }
 }
 

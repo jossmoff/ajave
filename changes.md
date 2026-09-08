@@ -3838,3 +3838,48 @@ been run on the corpus.**
 Path forward is in #96 and unchanged from #95: the fact is about the array
 *object*, so it needs allocation-site keying plus non-escape, or a real heap
 term threaded through the block predicates.
+
+## 2026-09-08 — the process did not know its own deadline
+
+The architecture review flagged `Budget` as ceremonial: nine of thirteen engines
+take `_budget` and ignore it. That turned out not to be cosmetic.
+
+**Measured first.** Of 20 sampled tasks that hit the 60s budget, `smt-bmc` held
+the process on **18 of 18** that timed out. Everything scheduled behind it —
+`chc`, `k-induction`, `imc`, `cegar` — never ran at all, on precisely the tasks
+that needed a different angle.
+
+The cause is that `ajave` had **no notion of its own time budget**. The harness
+enforced 60s by killing the process from outside; nothing inside knew a deadline
+existed, so no engine could yield even in principle. And the BMC's own budget is
+counted in *solver calls, block visits and forks* — units that bound work but
+not time, when a single solver call may take a minute.
+
+Three changes:
+
+- `--timeout <secs>` so the process knows the budget it is running under.
+  Absent, the run is unbounded, which is what every previous invocation did.
+- `Budget` carries a `deadline`, and the orchestrator gives each engine step a
+  share of what *remains* (0.6) rather than the whole of it. A share rather than
+  an equal split, because the engines are not equally valuable and the order
+  already encodes that: `interval-ai` and `smt-bmc` discharge on 119 and 30 of
+  172 sampled tasks, the four behind them on none. Splitting evenly would starve
+  the two that work to feed four that do not.
+- `SmtBmc::budget_left` checks the wall clock before its counters.
+
+| | before | after |
+|---|---|---|
+| valid-assert | 862 | **866** |
+| valid-assert timeouts | 55 | **25** |
+| no-runtime-exception | 1169 | **1181** |
+| no-runtime-exception timeouts | 43 | **21** |
+
+**+16 points and timeouts roughly halved on both properties**, with no new wrong
+answers. Tasks that previously died at the wall having learned nothing now
+finish and report, and the engines behind the BMC get to run.
+
+Worth noting what this is *not*: engines still do not resume. The BMC yields and
+is done. Real resumption — keeping the exploration frontier and continuing in a
+later round — would let the time returned by a fast engine be spent by a slow
+one, and is the remaining half of the blackboard design. This change only stops
+one engine consuming everything.

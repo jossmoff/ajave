@@ -150,7 +150,14 @@ def run_one(args):
     # main() never reaches them — they would silently use the live build and
     # defeat the snapshot.
     task, prop, timeout, collect_timing, binary = args
-    cmd = [binary, "--property", CLI_PROPERTY[prop]] + task["inputs"]
+    # Tell ajave the budget it is running under.
+    #
+    # Without it no engine knows a deadline exists, so none can yield: measured
+    # over 20 tasks that hit the wall, `smt-bmc` held the process on 18 of 18
+    # and every engine behind it never ran. A small margin below the harness
+    # timeout so the process finishes and reports rather than being killed.
+    inner = max(5, int(timeout) - 5)
+    cmd = [binary, "--property", CLI_PROPERTY[prop], "--timeout", str(inner)] + task["inputs"]
     env = dict(os.environ, RUST_LOG="info") if collect_timing else dict(os.environ)
 
     # run_guarded, not subprocess.run: ajave spawns a solver and a JVM, and

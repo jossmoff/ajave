@@ -471,7 +471,7 @@ impl Engine for SmtBmc {
         Direction::Under
     }
 
-    fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
+    fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
         }
@@ -580,6 +580,7 @@ impl Engine for SmtBmc {
             max_depth: self.max_depth,
             solver_calls: 0,
             exhausted: false,
+            deadline: budget.deadline,
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
@@ -1005,6 +1006,8 @@ struct ExploreCtx<'a> {
     max_depth: u32,
     solver_calls: u32,
     exhausted: bool,
+    /// Wall-clock slice for this exploration, from `Budget::deadline`.
+    deadline: Option<std::time::Instant>,
     completeness: Completeness,
     /// Obligations whose check could not be trusted, keyed by
     /// **(method, id)**. See `violated_oids` for why the method is part of
@@ -1151,6 +1154,17 @@ struct SavedState {
 impl<'a> ExploreCtx<'a> {
     fn budget_left(&self) -> bool {
         let k = budget_scale();
+        // The wall-clock slice comes first: the counters below bound *work*,
+        // and one solver call can take a minute regardless of how few calls
+        // have been made. Measured over 20 tasks that hit the 60s budget, this
+        // engine held the process on 18 of 18 -- every engine behind it never
+        // ran.
+        if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return false;
+        }
         !self.exhausted
             && (self.solver_calls as u64) < MAX_SOLVER_CALLS as u64 * k
             && self.violations.len() < MAX_VIOLATIONS

@@ -57,6 +57,20 @@ struct Cli {
     #[arg(long = "show-witness")]
     show_witness: bool,
 
+    /// Wall-clock budget for the whole verification, in seconds.
+    ///
+    /// Without it the process runs until something outside kills it, which is
+    /// what the harness does — and that is the problem. An engine cannot yield
+    /// to the next if it does not know a deadline exists. Measured over 20
+    /// tasks that hit a 60s budget, `smt-bmc` held the process on 18 of 18, so
+    /// `chc`, `k-induction`, `imc` and `cegar` never ran on precisely the
+    /// tasks that needed another angle.
+    ///
+    /// Pass the same value the harness enforces. Engines are given a share of
+    /// what remains rather than the whole of it.
+    #[arg(long = "timeout", value_name = "SECS")]
+    timeout: Option<u64>,
+
     /// Constrain nondet char to ASCII (0-127). Prevents witnesses with
     /// non-ASCII chars that our Character method encodings can't model.
     #[arg(long = "ascii-only")]
@@ -887,6 +901,9 @@ fn main() {
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
     orchestrator.assertion_only = assertion_only;
+    orchestrator.deadline = cli
+        .timeout
+        .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     // Phase 0 of the cooperative-scheduling work: a machine-readable record of
     // what the portfolio was asked to solve, so per-engine cost and payoff can
     // be aggregated *by program shape* rather than by task name.

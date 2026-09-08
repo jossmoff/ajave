@@ -27,6 +27,24 @@ pub struct Orchestrator {
     pub budget: Budget,
     pub trace: Vec<String>,
     pub assertion_only: bool,
+    /// When the whole verification must be finished, if known.
+    ///
+    /// Set from `--timeout`. Without it the run is unbounded, which is what
+    /// every invocation did before and remains the default.
+    pub deadline: Option<std::time::Instant>,
+    /// The largest share of the *remaining* time any single engine step may
+    /// take.
+    ///
+    /// A share rather than an equal split, because the engines are not equally
+    /// valuable and the order already encodes that: `interval-ai` and
+    /// `smt-bmc` discharge on 119 and 30 of 172 sampled tasks respectively,
+    /// and the four behind them on none. Splitting evenly would starve the two
+    /// that work in order to feed four that do not.
+    ///
+    /// The point is only to stop one engine taking *everything*. At 0.6 an
+    /// engine that would have run to the wall instead leaves 40% of what was
+    /// left for those behind it.
+    pub engine_share: f64,
 }
 
 impl Orchestrator {
@@ -38,6 +56,8 @@ impl Orchestrator {
             budget: Budget::default(),
             trace: Vec::new(),
             assertion_only: true,
+            deadline: None,
+            engine_share: 0.6,
         }
     }
 
@@ -100,8 +120,15 @@ impl Orchestrator {
                     .statuses()
                     .filter(|(_, s)| matches!(s, Status::Violated { .. }))
                     .count();
+                // Slice the remaining time so no engine can consume it all.
+                let mut budget = self.budget;
+                budget.deadline = self.deadline.map(|end| {
+                    let now = std::time::Instant::now();
+                    let left = end.saturating_duration_since(now);
+                    now + left.mul_f64(self.engine_share)
+                });
                 let t0 = std::time::Instant::now();
-                let progress = e.step(prog, &mut self.bb, self.budget);
+                let progress = e.step(prog, &mut self.bb, budget);
                 *step_ms.entry(e.id().0.to_string()).or_default() += t0.elapsed().as_millis();
                 let after = self.bb.proved_safe_count();
                 let after_v = self
