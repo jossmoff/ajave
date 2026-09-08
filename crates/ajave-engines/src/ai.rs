@@ -630,15 +630,19 @@ impl Engine for AiEngine {
         }
 
         let Some(entry) = &prog.entry else {
+            info!("interval-ai: declining — no entry method");
             return;
         };
         let Some(body) = prog.body(entry) else {
+            info!("interval-ai: declining — entry has no body");
             return;
         };
         if !body.is_fully_lifted() {
+            info!("interval-ai: declining — entry not fully lifted");
             return;
         }
         if body_uses_long_types(body) {
+            info!("interval-ai: declining — entry uses long");
             return;
         }
 
@@ -656,17 +660,25 @@ impl Engine for AiEngine {
             if complete {
                 self.discharge_obligations(entry, &reached, bb, body, prog);
             } else {
-                debug!(
-                    "interval-ai: float widening incomplete ({} states), skipping discharge",
+                info!(
+                    "interval-ai: declining — float widening incomplete ({} states)",
                     reached.len()
                 );
             }
             return;
         }
 
-        if body_uses_float_types(body) {
-            return;
-        }
+        // A float-typed body without loops is analysed by the ordinary CPA.
+        //
+        // `IState::float_vars` tracks `FloatInterval` and treats a missing
+        // entry as Top, so floats are represented, not ignored. The widening
+        // CPA above exists for float *loops*, where a plain join may not reach
+        // a fixpoint -- without loops the ordinary analysis terminates and
+        // there is nothing to decline for.
+        //
+        // Declining here refused 28 of 172 sampled no-runtime-exception tasks,
+        // and the shape of the guard pair was the tell: the *harder* case (with
+        // loops) was analysed and the easier one was not.
 
         let cpa = IntervalCpa {
             nonnull_fields: self.nonnull_fields.clone(),
