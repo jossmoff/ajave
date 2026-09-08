@@ -3787,3 +3787,54 @@ contribute nothing to this property.
 The lesson for measurement is the general one this file keeps recording: a
 count derived from a log line is a count of *that log line's emission
 condition*. Check it before drawing a conclusion.
+
+## 2026-09-08 — flat array-element nullness: 9 wrong answers, reverted (#96)
+
+The array-contents lever from #95, attempted at its cheapest slice — element
+**nullness**, on the theory that `D[i][j]` only needs `D[i]` non-null and
+`multianewarray` guarantees that (JVMS 6.5).
+
+Built: an `elems_allocated` flag on `Rvalue::NewArray` (true only for
+`multianewarray` with ≥2 dimensions, since `new int[4][]` really *is*
+null-filled); a flat `array_elem_null: BTreeMap<VarId, Nullness>` in the
+interval AI, weak-updated on store and dropped at calls; and a BMC path
+constraint `select(a, i) != 0` on reads from such an array, to avoid a
+quantified `forall i`.
+
+`new int[4][5]` went UNKNOWN → TRUE. Smoke stayed 156 with 0 wrong.
+
+**valid-assert 862 → 734, nine wrong answers.** Reverted in full.
+
+### Both mistakes are worth keeping
+
+**The BMC constraint was false, not merely imprecise.** `D[0] = null` is legal
+Java on a `multianewarray` array. Constraining *every read* to be non-null
+forbids that store, so any path taking it becomes infeasible — and an
+infeasible path proves anything. The JVMS guarantee is about the array's
+**initial** contents; restating it at the use site to dodge the quantifier
+changed the claim into a different, wrong one.
+
+**The AI cell was keyed on the wrong thing.** The existing flat *field*
+abstraction is keyed on `FieldKey` — a global name — so two variables cannot
+denote different cells and a weak update through any of them still weakens the
+one cell. Keying an array cell on `VarId` destroys that: `A = D; A[0] = null;`
+joins into `A`'s cell and leaves `D`'s at `NonNull`, so `D[0]` still reads
+non-null.
+
+The generalisable statement: **the flat field abstraction is sound because
+field cells are named globally, not because flatness is safe.** Arrays are
+reached through aliasing references, so the shape does not transfer. Copying an
+abstraction's structure without copying the argument for its soundness is how
+this failed.
+
+### And the gate that did not fire
+
+Smoke passed the whole way through — 147 tasks with no program that aliases an
+array reference and stores a null through the alias. The full valid-assert run
+caught it. That is the standing rule doing its job, and the reason it exists:
+**a change to what may be discharged is not measured until both properties have
+been run on the corpus.**
+
+Path forward is in #96 and unchanged from #95: the fact is about the array
+*object*, so it needs allocation-site keying plus non-escape, or a real heap
+term threaded through the block predicates.
