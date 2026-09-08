@@ -2,6 +2,47 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-09 — design: the round loop and cursor deltas
+
+Design only, in `docs/plans/resumption.md`. Recorded here because it settles two
+architectural questions the code has been silently answering "no" to.
+
+**Why the two must land together.** `max_rounds = 16` never runs past round 1,
+because every engine sets `done = true` on first entry. `Blackboard::since` —
+documented as what makes an engine removable without the others noticing — has
+exactly one caller, `since(0)`, a `--trace` dump. Neither is an oversight of the
+other: a cursor delta is meaningless to a one-shot engine, and re-entering every
+engine every round is unaffordable without one to say who is worth re-entering.
+
+**Resumption is deepening, not continuation.** `explore_block_until` recurses at
+19 sites over a shared `self` with solver push/pop paired across the recursion;
+a hand-rolled continuation there is the most direct route to the dangling-push
+bug class. Instead: every resumable engine has one bounded, monotone precision
+parameter, and resuming means restarting at the next value. The resumable state
+is an integer, the explorer is untouched, and the re-exploration cost is the
+standard iterative-deepening constant factor. The first entry keeps today's
+parameter, so round 0 is byte-for-byte the current run and every later round is
+strictly additive — which is what makes it measurable against the existing
+baseline rather than confounded with it.
+
+**`Progress::Stalled` was two states.** "Out of time with work outstanding" and
+"out of information" need opposite scheduling, and conflating them is why the
+round loop could not do anything useful. Splitting into `Suspended` / `Blocked`
+is what a cursor is *for*: a `Blocked` engine is re-entered only when something
+in its declared `Interest` has been published.
+
+**One finding while grounding the design.** `Status::Bounded { k }` is a claim
+that the search reached depth k, and `k-induction` turns it into an outright
+discharge on loop-free code. It survives the new wall-clock deadline only by
+nesting — the publish sits inside `!ctx.exhausted && ctx.budget_left()`, so a
+time-truncated pass skips it. Nothing tests that, and the deepening work moves
+exactly this code. A wrong TRUE at −16 sits behind one refactor;
+`bounded_is_not_published_when_the_slice_expired` is written before P4 starts.
+
+Phased P1–P5 with P1–P3 *predicted to measure as zero* — the prediction is the
+test, and a non-zero result means the rename or the allocator changed behaviour
+that was not meant to change.
+
 ## 2026-09-06 — concolic execution, and a scoring comparison that was not like-for-like
 
 ### Evaluation order, not budget, was defeating recursion
