@@ -3682,3 +3682,54 @@ Kept regardless, for a reason that is not "it might help later": the asymmetry
 between the two encoders is itself the defect this file has now recorded three
 times — exceptional edges, the check assumption, and array lengths. Leaving one
 encoder behind is how the next capability silently fails to apply.
+
+## 2026-09-08 — engine census: which engines actually earn their place
+
+Prompted by "could another engine pay like CHC did". The census says the
+premise needs correcting first, and then points somewhere other than an engine.
+
+Over 172 sampled no-runtime-exception tasks:
+
+| engine | ran on | discharged on | obligations | violated on |
+|---|---|---|---|---|
+| interval-ai | 62 | **55 of 57** | 3850 | 0 |
+| smt-bmc | 165 | 30 | 2512 | 13 |
+| chc | 32 | 3 | 33 | 0 |
+| k-induction | 14 | 1 | 28 | 0 |
+| smt-bmc-fpa | 29 | 0 | 0 | 0 |
+| imc | 2 | 0 | 0 | 0 |
+| cegar | **0** | — | — | — |
+
+**Attribution correction.** The session's gains were not mostly CHC. The CHC
+engine work is NRE +10 / valid-assert −7. The two ~+20 steps were the
+**interval AI plus the JDK contract surface** — a caught exception is never
+null, `System.out` is non-null in a program that never reassigns it, and
+contracts stating *when* a library method throws instead of vetoing the
+program. That is roughly ten times what the CHC encoding itself returned.
+
+**What actually pays** is not "fix an engine" but *find where the portfolio
+structurally refuses work it could already do*. Four instances this session,
+each measured:
+
+- CHC's obligation filter admitted only `Assertion`, making it absent from the
+  entire no-runtime-exception property.
+- `System.out` had no nullness, so every `println` receiver stayed unproven.
+- The unmodelled-library-call gate vetoed programs instead of seeding the
+  preconditions it already knew how to seed.
+- The interval AI declined float bodies **without** loops while analysing those
+  with them — the harder case admitted, the easier refused.
+
+**Why the inert engines are not obviously next.** `cegar` skips 109 of 121 on
+one guard, which is the CHC shape exactly — but that guard carries a real
+soundness argument: predicate abstraction over unconstrained heap values
+collapses to Top, and a Top state makes the safety check trivially succeed.
+Removing it needs the abstraction to handle Top correctly, which is work, not a
+filter fix. `imc` runs on 1 of 121 and is effectively dead.
+
+More importantly, both are Over engines aimed at obligations `interval-ai` and
+`chc` already attempt. Unlocking them **competes** rather than adds. CHC was the
+exception because no engine capable of those obligations was being offered
+them at all.
+
+So the ranked opportunity is unchanged: **heap contents (#95)** gates ~60 of 80
+tasks and is a capability every Over engine needs, not an engine to revive.
