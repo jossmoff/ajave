@@ -336,3 +336,60 @@ allocator changed behaviour that was not supposed to change.
 - **Re-enabling `AJAVE_ASK`.** Resumption makes the query loop cheaper — an
   unanswered query is exactly a `Blocked` engine waiting on `Interest::LEMMA` —
   but turning it on is a separate measurement.
+
+---
+
+## 10. As built
+
+Implemented on `feat/resumption`. Five things came out differently, and each was
+a measurement rather than a change of mind.
+
+**The resumable parameter is the work scale, not depth.** §4 named `max_depth`
+as `smt-bmc`'s parameter on the strength of the textbook algorithm. Sampling the
+tasks that actually truncate shows `handle_branch_fork` exhausting `MAX_FORKS`
+with `max_depth` nowhere near — `SatAckermann01` cuts at 500 forks and 1414
+block visits. Deepening on depth would re-run an identical exploration and stop
+in an identical place. The parameter is now a per-instance multiplier on
+`MAX_FORKS`/`MAX_SOLVER_CALLS`/`MAX_BLOCK_VISITS`, doubling to a ceiling of 8.
+
+**Round 0 keeps the flat cap.** §6 derived every engine's share from
+`round_share`. Measured, that gave thirteen live engines 0.088 of the remainder
+apiece where they used to get 0.6 — a different first round, and therefore a
+baseline that predicts nothing. The zero-regression rule §4 states for deepening
+applies to the allocator for the same reason, so `slice_share` returns
+`engine_cap` in round 0 and the geometry starts at round 1.
+
+**`RESUME_HEADROOM` is the guard that makes any of this affordable, and the
+design did not anticipate it.** The obvious condition — resume unless the clock
+has already expired — was the first thing written and measured 6x to 20x on
+individual smoke tasks (`BellmanFord-MemUnsat01` 11s → 72s) for one point. A
+pass entered with 40% of a slice left costs at least twice what the first 60%
+did, because the bound doubles *and* the restart repeats the prefix; it
+truncates, and reports nothing for the whole of it. A deeper pass now starts
+only with room to finish: `left >= 2 × spent`.
+
+**Three engines declare no resumable parameter.** §8 listed `k-induction`,
+`imc`, `chc` and `interval-ai` for P5. Only two have one. `imc`'s
+`MAX_ITERATIONS` bounds a fixpoint that converges or does not, so raising it
+spends longer failing. `cegar` refines on counterexamples, not on a bound.
+`interval-ai` reaches its fixpoint in milliseconds and is never the engine
+holding the clock. `Suspended` is a promise of progress, and an engine that
+cannot keep it should not make it — declaring one for symmetry would be exactly
+the ceremony this document exists to remove.
+
+**A second lying comment, alongside the one in §4.** `chc::solver_timeout_secs`
+documented itself as "a slice of the remaining budget rather than the whole of
+it". It was a flat ten seconds, and the engine took `_budget` and dropped it —
+which is why a task given a 295-second deadline was still running at 400. The
+deadline shipped in `8c9d53a` only ever bound the two engines that read their
+budget. It is now derived from the slice, and the CHC engine resumes when Spacer
+answers `unknown` inside its bound and there is room for a doubled query.
+
+### Pre-existing: the smoke baseline is stale
+
+`--check` reports three failures — `AbstractSerializationStreamReader_false`,
+`SatAckermann01`, `SatFibonacci01`. All three reproduce identically on the
+pre-change binary, with identical wall times, so they belong to a commit between
+`08b1b5b` (where the baseline was last recorded) and `HEAD`. Re-baselining would
+bake them in, which `justfile` warns about at the recipe; they want bisecting
+first.
