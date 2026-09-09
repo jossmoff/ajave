@@ -188,6 +188,12 @@ impl Engine for Concolic {
         Direction::Under
     }
 
+    /// Alternates concrete runs with path-condition flips, entirely from the
+    /// program.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -282,7 +288,7 @@ impl Engine for Concolic {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

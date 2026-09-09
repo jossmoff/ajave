@@ -61,6 +61,15 @@ impl Engine for CegarEngine {
         Direction::Over
     }
 
+    /// The open set decides the abstraction's target.
+    /// No resumable parameter, deliberately. Refinement here is driven by
+    /// spurious counterexamples, not by a bound that can be raised — when it
+    /// declines, it is because the body's shape defeats the predicate
+    /// abstraction, and more time does not change a shape.
+    fn interest(&self) -> Interest {
+        Interest::STATUS
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -80,7 +89,7 @@ impl Engine for CegarEngine {
         };
 
         if !body.is_fully_lifted() {
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         // CEGAR uses predicate abstraction (CPA-based reachability), not SMT
@@ -92,7 +101,7 @@ impl Engine for CegarEngine {
         // CEGAR's abstract interpretation can lose safety-critical information.
         if body_uses_havoced_ops(body) {
             debug!("cegar: {} uses havoced ops, skipping", entry);
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         let open: Vec<ObligationRef> = bb
@@ -142,7 +151,7 @@ impl Engine for CegarEngine {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

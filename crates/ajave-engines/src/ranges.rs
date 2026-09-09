@@ -232,6 +232,13 @@ impl Engine for Ranges {
         Direction::Over
     }
 
+    /// An answerer has nothing to do until somebody asks. This is the engine
+    /// whose `step` already says so in a comment; declaring it is what turns
+    /// that comment into scheduling.
+    fn interest(&self) -> Interest {
+        Interest::QUERY
+    }
+
     fn step(&mut self, _prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         let asked: Vec<(u32, Expr, Vec<Expr>, Want)> = bb
             .unanswered()
@@ -248,7 +255,7 @@ impl Engine for Ranges {
             //
             // "Nothing to do yet" and "nothing to do ever" are different
             // answers, and only the engine knows which it means.
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         let mut advanced = false;
@@ -301,7 +308,7 @@ impl Engine for Ranges {
             info!("ranges: answered {} query(ies)", self.answered.len());
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

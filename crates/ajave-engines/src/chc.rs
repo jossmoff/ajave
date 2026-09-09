@@ -27,6 +27,9 @@ use log::{debug, info, trace, warn};
 pub struct ChcEngine {
     solver_binary: String,
     done: bool,
+    /// Multiplier on the per-query solver bound. This engine's resumable
+    /// precision parameter — see `CHC_TIMEOUT_SCALE_CEILING`.
+    timeout_scale: u32,
 }
 
 impl Default for ChcEngine {
@@ -41,6 +44,7 @@ impl ChcEngine {
         ChcEngine {
             solver_binary: binary,
             done: false,
+            timeout_scale: 1,
         }
     }
 
@@ -63,7 +67,14 @@ impl Engine for ChcEngine {
         Direction::Over
     }
 
-    fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
+    /// A shrinking open set is its only lever — an obligation another engine
+    /// closed is one fewer clause in the query, and that is sometimes the
+    /// difference between `unknown` and `unsat`.
+    fn interest(&self) -> Interest {
+        Interest::STATUS
+    }
+
+    fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
         }
@@ -92,7 +103,7 @@ impl Engine for ChcEngine {
         };
 
         if !body.is_fully_lifted() {
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         // CHC's LIA encoding only models integer arithmetic, not heap/arrays.
@@ -168,7 +179,7 @@ impl Engine for ChcEngine {
             .any(|mk| prog.body(mk).is_some_and(body_uses_float_types));
         if uses_float && !prog_has_resolvable_calls(prog, entry) {
             info!("chc: skipping — float/double arithmetic, and no LIA encoding applies");
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
         // Skip if any reachable method has calls to non-Verifier library methods
         // without bodies. These become havoced (unconstrained) in the LIA encoding,
@@ -311,8 +322,15 @@ impl Engine for ChcEngine {
         trace!("chc: encoding:\n{}", &smt2[..smt2.len().min(4000)]);
 
         let mut advanced = false;
-        match run_chc_solver(&self.solver_binary, &smt2, &obs) {
-            Ok(results) => {
+        let mut last_outcome = ChcOutcome::Unknown;
+        match run_chc_solver(
+            &self.solver_binary,
+            &smt2,
+            &obs,
+            solver_timeout_secs(&budget, self.timeout_scale),
+        ) {
+            Ok((results, outcome)) => {
+                last_outcome = outcome;
                 for (oref, safe) in results {
                     if safe {
                         debug!("chc: discharged {}", oref);
@@ -346,10 +364,38 @@ impl Engine for ChcEngine {
             }
         }
 
+        // A `unknown` is a query that ran out of `-T`, and it is the one CHC
+        // outcome a second attempt can change. Resuming doubles the bound,
+        // which is still clamped by whatever time is actually left — so this
+        // spends the tail of a task nobody else wanted rather than taking time
+        // from the engines ahead.
+        //
+        // The headroom test matters as much as the outcome test: doubling the
+        // bound means the next query may run twice as long, and starting one
+        // that the deadline will cut in the middle spends the time and reports
+        // nothing.
+        let next_query = std::time::Duration::from_secs(
+            (solver_timeout_secs(&budget, self.timeout_scale) * 2) as u64,
+        );
+        if last_outcome == ChcOutcome::Unknown
+            && self.timeout_scale < CHC_TIMEOUT_SCALE_CEILING
+            && budget.deadline.is_none_or(|d| {
+                d.saturating_duration_since(std::time::Instant::now()) >= next_query
+            })
+        {
+            self.timeout_scale *= 2;
+            self.done = false;
+            debug!(
+                "chc: solver gave up inside its bound; resuming at {}x",
+                self.timeout_scale
+            );
+            return Progress::Suspended;
+        }
+
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }
@@ -360,17 +406,42 @@ impl Engine for ChcEngine {
 
 /// Returns true if the body uses array or heap operations that CHC's LIA
 /// encoding cannot model: array load/store/new, field get/put, instanceof.
-/// Seconds Spacer may spend on one query.
-///
-/// CHC runs late in the portfolio, so this is a slice of the remaining budget
-/// rather than the whole of it: a proof needing longer is one the other engines
-/// have already failed to find, and spending the task's whole budget on it
-/// costs the answers they would have produced.
-fn solver_timeout_secs() -> u32 {
+/// Ceiling on the seconds Spacer may spend on one query.
+fn solver_timeout_cap() -> u32 {
     std::env::var("AJAVE_CHC_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10)
+}
+
+/// Seconds Spacer may spend on one query, given this step's slice.
+///
+/// The doc comment on the constant this replaced said it was "a slice of the
+/// remaining budget rather than the whole of it". It was not — it was a flat
+/// ten seconds, and the engine took `_budget` and dropped it. That is the shape
+/// `CLAUDE.md` calls out under "comments asserting invariants the code does not
+/// maintain", and it is why a task with a 295-second deadline was still running
+/// after 400: the deadline only ever bound the two engines that read it.
+///
+/// The cap still applies. A proof needing longer than that is one the earlier
+/// engines have already failed to find, and spending the rest of the task on it
+/// costs the answers they would have produced.
+/// How far the per-query bound may be raised across resumptions. Bounded
+/// because `Progress::Suspended` promises it terminates without a deadline.
+const CHC_TIMEOUT_SCALE_CEILING: u32 = 4;
+
+fn solver_timeout_secs(budget: &Budget, scale: u32) -> u32 {
+    let cap = solver_timeout_cap() * scale;
+    match budget.deadline {
+        // At least a second: Spacer given zero would answer nothing at all,
+        // and a step that cannot answer should not have been entered.
+        Some(d) => cap.min(
+            d.saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .max(1) as u32,
+        ),
+        None => cap,
+    }
 }
 
 // Nested deliberately: the outer match is on the IR node and the inner on
@@ -2264,11 +2335,31 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 ///
 /// A `sat` answer means no obligation in the batch is violated: the encoding
 /// routes them all to one `error` predicate, so they are proved together.
+/// What Spacer said, as distinct from what we concluded.
+///
+/// `Unknown` is the arm that matters for scheduling: it is the only outcome a
+/// longer query can change, so it is the only one worth resuming for.
+/// Collapsing it into "not safe" is what made the engine's timeout constant
+/// unfalsifiable — a query that ran out of time and one that proved the error
+/// reachable produced the same empty result.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ChcOutcome {
+    /// `sat` in CHC mode: the error predicate is unreachable.
+    Safe,
+    /// `unsat`: the error predicate is derivable. CHC is an Over engine, so
+    /// this is not ours to publish as a violation — an over-approximating
+    /// counterexample may be spurious.
+    Unsafe,
+    /// The solver gave up, almost always on `-T`.
+    Unknown,
+}
+
 fn run_chc_solver(
     binary: &str,
     smt2: &str,
     obligations: &[ObligationRef],
-) -> Result<Vec<(ObligationRef, bool)>, String> {
+    timeout_secs: u32,
+) -> Result<(Vec<(ObligationRef, bool)>, ChcOutcome), String> {
     let mut child = Command::new(binary)
         .args([
             "-in",
@@ -2279,7 +2370,7 @@ fn run_chc_solver(
             // saw a program hard enough to hang on. It is a latent hazard the
             // guard was hiding, not a consequence of it: any future encoding
             // work makes it reachable immediately.
-            &format!("-T:{}", solver_timeout_secs()),
+            &format!("-T:{}", timeout_secs),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2308,8 +2399,12 @@ fn run_chc_solver(
 
     // In CHC mode: `sat` means error is unreachable (safe), `unsat` means reachable (unsafe).
     match result_line {
-        "sat" => Ok(obligations.iter().map(|o| (o.clone(), true)).collect()),
-        _ => Ok(vec![]),
+        "sat" => Ok((
+            obligations.iter().map(|o| (o.clone(), true)).collect(),
+            ChcOutcome::Safe,
+        )),
+        "unsat" => Ok((vec![], ChcOutcome::Unsafe)),
+        _ => Ok((vec![], ChcOutcome::Unknown)),
     }
 }
 
@@ -2779,7 +2874,9 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let proved = run_chc_solver("z3", &smt2, &refs).unwrap_or_default();
+        let proved = run_chc_solver("z3", &smt2, &refs, solver_timeout_cap())
+            .map(|(p, _)| p)
+            .unwrap_or_default();
         assert!(
             proved.is_empty(),
             "CHC proved `inc(n) > n`, which fails at Integer.MAX_VALUE. That is \

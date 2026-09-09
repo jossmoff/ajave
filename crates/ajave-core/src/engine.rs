@@ -5,17 +5,38 @@
 //! the portfolio schedulable and makes any engine removable without the others
 //! noticing.
 
-use crate::artifact::{Direction, EngineId};
+use crate::artifact::{Direction, EngineId, Interest};
 use crate::blackboard::Blackboard;
 use ajave_ir::Program;
 
 /// What a `step` achieved. The orchestrator schedules on this.
+///
+/// The three-way version of this enum had one arm, `Stalled`, meaning "ran,
+/// learned nothing, but could do more with a bigger budget" — which is two
+/// states wearing one name. An engine that stopped on the clock with work
+/// outstanding wants a fresh slice immediately and needs no new information; an
+/// engine that ran out of *information* wants to be left alone until its inputs
+/// change. They want opposite scheduling, and conflating them is why the round
+/// loop could never do anything useful: every engine also set `done = true`
+/// before returning `Stalled`, so the only honest reading was the second.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Progress {
     /// Published something new.
     Advanced,
-    /// Ran, learned nothing, but could do more with a bigger budget.
-    Stalled,
+    /// Stopped on the clock with work outstanding. Re-entering with a fresh
+    /// slice makes strictly more progress on the *same* inputs, so the
+    /// scheduler re-enters without waiting for anything to change.
+    ///
+    /// **Contract.** An engine may return this only if its next entry runs at a
+    /// strictly higher setting of a *bounded* precision parameter. That is what
+    /// makes the loop terminate when there is no deadline, which is how every
+    /// unit test and most `just` recipes invoke the tool. An engine that
+    /// suspends without advancing anything would otherwise spin to
+    /// `max_rounds` on every task.
+    Suspended,
+    /// Ran, learned nothing, and more time alone will not help. Re-entered only
+    /// once something matching `interest()` has been published.
+    Blocked,
     /// Will never publish again. The orchestrator retires it.
     Exhausted,
 }
@@ -64,6 +85,22 @@ pub trait Engine {
 
     /// Called once before scheduling begins.
     fn init(&mut self, _prog: &Program, _bb: &mut Blackboard) {}
+
+    /// What this engine reads from the blackboard.
+    ///
+    /// A `Progress::Blocked` engine is re-entered only once an artifact
+    /// matching this set has been published since its last step. The default is
+    /// the widest set because under-declaring loses answers silently while
+    /// over-declaring costs one wasted step — the same asymmetry `Approximations`
+    /// is governed by.
+    ///
+    /// Declaring `Interest::NOTHING` says the engine works from the program
+    /// alone. That is true of every under-approximating engine here, and it is
+    /// what lets the round loop skip them instead of paying for a step that
+    /// re-derives the same answer.
+    fn interest(&self) -> Interest {
+        Interest::ANY
+    }
 
     /// Do a bounded slice of work. Engines read deltas via their own cursor
     /// into the blackboard, so they pick up other engines' artifacts without

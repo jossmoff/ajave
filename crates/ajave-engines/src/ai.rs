@@ -604,6 +604,17 @@ impl Engine for AiEngine {
         Direction::Over
     }
 
+    /// Which obligations are still open decides what the fixpoint is asked
+    /// to prove, and it is the only thing this reads from the board.
+    /// No resumable parameter, deliberately. `widen_delay` is the obvious
+    /// candidate and the wrong one: this engine reaches its fixpoint in
+    /// milliseconds on essentially every task, so it is never the engine
+    /// holding the clock, and a later widening buys precision on loops where
+    /// the interval domain has already lost the property for other reasons.
+    fn interest(&self) -> Interest {
+        Interest::STATUS
+    }
+
     /// Runs the interval analysis at init time to publish hints for BMC and
     /// other engines. The discharge logic runs later in `step()`.
     fn init(&mut self, prog: &Program, bb: &mut Blackboard) {
@@ -823,7 +834,7 @@ impl Engine for AiEngine {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

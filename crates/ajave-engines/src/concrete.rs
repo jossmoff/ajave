@@ -1316,6 +1316,12 @@ impl Engine for Concrete {
         Direction::Under
     }
 
+    /// Runs the program. What the board says about an obligation does not
+    /// change what an execution does.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -1362,7 +1368,7 @@ impl Engine for Concrete {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

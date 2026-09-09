@@ -1089,6 +1089,11 @@ impl Engine for ConcurrencyEngine {
         Direction::Under
     }
 
+    /// Enumerates interleavings of the program's own threads.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
+    }
+
     fn step(&mut self, prog: &Program, _bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -1105,7 +1110,7 @@ impl Engine for ConcurrencyEngine {
                 // between "no bug here" and "we did not look", and that
                 // distinction should be visible without -vv.
                 info!("concurrency: declining to analyse — {why}");
-                Progress::Stalled
+                Progress::Blocked
             }
             Ok(entries) => {
                 info!(
@@ -1157,7 +1162,7 @@ impl Engine for ConcurrencyEngine {
                         if published.is_ok() {
                             Progress::Advanced
                         } else {
-                            Progress::Stalled
+                            Progress::Blocked
                         }
                     }
                     // Same reasoning as a deadlock: a race is not a violation
@@ -1179,7 +1184,7 @@ impl Engine for ConcurrencyEngine {
                              (not a violation of either scored property)",
                             schedule.len()
                         );
-                        Progress::Stalled
+                        Progress::Blocked
                     }
                     // DRF-SC (JLS 17.4.5): a program whose executions are all
                     // sequentially consistent is exactly a data-race-free one.
@@ -1242,12 +1247,12 @@ impl Engine for ConcurrencyEngine {
                         if advanced {
                             Progress::Advanced
                         } else {
-                            Progress::Stalled
+                            Progress::Blocked
                         }
                     }
                     Exploration::Incomplete(why) => {
                         info!("concurrency: exploration incomplete — {why}");
-                        Progress::Stalled
+                        Progress::Blocked
                     }
                 }
             }

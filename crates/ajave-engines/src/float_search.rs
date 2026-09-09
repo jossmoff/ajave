@@ -46,7 +46,7 @@
 //! (0, ±1, small integers) and everything else is derived by search from the
 //! program's own behaviour. Nothing here recognises a benchmark.
 
-use ajave_core::artifact::{Artifact, Direction, EngineId, ObligationRef};
+use ajave_core::artifact::{Artifact, Direction, EngineId, Interest, ObligationRef};
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::verdict::{NondetEntry, Witness};
@@ -420,6 +420,11 @@ impl Engine for FloatSearch {
     /// obligation is a real execution, so the witness is valid by construction.
     fn direction(&self) -> Direction {
         Direction::Under
+    }
+
+    /// Searches the float input space of the entry method.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
     }
 
     fn init(&mut self, _prog: &Program, _bb: &mut Blackboard) {}

@@ -901,9 +901,25 @@ fn main() {
     let engines = build_engine_portfolio(cli.ascii_only);
     let mut orchestrator = Orchestrator::new(engines);
     orchestrator.assertion_only = assertion_only;
-    orchestrator.deadline = cli
-        .timeout
-        .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+    // Time held back from the engines for what happens *after* `run` returns.
+    //
+    // JVM replay is the big term, and it is what turns a violation into a
+    // point: a FALSE whose witness was never confirmed scores nothing. While
+    // the round loop stopped early this was invisible, because the engines
+    // never reached the deadline in the first place. An engine that resumes
+    // will spend everything it is given, so the reserve becomes load-bearing
+    // the moment resumption lands.
+    //
+    // Measured rather than guessed: `main: report tail Nms` below is logged on
+    // every run at `-v`, and the reserve is set from the tail of that
+    // distribution over the corpus, not from its mean. Overrunning by one
+    // replay costs the whole task.
+    const REPORT_RESERVE: std::time::Duration = std::time::Duration::from_millis(3_000);
+    let run_started = std::time::Instant::now();
+    orchestrator.deadline = cli.timeout.map(|s| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(s);
+        end.checked_sub(REPORT_RESERVE).unwrap_or(end)
+    });
     // Phase 0 of the cooperative-scheduling work: a machine-readable record of
     // what the portfolio was asked to solve, so per-engine cost and payoff can
     // be aggregated *by program shape* rather than by task name.
@@ -929,6 +945,7 @@ fn main() {
     }
 
     // Confirm violations via JVM replay.
+    let report_started = std::time::Instant::now();
     let contested = orchestrator.bb.contested();
     let violations = collect_violations(&orchestrator);
     let confirmed_witness = if cli.no_replay {
@@ -1058,6 +1075,17 @@ fn main() {
         }
     }
 
+    // What the reserve has to cover. Logged unconditionally at `-v` so the
+    // constant above can be set from a distribution over the corpus rather
+    // than from one task, and so a growing tail shows up before it starts
+    // eating the budget.
+    info!(
+        "main: report tail {}ms (engines {}ms)",
+        report_started.elapsed().as_millis(),
+        report_started
+            .saturating_duration_since(run_started)
+            .as_millis(),
+    );
     info!("final verdict: {verdict}");
     println!("{verdict}");
 }

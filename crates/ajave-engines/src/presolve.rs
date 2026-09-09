@@ -40,6 +40,12 @@ impl Engine for Presolve {
         Direction::Over
     }
 
+    /// Constant folding over the program text. Nothing another engine
+    /// publishes changes what a constant evaluates to.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -82,7 +88,7 @@ impl Engine for Presolve {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }
