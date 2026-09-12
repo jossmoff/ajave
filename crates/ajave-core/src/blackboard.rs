@@ -284,13 +284,29 @@ impl Blackboard {
 
     /// Everything published at or after `cursor`. Engines keep their own cursor
     /// so they can be added, removed or restarted without coordination.
+    ///
+    /// `partition_point`, not a linear `position`: sequence numbers are
+    /// assigned monotonically by `publish`, so the log is sorted by `seq` by
+    /// construction. Irrelevant while this had one caller per run; the round
+    /// loop calls it rounds x engines times.
     pub fn since(&self, cursor: u64) -> &[Tagged] {
-        let start = self
-            .log
-            .iter()
-            .position(|t| t.seq >= cursor)
-            .unwrap_or(self.log.len());
+        let start = self.log.partition_point(|t| t.seq < cursor);
         &self.log[start..]
+    }
+
+    /// Whether anything matching `interest` was published at or after `cursor`.
+    ///
+    /// The scheduler's re-entry test, and the first real consumer of the delta
+    /// log. It asks the *log* rather than the engines, which is what the
+    /// comment at the top of this file means by an engine being removable
+    /// without the others noticing.
+    pub fn changed_since(&self, cursor: u64, interest: Interest) -> bool {
+        if interest.is_nothing() {
+            return false;
+        }
+        self.since(cursor)
+            .iter()
+            .any(|t| t.artifact.interest().intersects(interest))
     }
 
     pub fn head(&self) -> u64 {

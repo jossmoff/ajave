@@ -110,13 +110,28 @@ const MAX_FORKS: u32 = 500;
 /// Lifting `FdLibm` would qualify; a range table does not. Kept behind this
 /// flag so the next answerer has somewhere to plug in, and so the measurement
 /// can be repeated rather than re-argued.
+/// Whether this engine posts `Query`s about calls it cannot model.
+///
+/// On by default since 2026-09-10. It was off because it had been measured as
+/// costing a task and gaining none, and that measurement was taken when the
+/// only re-entry available was a hand-rolled latch: the engine cleared `done`
+/// and returned `Stalled`, which the scheduler read as "run again next round"
+/// whether or not anybody had answered. The common case was therefore a second
+/// full exploration against an unchanged board.
+///
+/// `Blocked` plus `Interest::LEMMA` removes exactly that. Re-measured on the
+/// full corpus at a 60s budget: valid-assert 870 against 870, no-runtime-exception
+/// 1183 against 1183, timeouts identical on both, no wrong answers. Free, and
+/// strictly more capable — `benchmarks/ajave/engine-cooperation/SinBoundNeedsAnAnswer`
+/// is TRUE with it and UNKNOWN without.
+///
+/// Neutral on this corpus is not the same as neutral in general, and the
+/// direction of the difference is worth naming: an unmodelled library call is
+/// rare in SV-COMP and ordinary in real Java, so the population this helps is
+/// under-represented in what we score on. `AJAVE_ASK=0` turns it off.
 pub fn asking_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("AJAVE_ASK")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
+    *ON.get_or_init(|| std::env::var("AJAVE_ASK").as_deref() != Ok("0"))
 }
 
 fn budget_scale() -> u64 {
@@ -284,6 +299,104 @@ impl Completeness {
 /// Exceptional successors count as edges. Handler code is reachable from a
 /// block that can throw, and a claim of having covered everything must include
 /// it.
+/// Whether a stopped run is entitled to publish `Status::Bounded { k }`.
+///
+/// `Bounded { k }` is a claim that the search **reached** depth k, and
+/// `k-induction` acts on it: when nothing reachable has a back-edge it
+/// discharges the obligation outright. So a run that stopped for a reason
+/// other than depth has no bounded result to report, and saying it does turns
+/// a search that never happened into a proof — a wrong TRUE at -16.
+///
+/// The four conditions, and which failure each rules out:
+///
+/// * `!exhausted` and `budget_left` — the run stopped on *depth*, not on the
+///   wall clock or a fork/solver-call cap. This is the one the process
+///   deadline made reachable: before `8c9d53a` a slice could not expire
+///   mid-run, and afterwards it can. It held only because the publish
+///   happened to sit inside an `if ... ctx.budget_left()`, which is an
+///   invariant maintained by nesting and by nothing else.
+/// * `!all_paths_complete` — a complete search is discharged outright and has
+///   no need of a bounded status.
+/// * `violations_empty` — a bounded status is evidence only when the search
+///   was clean; alongside a violation it says nothing a consumer may use.
+///
+/// A named predicate rather than an enclosing `if`, because the caller is
+/// exactly the code an iterative-deepening pass has to restructure, and
+/// `CLAUDE.md` asks that a soundness argument stated in a comment have a test
+/// named after it. See `bounded_is_not_published_when_the_slice_expired`.
+/// How far this engine's work bounds may be raised across resumptions.
+///
+/// Bounded because `Progress::Suspended` promises it: a strictly increasing but
+/// unbounded parameter never reaches `Exhausted`, and a run without
+/// `--timeout` — every unit test, most `just` recipes — has no deadline to stop
+/// it. Three doublings takes `MAX_FORKS` from 500 to 4000.
+const SCALE_CEILING: u64 = 8;
+
+/// Whether a finished pass should be resumed at a higher work bound.
+///
+/// Iterative deepening, with the parameter chosen from what actually binds. On
+/// the tasks that truncate, `handle_branch_fork` exhausts `MAX_FORKS` while
+/// `max_depth` is nowhere near — so deepening on depth would re-run an
+/// identical exploration and stop in an identical place.
+///
+/// `clock_expired` is the interesting condition. A pass cut short by its
+/// *slice* has not established that its bounds were too small, and resuming it
+/// at a higher bound re-runs the same prefix with less time than it had the
+/// first time. The counters are the only cut that resumption can answer.
+///
+/// Note what this does *not* claim: the previously-recorded result that a
+/// larger BMC budget converts nothing still stands, and it was measured by
+/// raising `AJAVE_BMC_SCALE` for the whole run. The difference here is that the
+/// larger bound is paid for out of time nobody else wanted, after every other
+/// engine has had its slice — not taken from them up front.
+fn should_resume_deeper(
+    all_paths_complete: bool,
+    exhausted: bool,
+    scale: u64,
+    anything_open: bool,
+    spent: std::time::Duration,
+    left: Option<std::time::Duration>,
+) -> bool {
+    if !ajave_core::engine::resumption_enabled()
+        || all_paths_complete
+        || exhausted
+        || !anything_open
+        || scale >= SCALE_CEILING
+    {
+        return false;
+    }
+    match left {
+        // Doubling the bound roughly doubles the work, and the restart repeats
+        // the prefix as well, so a pass that cost `spent` will cost at least
+        // that much again. Entering one with less than that on the clock buys a
+        // second truncation and throws away the first result's time.
+        Some(left) => left >= spent.mul_f64(RESUME_HEADROOM),
+        // No deadline: bounded by SCALE_CEILING, per the `Suspended` contract.
+        None => true,
+    }
+}
+
+/// How much of the pass just finished must still be on the clock before a
+/// deeper one is worth starting.
+///
+/// The first version of this guard asked only whether the clock had *expired*,
+/// which is a different question and a much weaker one: with 40% of a slice
+/// left it would start a pass costing twice the 60% already spent, truncate it,
+/// and report nothing for the whole of it. Measured on the smoke set that was
+/// 6x to 20x on individual tasks — `BellmanFord-MemUnsat01` 11s to 72s — for
+/// one point. Two, and not one, because the restart repeats the prefix on top
+/// of the doubled bound.
+const RESUME_HEADROOM: f64 = 2.0;
+
+fn may_publish_bounded(
+    exhausted: bool,
+    budget_left: bool,
+    all_paths_complete: bool,
+    violations_empty: bool,
+) -> bool {
+    !exhausted && budget_left && !all_paths_complete && violations_empty
+}
+
 fn obligations_at_risk(
     prog: &Program,
     cut_points: &BTreeSet<(MethodKey, BlockId)>,
@@ -418,6 +531,16 @@ pub struct SmtBmc {
     pub fp_arith: bool,
     factory: Box<dyn SolverFactory>,
     max_depth: u32,
+    /// Multiplier on this instance's work bounds — `MAX_FORKS`,
+    /// `MAX_SOLVER_CALLS`, `MAX_BLOCK_VISITS`.
+    ///
+    /// This engine's resumable precision parameter, and per-instance rather
+    /// than the process-global `budget_scale()` because resuming means raising
+    /// it. Depth would be the textbook choice, and it is the wrong one here:
+    /// sampling the tasks that truncate shows `handle_branch_fork` hitting
+    /// `MAX_FORKS` long before `max_depth` binds, so deepening on depth would
+    /// re-run an identical exploration and stop in an identical place.
+    scale: u64,
     done: bool,
     /// Constrain nondet char to ASCII (0-127). Prevents witnesses with
     /// non-ASCII chars that our Character method encodings can't model,
@@ -425,12 +548,6 @@ pub struct SmtBmc {
     pub ascii_only: bool,
     /// Queries this engine posted and has not yet consumed answers for.
     asked: Vec<u32>,
-    /// Whether a further pass is permitted once questions have been answered.
-    ///
-    /// Bounded at one. The point is to act on something learned, not to
-    /// iterate — and the budget sweep settled that more of the same effort
-    /// converts nothing, so an unbounded loop would buy only wall time.
-    may_reenter: bool,
 }
 
 impl SmtBmc {
@@ -439,10 +556,10 @@ impl SmtBmc {
             fp_arith: encode::fp_arith_default(),
             factory,
             max_depth,
+            scale: budget_scale(),
             done: false,
             ascii_only: false,
             asked: Vec::new(),
-            may_reenter: true,
         }
     }
 }
@@ -471,7 +588,22 @@ impl Engine for SmtBmc {
         Direction::Under
     }
 
+    /// Two things, both published by other engines and both acted on inside
+    /// `step`: answers to the questions this engine posts about unmodelled
+    /// calls, and the interval hints `interval-ai` publishes, which prune
+    /// infeasible regions before a single solver call is made.
+    ///
+    /// Deliberately not `STATUS`. A closed obligation is one fewer thing to
+    /// check, but it does not make any path this engine could not explore
+    /// explorable, so waking on it would buy a re-exploration and nothing else.
+    fn interest(&self) -> Interest {
+        Interest::LEMMA.union(Interest::PRECISION)
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
+        // What this pass costs, which is the best available estimate of what a
+        // deeper one would cost. Read by `should_resume_deeper` at the end.
+        let step_started = std::time::Instant::now();
         if self.done {
             return Progress::Exhausted;
         }
@@ -581,6 +713,7 @@ impl Engine for SmtBmc {
             solver_calls: 0,
             exhausted: false,
             deadline: budget.deadline,
+            scale: self.scale,
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
@@ -743,10 +876,17 @@ impl Engine for SmtBmc {
         // below, so a more faithful engine can ask for these obligations back.
         let approximated = ctx.approximated;
 
+        // Why this pass stopped, captured while `ctx` is still alive. The
+        // resumption decision at the end of `step` needs all three, and needs
+        // to tell a counter cut from a clock cut — only the first is something
+        // a larger bound can answer.
+        let all_paths_complete = ctx.completeness.all_paths_complete;
+        let was_exhausted = ctx.exhausted;
+
         // Post the questions raised on the way. A query costs nothing and
         // commits to nothing, so there is no reason to be sparing — but an
         // engine that asks and never returns has wasted the answer, which is
-        // why `may_reenter` exists below.
+        // what the `Blocked` return below is for.
         let pending = std::mem::take(&mut ctx.pending_queries);
         let asked_now = !pending.is_empty() && asking_enabled();
         if asked_now {
@@ -910,7 +1050,12 @@ impl Engine for SmtBmc {
                     elsewhere
                 );
             }
-            if !ctx.completeness.all_paths_complete && violations_empty {
+            if may_publish_bounded(
+                ctx.exhausted,
+                ctx.budget_left(),
+                ctx.completeness.all_paths_complete,
+                violations_empty,
+            ) {
                 // Bounded publishing only when no violations at all
                 // (conservative: bounded status is only useful when clean).
                 // Also skip obligations that had a tainted-path violation
@@ -953,31 +1098,69 @@ impl Engine for SmtBmc {
             }
         }
 
-        // Having asked something, come back once to act on the answer. This is
-        // the one place the portfolio is re-entrant, and it is re-entrancy for
-        // *learning* rather than for more effort — the budget sweep settled
-        // that a bigger budget alone converts nothing.
+        // Having asked something, come back to act on the answer.
+        //
+        // This used to be the one place the portfolio was re-entrant, and it
+        // was hand-rolled: clear `done`, latch `may_reenter` so it could happen
+        // at most once, and return `Stalled` — which the old scheduler read as
+        // "run again next round" regardless of whether anybody had answered. So
+        // the common case was a second full exploration against an unchanged
+        // board.
+        //
+        // `Blocked` plus `Interest::LEMMA` says the same thing to a scheduler
+        // that can act on it: re-enter when an answer lands, and not before.
+        // The latch goes with it — what bounded the re-entry was never the
+        // count, it was that a `Lemma` arrives at most once per `Query`.
+        //
         // `open_for`, not `open`. An unconstrained `Math.sin` lets the solver
         // claim `sin(x) > 2`, so this pass may have *closed* the very
         // obligation the answers would settle — which is the same trap the FPA
         // pass fell into, and the reason `open_for` exists. Gating on `open()`
         // here meant the engine never returned in exactly the case that
         // motivated asking.
-        if asked_now && self.may_reenter && !bb.open_for(Approximations::UNMODELLED_CALL).is_empty()
-        {
-            self.may_reenter = false;
+        if asked_now && !bb.open_for(Approximations::UNMODELLED_CALL).is_empty() {
             self.done = false;
             debug!(
-                "smt-bmc: asked {} question(s); will return for the answers",
+                "smt-bmc: asked {} question(s); will return when they are answered",
                 self.asked.len()
             );
-            return Progress::Stalled;
+            return Progress::Blocked;
+        }
+
+        // Resume at a higher work bound if the counters, and not the clock,
+        // are what stopped this pass.
+        //
+        // The restart re-explores the prefix it already covered, which is the
+        // ordinary cost of iterative deepening and is why the bound doubles
+        // rather than creeping: the shallow work is repeated a bounded number
+        // of times. Carrying the frontier across the yield instead would avoid
+        // it, and would mean rewriting a nineteen-site recursion whose solver
+        // `push`/`pop` pairs span the recursion — the dangling-push bug class
+        // `CLAUDE.md` names. An integer is the cheaper honest mechanism.
+        if should_resume_deeper(
+            all_paths_complete,
+            was_exhausted,
+            self.scale,
+            !bb.open_for(approximated).is_empty(),
+            step_started.elapsed(),
+            budget
+                .deadline
+                .map(|d| d.saturating_duration_since(std::time::Instant::now())),
+        ) {
+            self.scale *= 2;
+            self.done = false;
+            debug!(
+                "smt-bmc: counters bound this pass, not the clock; \
+                 resuming at scale {}",
+                self.scale
+            );
+            return Progress::Suspended;
         }
 
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }
@@ -1008,6 +1191,8 @@ struct ExploreCtx<'a> {
     exhausted: bool,
     /// Wall-clock slice for this exploration, from `Budget::deadline`.
     deadline: Option<std::time::Instant>,
+    /// Multiplier on the work bounds for this pass. See `SmtBmc::scale`.
+    scale: u64,
     completeness: Completeness,
     /// Obligations whose check could not be trusted, keyed by
     /// **(method, id)**. See `violated_oids` for why the method is part of
@@ -1152,17 +1337,21 @@ struct SavedState {
 
 /// Small utility methods on ExploreCtx: budget, width, taint, field helpers.
 impl<'a> ExploreCtx<'a> {
+    /// Whether this step's wall-clock slice is spent, as distinct from its
+    /// work counters. Resumption can answer the second and not the first.
+    fn clock_expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+    }
+
     fn budget_left(&self) -> bool {
-        let k = budget_scale();
+        let k = self.scale;
         // The wall-clock slice comes first: the counters below bound *work*,
         // and one solver call can take a minute regardless of how few calls
         // have been made. Measured over 20 tasks that hit the 60s budget, this
         // engine held the process on 18 of 18 -- every engine behind it never
         // ran.
-        if self
-            .deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        if self.clock_expired() {
             return false;
         }
         !self.exhausted
@@ -1659,7 +1848,7 @@ impl<'a> ExploreCtx<'a> {
 
     fn check_sat_with_path(&mut self) -> SatResult {
         self.solver_calls += 1;
-        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * budget_scale() {
+        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * self.scale {
             self.exhausted = true;
             return SatResult::Unknown;
         }
@@ -1677,7 +1866,7 @@ impl<'a> ExploreCtx<'a> {
     /// Returns (result, optional witness).
     fn check_sat_with_path_and_witness(&mut self, extra: Term) -> (SatResult, Option<Witness>) {
         self.solver_calls += 1;
-        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * budget_scale() {
+        if (self.solver_calls as u64) > MAX_SOLVER_CALLS as u64 * self.scale {
             self.exhausted = true;
             return (SatResult::Unknown, None);
         }
@@ -1924,5 +2113,120 @@ mod bounded_publish_tests {
             !at_risk.contains(&(mk.clone(), ObligationId(0))),
             "bb2 is a dead end; nothing it could have explored reaches bb1"
         );
+    }
+
+    /// The -16 this rule exists to prevent.
+    ///
+    /// A run that stops on the wall clock has `all_paths_complete == false`
+    /// and, on a clean program, no violations — the two conditions the old
+    /// nesting-based guard tested. If the enclosing `budget_left()` check is
+    /// ever refactored away, every open obligation is handed a
+    /// `Bounded { k }` claiming a search depth the run never reached, and
+    /// `k-induction` converts the loop-free ones straight into discharges.
+    #[test]
+    fn bounded_is_not_published_when_the_slice_expired() {
+        assert!(
+            !may_publish_bounded(false, false, false, true),
+            "a run that stopped on the clock reached no depth to report"
+        );
+        assert!(
+            !may_publish_bounded(true, true, false, true),
+            "an explicitly exhausted run reached no depth to report either"
+        );
+    }
+
+    /// The other half: the rule has to still fire for the case it is for, or
+    /// it would be sound and useless — `k-induction` and `imc` both starve
+    /// without `Bounded`.
+    #[test]
+    fn bounded_is_published_when_the_run_stopped_on_depth() {
+        assert!(
+            may_publish_bounded(false, true, false, true),
+            "budget remaining and paths incomplete means depth was the cut"
+        );
+    }
+
+    /// A complete search is discharged outright, and a search with a violation
+    /// is not evidence of anything a consumer may use.
+    #[test]
+    fn bounded_says_nothing_about_a_complete_or_a_violated_run() {
+        assert!(!may_publish_bounded(false, true, true, true));
+        assert!(!may_publish_bounded(false, true, false, false));
+    }
+
+    use std::time::Duration;
+
+    const SPENT: Duration = Duration::from_secs(10);
+
+    /// The guard that makes resumption affordable. A deeper pass costs at least
+    /// what the last one did — the bound doubles *and* the restart repeats the
+    /// prefix — so starting one with less than that on the clock produces a
+    /// second truncated result and reports nothing for the time.
+    ///
+    /// The first version asked only whether the clock had already expired,
+    /// which is a much weaker question. On the smoke set that cost 6x to 20x on
+    /// individual tasks for a single point.
+    #[test]
+    fn a_pass_is_not_resumed_without_time_to_finish_it() {
+        assert!(!should_resume_deeper(
+            false,
+            false,
+            1,
+            true,
+            SPENT,
+            Some(Duration::from_secs(15))
+        ));
+        assert!(should_resume_deeper(
+            false,
+            false,
+            1,
+            true,
+            SPENT,
+            Some(Duration::from_secs(25))
+        ));
+    }
+
+    /// A complete search has nothing left to find, whatever the bound.
+    #[test]
+    fn a_complete_pass_is_not_resumed() {
+        assert!(!should_resume_deeper(true, false, 1, true, SPENT, None));
+    }
+
+    /// Nothing open means nothing to resume *for*. Without this the engine
+    /// would spend the tail of every solved task re-exploring it.
+    #[test]
+    fn a_pass_with_nothing_open_is_not_resumed() {
+        assert!(!should_resume_deeper(false, false, 1, false, SPENT, None));
+    }
+
+    /// The case resumption exists for: counters bound the pass, something is
+    /// still open, and there is time to do better.
+    #[test]
+    fn a_counter_cut_with_work_left_and_time_left_is_resumed() {
+        assert!(should_resume_deeper(
+            false,
+            false,
+            1,
+            true,
+            SPENT,
+            Some(Duration::from_secs(60))
+        ));
+    }
+
+    /// The `Progress::Suspended` contract: the parameter is bounded, so the
+    /// engine reaches `Exhausted` after finitely many entries even with no
+    /// deadline to stop it. Doubling from the default reaches the ceiling in
+    /// three steps.
+    #[test]
+    fn the_work_bound_rises_finitely_so_the_engine_terminates() {
+        let mut scale = 1u64;
+        let mut resumes = 0;
+        while should_resume_deeper(false, false, scale, true, SPENT, None) {
+            scale *= 2;
+            resumes += 1;
+            assert!(resumes < 64, "the bound must not rise forever");
+        }
+        assert_eq!(resumes, 3);
+        assert_eq!(scale, SCALE_CEILING);
     }
 }

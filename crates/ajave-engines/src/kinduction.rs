@@ -32,6 +32,11 @@ use crate::smt_encode;
 pub struct KInduction {
     factory: Box<dyn SolverFactory>,
     done: bool,
+    /// How far into `K_SCHEDULE` this instance may go. Its resumable precision
+    /// parameter: the schedule stops at 3 because deeper encodings are large,
+    /// and a resumption pays that cost out of time the engines ahead did not
+    /// want rather than out of theirs.
+    k_limit: usize,
 }
 
 impl KInduction {
@@ -39,6 +44,7 @@ impl KInduction {
         KInduction {
             factory,
             done: false,
+            k_limit: K_DEFAULT_LIMIT,
         }
     }
 }
@@ -52,7 +58,18 @@ impl Engine for KInduction {
         Direction::Over
     }
 
-    fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
+    /// Both of its inputs are statuses: the open set, and the `Bounded { k }`
+    /// base cases the BMC publishes.
+    fn interest(&self) -> Interest {
+        Interest::STATUS
+    }
+
+    fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
+        // Cost of this pass, as the estimate of what the next one costs. The
+        // deeper encodings are the expensive ones — that is why the default
+        // schedule stops at 3 — so entering one without room to finish it
+        // spends the time and reports nothing.
+        let step_started = std::time::Instant::now();
         if self.done {
             return Progress::Exhausted;
         }
@@ -100,7 +117,7 @@ impl Engine for KInduction {
 
         if bounded.is_empty() && inductive.is_empty() {
             debug!("k-induction: nothing to work on");
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         info!(
@@ -195,10 +212,31 @@ impl Engine for KInduction {
             }
         }
 
+        // Nothing proved and the schedule has room left: try the deeper
+        // encodings that were left out of the first pass on cost grounds.
+        let room = budget.deadline.is_none_or(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                >= step_started.elapsed().mul_f64(2.0)
+        });
+        if ajave_core::engine::resumption_enabled()
+            && !advanced
+            && room
+            && self.k_limit < K_SCHEDULE.len()
+            && !bb.open_or_unconfirmed().is_empty()
+        {
+            self.k_limit += 1;
+            self.done = false;
+            debug!(
+                "k-induction: resuming with the schedule extended to k={}",
+                K_SCHEDULE[self.k_limit - 1]
+            );
+            return Progress::Suspended;
+        }
+
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }
@@ -241,7 +279,16 @@ fn reachable_has_loops(prog: &Program, entry: &MethodKey) -> bool {
 /// Depths attempted, in order. Each is a separate pair of solver queries, so
 /// this is a cost as well as a reach: past 3 the encodings get large and the
 /// programs that need a deeper induction usually need an invariant instead.
-const K_SCHEDULE: [u32; 3] = [1, 2, 3];
+///
+/// Only the first `K_DEFAULT_LIMIT` are tried on the first entry, which is the
+/// schedule this engine has always run. The rest exist for resumption: the
+/// objection to them was always cost, and a resumed step spends time no other
+/// engine claimed.
+const K_SCHEDULE: [u32; 5] = [1, 2, 3, 4, 5];
+
+/// Where the first pass stops. Changing this changes the measured baseline;
+/// changing `K_SCHEDULE`'s length only changes what a resumption may reach.
+const K_DEFAULT_LIMIT: usize = 3;
 
 /// Largest encoding this engine will attempt, in the rough term count
 /// `smt_encode::k_induction_cost` reports.
@@ -269,7 +316,7 @@ impl KInduction {
     /// and checking only the base case is the bounded check this engine used
     /// to publish as a proof (#76).
     fn try_k_induction(&self, body: &Body, oid: ObligationId) -> Result<Option<u32>, String> {
-        for k in K_SCHEDULE {
+        for &k in &K_SCHEDULE[..self.k_limit.min(K_SCHEDULE.len())] {
             let cost = smt_encode::k_induction_cost(body, oid, k).unwrap_or(usize::MAX);
             if cost > MAX_ENCODING_COST {
                 debug!(

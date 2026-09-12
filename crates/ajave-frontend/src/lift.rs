@@ -2036,6 +2036,81 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 );
                 self.stack.push(n);
             }
+            CallModel::CollectionAppend(elem_idx) => {
+                // Append to the receiver's contents array at the current size,
+                // and bump the size — the same `array_map` the BMC already uses
+                // for `int[]`, which is keyed by the reference term so two
+                // aliases of one list agree.
+                //
+                // `$$coll_last` is still written. `next()` on an iterator has
+                // no index to offer and reads it, so dropping it here would
+                // trade one modelled shape for another.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                let elem = args
+                    .get(elem_idx as usize)
+                    .cloned()
+                    .unwrap_or(Operand::int(0));
+                let old = self.assign(
+                    Ty::Int,
+                    Rvalue::GetField {
+                        obj: this.clone(),
+                        field: Self::coll_size_field(),
+                    },
+                );
+                self.stmts.push(Stmt::ArrayStore {
+                    arr: this.clone(),
+                    idx: old.clone(),
+                    val: elem.clone(),
+                });
+                self.stmts.push(Stmt::PutField {
+                    obj: this.clone(),
+                    field: FieldKey {
+                        class: "$$coll".into(),
+                        name: models::COLL_LAST_FIELD.into(),
+                        desc: "Ljava/lang/Object;".into(),
+                    },
+                    val: elem,
+                });
+                let inc = self.assign(
+                    Ty::Int,
+                    Rvalue::Bin(BinOp::Add, old, Operand::Const(Const::Int(1))),
+                );
+                self.stmts.push(Stmt::PutField {
+                    obj: this,
+                    field: Self::coll_size_field(),
+                    val: inc,
+                });
+                if ret.is_some() {
+                    self.stack.push(Operand::int(1)); // add() → true
+                }
+            }
+            CallModel::CollectionIndexedLoad(t) => {
+                // `get(i)` reads index `i` of the contents array — the element
+                // actually stored there, rather than whichever was stored last.
+                let idx = if args.is_empty() {
+                    Operand::int(0)
+                } else {
+                    args.remove(0)
+                };
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                let ty = t.unwrap_or(Ty::Ref);
+                let v = self.assign(ty, Rvalue::ArrayLoad { arr: this, idx });
+                self.stack.push(v);
+            }
+            CallModel::CollectionEmptyInit => {
+                // JLS 12.5 default-initialises instance fields, but `$$coll_size`
+                // is synthetic and the BMC has no notion of "field never written
+                // on a fresh allocation" — so the first `size()` read after a
+                // `new` was unconstrained. Writing the zero the constructor
+                // guarantees is what turns `i < xs.size()` from an unbounded
+                // loop into a bounded one.
+                let this = receiver.unwrap_or_else(|| args.remove(0));
+                self.stmts.push(Stmt::PutField {
+                    obj: this,
+                    field: Self::coll_size_field(),
+                    val: Operand::Const(Const::Int(0)),
+                });
+            }
             CallModel::CollectionIsEmpty => {
                 let this = receiver.unwrap_or_else(|| args.remove(0));
                 let n = self.assign(

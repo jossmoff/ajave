@@ -875,6 +875,42 @@ pub enum CallModel {
     CollectionSize,
     /// `isEmpty()` — `$$coll_size == 0`.
     CollectionIsEmpty,
+    /// `list.get(int)` — load element `i` from the receiver's contents array.
+    ///
+    /// The BMC already models a Java array as a per-reference contents array
+    /// plus a length (`array_map`), indexed by the *reference term*, so two
+    /// aliases of the same array agree. Collections were not wired to it: every
+    /// `add` wrote one synthetic `$$coll_last` field and `get(i)` read it back,
+    /// so a list of three elements held only the third and `get(0)` returned it.
+    ///
+    /// Restricted to `(I)` descriptors on a sequence owner. `Map.get(key)` is
+    /// not an index and keeps the last-value model.
+    CollectionIndexedLoad(Option<Ty>),
+    /// `list.add(E)` — append to the receiver's contents array at the current
+    /// size, which is the index the size counter is about to become.
+    ///
+    /// **Append only.** `add(int, E)` inserts and shifts every later element up
+    /// one, and a plain store at that index would claim contents the program
+    /// never wrote — the wrong-TRUE shape, not a precision loss. `set(int, E)`
+    /// replaces in place and would be sound to model this way, but it is left
+    /// alone until something needs it.
+    CollectionAppend(u8),
+    /// A constructor that is specified to produce an **empty** collection —
+    /// `$$coll_size = 0`.
+    ///
+    /// Without this the count starts unconstrained, so `size()` after three
+    /// `add`s is "something plus three" rather than three, and a loop bounded
+    /// by it has no bound at all: exploration unrolls to the cap, truncates,
+    /// and cannot discharge. `benchmarks/ajave/real-world/ArrayListSum` is that
+    /// in eight lines.
+    ///
+    /// Keyed on the full descriptor, and only the descriptors whose Javadoc
+    /// says empty. `ArrayList()` and `ArrayList(int)` are both empty — the int
+    /// is a capacity, not a size — while `ArrayList(Collection)` copies its
+    /// argument and `HashMap(Map)` likewise. Claiming zero for those would
+    /// assert a fact about content the program never established, which is the
+    /// wrong-TRUE shape `CLAUDE.md` records for the StringBuffer model.
+    CollectionEmptyInit,
 }
 
 fn ret_ty(desc: &str) -> Option<Ty> {
@@ -1017,6 +1053,20 @@ pub fn model_for(owner: &str, name: &str, desc: &str) -> CallModel {
         return CallModel::NoOp;
     }
     // Constructors of pure/collection classes: no tracked state to set up.
+    // A collection constructor specified to produce an empty collection, taken
+    // *before* the `PURE_OWNERS` catch-all below.
+    //
+    // Ordering is the whole of it: the collection classes are in `PURE_OWNERS`,
+    // so that catch-all answered `<init>` first and `collection_model` was never
+    // consulted for a constructor at all. The size field then started
+    // unconstrained and every `size()`-bounded loop was unbounded — the model
+    // existed end to end and one arm of a match ahead of it made it inert.
+    if name == "<init>" {
+        if let Some(model @ CallModel::CollectionEmptyInit) = collection_model(owner, name, desc) {
+            return model;
+        }
+    }
+
     // The lifter preserves Pure(None) as a Call, so taint analysis can see
     // argument flow (e.g. `new StringTokenizer(taintedStr)`).
     if name == "<init>" && PURE_OWNERS.contains(&owner) {
@@ -1579,15 +1629,24 @@ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
 
     // Collection/List/Set/Queue/Deque store methods
     match name {
+        // Appending forms: the element goes at the current size, which is an
+        // index nothing else occupies. `add(int, E)` is deliberately excluded —
+        // it inserts and shifts, and a store at that index would assert
+        // contents the program never wrote.
+        "add" | "offer" if !desc.starts_with("(I") => Some(CallModel::CollectionAppend(0)),
         "add" | "offer" => {
-            // add(Object) → arg 0; add(int, Object) → arg 1
-            let elem_idx = if desc.starts_with("(I") { 1 } else { 0 };
-            Some(CallModel::CollectionStore(elem_idx))
+            // add(int, Object) → arg 1, and no index model: see above.
+            Some(CallModel::CollectionStore(1))
         }
         "addLast" | "addFirst" | "push" | "offerFirst" | "offerLast" | "addElement" => {
             Some(CallModel::CollectionStore(0))
         }
         "set" => Some(CallModel::CollectionStore(1)), // set(int, Object) → arg 1
+
+        // Indexed reads, which the contents array can answer exactly.
+        "get" | "elementAt" if desc.starts_with("(I)") => {
+            Some(CallModel::CollectionIndexedLoad(ret_ty(desc)))
+        }
 
         // Collection/List/Queue/Deque load methods
         "get" | "remove" | "getLast" | "getFirst" | "peek" | "peekFirst" | "peekLast" | "poll"
@@ -1598,6 +1657,11 @@ fn collection_model(owner: &str, name: &str, desc: &str) -> Option<CallModel> {
 
         // Iterator creation — return the collection itself
         "iterator" | "listIterator" => Some(CallModel::CollectionIterator),
+
+        // A constructor specified to produce an empty collection. Only these
+        // two descriptor shapes: every other constructor takes the initial
+        // contents from its argument, and we do not know that argument's size.
+        "<init>" if desc == "()V" || desc == "(I)V" => Some(CallModel::CollectionEmptyInit),
 
         // Size queries read the tracked element count, which is what makes an
         // `i < size` bound provable rather than merely stated.
@@ -2118,5 +2182,89 @@ mod contract_order_tests {
         };
         assert!(total.is_total());
         assert!(!Contract::OPAQUE.is_total());
+    }
+}
+
+/// The empty-collection constructor model, and the ordering that kept it inert.
+#[cfg(test)]
+mod collection_init_tests {
+    use super::*;
+
+    /// Only the descriptors whose Javadoc says the result is empty.
+    ///
+    /// Every concrete class `is_collection_owner` admits — `ArrayList`,
+    /// `LinkedList`, `Vector`, `Stack`, `HashSet`, `TreeSet`, `LinkedHashSet`,
+    /// `ArrayDeque` — specifies `()V` as empty, and where a `(I)V` exists the
+    /// `int` is an initial *capacity*, never a size. The copying constructors
+    /// take a `Collection` and are deliberately not matched: their size is
+    /// their argument's, which we do not know, and asserting zero would be a
+    /// claim about content the program never made.
+    #[test]
+    fn only_the_constructors_specified_to_be_empty_set_the_size() {
+        for owner in [
+            "java/util/ArrayList",
+            "java/util/LinkedList",
+            "java/util/Vector",
+            "java/util/Stack",
+            "java/util/HashSet",
+            "java/util/TreeSet",
+            "java/util/LinkedHashSet",
+            "java/util/ArrayDeque",
+        ] {
+            assert_eq!(
+                model_for(owner, "<init>", "()V"),
+                CallModel::CollectionEmptyInit,
+                "{owner}.<init>()V constructs an empty collection"
+            );
+            assert_eq!(
+                model_for(owner, "<init>", "(I)V"),
+                CallModel::CollectionEmptyInit,
+                "{owner}.<init>(I)V takes a capacity, not a size"
+            );
+            assert_ne!(
+                model_for(owner, "<init>", "(Ljava/util/Collection;)V"),
+                CallModel::CollectionEmptyInit,
+                "{owner} copies its argument; its size is not zero"
+            );
+        }
+    }
+
+    /// The defect this fixed, pinned as a test because it is invisible.
+    ///
+    /// The collection classes are in `PURE_OWNERS`, and that catch-all answered
+    /// `<init>` before `collection_model` was ever consulted — so the whole
+    /// size model existed end to end, `add` incremented, `size()` read, and the
+    /// count started unconstrained because nothing ever wrote the zero. A loop
+    /// bounded by `xs.size()` was therefore unbounded, and exploration
+    /// truncated. Nothing failed; a task simply went unproven.
+    ///
+    /// Reordering is the fix, so the test is about order: if the `PURE_OWNERS`
+    /// arm moves back in front, this fails.
+    #[test]
+    fn the_pure_owners_catch_all_does_not_shadow_the_collection_constructor() {
+        assert!(
+            PURE_OWNERS.contains(&"java/util/ArrayList"),
+            "the shadowing this guards against requires the class to be in \
+             PURE_OWNERS; if that changes, this test is no longer the guard \
+             it claims to be"
+        );
+        assert_eq!(
+            model_for("java/util/ArrayList", "<init>", "()V"),
+            CallModel::CollectionEmptyInit
+        );
+    }
+
+    /// A class outside the collection owners is untouched — the model must not
+    /// spread to every no-argument constructor in the JDK.
+    #[test]
+    fn a_non_collection_constructor_is_not_given_a_size() {
+        assert_ne!(
+            model_for("java/lang/Object", "<init>", "()V"),
+            CallModel::CollectionEmptyInit
+        );
+        assert_ne!(
+            model_for("java/util/BitSet", "<init>", "()V"),
+            CallModel::CollectionEmptyInit
+        );
     }
 }

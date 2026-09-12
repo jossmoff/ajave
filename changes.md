@@ -2,6 +2,140 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-09-09 — the round loop and cursor deltas, measured
+
+Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181
+recorded for `8c9d53a`:
+
+| | before | after |
+|---|---|---|
+| valid-assert | 866 | **869** |
+| VA timeouts | 25 | 24 |
+| VA wrong | 1 (`ReverseInterpolator`, a benchmark mislabel) | 1, the same one |
+| no-runtime-exception | 1181 | **1183** |
+| NRE timeouts | 21 | 19 |
+| NRE wrong | 0 | **0** |
+
+**+5, and that is roughly what the existing evidence predicted.** The recorded
+result that a larger BMC budget converts nothing was measured by raising
+`AJAVE_BMC_SCALE` for a whole run; resumption does not repeal it, it only
+changes whose time pays for the attempt. The points in this area were always
+going to come from engines that never ran, not from the one that ran longest —
+which is what `8c9d53a` collected at +16.
+
+### `Progress::Stalled` was two states wearing one name
+
+"Out of time with work outstanding" and "out of information" want opposite
+scheduling. Every engine that returned `Stalled` had just set `done = true`, so
+only the second reading was ever honest, and the round loop had no way to
+express the first. `Suspended` and `Blocked` separate them, and `Blocked` is
+what makes a cursor mean something: an engine is re-entered when an artifact
+matching its declared `Interest` arrives, and not before.
+
+`Interest` follows the asymmetry `Approximations` already states, with the signs
+swapped — under-declaring silently loses an answer, over-declaring costs one
+step — so the default is the widest set and an engine narrows it deliberately.
+
+### Resumption is iterative deepening, and on the bound that actually binds
+
+`explore_block_until` recurses at 19 sites over a shared `self` with solver
+`push`/`pop` paired across the recursion. A hand-rolled continuation there is
+the dangling-push bug class `CLAUDE.md` names, so the resumable state is an
+integer instead and the explorer is untouched.
+
+The design said `max_depth`, on textbook grounds, and that was wrong. The tasks
+that truncate cut at `MAX_FORKS` — `SatAckermann01` stops at 500 forks with
+depth nowhere near — so deepening on depth would re-run an identical exploration
+and stop in an identical place.
+
+### `RESUME_HEADROOM`: the design's largest omission
+
+The obvious guard is "resume unless the clock has expired". It measured **6x to
+20x** on individual smoke tasks — `BellmanFord-MemUnsat01` 11s to 72s — for one
+point. A pass entered with 40% of a slice left costs at least twice what the
+first 60% did, because the bound doubles *and* the restart repeats the prefix;
+it truncates, and reports nothing for the whole of it. A deeper pass now starts
+only with room to finish it: `left >= 2 x spent`.
+
+### Round 0 is scheduled exactly as before
+
+Deriving each engine's share from `round_share` gave thirteen live engines 0.088
+of the remainder where they used to get 0.6 — a different first round, and so a
+baseline that predicts nothing. This is the same zero-regression rule the
+deepening passes follow, and it had to be applied to the allocator too.
+
+### Two comments that were asserting invariants the code did not maintain
+
+Both are the shape `CLAUDE.md` lists under "faults between engines", and both
+were found by grounding a design rather than by a test.
+
+- `Status::Bounded { k }` claims the search *reached* depth k, and `k-induction`
+  turns that into an outright discharge on loop-free code. It survived the
+  wall-clock deadline only because the publish happened to sit inside an
+  `if ... ctx.budget_left()`. Now `may_publish_bounded`, with a test that fails
+  when the guard is removed.
+- `chc::solver_timeout_secs` documented itself as "a slice of the remaining
+  budget rather than the whole of it". It was a flat ten seconds and the engine
+  took `_budget` and dropped it — which is why a task given a 295-second
+  deadline was still running at 400. The deadline shipped in `8c9d53a` only ever
+  bound the two engines that read their budget.
+
+### Three engines decline to have a resumable parameter
+
+`imc`'s `MAX_ITERATIONS` bounds a fixpoint that converges or does not, `cegar`
+refines on counterexamples rather than a bound, and `interval-ai` reaches its
+fixpoint in milliseconds and is never the engine holding the clock. `Suspended`
+is a promise of progress; an engine that cannot keep it should not make it, and
+declaring one for symmetry would be the ceremony this work exists to remove.
+
+### Unrelated: the smoke baseline is stale
+
+`--check` reports `AbstractSerializationStreamReader_false`, `SatAckermann01`
+and `SatFibonacci01` as regressed. All three reproduce on the pre-change binary
+with identical verdicts and wall times, so they belong to a commit between
+`08b1b5b` and `HEAD`. Re-baselining would bake them in.
+
+## 2026-09-09 — design: the round loop and cursor deltas
+
+Design only, in `docs/plans/resumption.md`. Recorded here because it settles two
+architectural questions the code has been silently answering "no" to.
+
+**Why the two must land together.** `max_rounds = 16` never runs past round 1,
+because every engine sets `done = true` on first entry. `Blackboard::since` —
+documented as what makes an engine removable without the others noticing — has
+exactly one caller, `since(0)`, a `--trace` dump. Neither is an oversight of the
+other: a cursor delta is meaningless to a one-shot engine, and re-entering every
+engine every round is unaffordable without one to say who is worth re-entering.
+
+**Resumption is deepening, not continuation.** `explore_block_until` recurses at
+19 sites over a shared `self` with solver push/pop paired across the recursion;
+a hand-rolled continuation there is the most direct route to the dangling-push
+bug class. Instead: every resumable engine has one bounded, monotone precision
+parameter, and resuming means restarting at the next value. The resumable state
+is an integer, the explorer is untouched, and the re-exploration cost is the
+standard iterative-deepening constant factor. The first entry keeps today's
+parameter, so round 0 is byte-for-byte the current run and every later round is
+strictly additive — which is what makes it measurable against the existing
+baseline rather than confounded with it.
+
+**`Progress::Stalled` was two states.** "Out of time with work outstanding" and
+"out of information" need opposite scheduling, and conflating them is why the
+round loop could not do anything useful. Splitting into `Suspended` / `Blocked`
+is what a cursor is *for*: a `Blocked` engine is re-entered only when something
+in its declared `Interest` has been published.
+
+**One finding while grounding the design.** `Status::Bounded { k }` is a claim
+that the search reached depth k, and `k-induction` turns it into an outright
+discharge on loop-free code. It survives the new wall-clock deadline only by
+nesting — the publish sits inside `!ctx.exhausted && ctx.budget_left()`, so a
+time-truncated pass skips it. Nothing tests that, and the deepening work moves
+exactly this code. A wrong TRUE at −16 sits behind one refactor;
+`bounded_is_not_published_when_the_slice_expired` is written before P4 starts.
+
+Phased P1–P5 with P1–P3 *predicted to measure as zero* — the prediction is the
+test, and a non-zero result means the rename or the allocator changed behaviour
+that was not meant to change.
+
 ## 2026-09-06 — concolic execution, and a scoring comparison that was not like-for-like
 
 ### Evaluation order, not budget, was defeating recursion

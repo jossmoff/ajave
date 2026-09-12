@@ -63,6 +63,17 @@ impl Engine for ImcEngine {
         Direction::Over
     }
 
+    /// Same two inputs as k-induction: the open set and `Bounded` base cases.
+    /// No resumable parameter, deliberately.
+    ///
+    /// `MAX_ITERATIONS` bounds a fixpoint that either converges or does not;
+    /// raising it does not make an interpolant sequence converge, it only
+    /// spends longer failing to. `Progress::Suspended` would be a promise of
+    /// progress this engine cannot keep, so it never returns one.
+    fn interest(&self) -> Interest {
+        Interest::STATUS
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -98,7 +109,7 @@ impl Engine for ImcEngine {
 
         if bounded.is_empty() {
             debug!("imc: no bounded obligations to work on");
-            return Progress::Stalled;
+            return Progress::Blocked;
         }
 
         info!(
@@ -137,7 +148,7 @@ impl Engine for ImcEngine {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

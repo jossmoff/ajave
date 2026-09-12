@@ -55,6 +55,11 @@ impl Engine for NraEngine {
         Direction::Under
     }
 
+    /// Solves the entry method's real-arithmetic constraints directly.
+    fn interest(&self) -> Interest {
+        Interest::NOTHING
+    }
+
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, _budget: Budget) -> Progress {
         if self.done {
             return Progress::Exhausted;
@@ -186,7 +191,7 @@ impl Engine for NraEngine {
         if advanced {
             Progress::Advanced
         } else {
-            Progress::Stalled
+            Progress::Blocked
         }
     }
 }

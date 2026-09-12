@@ -120,6 +120,79 @@ impl std::fmt::Debug for Approximations {
     }
 }
 
+/// Which kinds of artifact an engine reads.
+///
+/// The scheduler re-enters a `Progress::Blocked` engine only once something
+/// matching its interest has been published since its last step. Without that
+/// test the round loop is unaffordable: thirteen engines re-deriving the same
+/// answers every round spends the deadline and changes nothing.
+///
+/// The discipline is the one `Approximations` already states, with the signs
+/// swapped. Under-declaring means an engine never learns the thing that would
+/// unblock it, and that is silent. Over-declaring costs one wasted step. So the
+/// default is the widest set, and an engine narrows it deliberately.
+///
+/// A bitset over `Artifact` variants rather than over producers: "who told me"
+/// is exactly the coupling the blackboard exists to remove.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, PartialOrd, Ord)]
+pub struct Interest(u8);
+
+impl Interest {
+    /// Reads nothing from the board. A one-shot engine that works from the
+    /// program alone declares this and is never re-entered while blocked.
+    pub const NOTHING: Interest = Interest(0);
+
+    pub const STATUS: Interest = Interest(1 << 0);
+    pub const INVARIANT: Interest = Interest(1 << 1);
+    pub const PRECISION: Interest = Interest(1 << 2);
+    pub const TRACE: Interest = Interest(1 << 3);
+    pub const RESIDUAL: Interest = Interest(1 << 4);
+    pub const QUERY: Interest = Interest(1 << 5);
+    pub const LEMMA: Interest = Interest(1 << 6);
+
+    /// Every kind. The default, because over-declaring is the cheap mistake.
+    pub const ANY: Interest = Interest(0x7f);
+
+    pub const fn union(self, other: Interest) -> Interest {
+        Interest(self.0 | other.0)
+    }
+
+    pub const fn intersects(self, other: Interest) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub const fn is_nothing(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::fmt::Debug for Interest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_nothing() {
+            return f.write_str("nothing");
+        }
+        let mut first = true;
+        for (bit, name) in [
+            (Self::STATUS, "status"),
+            (Self::INVARIANT, "invariant"),
+            (Self::PRECISION, "precision"),
+            (Self::TRACE, "trace"),
+            (Self::RESIDUAL, "residual"),
+            (Self::QUERY, "query"),
+            (Self::LEMMA, "lemma"),
+        ] {
+            if self.intersects(bit) {
+                if !first {
+                    f.write_str("+")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct EngineId(pub &'static str);
 
@@ -323,6 +396,24 @@ pub enum Artifact {
     Query(Query),
     /// An answer. Governed by `Direction` exactly as a `Status` is.
     Lemma(Lemma),
+}
+
+impl Artifact {
+    /// Which `Interest` bit this artifact satisfies.
+    ///
+    /// One arm per variant on purpose: adding a variant should not silently
+    /// become invisible to every engine that declared a narrow interest.
+    pub fn interest(&self) -> Interest {
+        match self {
+            Artifact::Status(..) => Interest::STATUS,
+            Artifact::Invariant(_) => Interest::INVARIANT,
+            Artifact::Precision(..) => Interest::PRECISION,
+            Artifact::Trace(_) => Interest::TRACE,
+            Artifact::Residual(_) => Interest::RESIDUAL,
+            Artifact::Query(_) => Interest::QUERY,
+            Artifact::Lemma(_) => Interest::LEMMA,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

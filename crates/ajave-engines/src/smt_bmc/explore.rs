@@ -819,7 +819,10 @@ impl<'a> ExploreCtx<'a> {
                     if let Some((lo, hi)) =
                         self.known_bounds.get(&(self.body.key.clone(), v)).copied()
                     {
-                        self.assume_known_bound(v, lo, hi);
+                        // `bv`, not `v`: the variable does not denote this term
+                        // until `handle_assign` returns.
+                        let w = self.width_of_var(v);
+                        self.assume_known_bound(bv, w, lo, hi);
                     } else {
                         self.ask_about_call(v, target, args);
                     }
@@ -1775,12 +1778,24 @@ impl<'a> ExploreCtx<'a> {
     /// `asin(2)` are NaN, and NaN is outside every range. Asserting the
     /// unguarded form would remove real executions, and an exhaustive claim
     /// over a state space we had shrunk is a wrong TRUE.
-    pub(super) fn assume_known_bound(&mut self, vid: VarId, lo_bits: u64, hi_bits: u64) {
-        let w = self.width_of_var(vid);
+    /// Takes the **term**, not the variable.
+    ///
+    /// The variable is not bound to the call's result yet when this is called:
+    /// `handle_assign` computes the havoc term first, constrains it, and only
+    /// then stores it into `vars[v]`. Reading `get_var(v)` here therefore
+    /// returned whatever that slot held *before* the call — a stale term, or a
+    /// placeholder — and the assignment immediately discarded it. The lemma
+    /// was asserted about a term nothing downstream reads, so the constraint
+    /// was live in the solver (`pc_len` grew by exactly one) and vacuous.
+    ///
+    /// That is the seam `CLAUDE.md` describes as a producer and a consumer
+    /// disagreeing about an artifact, here disagreeing about which term a
+    /// variable denotes at an instant. Passing the term removes the instant
+    /// from the question.
+    pub(super) fn assume_known_bound(&mut self, t: Term, w: u32, lo_bits: u64, hi_bits: u64) {
         if w != 64 {
             return;
         }
-        let t = self.get_var(vid);
         let fp = self.solver.fp_from_bits(t, 64);
         let is_nan = self.solver.fp_is_nan(fp);
         let mut in_range: Option<ajave_core::smt::Term> = None;
