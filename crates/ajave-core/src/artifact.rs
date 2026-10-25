@@ -317,6 +317,15 @@ impl Status {
 pub enum Want {
     /// Numeric bounds on the term. Universal: needs Over.
     Bounds,
+    /// Can this reference be null here? Universal: needs Over.
+    ///
+    /// Added because no-runtime-exception is more than half the total score and
+    /// its content is almost entirely nullness, which previously could not be
+    /// asked. Engines routed around it privately: a hardcoded static list in
+    /// `interval.rs`, a lifter special case for constructor parameters, a
+    /// program-level fallback in `eval_nullness`. Each is a private answer to a
+    /// question several engines could answer.
+    NonNull,
     /// Does the predicate hold on every reaching execution? Universal.
     Valid,
     /// Is there an assignment making it true? Existential: needs Under.
@@ -361,6 +370,17 @@ pub enum Answer {
     RefutedBy(Vec<(VarId, i64)>),
     /// An assignment satisfying it.
     SatisfiedBy(Vec<(VarId, i64)>),
+    /// The reference is not null on any reaching execution.
+    ///
+    /// **The most dangerous answer in this enum.** A wrong one discharges a
+    /// NullDeref that can really fire — a wrong TRUE at -16. `CLAUDE.md`
+    /// records the specific trap: `System.out` looks like a non-null
+    /// `static final` and is mutable through `System.setOut(null)`, so it does
+    /// not qualify. An answerer must justify this from a contract, keyed on the
+    /// full `(class, name, desc)` signature, and validated against a real JVM
+    /// with adversarial inputs — not from a lattice result that happens to be
+    /// convenient.
+    NonNull,
     /// Asked and could not say. Worth publishing: it stops the scheduler
     /// asking the same engine the same question again.
     Unknown,
@@ -373,7 +393,10 @@ impl Answer {
     /// under-approximating engine would be a proof from an engine that has
     /// only ever looked at some of the paths.
     pub fn is_universal(&self) -> bool {
-        matches!(self, Answer::Bounds { .. } | Answer::Holds)
+        matches!(
+            self,
+            Answer::Bounds { .. } | Answer::Holds | Answer::NonNull
+        )
     }
 }
 

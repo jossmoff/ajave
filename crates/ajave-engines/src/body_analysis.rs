@@ -355,3 +355,34 @@ pub fn stmt_is_havoced_op(stmt: &Stmt) -> bool {
         _ => false,
     }
 }
+
+// ─── Cooperation options (docs/plans/cooperation-options.md) ───
+//
+// Each defaults **off**, so the default build is unchanged and each option is
+// benchmarked individually against it. The three-levers flags above default
+// *on* because those were expected to interact; these four are independent.
+
+/// A — `interval-ai` answers `Want::Bounds` queries from its own fixpoint.
+pub fn answers_queries_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_AI_ANSWERS").as_deref() == Ok("1"))
+}
+
+/// B — a witness the producing engine knows cannot replay becomes a published
+/// fact rather than a silent withholding.
+pub fn refute_artifact_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_REFUTE_ARTIFACT").as_deref() == Ok("1"))
+}
+
+/// C — the BMC publishes a `Residual` describing what it did not cover.
+pub fn residual_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_RESIDUAL").as_deref() == Ok("1"))
+}
+
+/// D — nullness as a question kind.
+pub fn null_queries_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_NULL_QUERIES").as_deref() == Ok("1"))
+}

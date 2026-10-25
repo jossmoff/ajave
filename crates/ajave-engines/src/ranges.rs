@@ -266,6 +266,47 @@ impl Engine for Ranges {
             if want == Want::Satisfiable {
                 continue;
             }
+            // Option D: a nullness question is answered from the contract
+            // database, which is the only source entitled to answer it.
+            //
+            // `returns_nonnull` is keyed on the full `(class, name, desc)`
+            // signature and justified from the Javadoc, which is the standard
+            // `CLAUDE.md` sets for any statement about an external method. A
+            // lattice result or an observed behaviour would not qualify: a
+            // wrong non-null discharges a NullDeref that can really fire.
+            //
+            // Anything the contract does not positively assert is answered
+            // `Unknown`, not `MaybeNull`-by-default — "we never said" and "it
+            // can be null" are different claims, and the asker must not read
+            // the first as the second.
+            if want == Want::NonNull {
+                let answer = match bound_call(&about, &given) {
+                    Some(Expr::Apply {
+                        class, name, desc, ..
+                    }) if ajave_models::returns_nonnull(class, name, desc) => {
+                        debug!(
+                            "ranges: {}.{} is specified non-null — answering query {id}",
+                            class, name
+                        );
+                        Answer::NonNull
+                    }
+                    _ => Answer::Unknown,
+                };
+                let published = bb.publish(
+                    self.id(),
+                    self.direction(),
+                    Artifact::Lemma(Lemma {
+                        query: id,
+                        by: self.id(),
+                        answer,
+                    }),
+                );
+                if published.is_ok() {
+                    advanced = true;
+                }
+                continue;
+            }
+
             let answer = match bound_call(&about, &given) {
                 Some(Expr::Apply {
                     class, name, desc, ..

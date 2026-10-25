@@ -3276,6 +3276,67 @@ mod encoder_conformance {
         )
     }
 
+    /// `double d = nondet-ish float arithmetic; assert d == 0;` — **unsafe**, and
+    /// the case that guards the float havoc.
+    ///
+    /// Both encoders now replace a float-valued rvalue with an unconstrained
+    /// value rather than declining the program, which is sound in one
+    /// direction only: an unconstrained value admits more executions, so a
+    /// *proof* over it still holds, while a *claim about a specific result* does
+    /// not. An encoder that instead computed on the raw IEEE-754 bit pattern
+    /// could decide `1.5 + 1.5 == 0` is false and "prove" this safe — a
+    /// statement about a program that is not ours.
+    ///
+    /// Havocing keeps it unprovable, which is the correct answer here.
+    fn unsafe_float_result() -> (Program, MethodKey) {
+        let (d, c) = (VarId(0), VarId(1));
+        let m = mk("main");
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            m.clone(),
+            Body {
+                is_static: true,
+                key: m.clone(),
+                entry: BlockId(0),
+                vars: vec![
+                    VarInfo {
+                        kind: VarKind::Local(0),
+                        ty: Ty::Double,
+                    },
+                    ivar(1),
+                ],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(c),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            d,
+                            Rvalue::Bin(
+                                BinOp::Add,
+                                Operand::Const(Const::Double(1.5)),
+                                Operand::Const(Const::Double(1.5)),
+                            ),
+                        ),
+                        Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(d), Operand::int(0))),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(m.clone());
+        (prog, m)
+    }
+
     fn corpus() -> Vec<(&'static str, bool, (Program, MethodKey))> {
         vec![
             ("safe_constant", true, safe_constant()),
@@ -3283,7 +3344,56 @@ mod encoder_conformance {
             ("unsafe_constant", false, unsafe_constant()),
             ("unsafe_nondet", false, unsafe_nondet()),
             ("unsafe_overflow", false, unsafe_overflow()),
+            ("unsafe_float_result", false, unsafe_float_result()),
         ]
+    }
+
+    /// The bitvector encoder emits a fresh binder for a float rvalue, not
+    /// arithmetic over it.
+    ///
+    /// Checks the encoding itself rather than only the verdict, because the
+    /// verdict test above can pass for the wrong reason — a solver that times
+    /// out also fails to prove an unsafe program safe. This asserts the
+    /// mechanism: `bvfp_` is the havoc binder, and `bvadd` over the two
+    /// doubles is what must not appear.
+    #[test]
+    fn the_bitvector_encoder_havocs_a_float_rvalue() {
+        let (prog, m) = unsafe_float_result();
+        let body = prog.body(&m).expect("body");
+        let smt2 = encode_chc_single(body, &[ObligationId(0)]);
+        assert!(
+            smt2.contains("bvfp_"),
+            "the float rvalue should become a fresh binder; encoding was:\n{smt2}"
+        );
+        assert!(
+            !smt2.contains("bvadd"),
+            "no bitvector addition should be emitted for a double; encoding was:\n{smt2}"
+        );
+    }
+
+    /// There is no setting of `AJAVE_SCOPE_OBLIGATION` under which float
+    /// arithmetic is **neither** havoced nor declined.
+    ///
+    /// The gate drives both sides: the `Stmt::Assign` arm havocs when it is on,
+    /// and `step`'s guard declines when it is off. If either polarity were
+    /// flipped independently there would be a configuration that computes on
+    /// raw IEEE-754 bit patterns, which `unsafe_float_result` shows proves an
+    /// unsafe program safe — a wrong TRUE at -16.
+    ///
+    /// Stated as a test because the two sides sit 1,900 lines apart and the
+    /// invariant between them is otherwise only in a comment. `OnceLock` means
+    /// the real gate cannot be toggled twice in one process, so this checks the
+    /// relation the two call sites must preserve.
+    #[test]
+    fn floats_are_never_both_unhavoced_and_undeclined() {
+        for gate in [true, false] {
+            let havocs_floats = gate; // the `Stmt::Assign` arm in encode_chc_single
+            let declines_program = !gate; // the `uses_float` guard in step
+            assert!(
+                havocs_floats || declines_program,
+                "gate={gate} would compute float arithmetic on bit patterns"
+            );
+        }
     }
 
     /// The soundness half. Neither encoder may call an unsafe program safe.

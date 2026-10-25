@@ -488,6 +488,23 @@ impl Blackboard {
             .collect()
     }
 
+    /// Residual conditions published so far, with their producer.
+    ///
+    /// The first consumer of `Artifact::Residual`, which had none. A residual
+    /// says "this much is accounted for, and here is why" — what a consumer may
+    /// conclude depends on the producer's direction, so that travels with it:
+    /// an `Under` residual (a witness that could not be used) is information
+    /// about one execution and never a discharge.
+    pub fn residuals(&self) -> Vec<(EngineId, Direction, &Condition)> {
+        self.log
+            .iter()
+            .filter_map(|t| match &t.artifact {
+                Artifact::Residual(c) => Some((t.producer, t.direction, c)),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn pending_traces(&self) -> impl Iterator<Item = &AbstractTrace> {
         self.traces.iter().filter(|t| t.feasible != Some(true))
     }

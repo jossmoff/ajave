@@ -555,3 +555,195 @@ fn collect_free_vars_combined(a: &str, b: &str, declarations: &str) -> Vec<Strin
     }
     vars
 }
+
+/// The L2 lever: a decline becomes a question.
+///
+/// `ask_about_untracked` is what turns this engine from an *alternative* into
+/// also a *resource*. Its analysis is unchanged; only its failure mode is. So
+/// the tests are about the questions: that they are asked at all, that they are
+/// about the right terms, that they are bounded, and that asking does not
+/// retire the engine before an answer can arrive.
+#[cfg(test)]
+mod ask_on_decline_tests {
+    use super::*;
+    use ajave_core::artifact::Want;
+
+    fn key(name: &str) -> MethodKey {
+        MethodKey {
+            class: "Main".into(),
+            name: name.into(),
+            desc: "()V".into(),
+        }
+    }
+
+    fn var(slot: u16, ty: Ty) -> VarInfo {
+        VarInfo {
+            kind: VarKind::Local(slot),
+            ty,
+        }
+    }
+
+    /// One block: an int from an unresolved call, a ref from a `New`, and a
+    /// plain copy. Only the first is worth asking about.
+    fn mixed_body() -> (Program, MethodKey) {
+        let mk = key("main");
+        let lib = MethodKey {
+            class: "java/lang/Math".into(),
+            name: "sin".into(),
+            desc: "(D)D".into(),
+        };
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            mk.clone(),
+            Body {
+                is_static: true,
+                key: mk.clone(),
+                entry: BlockId(0),
+                vars: vec![
+                    var(0, Ty::Int),
+                    var(1, Ty::Ref),
+                    var(2, Ty::Int),
+                    var(3, Ty::Int),
+                ],
+                obligations: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        // Untracked, int-typed: ask.
+                        Stmt::Assign(
+                            VarId(0),
+                            Rvalue::Call {
+                                target: lib.clone(),
+                                args: vec![Operand::int(1)],
+                                is_virtual: false,
+                            },
+                        ),
+                        // Untracked but a reference: a bound means nothing to
+                        // the predicate domain, so do not ask.
+                        Stmt::Assign(VarId(1), Rvalue::New("java/lang/Object".into())),
+                        // Tracked: not a decline cause at all.
+                        Stmt::Assign(VarId(2), Rvalue::Use(Operand::int(7))),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(mk.clone());
+        (prog, mk)
+    }
+
+    /// Asks about the untracked integer, and about nothing else.
+    ///
+    /// A reference is excluded deliberately: `Want::Bounds` on a pointer is a
+    /// question no answerer can usefully reply to, and an engine that posts
+    /// unanswerable questions has converted a cheap decline into an expensive
+    /// one.
+    #[test]
+    fn it_asks_about_untracked_integers_and_not_references() {
+        let (prog, mk) = mixed_body();
+        let body = prog.body(&mk).unwrap();
+        let mut bb = Blackboard::new();
+        let n = ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
+        assert_eq!(n, 1, "one int from an untracked op, so one question");
+
+        let qs = bb.unanswered();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(
+            qs[0].want,
+            Want::Bounds,
+            "a bound is what unblocks the domain"
+        );
+        assert_eq!(
+            qs[0].about,
+            ajave_core::term::Expr::Var(VarId(0)),
+            "the question is about the destination of the untracked call"
+        );
+        assert_eq!(
+            qs[0].at.method, mk,
+            "a VarId indexes one Body, so the point must name the method"
+        );
+    }
+
+    /// The question carries the call that produced the value, so an answerer
+    /// can recognise a signature whose range is specified.
+    ///
+    /// Without `given`, `ranges` sees "bound v0" with no way to know v0 came
+    /// from `Math.sin` — which is exactly the lemma it holds.
+    #[test]
+    fn the_question_carries_the_call_that_produced_the_value() {
+        let (prog, mk) = mixed_body();
+        let body = prog.body(&mk).unwrap();
+        let mut bb = Blackboard::new();
+        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
+        let qs = bb.unanswered();
+        let given = format!("{:?}", qs[0].given);
+        assert!(
+            given.contains("sin"),
+            "the binding must name the callee; given was {given}"
+        );
+    }
+
+    /// Bounded. A body with many untracked assignments must not post one
+    /// question per statement — the cap is what keeps a decline cheap.
+    #[test]
+    fn the_number_of_questions_is_capped() {
+        let mk = key("main");
+        let lib = MethodKey {
+            class: "com/example/Unknown".into(),
+            name: "f".into(),
+            desc: "(I)I".into(),
+        };
+        let mut prog = Program::default();
+        let n_stmts = 40usize;
+        prog.bodies.insert(
+            mk.clone(),
+            Body {
+                is_static: true,
+                key: mk.clone(),
+                entry: BlockId(0),
+                vars: (0..n_stmts as u16).map(|i| var(i, Ty::Int)).collect(),
+                obligations: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: (0..n_stmts)
+                        .map(|i| {
+                            Stmt::Assign(
+                                VarId(i as u32),
+                                Rvalue::Call {
+                                    target: lib.clone(),
+                                    args: vec![Operand::int(1)],
+                                    is_virtual: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(mk.clone());
+        let body = prog.body(&mk).unwrap();
+        let mut bb = Blackboard::new();
+        let n = ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
+        assert!(n <= 8, "asked {n} questions; the cap is 8");
+        assert!(n > 0, "it must still ask something");
+    }
+
+    /// Identical questions are one question.
+    ///
+    /// `Blackboard::ask` deduplicates, and this pins that the asker benefits:
+    /// two declines over the same body must not double the queue.
+    #[test]
+    fn asking_twice_about_the_same_body_does_not_duplicate() {
+        let (prog, mk) = mixed_body();
+        let body = prog.body(&mk).unwrap();
+        let mut bb = Blackboard::new();
+        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
+        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
+        assert_eq!(bb.unanswered().len(), 1);
+    }
+}

@@ -399,6 +399,26 @@ impl Orchestrator {
             }
         }
 
+        // Why an obligation could not be *falsified*, as distinct from why it
+        // could not be proved.
+        //
+        // The open-obligation report above answers "what is unproven". This
+        // answers the other half: an engine found a satisfiable error path and
+        // then could not use it. Across the corpus that population is 56 of 76
+        // refuted witnesses; per task it was invisible until now.
+        for (producer, direction, cond) in self.bb.residuals() {
+            info!(
+                "orchestrator: residual from {} ({:?}): {}",
+                producer, direction, cond.note
+            );
+            for p in cond.covered.iter().take(6) {
+                debug!(
+                    "orchestrator:   unfalsifiable obligation {} in {}.{}",
+                    p.index, p.method.class, p.method.name
+                );
+            }
+        }
+
         let verdict = self.bb.verdict();
         info!("orchestrator: done, verdict={verdict:?}");
         verdict

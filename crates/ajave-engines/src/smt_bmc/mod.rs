@@ -670,6 +670,9 @@ impl Engine for SmtBmc {
         // blackboard has already refused anything else at publish, so reaching
         // here means the claim is about every execution.
         let mut known_bounds: HashMap<(MethodKey, VarId), (u64, u64)> = HashMap::new();
+        // References an Over engine has established are never null (Option D).
+        let mut known_nonnull: std::collections::HashSet<(MethodKey, VarId)> =
+            std::collections::HashSet::new();
         for qid in std::mem::take(&mut self.asked) {
             let Some(q) = bb.query(qid) else { continue };
             let (method, about) = (q.at.method.clone(), q.about.clone());
@@ -679,6 +682,19 @@ impl Engine for SmtBmc {
                 // `open_for` applies to statuses.
                 if !approx.is_exact() {
                     continue;
+                }
+                // Option D: a reference the contract says is never null.
+                //
+                // Consumed as a path constraint `v != 0` rather than as a
+                // discharge: the BMC is `Under` and may not conclude safety,
+                // but it may *assume* a fact an `Over` answerer established,
+                // which prunes the null branch so the real paths are explored
+                // instead of a spurious one.
+                if matches!(lemma.answer, Answer::NonNull) {
+                    if let ajave_core::term::Expr::Var(v) = &about {
+                        debug!("smt-bmc: assuming {} non-null from {}", v.0, lemma.by);
+                        known_nonnull.insert((method.clone(), *v));
+                    }
                 }
                 if let Answer::Bounds { lo, hi } = &lemma.answer {
                     if let (
@@ -714,6 +730,8 @@ impl Engine for SmtBmc {
             exhausted: false,
             deadline: budget.deadline,
             scale: self.scale,
+            self_refuted: Vec::new(),
+            pending_null_queries: Vec::new(),
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
@@ -722,6 +740,7 @@ impl Engine for SmtBmc {
             approximated: Approximations::EXACT,
             pending_queries: Vec::new(),
             known_bounds,
+            known_nonnull,
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -872,6 +891,97 @@ impl Engine for SmtBmc {
             ctx.skipped_obligations.len(),
         );
 
+        // Option C: publish where exploration stopped.
+        //
+        // `cut_points` already records exactly that, as `(MethodKey, BlockId)`
+        // pairs, and `obligations_at_risk` already turns it into the affected
+        // obligations. Today the rest of the portfolio learns only
+        // `all_paths_complete = false` — one boolean for "something, somewhere,
+        // was cut".
+        //
+        // **This is a producer with a diagnostic consumer, and is not claimed
+        // as a cooperation win.** No engine knows how to analyse "this program
+        // restricted to these paths": CHC would need clause generation scoped
+        // to a block subset, k-induction a base case starting from a residual
+        // state. Shipping a producer whose consumer merely logs would be the
+        // live-but-inert defect this session found four times. What this round
+        // measures is how often a residual is non-trivial and how large — the
+        // data needed to decide whether a real consumer is worth building.
+        //
+        // Conditional model checking (Beyer, Henzinger, Keremoglu, Wendler
+        // 2012) is the published design to follow if it is.
+        if crate::body_analysis::residual_enabled() && !ctx.cut_points.is_empty() {
+            let total_blocks: usize = prog
+                .reachable_from_entry()
+                .iter()
+                .filter_map(|mk| prog.body(mk))
+                .map(|b| b.blocks.len())
+                .sum();
+            let covered: Vec<ProgramPoint> = ctx
+                .cut_points
+                .iter()
+                .map(|(mk, b)| ProgramPoint {
+                    method: mk.clone(),
+                    block: *b,
+                    index: 0,
+                })
+                .collect();
+            let note = format!(
+                "exploration stopped at {} point(s) of {} reachable block(s); \
+                 everything not reachable from those points was covered to depth {}",
+                covered.len(),
+                total_blocks,
+                self.max_depth
+            );
+            let _ = bb.publish(
+                self.id(),
+                // `Under`: a statement about what this bounded search did, not
+                // a claim about every execution.
+                Direction::Under,
+                Artifact::Residual(Condition { covered, note }),
+            );
+        }
+
+        // Option B: publish the self-refutations as `Residual` conditions.
+        //
+        // `Residual` is reused rather than a new kind added, because the shape
+        // fits exactly: a condition naming program points plus a note saying
+        // what is true of them. Here the note is why the obligation could not
+        // be falsified, which is the fact nobody records today.
+        //
+        // The consumer is the orchestrator's end-of-run report, which turns a
+        // corpus-wide statistic (56 of 76 witnesses carry no input) into a
+        // per-task diagnosis naming the obligation and the reason.
+        if crate::body_analysis::refute_artifact_enabled() && !ctx.self_refuted.is_empty() {
+            let n = ctx.self_refuted.len();
+            let covered: Vec<ProgramPoint> = ctx
+                .self_refuted
+                .iter()
+                .map(|(mk, oid)| ProgramPoint {
+                    method: mk.clone(),
+                    block: BlockId(0),
+                    index: oid.0 as usize,
+                })
+                .collect();
+            let _ = bb.publish(
+                self.id(),
+                // `Under`: this is information about *one* execution — the
+                // witness that was constructed and found unusable — not a
+                // claim about every execution. An engine that read it as
+                // "safe" would produce wrong TRUEs at scale, which is the line
+                // `proved_safe` and `verdict_excluding` already hold.
+                Direction::Under,
+                Artifact::Residual(Condition {
+                    covered,
+                    note: format!(
+                        "{n} obligation(s) had a satisfiable error path whose witness \
+                         carried no nondet input: the assignment came from a havoced \
+                         value, not from the program"
+                    ),
+                }),
+            );
+        }
+
         // What this exploration failed to model. Rides out on every artifact
         // below, so a more faithful engine can ask for these obligations back.
         let approximated = ctx.approximated;
@@ -892,6 +1002,20 @@ impl Engine for SmtBmc {
         if asked_now {
             for (at, about, given) in pending {
                 let id = bb.ask(self.id(), at, about, Want::Bounds, given);
+                self.asked.push(id);
+            }
+        }
+        // Option D's questions, posted on the same channel.
+        //
+        // Not gated on `asked_now`: a run may raise nullness questions and no
+        // bounds questions, and gating the two together would have made the
+        // whole option silently inert — which is the shape of every defect in
+        // this session's record.
+        let null_pending = std::mem::take(&mut ctx.pending_null_queries);
+        if !null_pending.is_empty() && crate::body_analysis::null_queries_enabled() {
+            debug!("smt-bmc: asking about {} reference(s)", null_pending.len());
+            for (at, about, given) in null_pending {
+                let id = bb.ask(self.id(), at, about, Want::NonNull, given);
                 self.asked.push(id);
             }
         }
@@ -1193,6 +1317,15 @@ struct ExploreCtx<'a> {
     deadline: Option<std::time::Instant>,
     /// Multiplier on the work bounds for this pass. See `SmtBmc::scale`.
     scale: u64,
+    /// Obligations whose violation this engine withheld because its own witness
+    /// could not replay. Option B; see `handle_check`.
+    self_refuted: Vec<(MethodKey, ObligationId)>,
+    /// Nullness questions raised on the way. Option D.
+    pending_null_queries: Vec<(
+        ProgramPoint,
+        ajave_core::term::Expr,
+        Vec<ajave_core::term::Expr>,
+    )>,
     completeness: Completeness,
     /// Obligations whose check could not be trusted, keyed by
     /// **(method, id)**. See `violated_oids` for why the method is part of
@@ -1228,6 +1361,8 @@ struct ExploreCtx<'a> {
     /// Read from lemmas at the start of a pass and asserted as the variable is
     /// created, which is what turns an answer into pruning.
     known_bounds: HashMap<(MethodKey, VarId), (u64, u64)>,
+    /// References another engine established are never null. Option D.
+    known_nonnull: std::collections::HashSet<(MethodKey, VarId)>,
     /// What this exploration did not model faithfully.
     ///
     /// Set by `encode_binop` when it encodes a float arithmetic operator on

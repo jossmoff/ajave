@@ -10,7 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::body_analysis::{body_has_loops, body_uses_float_types, body_uses_long_types};
+use crate::body_analysis::{
+    answers_queries_enabled, body_has_loops, body_uses_float_types, body_uses_long_types,
+};
 use crate::interval::{Interval, IntervalCpa, WideningIntervalCpa, NEG_INF, POS_INF};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
@@ -402,6 +404,138 @@ pub struct AiEngine {
     nonnull_statics: HashSet<FieldKey>,
     /// Precision policy for the flat field abstraction.
     field_prec: crate::interval::FieldPrec,
+    /// Joined intervals from a **complete** fixpoint, kept so `step` can answer
+    /// `Want::Bounds` queries that did not exist when `init` ran.
+    ///
+    /// Keyed by `(method, var)` and joined over **every** state the variable is
+    /// live in, not by program point. Two reasons, and the first is a
+    /// measurement: `smt-bmc` posts every query with `index: 0`, and the
+    /// variable it asks about is the destination of a call, which has no value
+    /// at block entry. Keyed by point, the engine held 32 facts and could
+    /// answer none of them.
+    ///
+    /// Joining over all points is **sound in the direction that matters**: the
+    /// result contains the variable's range at every individual point, so it is
+    /// wider than the true bound at the asker's point. A wider bound assumed by
+    /// the asker removes fewer executions, so a proof over it still holds. The
+    /// cost is precision, which is the right way round.
+    ///
+    /// Empty unless the run converged. A truncated `reached` set
+    /// *under*-approximates reachable states, so a join over it can be too
+    /// narrow — which would be an unsound bound and the wrong-TRUE direction.
+    /// `init` only fills this on `complete`, which is the same gate the hint
+    /// path uses and for the same reason.
+    answerable: HashMap<(MethodKey, VarId), Interval>,
+    /// The same, for float and double variables.
+    ///
+    /// Kept separate rather than unified because the two domains have different
+    /// bounds types and different notions of top, and because the *asker* that
+    /// motivated this channel asks about doubles: `smt-bmc` posts a query for
+    /// every unmodelled call, and the call that started all of this is
+    /// `Math.sin`, whose result is a double. Answering only integers would have
+    /// left the one measured asker unserved — which the engine's own
+    /// instrumentation showed on the first run: 26 facts held, one query, zero
+    /// answerable.
+    answerable_fp: HashMap<(MethodKey, VarId), crate::interval::FloatInterval>,
+}
+
+/// Join the interval for each `(block, var)` across every reached state.
+///
+/// Extracted so the hint path and the query answerer cannot disagree about what
+/// a published interval means. The result is a sound over-approximation
+/// *provided the fixpoint converged*: every concrete value at that block is
+/// inside the returned interval. Callers must check `complete` first — a
+/// truncated `reached` set under-approximates reachable states, so joining over
+/// it can produce an interval that is too narrow.
+///
+/// Block-entry states only (`index == 0`): a mid-block state reflects values
+/// after an assignment, which do not hold on entry to the block.
+///
+/// 32-bit integers only. The domain's bounds are `i32`, so a `Long` or `Double`
+/// interval read out of it would be a claim about a range the analysis never
+/// represented.
+/// Join a variable's interval over **every** state in the method.
+///
+/// The per-block joins below answer "what holds on entry to this block", which
+/// is what an invariant hint needs. This answers "what range can this variable
+/// ever take", which is what a `Want::Bounds` query needs — and is strictly
+/// wider, hence sound to hand to an asker whose point we cannot match exactly.
+fn join_method_intervals(
+    method: &MethodKey,
+    reached: &[crate::interval::IState],
+    body: &ajave_ir::Body,
+) -> HashMap<VarId, Interval> {
+    let mut out: HashMap<VarId, Interval> = HashMap::new();
+    for state in reached {
+        if state.location().method != *method {
+            continue;
+        }
+        for (&vid, &iv) in &state.vars {
+            if iv.is_bottom() {
+                continue;
+            }
+            let var_ty = body.vars.get(vid.0 as usize).map(|v| &v.ty);
+            if matches!(var_ty, Some(ajave_ir::Ty::Long | ajave_ir::Ty::Double)) {
+                continue;
+            }
+            let j = out.entry(vid).or_insert_with(Interval::bottom);
+            *j = j.join(iv);
+        }
+    }
+    out
+}
+
+/// The float half of `join_method_intervals`.
+fn join_method_float_intervals(
+    method: &MethodKey,
+    reached: &[crate::interval::IState],
+) -> HashMap<VarId, crate::interval::FloatInterval> {
+    let mut out: HashMap<VarId, crate::interval::FloatInterval> = HashMap::new();
+    for state in reached {
+        if state.location().method != *method {
+            continue;
+        }
+        for (&vid, &iv) in &state.float_vars {
+            if iv.is_bottom() {
+                continue;
+            }
+            match out.get(&vid).copied() {
+                Some(prev) => {
+                    out.insert(vid, prev.join(iv));
+                }
+                None => {
+                    out.insert(vid, iv);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn join_block_intervals(
+    method: &MethodKey,
+    reached: &[crate::interval::IState],
+    body: &ajave_ir::Body,
+) -> HashMap<(BlockId, VarId), Interval> {
+    let mut out: HashMap<(BlockId, VarId), Interval> = HashMap::new();
+    for state in reached {
+        let loc = state.location();
+        if loc.method != *method || loc.index != 0 {
+            continue;
+        }
+        for (&vid, &iv) in &state.vars {
+            if iv.is_bottom() {
+                continue;
+            }
+            let var_ty = body.vars.get(vid.0 as usize).map(|v| &v.ty);
+            if matches!(var_ty, Some(ajave_ir::Ty::Long | ajave_ir::Ty::Double)) {
+                continue;
+            }
+            let joined = out.entry((loc.block, vid)).or_insert_with(Interval::bottom);
+            *joined = joined.join(iv);
+        }
+    }
+    out
 }
 
 impl AiEngine {
@@ -412,6 +546,8 @@ impl AiEngine {
             nonnull_returns: HashSet::new(),
             nonnull_statics: HashSet::new(),
             field_prec: Default::default(),
+            answerable: HashMap::new(),
+            answerable_fp: HashMap::new(),
         }
     }
 }
@@ -423,6 +559,106 @@ impl Default for AiEngine {
 }
 
 impl AiEngine {
+    /// Answer open `Want::Bounds` questions from the stored fixpoint.
+    ///
+    /// Returns how many were answered. `ranges` answers the same question from
+    /// a published JDK contract, so it can only speak about library calls; this
+    /// speaks about the program's own variables, which is what an asker that
+    /// havoced a value actually needs.
+    ///
+    /// # Soundness
+    ///
+    /// `Answer::Bounds` is universal, and this engine is `Over`, so the
+    /// direction is already right and the blackboard enforces it at publish.
+    /// The load-bearing condition is elsewhere: `answerable` is filled only
+    /// from a **complete** fixpoint, because a join over a truncated `reached`
+    /// set can be too narrow, and a too-narrow bound assumed by the BMC would
+    /// remove real executions — a wrong TRUE.
+    ///
+    /// An interval at top is answered `Unknown` rather than left open. Saying
+    /// "asked and cannot say" stops the scheduler re-asking, which is what the
+    /// `Unknown` arm is documented to be for.
+    fn answer_bounds_queries(&mut self, bb: &mut Blackboard) -> usize {
+        let pending: Vec<(u32, MethodKey, VarId)> = bb
+            .unanswered()
+            .into_iter()
+            .filter(|q| q.want == Want::Bounds)
+            .filter_map(|q| match &q.about {
+                Expr::Var(v) => Some((q.id, q.at.method.clone(), *v)),
+                _ => None,
+            })
+            .collect();
+        if pending.is_empty() {
+            return 0;
+        }
+
+        let mut answered = 0usize;
+        let mut unknown = 0usize;
+        for (qid, method, vid) in pending {
+            // Keyed by method as well as variable: a `VarId` indexes exactly
+            // one `Body`, so answering a question about a method this run did
+            // not analyse would be a claim about a different variable that
+            // happens to share a number — the id-collision class `CLAUDE.md`
+            // records under faults between engines.
+            let iv = self
+                .answerable
+                .get(&(method.clone(), vid))
+                .copied()
+                .filter(|iv| !iv.is_bottom());
+
+            // A float fact, if the integer domain has nothing. `Expr::double`
+            // holds the value as its IEEE-754 bit pattern, which is what makes
+            // the claim exact and `Eq`/`Hash`-able.
+            let fp = self.answerable_fp.get(&(method.clone(), vid)).copied();
+
+            let answer = match iv {
+                Some(iv) if iv.lo > NEG_INF || iv.hi < POS_INF => Answer::Bounds {
+                    lo: Expr::Int(iv.lo),
+                    hi: Expr::Int(iv.hi),
+                },
+                _ if fp.is_some_and(|f| f.lo.is_finite() || f.hi.is_finite()) => {
+                    let f = fp.expect("checked by the guard");
+                    Answer::Bounds {
+                        lo: Expr::double(f.lo),
+                        hi: Expr::double(f.hi),
+                    }
+                }
+                // Either no fact, or a fact that says nothing. Both are
+                // honestly `Unknown`, and publishing it is cheaper than
+                // leaving the asker to wait.
+                _ => {
+                    unknown += 1;
+                    Answer::Unknown
+                }
+            };
+            let is_bound = matches!(answer, Answer::Bounds { .. });
+            let published = bb.publish(
+                self.id(),
+                self.direction(),
+                Artifact::Lemma(Lemma {
+                    query: qid,
+                    by: self.id(),
+                    answer,
+                }),
+            );
+            if published.is_ok() && is_bound {
+                answered += 1;
+            }
+        }
+        // The pre-check the plan asks for, emitted by the implementation rather
+        // than run separately: how many questions this engine could actually
+        // answer. If `bounded` stays near zero the option is falsified.
+        info!(
+            "interval-ai: answered {} query(ies) with a bound, {} as unknown \
+             ({} int + {} float facts held)",
+            answered,
+            unknown,
+            self.answerable.len(),
+            self.answerable_fp.len()
+        );
+        answered
+    }
+
     /// Collect per-block-per-variable interval bounds from the reached states
     /// and publish them to the blackboard for other engines to consume.
     fn publish_interval_hints(
@@ -432,36 +668,7 @@ impl AiEngine {
         bb: &mut Blackboard,
         body: &ajave_ir::Body,
     ) {
-        // For each (block, var), join all intervals across reached states at
-        // that block. The result is a sound over-approximation: every concrete
-        // value at that block is within the published interval.
-        let mut block_vars: HashMap<(BlockId, VarId), Interval> = HashMap::new();
-
-        for state in reached {
-            let loc = state.location();
-            if loc.method != *entry {
-                continue;
-            }
-            // Only use states at block entry (index 0) — mid-block states
-            // reflect post-assignment values that don't hold at block entry.
-            if loc.index != 0 {
-                continue;
-            }
-            for (&vid, &iv) in &state.vars {
-                if iv.is_bottom() {
-                    continue;
-                }
-                // Only publish for 32-bit integer variables. The interval
-                // domain uses i32 range; Long/Double intervals would be wrong.
-                let var_ty = body.vars.get(vid.0 as usize).map(|v| &v.ty);
-                if matches!(var_ty, Some(ajave_ir::Ty::Long | ajave_ir::Ty::Double)) {
-                    continue;
-                }
-                let key = (loc.block, vid);
-                let joined = block_vars.entry(key).or_insert_with(Interval::bottom);
-                *joined = joined.join(iv);
-            }
-        }
+        let block_vars = join_block_intervals(entry, reached, body);
 
         let mut hint_count = 0;
         for ((block, vid), iv) in &block_vars {
@@ -612,7 +819,17 @@ impl Engine for AiEngine {
     /// holding the clock, and a later widening buys precision on loops where
     /// the interval domain has already lost the property for other reasons.
     fn interest(&self) -> Interest {
-        Interest::STATUS
+        // `QUERY` as well as `STATUS` once this engine answers questions: a
+        // query posted by an engine that runs *after* this one would otherwise
+        // never wake it, and the answer would never be given. #37 is the same
+        // mistake in the other direction — an interest in a kind nobody
+        // produces — so both halves of this declaration are worth checking
+        // against the producers that actually exist.
+        if answers_queries_enabled() {
+            Interest::STATUS.union(Interest::QUERY)
+        } else {
+            Interest::STATUS
+        }
     }
 
     /// Runs the interval analysis at init time to publish hints for BMC and
@@ -708,12 +925,40 @@ impl Engine for AiEngine {
 
         if complete {
             self.publish_interval_hints(entry, &reached, bb, body);
+            // Kept for the query answerer. Only on `complete`, for the reason
+            // stated on the field.
+            if answers_queries_enabled() {
+                for (vid, iv) in join_method_intervals(entry, &reached, body) {
+                    self.answerable.insert((entry.clone(), vid), iv);
+                }
+                for (vid, iv) in join_method_float_intervals(entry, &reached) {
+                    self.answerable_fp.insert((entry.clone(), vid), iv);
+                }
+            }
         }
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
+        // Answer first, and on every entry — including entries after `done`.
+        //
+        // This engine is one-shot for *discharge*, but answering is not the
+        // same work: a question posted by an engine further down the portfolio
+        // arrives after this one has finished, and the fixpoint that can answer
+        // it is already computed and sitting in `answerable`. Returning
+        // `Exhausted` before looking would throw away the whole point of the
+        // channel.
+        let answered = if answers_queries_enabled() {
+            self.answer_bounds_queries(bb)
+        } else {
+            0
+        };
+
         if self.done {
-            return Progress::Exhausted;
+            return if answered > 0 {
+                Progress::Advanced
+            } else {
+                Progress::Exhausted
+            };
         }
         self.done = true;
 
