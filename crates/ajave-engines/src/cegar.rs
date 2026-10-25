@@ -16,7 +16,11 @@ use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::*;
 use log::{debug, info};
 
-use crate::body_analysis::{body_uses_havoced_ops, find_defining_bin};
+use ajave_core::term::{Expr, Op};
+
+use crate::body_analysis::{
+    all_methods_scoping_enabled, ask_on_decline_enabled, body_uses_havoced_ops, find_defining_bin,
+};
 use crate::interpolation::{encode_body_lia, find_interpolation_solver, InterpolationSolver};
 use crate::predicate::{
     predicates_from_interpolant, CompOp, PredPrec, Predicate, PredicateCpa, PredicateOperand,
@@ -84,68 +88,144 @@ impl Engine for CegarEngine {
         let Some(entry) = &prog.entry else {
             return Progress::Exhausted;
         };
-        let Some(body) = prog.body(entry) else {
+        // Confirms the entry is loadable; each candidate method fetches its
+        // own body in the loop below.
+        if prog.body(entry).is_none() {
             return Progress::Exhausted;
+        }
+
+        // Which methods to attempt.
+        //
+        // This engine used to filter `oref.method == *entry`, so an obligation
+        // in a helper was not declined — it was never considered. The BMC
+        // routinely inlines four deep, so a corpus where assertions live
+        // outside `main` was invisible to predicate abstraction entirely.
+        //
+        // A per-method proof is a proof under *unconstrained parameters*, which
+        // is strictly more conservative than one under the caller's actual
+        // arguments, so a discharge stays sound. The risk is the opposite: it
+        // will often fail and cost time, which is what the gate is for.
+        let candidates: Vec<MethodKey> = if all_methods_scoping_enabled() {
+            let mut v: Vec<MethodKey> = bb
+                .open_or_unconfirmed()
+                .iter()
+                .map(|o| o.method.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            // Entry first: it is the method most likely to carry the property,
+            // and a proof there can close the task on its own.
+            v.sort_by_key(|mk| (mk != entry, mk.clone()));
+            v
+        } else {
+            vec![entry.clone()]
         };
 
-        if !body.is_fully_lifted() {
-            return Progress::Blocked;
-        }
-
-        // CEGAR uses predicate abstraction (CPA-based reachability), not SMT
-        // satisfiability. When heap operations produce unconstrained abstract
-        // values, the predicate domain can't track them, causing the abstract
-        // state to collapse to "top" — which makes the safety check trivially
-        // succeed, producing unsound TRUE verdicts. Unlike k-induction/CHC/IMC
-        // (which use SMT UNSAT checks where fresh values are conservative),
-        // CEGAR's abstract interpretation can lose safety-critical information.
-        if body_uses_havoced_ops(body) {
-            debug!("cegar: {} uses havoced ops, skipping", entry);
-            return Progress::Blocked;
-        }
-
-        let open: Vec<ObligationRef> = bb
-            .open_or_unconfirmed()
-            .iter()
-            .filter(|oref| oref.method == *entry)
-            .cloned()
-            .collect();
-
-        if open.is_empty() {
-            return Progress::Exhausted;
-        }
-
-        info!(
-            "cegar: starting refinement loop for {} obligation(s)",
-            open.len()
-        );
-
         let mut advanced = false;
+        let mut attempted = 0usize;
+        let mut asked = 0usize;
 
-        for oref in &open {
-            match try_cegar(solver, prog, body, entry, oref.id) {
-                Ok(true) => {
-                    debug!("cegar: proved {} via predicate abstraction", oref);
-                    let _ = bb.publish(
-                        self.id(),
-                        self.direction(),
-                        Artifact::Status(
-                            oref.clone(),
-                            Status::Discharged {
-                                by: self.id(),
-                                proof: ProofKind::Exhaustive,
-                            },
-                        ),
-                    );
-                    advanced = true;
+        for mk in &candidates {
+            let Some(body) = prog.body(mk) else { continue };
+
+            if !body.is_fully_lifted() {
+                continue;
+            }
+
+            // CEGAR uses predicate abstraction (CPA-based reachability), not SMT
+            // satisfiability. When heap operations produce unconstrained abstract
+            // values, the predicate domain can't track them, causing the abstract
+            // state to collapse to "top" — which makes the safety check trivially
+            // succeed, producing unsound TRUE verdicts. Unlike k-induction/CHC/IMC
+            // (which use SMT UNSAT checks where fresh values are conservative),
+            // CEGAR's abstract interpretation can lose safety-critical information.
+            //
+            // **This guard is soundness, not capability, and it is per body.**
+            // The three-levers experiment deliberately does not relax it: the
+            // architecture review called it out as "not a cheap unlock", and
+            // opening it needs the collapse mechanism understood plus a test
+            // that fails when the abstraction goes to top. Analysing more
+            // methods means more bodies each checked by this guard, which is
+            // the safe way to widen reach.
+            if body_uses_havoced_ops(body) {
+                debug!("cegar: {} uses havoced ops, skipping", mk);
+                // A decline is a question, not a surrender.
+                //
+                // Returning `Blocked` tells the scheduler "nothing more to do
+                // here" and nothing else. But this engine knows precisely what
+                // defeated it: a value it cannot track. Saying so costs nothing
+                // and commits to nothing — a `Query` is not a claim — and any
+                // later answerer can supply a bound that makes the predicate
+                // domain viable.
+                //
+                // That is what turns an *alternative* engine into also a
+                // *resource*, without touching its analysis: only its failure
+                // mode changes. The scheduler re-enters it when an answer lands
+                // because `Interest::LEMMA` and the delta cursor already exist.
+                if ask_on_decline_enabled() {
+                    asked += ask_about_untracked(bb, self.id(), mk, body);
                 }
-                Ok(false) => {
-                    debug!("cegar: inconclusive for {}", oref);
-                }
-                Err(e) => {
-                    debug!("cegar: error for {}: {}", oref, e);
+                continue;
+            }
+
+            let open: Vec<ObligationRef> = bb
+                .open_or_unconfirmed()
+                .iter()
+                .filter(|oref| oref.method == *mk)
+                .cloned()
+                .collect();
+
+            if open.is_empty() {
+                continue;
+            }
+            attempted += open.len();
+
+            info!(
+                "cegar: starting refinement loop for {} obligation(s) in {}",
+                open.len(),
+                mk
+            );
+
+            for oref in &open {
+                match try_cegar(solver, prog, body, mk, oref.id) {
+                    Ok(true) => {
+                        debug!("cegar: proved {} via predicate abstraction", oref);
+                        let _ = bb.publish(
+                            self.id(),
+                            self.direction(),
+                            Artifact::Status(
+                                oref.clone(),
+                                Status::Discharged {
+                                    by: self.id(),
+                                    proof: ProofKind::Exhaustive,
+                                },
+                            ),
+                        );
+                        advanced = true;
+                    }
+                    Ok(false) => {
+                        debug!("cegar: inconclusive for {}", oref);
+                    }
+                    Err(e) => {
+                        debug!("cegar: error for {}: {}", oref, e);
+                    }
                 }
             }
+        }
+
+        if attempted == 0 {
+            debug!(
+                "cegar: no analysable body among {} candidate method(s), asked {} question(s)",
+                candidates.len(),
+                asked
+            );
+            // Having asked, do not retire: `Interest::LEMMA` brings this engine
+            // back if anybody answers. Retiring would throw the answer away.
+            return if asked > 0 {
+                Progress::Blocked
+            } else {
+                Progress::Exhausted
+            };
         }
 
         if advanced {
@@ -154,6 +234,84 @@ impl Engine for CegarEngine {
             Progress::Blocked
         }
     }
+}
+
+/// Ask about the values that defeated the predicate abstraction.
+///
+/// One `Bounds` question per variable assigned from an operation this engine
+/// cannot track. A bound would let the predicate domain represent the value
+/// instead of collapsing to top, which is the specific thing that makes this
+/// body unanalysable.
+///
+/// `Want::Bounds` is a universal question, so only an `Over` or `Exact`
+/// answerer may reply — enforced at publish, not here. Capped, because an
+/// engine that posts a hundred questions nobody can answer has converted a
+/// cheap decline into an expensive one.
+fn ask_about_untracked(bb: &mut Blackboard, me: EngineId, mk: &MethodKey, body: &Body) -> usize {
+    const MAX_QUESTIONS: usize = 8;
+    let mut n = 0;
+    for block in &body.blocks {
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            if n >= MAX_QUESTIONS {
+                return n;
+            }
+            let Stmt::Assign(vid, rv) = stmt else {
+                continue;
+            };
+            if !crate::body_analysis::stmt_is_havoced_op(stmt) {
+                continue;
+            }
+            // Only int-typed destinations: a bound on a reference means
+            // nothing to the predicate domain, and asking would be noise.
+            if !body
+                .vars
+                .get(vid.0 as usize)
+                .is_some_and(|vi| matches!(vi.ty, Ty::Int | Ty::Long))
+            {
+                continue;
+            }
+            // What the question is *about*, and what the asker already knows.
+            // `given` carries the binding so an answerer can recognise the
+            // shape — a library call whose range is specified, for instance.
+            let about = Expr::Var(*vid);
+            let given = match rv {
+                Rvalue::Call { target, args, .. } => {
+                    let arg_exprs: Vec<Expr> = args
+                        .iter()
+                        .filter_map(|a| match a {
+                            Operand::Var(v) => Some(Expr::Var(*v)),
+                            Operand::Const(Const::Int(i)) => Some(Expr::Int(*i as i64)),
+                            _ => None,
+                        })
+                        .collect();
+                    if arg_exprs.len() != args.len() {
+                        continue;
+                    }
+                    vec![Expr::bin(
+                        Op::Eq,
+                        about.clone(),
+                        Expr::call(&target.class, &target.name, &target.desc, arg_exprs),
+                    )]
+                }
+                // Not a call: nothing to describe it with, so the question is
+                // bare. An answerer with a whole-program fact can still reply.
+                _ => Vec::new(),
+            };
+            bb.ask(
+                me,
+                ProgramPoint {
+                    method: mk.clone(),
+                    block: block.id,
+                    index: idx,
+                },
+                about,
+                Want::Bounds,
+                given,
+            );
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Run the CEGAR loop for a single obligation.

@@ -12,7 +12,7 @@
 //! because Spacer's fixpoint engine works best with integers. Falls back to
 //! BV for the single-method encoding when there are no inter-procedural calls.
 
-use crate::body_analysis::body_uses_float_types;
+use crate::body_analysis::{body_uses_float_types, obligation_scoping_enabled};
 use crate::smt_text::{self, LiaTheory, SmtTheory};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as IoWrite;
@@ -170,14 +170,19 @@ impl Engine for ChcEngine {
         // `smt_bmc/encode.rs`. Overflow guards do not help: the values were
         // never integers to begin with.
         //
-        // Declining the whole program is heavier than it needs to be: havocing
-        // just the float-valued rvalues would be sound and would keep the
-        // programs whose assertion is about integers and whose `double` is
-        // incidental. That is 37 of the 142 unproven TRUE tasks. Not done yet.
+        // Done now. Both encoders havoc float-valued rvalues rather than
+        // computing on bit patterns — the LIA one via `rvalue_is_float` in
+        // `lia_rvalue`, the bitvector one at its `Stmt::Assign` arm — so the
+        // program no longer has to be refused. That decline cost 37 of the 142
+        // unproven TRUE tasks: every program whose assertion is about integers
+        // and whose `double` is incidental.
+        //
+        // Kept behind the gate so the change can be ablated against itself in
+        // one build rather than measured across two.
         let uses_float = reachable_methods
             .iter()
             .any(|mk| prog.body(mk).is_some_and(body_uses_float_types));
-        if uses_float && !prog_has_resolvable_calls(prog, entry) {
+        if uses_float && !prog_has_resolvable_calls(prog, entry) && !obligation_scoping_enabled() {
             info!("chc: skipping — float/double arithmetic, and no LIA encoding applies");
             return Progress::Blocked;
         }
@@ -2090,6 +2095,17 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                 _ => false,
             }
         };
+        let is_float = |op: &Operand| -> bool {
+            match op {
+                Operand::Const(Const::Float(_)) | Operand::Const(Const::Double(_)) => true,
+                Operand::Var(v) => body
+                    .vars
+                    .get(v.0 as usize)
+                    .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
+                    .unwrap_or(false),
+                _ => false,
+            }
+        };
 
         for stmt in &block.stmts {
             match stmt {
@@ -2142,9 +2158,38 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                             continue;
                         }
                     }
-                    // The encoder reports its own binders, so the old
-                    // recover-by-string-prefix on "bv_fresh" is gone.
-                    let expr = enc.rvalue(rv, &var_map, &is_wide);
+                    // Float arithmetic is havoced, not computed.
+                    //
+                    // A float encoded as its raw IEEE-754 bit pattern and then
+                    // put through `bvadd` computes something that is not
+                    // floating-point addition, so a proof over it is a proof
+                    // about a different program. The LIA encoder has havoced
+                    // these since `rvalue_is_float` landed; this encoder did
+                    // not, which is why `step` declined the whole program
+                    // whenever it was the one selected.
+                    //
+                    // Havocing is sound in the only direction that matters
+                    // here: an unconstrained value admits every float the real
+                    // computation could produce and more, so the relations
+                    // over-approximate reachability, and `error` unreachable
+                    // over a superset is unreachable over the truth. The
+                    // failure mode is a proof that does not go through.
+                    //
+                    // The decline it replaces cost 37 of 142 unproven TRUE
+                    // tasks — every program whose assertion is about integers
+                    // and whose `double` is incidental.
+                    let expr = if obligation_scoping_enabled() && rvalue_is_float(rv, &is_float) {
+                        let f = format!("bvfp_{}_{}", block.id.0, vid.0);
+                        let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);
+                        if !fresh_decls.iter().any(|(n, _)| n == &f) {
+                            fresh_decls.push((f.clone(), w));
+                        }
+                        f
+                    } else {
+                        // The encoder reports its own binders, so the old
+                        // recover-by-string-prefix on "bv_fresh" is gone.
+                        enc.rvalue(rv, &var_map, &is_wide)
+                    };
                     for (name, _) in enc.binders.drain(..) {
                         let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);
                         if !fresh_decls.iter().any(|(n, _)| n == &name) {

@@ -186,3 +186,172 @@ pub fn first_unmodelled_throwing_call<'a>(
     }
     None
 }
+
+// ─── Per-obligation scoping (the three-levers experiment, docs/plans/three-levers.md) ───
+
+/// Whether per-obligation scoping is enabled.
+///
+/// `cegar` refuses a whole program when `body_uses_havoced_ops` holds anywhere,
+/// and `chc` refuses any body where `body_uses_heap_ops` does. Measured, that
+/// guard skips 109 of 121 tasks — but obligations are individual, and one havoc
+/// in a sixty-obligation method kills all sixty, including the fifty-nine whose
+/// paths never reach it.
+///
+/// Gated so one build can be ablated against itself. See also
+/// `AJAVE_ASK_ON_DECLINE` and `AJAVE_SCOPE_ALL_METHODS`.
+pub fn obligation_scoping_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_SCOPE_OBLIGATION").as_deref() != Ok("0"))
+}
+
+/// Whether an engine that cannot proceed should publish a `Query` rather than
+/// simply returning `Blocked`.
+pub fn ask_on_decline_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_ASK_ON_DECLINE").as_deref() != Ok("0"))
+}
+
+/// Whether engines may analyse methods other than the entry point.
+pub fn all_methods_scoping_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_SCOPE_ALL_METHODS").as_deref() != Ok("0"))
+}
+
+/// Blocks of `body` in which `pred` holds of some statement.
+fn blocks_matching(body: &Body, pred: &dyn Fn(&Stmt) -> bool) -> Vec<BlockId> {
+    body.blocks
+        .iter()
+        .filter(|b| b.stmts.iter().any(pred))
+        .map(|b| b.id)
+        .collect()
+}
+
+/// Obligations in `body` that an unsupported statement can reach.
+///
+/// Forward CFG reachability from every block containing a statement `pred`
+/// accepts, to every `Check`. An obligation NOT in the returned set is one the
+/// unsupported feature cannot influence, so an engine that refuses the feature
+/// may still attempt that obligation.
+///
+/// # Why this direction of imprecision is the safe one
+///
+/// The caller uses this to *widen* what an over-approximating engine attempts,
+/// and a discharge is a claim about every execution — so an obligation wrongly
+/// judged unreachable from a havoc would be a wrong TRUE at −16.
+///
+/// Every source of imprecision here therefore over-approximates reachability:
+///
+/// * Block granularity, not statement — a havoc late in a block taints the
+///   obligations checked earlier in that same block.
+/// * Exceptional edges are followed, so a handler counts as reachable.
+/// * A call is treated as reaching **everything** in the callee and, because a
+///   caller resumes after it returns, the call's own successors are already
+///   covered by the ordinary CFG walk.
+/// * A body we cannot find contributes all of its obligations.
+///
+/// Deliberately *not* backward slicing, which is the stronger version: slicing
+/// rewrites the body, which renumbers `VarId`s and so invalidates every
+/// obligation and invariant keyed by them. Reachability answers the same
+/// question without touching the IR.
+pub fn obligations_reachable_from(
+    prog: &ajave_ir::Program,
+    method: &ajave_ir::MethodKey,
+    body: &Body,
+    pred: &dyn Fn(&Stmt) -> bool,
+) -> std::collections::HashSet<(ajave_ir::MethodKey, ajave_ir::ObligationId)> {
+    use std::collections::{BTreeSet, HashSet};
+    let mut out: HashSet<(ajave_ir::MethodKey, ajave_ir::ObligationId)> = HashSet::new();
+    let starts = blocks_matching(body, pred);
+    if starts.is_empty() {
+        return out;
+    }
+
+    // Blocks reachable from any offending block, within this method.
+    let mut seen: BTreeSet<BlockId> = BTreeSet::new();
+    let mut work = starts;
+    // Methods a reachable call enters: all of their obligations are tainted,
+    // transitively, because we do not analyse what the callee does.
+    let mut tainted: BTreeSet<ajave_ir::MethodKey> = BTreeSet::new();
+    while let Some(bid) = work.pop() {
+        if !seen.insert(bid) {
+            continue;
+        }
+        let Some(block) = body.blocks.get(bid.0 as usize) else {
+            continue;
+        };
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Check(oid) => {
+                    out.insert((method.clone(), *oid));
+                }
+                Stmt::Assign(_, Rvalue::Call { target, .. }) => {
+                    tainted.insert(target.clone());
+                }
+                _ => {}
+            }
+        }
+        match &block.term {
+            Terminator::Goto(t) => work.push(*t),
+            Terminator::Branch { then_, else_, .. } => {
+                work.push(*then_);
+                work.push(*else_);
+            }
+            Terminator::Switch { cases, default, .. } => {
+                for (_, t) in cases {
+                    work.push(*t);
+                }
+                work.push(*default);
+            }
+            Terminator::Return(_) | Terminator::Halt | Terminator::Throw(_) => {}
+            Terminator::Diverge(_) => {}
+        }
+        for e in &block.exceptional {
+            work.push(e.target);
+        }
+    }
+
+    // Everything the tainted methods can reach, transitively.
+    let mut mwork: Vec<ajave_ir::MethodKey> = tainted.into_iter().collect();
+    let mut mseen: BTreeSet<ajave_ir::MethodKey> = BTreeSet::new();
+    while let Some(mk) = mwork.pop() {
+        if !mseen.insert(mk.clone()) {
+            continue;
+        }
+        let Some(b) = prog.body(&mk) else { continue };
+        for block in &b.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    Stmt::Check(oid) => {
+                        out.insert((mk.clone(), *oid));
+                    }
+                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
+                        mwork.push(target.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `Stmt` predicate matching the operations `body_uses_havoced_ops` rejects.
+#[allow(clippy::collapsible_match)]
+pub fn stmt_is_havoced_op(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Assign(_, rv) => matches!(
+            rv,
+            Rvalue::GetStatic(_)
+                | Rvalue::GetField { .. }
+                | Rvalue::InstanceOf { .. }
+                | Rvalue::Call { .. }
+                | Rvalue::Havoc(_, _)
+                | Rvalue::ArrayLoad { .. }
+                | Rvalue::ArrayLength(_)
+                | Rvalue::New(_)
+                | Rvalue::NewArray { .. }
+        ),
+        Stmt::PutField { .. } | Stmt::PutStatic { .. } | Stmt::ArrayStore { .. } => true,
+        _ => false,
+    }
+}
