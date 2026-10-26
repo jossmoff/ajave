@@ -508,7 +508,47 @@ impl Blackboard {
         self.queries.iter().find(|q| q.id == id)
     }
 
-    /// Whether `inv_id` is a certificate this blackboard will accept.
+    /// Every obligation discharged by an invariant, with that invariant's id.
+    ///
+    /// The report-time certifier's work list. Sorted, because an iteration
+    /// order that reaches a solver decides what gets checked first and
+    /// CLAUDE.md's determinism rule applies.
+    pub fn discharged_by_invariant(&self) -> Vec<(ObligationRef, u32)> {
+        let mut out: Vec<(ObligationRef, u32)> = self
+            .statuses
+            .iter()
+            .filter_map(|(oref, st)| match st {
+                Status::Discharged {
+                    proof: ProofKind::Invariant(id),
+                    ..
+                } => Some((oref.clone(), *id)),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            (&a.0.method.class, &a.0.method.name, a.0.id.0, a.1).cmp(&(
+                &b.0.method.class,
+                &b.0.method.name,
+                b.0.id.0,
+                b.1,
+            ))
+        });
+        out
+    }
+
+    /// Whether `inv_id` names a certificate that exists.
+    ///
+    /// Only existence, deliberately. `InvStatus::Inductive` is checked at
+    /// *report* time, where `JvmReplay` already checks violations, because the
+    /// blackboard is append-only and a publish-time `Inductive` requirement
+    /// would reject the discharge before any certifier could promote its
+    /// invariant — making promotion unreachable and the flag mean "reject
+    /// everything".
+    ///
+    /// What this catches is the dangling reference: `interval-ai` called
+    /// `fresh_invariant_id()`, put the result in `ProofKind::Invariant`, and
+    /// published no `Invariant` carrying it, so every one of its discharges
+    /// named a certificate that was never written.
     ///
     /// Factored out so the rule is testable without the process-wide env gate:
     /// a test that toggles a `OnceLock` is order-sensitive and passes or fails
@@ -523,11 +563,6 @@ impl Blackboard {
             None => Err(format!(
                 "{producer} discharges {oref} by invariant {inv_id}, which was \
                  never published"
-            )),
-            Some(inv) if inv.status != InvStatus::Inductive => Err(format!(
-                "{producer} discharges {oref} by invariant {inv_id}, which is \
-                 {:?} and not Inductive",
-                inv.status
             )),
             Some(_) => Ok(()),
         }
@@ -1180,8 +1215,11 @@ mod certification_tests {
         );
     }
 
+    /// A published `Candidate` satisfies the *publish-time* rule, which is
+    /// existence only. The `Inductive` requirement lives at report time — see
+    /// `check_invariant_proof`'s doc for why it cannot live here.
     #[test]
-    fn a_candidate_invariant_is_not_enough_to_discharge() {
+    fn a_published_candidate_satisfies_the_publish_time_rule() {
         let mut bb = Blackboard::new();
         let id = bb.fresh_invariant_id();
         bb.publish(
@@ -1193,8 +1231,8 @@ mod certification_tests {
         assert!(bb.invariant(id).is_some(), "precondition: it was published");
         let r = bb.check_invariant_proof(EngineId("interval-ai"), &oref(), id);
         assert!(
-            r.is_err(),
-            "InvStatus::Candidate documents itself as never enough on its own"
+            r.is_ok(),
+            "publish-time checks existence; Inductive is enforced at report time"
         );
     }
 

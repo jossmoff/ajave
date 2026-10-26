@@ -644,6 +644,71 @@ fn contract_checks_on() -> bool {
     cfg!(debug_assertions)
 }
 
+/// Report-time certification of invariant-backed TRUE claims.
+///
+/// The TRUE half of the rule `certify.rs` states: "no artifact reaches the
+/// reporter on an engine's authority alone." FALSE is replayed on a real JVM
+/// just above; this re-checks the invariants a proof rests on.
+///
+/// Returns the obligations whose certificate did **not** confirm. A non-empty
+/// result means TRUE must not be reported: the engine claimed an invariant
+/// justifies the check and an independent pass could not agree.
+///
+/// Runs at report time rather than at publish time because the blackboard is
+/// append-only — rejecting a discharge when its invariant is still a
+/// `Candidate` would make promotion unreachable. This is also where
+/// `JvmReplay` runs, for the same reason.
+fn uncertified_invariant_proofs(
+    bb: &ajave_core::blackboard::Blackboard,
+    prog: &Program,
+) -> Vec<ajave_core::artifact::ObligationRef> {
+    let Some(solver) = which_solver() else {
+        // No solver, so nothing can be certified. Every invariant-backed
+        // proof is therefore unconfirmed, which is the conservative answer.
+        warn!("certify-true: no solver available; no invariant proof can be checked");
+        return bb
+            .discharged_by_invariant()
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+    };
+    let mut bad = Vec::new();
+    for (oref, inv_id) in bb.discharged_by_invariant() {
+        let Some(inv) = bb.invariant(inv_id) else {
+            warn!("certify-true: {oref} names invariant {inv_id}, which does not exist");
+            bad.push(oref);
+            continue;
+        };
+        let Some(body) = prog.body(&oref.method) else {
+            bad.push(oref);
+            continue;
+        };
+        let r = ajave_engines::invariant_check::check_inductive(body, inv, oref.id, &solver);
+        match r {
+            ajave_core::certify::CertResult::Confirmed => {
+                debug!("certify-true: {oref} confirmed by invariant {inv_id}");
+            }
+            other => {
+                info!("certify-true: {oref} NOT confirmed ({other:?})");
+                bad.push(oref);
+            }
+        }
+    }
+    bad
+}
+
+/// The SMT binary the certifier should use, honouring the same override the
+/// engines do.
+fn which_solver() -> Option<String> {
+    let bin = std::env::var("AJAVE_SMT_SOLVER")
+        .or_else(|_| std::env::var("ROAST_SMT_SOLVER"))
+        .unwrap_or_else(|_| "z3".to_string());
+    match std::process::Command::new(&bin).arg("--version").output() {
+        Ok(o) if o.status.success() => Some(bin),
+        _ => None,
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1025,7 +1090,21 @@ fn main() {
                             violations.len()
                         );
                     }
-                    verdict::Verdict::True
+                    let bad = if ajave_core::blackboard::certify_true_enabled() {
+                        uncertified_invariant_proofs(&orchestrator.bb, &prog)
+                    } else {
+                        Vec::new()
+                    };
+                    if bad.is_empty() {
+                        verdict::Verdict::True
+                    } else {
+                        warn!(
+                            "downgrading TRUE to UNKNOWN: {} invariant-backed \
+                             proof(s) could not be certified",
+                            bad.len()
+                        );
+                        verdict::Verdict::Unknown
+                    }
                 }
                 _ => verdict::Verdict::Unknown,
             }

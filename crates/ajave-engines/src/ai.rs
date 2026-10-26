@@ -524,6 +524,14 @@ impl AiEngine {
         // ~54 correct answers in securibench alone for no soundness gain.
         let mut safe: HashMap<ObligationId, bool> =
             body.obligations.iter().map(|o| (o.id, true)).collect();
+        // The abstract state at each obligation's check, joined over every
+        // reached state there. This is the *certificate* for the discharge:
+        // "here is what I claim holds at this point, which is why the check
+        // passes". Until 2026-10-26 the discharge named an invariant id that
+        // was never published at all (#A1), so the proof referenced a
+        // certificate nobody had written.
+        let mut at_check: HashMap<ObligationId, (ProgramPoint, crate::interval::IState)> =
+            HashMap::new();
 
         for state in reached {
             let loc = state.location();
@@ -546,6 +554,17 @@ impl AiEngine {
             }
             let entry_flag = safe.entry(*oid).or_insert(true);
             *entry_flag = *entry_flag && cond_ok;
+
+            // Join rather than overwrite: an obligation checked on several
+            // paths must be certified against what holds on *all* of them. A
+            // single path's state would be an under-approximation, which is
+            // the wrong direction for a proof.
+            match at_check.get_mut(oid) {
+                Some((_, acc)) => *acc = ajave_core::fixpoint::Lattice::join(acc, state),
+                None => {
+                    at_check.insert(*oid, (loc.clone(), state.clone()));
+                }
+            }
         }
 
         let safe_count = safe.values().filter(|&&v| v).count();
@@ -573,6 +592,22 @@ impl AiEngine {
                 id: oid,
             };
             let inv_id = bb.fresh_invariant_id();
+            // Publish the certificate before the claim that rests on it, so
+            // the blackboard can check that the claim's reference resolves.
+            if let Some((at, state)) = at_check.get(&oid) {
+                if let Some(formula) = interval_state_as_formula(state, body) {
+                    let _ = bb.publish(
+                        EngineId("interval-ai"),
+                        Direction::Over,
+                        Artifact::Invariant(Invariant {
+                            id: inv_id,
+                            at: at.clone(),
+                            formula,
+                            status: InvStatus::Candidate,
+                        }),
+                    );
+                }
+            }
             let published = bb.publish(
                 EngineId("interval-ai"),
                 Direction::Over,
@@ -590,6 +625,42 @@ impl AiEngine {
         }
         advanced
     }
+}
+
+/// The integer part of an abstract state, as a conjunction of bounds.
+///
+/// Only variables the analysis actually narrowed, and only integer ones: the
+/// certifier checks in LIA, so a float bound could not be stated there and
+/// claiming one would invite a checker to confirm something it cannot see. See
+/// `invariant_check`'s module doc, and #48 for why that matters.
+///
+/// Returns `None` when nothing was narrowed — an empty conjunction is `true`,
+/// which is a certificate that justifies nothing, and publishing one would
+/// make the discharge look certified while resting on no information at all.
+fn interval_state_as_formula(
+    state: &crate::interval::IState,
+    body: &ajave_ir::Body,
+) -> Option<Expr> {
+    let mut conjuncts: Vec<Expr> = Vec::new();
+    for (vid, iv) in &state.vars {
+        let is_int = body
+            .vars
+            .get(vid.0 as usize)
+            .map(|vi| !matches!(vi.ty, ajave_ir::Ty::Float | ajave_ir::Ty::Double))
+            .unwrap_or(false);
+        if !is_int || *iv == Interval::top() {
+            continue;
+        }
+        if iv.lo > NEG_INF {
+            conjuncts.push(Expr::bin(Op::Le, Expr::Int(iv.lo), Expr::Var(*vid)));
+        }
+        if iv.hi < POS_INF {
+            conjuncts.push(Expr::bin(Op::Le, Expr::Var(*vid), Expr::Int(iv.hi)));
+        }
+    }
+    let mut it = conjuncts.into_iter();
+    let first = it.next()?;
+    Some(it.fold(first, |acc, c| Expr::bin(Op::And, acc, c)))
 }
 
 impl Engine for AiEngine {
