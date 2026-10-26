@@ -20,7 +20,7 @@ default:
 # ---------------------------------------------------------------------------
 
 # Everything CI checks, in the order it fails fastest.
-check: fmt-check clippy test boundaries strategy-docs
+check: fmt-check clippy test boundaries strategy-docs contracts-static
 
 # Fail if anything is unformatted.
 fmt-check:
@@ -51,6 +51,12 @@ boundaries:
 # Assert every registered engine has a strategy doc, or a recorded gap.
 strategy-docs:
     bash scripts/check-strategy-docs.sh
+
+# Assert the contracts between engines are not vacuous: every declared interest
+# has a producer, every defaulted trait method is varied, every abstract domain
+# checks its laws. Seconds, no toolchain. See docs/plans/codebase-health.md.
+contracts-static:
+    python3 scripts/check-contracts.py
 
 # Release build. Everything below assumes this has run.
 build:

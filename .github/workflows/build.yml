@@ -39,6 +39,7 @@ jobs:
       - uses: extractions/setup-just@v2
       - run: just boundaries
       - run: just strategy-docs
+      - run: just contracts-static
 
   # rustfmt only: `cargo fmt --check` parses, it does not compile dependencies,
   # so this needs no cache and finishes long before the build jobs.
