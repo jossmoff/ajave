@@ -232,7 +232,20 @@ where
                         replaced = true;
                     }
                 }
-                if !replaced && covered_by(&merged, &reached) {
+                if replaced {
+                    // `reached` already holds this state: the entry was
+                    // overwritten in place above. Pushing it again appended a
+                    // duplicate at the same program point, and the duplicate
+                    // was not harmless — `reached.len() >= max_states` is what
+                    // reports a search incomplete, and an incomplete search
+                    // forfeits the proof, so every duplicate spent part of the
+                    // completeness budget on a state that said nothing new.
+                    //
+                    // It does still need re-propagating, which is the waitlist.
+                    waitlist.push(merged);
+                    continue;
+                }
+                if covered_by(&merged, &reached) {
                     continue;
                 }
                 reached.push(merged.clone());
@@ -488,6 +501,67 @@ mod tests {
         prog
     }
 
+    /// `Join`, but it records how many times it actually joined.
+    ///
+    /// A test about what a merge *does* has to establish that one happened.
+    /// The first version of `merging_does_not_leave_duplicate_states_behind`
+    /// inferred that from the duplication it was testing for, so once the bug
+    /// was fixed the precondition became unsatisfiable — the assertion and its
+    /// own premise were the same fact.
+    struct CountingJoin(std::cell::Cell<usize>);
+
+    impl MergePolicy<FactsDomain> for CountingJoin {
+        fn merge(&self, new: &Facts, reached: &Facts, prec: &()) -> MergeResult<Facts> {
+            let r = MergePolicy::<FactsDomain>::merge(&Join, new, reached, prec);
+            if matches!(r, MergeResult::Joined(_)) {
+                self.0.set(self.0.get() + 1);
+            }
+            r
+        }
+    }
+
+    /// `if (c) {} else {}` — block 3 is reached from both 1 and 2, so a merge
+    /// policy actually fires there. `two_block_program` visits every point once
+    /// from a single predecessor, which makes any merge assertion vacuous.
+    fn diamond_program() -> Program {
+        let blk = |id: u32, term: Terminator| ajave_ir::Block {
+            id: BlockId(id),
+            bytecode_offset: id as u16,
+            stmts: vec![],
+            term,
+            exceptional: vec![],
+        };
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            mk(),
+            Body {
+                is_static: true,
+                key: mk(),
+                entry: BlockId(0),
+                vars: vec![VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: ajave_ir::Ty::Int,
+                }],
+                obligations: vec![],
+                blocks: vec![
+                    blk(
+                        0,
+                        Terminator::Branch {
+                            cond: Operand::Const(Const::Int(1)),
+                            then_: BlockId(1),
+                            else_: BlockId(2),
+                        },
+                    ),
+                    blk(1, Terminator::Goto(BlockId(3))),
+                    blk(2, Terminator::Goto(BlockId(3))),
+                    blk(3, Terminator::Return(None)),
+                ],
+            },
+        );
+        prog.entry = Some(mk());
+        prog
+    }
+
     #[test]
     fn the_sample_lattice_satisfies_the_laws() {
         laws::check_lattice_laws(&samples());
@@ -568,6 +642,52 @@ mod tests {
         assert!(
             covered_by(&narrow_elsewhere, std::slice::from_ref(&top_there)),
             "but it is covered by a Top state at its own point"
+        );
+    }
+
+    /// A merge must not leave a duplicate behind.
+    ///
+    /// When a policy joins, the driver overwrites the reached state *and* then
+    /// pushes the merged one, because `replaced` skips the coverage check that
+    /// would otherwise have subsumed it. Both copies sit at the same program
+    /// point, so a later successor merges with each in turn.
+    ///
+    /// That is not only imprecision: `reached.len() >= max_states` is what
+    /// reports a search incomplete, and an incomplete search forfeits the
+    /// proof, so duplicates spend the completeness budget on states that say
+    /// nothing new.
+    ///
+    /// The first version of this test used `two_block_program`, where every
+    /// point is reached once from a single predecessor — so no merge ever
+    /// fired and the assertion held vacuously. Hence `merge_fired` below:
+    /// a test for what a merge does must establish that one happened.
+    #[test]
+    fn merging_does_not_leave_duplicate_states_behind() {
+        let prog = diamond_program();
+        let start = pp(0, 0);
+        let policy = CountingJoin(std::cell::Cell::new(0));
+        let (reached, complete) = explore(&FactsDomain, &policy, &prog, &start, (), 1000);
+        assert!(complete);
+
+        // Premise, observed rather than inferred.
+        assert!(
+            policy.0.get() > 0,
+            "no merge fired, so this test proves nothing"
+        );
+
+        let mut points: Vec<(u32, usize)> =
+            reached.iter().map(|f| (f.at.block.0, f.at.index)).collect();
+        let total = points.len();
+        points.sort_unstable();
+        let mut distinct = points.clone();
+        distinct.dedup();
+        assert_eq!(
+            total,
+            distinct.len(),
+            "{total} reached states cover only {} distinct points after {} merge(s); \
+             duplicates: {points:?}",
+            distinct.len(),
+            policy.0.get()
         );
     }
 

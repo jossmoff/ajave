@@ -343,11 +343,31 @@ a type. If you cannot name the consumer, the artifact is not ready. `Invariant`,
 `Precision`, `Trace` and `Residual` sat unused for months precisely because
 nobody had to.
 
-A producer that is **off by default is not a producer**. `Query`/`Lemma` are in
-exactly that state: the loop works end to end behind `AJAVE_ASK=1` and is
-disabled because it was measured and costs a task without gaining one. That is a
-legitimate place to leave a mechanism — but it is *unfinished*, and saying so is
-the condition for leaving it there.
+A producer that is **off by default is not a producer**. Parking a mechanism
+behind a disabled flag is a legitimate place to leave it — but it is
+*unfinished*, and saying so is the condition for leaving it there.
+
+`Query`/`Lemma` used to be the example here, and that text was wrong for long
+enough to be worth recording. It said the loop was "disabled because it was
+measured and costs a task without gaining one". It is **enabled by default**
+(`AJAVE_ASK=0` turns it off) and was re-measured as free: valid-assert 870
+against 870, no-runtime-exception 1183 against 1183, timeouts identical, no
+wrong answers — and strictly more capable, since
+`benchmarks/ajave/engine-cooperation/SinBoundNeedsAnAnswer` is TRUE with it and
+UNKNOWN without. It is kept because the population it helps, unmodelled library
+calls, is rare in SV-COMP and ordinary in real Java.
+
+The drift matters more than the flag. This file *overrides default behaviour*
+for everyone who reads it, so a stale claim here is worse than a stale comment
+in a function: it misdirects work before the code is ever opened. It is also
+exactly the defect this file warns about two sections down — "comments
+asserting invariants the code does not maintain" — which had quietly infected
+the paragraph arguing that unfinished mechanisms must say so.
+
+**So: when you change a default, grep this file for the flag name.** The
+current off-by-default set lives in `docs/plans/cooperation-options.md` with its
+measurements; do not re-state a flag's default here, because that is the claim
+that rots.
 
 ### Every artifact must document what a consumer may conclude from it
 Already learned once, expensively: `Bounded { k }` means the BMC's *path-length*

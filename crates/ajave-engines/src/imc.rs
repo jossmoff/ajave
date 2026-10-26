@@ -124,7 +124,32 @@ impl Engine for ImcEngine {
                 continue;
             };
 
-            if let Ok(proved) = try_imc(solver, body, oref.id) {
+            // An over-approximating engine cannot see past a `Diverge`, and
+            // `core::cfg` makes one deliberately indistinguishable from a
+            // return so that the truncation is not hidden from the analysis.
+            // Noticing it is therefore the engine's job, which `cegar.rs` does
+            // and this engine did not until 2026-10-26 (#43).
+            //
+            // The encoder also drops `Diverge` and `Throw` terminators
+            // entirely (`interpolation.rs`'s `_ => {}` over terminators), so
+            // those edges are simply absent from the transition relation a
+            // proof is taken over.
+            if !body.is_fully_lifted() {
+                debug!(
+                    "imc: declining {} — {} is not fully lifted",
+                    oref, oref.method.name
+                );
+                continue;
+            }
+
+            // The error arm used to be dropped silently, which is how a
+            // solver that failed on every call looked like an engine that
+            // simply never found a proof (#43).
+            let outcome = try_imc(solver, body, oref.id);
+            if let Err(why) = &outcome {
+                debug!("imc: {} could not be attempted — {why}", oref);
+            }
+            if let Ok(proved) = outcome {
                 if proved {
                     debug!("imc: proved {} via interpolation fixpoint", oref);
                     let _ = bb.publish(
@@ -166,6 +191,32 @@ impl Engine for ImcEngine {
 ///    d. If UNSAT: get interpolant I between F∧T and Bad
 ///    e. If I ⊆ F: fixpoint → proved safe
 ///    f. Else F = F ∨ I, iterate
+/// # What this proof rests on, besides the interpolation argument
+///
+/// Audited 2026-10-26 (#43). This engine publishes `Over`, so a gap in the
+/// encoding is a wrong TRUE. Two properties keep it sound, **neither of which
+/// was chosen for that purpose**, and both are easy to remove while trying to
+/// make the encoding sharper:
+///
+/// 1. `smt_text::Encoder::rvalue` ends in `_ => self.fresh(..)`. Every rvalue
+///    the encoder does not model — `GetField`, `GetStatic`, `ArrayLoad`,
+///    `Call`, `Havoc` — becomes an unconstrained variable. That is why the
+///    block walk's `_ => {}` over `PutField`/`PutStatic`/`ArrayStore` is
+///    harmless: the writes are dropped, but every read of what they would have
+///    written is unconstrained anyway, so violations stay easier to find
+///    rather than harder.
+///
+/// 2. `var_exprs` is reset to the pre-state at the top of every block, so each
+///    error formula is written over that block's own unconstrained pre-state.
+///    That is why dropping `Diverge` and `Throw` terminators — which leaves
+///    their edges out of the transition relation — does not turn into a proof:
+///    a missing edge into a block cannot make the block's local error
+///    condition UNSAT.
+///
+/// Sharpen either one and the other stops covering for it. If you give
+/// unmodelled rvalues real semantics, the dropped writes become unsound. If
+/// you thread state across blocks, the dropped terminators become unsound.
+/// `imc_conservatism_tests` pins both.
 fn try_imc(solver: &InterpolationSolver, body: &Body, oid: ObligationId) -> Result<bool, String> {
     let encoding = encode_body_lia(body, &[oid], "");
 
@@ -349,4 +400,168 @@ fn collect_free_vars(formula: &str, declarations: &str) -> Vec<String> {
         }
     }
     vars
+}
+
+#[cfg(test)]
+mod imc_conservatism_tests {
+    //! Guards for the two properties `try_imc`'s doc comment names.
+    //!
+    //! `imc.rs` and `interpolation.rs` had zero tests between them while
+    //! publishing `Direction::Over`, which CLAUDE.md forbids: "Every engine
+    //! publishing `Over` needs a test that would fail if its encoding were
+    //! unsound, independent of blackboard gating." `chc.rs` and
+    //! `kinduction.rs` have theirs; these are IMC's.
+    //!
+    //! They are deliberately *not* bug demonstrations — the investigation in
+    //! #43 could not construct a wrong TRUE, because the encoder's two
+    //! independent conservatisms cover for each other's gaps. They pin that
+    //! cover in place, so a later precision improvement that removes one has
+    //! to notice the other.
+
+    use super::*;
+    use ajave_ir::{
+        Block, BlockId, Body, Const, MethodKey, Obligation, ObligationId, ObligationKind, Operand,
+        Rvalue, Terminator, Ty, VarId, VarInfo, VarKind,
+    };
+
+    fn mk() -> MethodKey {
+        MethodKey {
+            class: "Main".into(),
+            name: "m".into(),
+            desc: "()V".into(),
+        }
+    }
+
+    fn one_var() -> Vec<VarInfo> {
+        vec![VarInfo {
+            kind: VarKind::Local(0),
+            ty: Ty::Int,
+        }]
+    }
+
+    /// Safety condition `v0`: violated at any reachable state where `v0 == 0`.
+    fn ob() -> Vec<Obligation> {
+        vec![Obligation {
+            id: ObligationId(0),
+            kind: ObligationKind::Assertion,
+            cond: Operand::Var(VarId(0)),
+            guarded: false,
+            bytecode_offset: 0,
+            line: None,
+        }]
+    }
+
+    /// `v0 = 1; check(v0);` — genuinely safe, and the encoder can see it.
+    /// Establishes the fixtures are not trivially unprovable, so a `false`
+    /// elsewhere means something.
+    fn provably_safe() -> Body {
+        Body {
+            is_static: true,
+            key: mk(),
+            entry: BlockId(0),
+            vars: one_var(),
+            obligations: ob(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts: vec![
+                    Stmt::Assign(VarId(0), Rvalue::Use(Operand::Const(Const::Int(1)))),
+                    Stmt::Check(ObligationId(0)),
+                ],
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            }],
+        }
+    }
+
+    /// The same check, but `v0` comes from an unmodelled rvalue. The encoder
+    /// must treat that as unconstrained — so `v0 == 0` stays satisfiable and
+    /// the obligation must not be proved.
+    fn safe_only_if_an_unmodelled_read_is_believed() -> Body {
+        let mut b = provably_safe();
+        b.blocks[0].stmts = vec![
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::Call {
+                    target: MethodKey {
+                        class: "java/lang/Math".into(),
+                        name: "max".into(),
+                        desc: "(II)I".into(),
+                    },
+                    args: vec![Operand::Const(Const::Int(1)), Operand::Const(Const::Int(2))],
+                    is_virtual: false,
+                },
+            ),
+            Stmt::Check(ObligationId(0)),
+        ];
+        b
+    }
+
+    /// A body the frontend could not fully lift. `is_fully_lifted` is false,
+    /// and the engine must decline rather than reason about a transition
+    /// relation that is missing the diverging block's edges.
+    fn not_fully_lifted() -> Body {
+        let mut b = provably_safe();
+        b.blocks.push(Block {
+            id: BlockId(1),
+            bytecode_offset: 1,
+            stmts: vec![],
+            term: Terminator::Diverge("unlifted opcode".into()),
+            exceptional: vec![],
+        });
+        b.blocks[0].term = Terminator::Goto(BlockId(1));
+        b
+    }
+
+    #[test]
+    fn a_diverging_body_is_not_fully_lifted_and_the_engine_declines_it() {
+        let b = not_fully_lifted();
+        assert!(
+            !b.is_fully_lifted(),
+            "fixture precondition: the body must contain a Diverge, or this \
+             test exercises the ordinary path instead of the one under test"
+        );
+        // The guard is in `step`, which needs a solver and a blackboard; what
+        // is asserted here is the predicate the guard consults. Pinning it
+        // separately matters because `core::cfg` makes `Diverge` deliberately
+        // indistinguishable from a return, so this predicate is the *only*
+        // signal an engine gets.
+        assert!(provably_safe().is_fully_lifted());
+    }
+
+    #[test]
+    fn an_unmodelled_read_is_unconstrained_so_nothing_is_proved_about_it() {
+        let Some(solver) = find_interpolation_solver() else {
+            eprintln!("no interpolation-capable solver on PATH; skipping");
+            return;
+        };
+
+        // Control: the encoder can prove the version it understands.
+        let safe = try_imc(&solver, &provably_safe(), ObligationId(0));
+        assert_eq!(
+            safe,
+            Ok(true),
+            "control failed: the encoder could not prove `v0 = 1; check(v0)`, \
+             so the negative result below would prove nothing"
+        );
+
+        // The property. `Math.max(1, 2)` is 2 in any real execution, so the
+        // check does hold — but the encoder does not model calls, and an
+        // engine may not prove a property that rests on a value it declined
+        // to interpret.
+        let unknown = try_imc(
+            &solver,
+            &safe_only_if_an_unmodelled_read_is_believed(),
+            ObligationId(0),
+        );
+        assert_eq!(
+            unknown,
+            Ok(false),
+            "IMC proved an obligation whose safety depends on an unmodelled \
+             call. `smt_text::Encoder::rvalue`'s `_ => self.fresh(..)` is what \
+             makes the dropped heap writes in `encode_body_lia` harmless; if \
+             unmodelled rvalues ever gain semantics, those writes become \
+             unsound (#43)."
+        );
+    }
 }

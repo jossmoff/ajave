@@ -198,17 +198,11 @@ pub fn first_unmodelled_throwing_call<'a>(
 /// paths never reach it.
 ///
 /// Gated so one build can be ablated against itself. See also
-/// `AJAVE_ASK_ON_DECLINE` and `AJAVE_SCOPE_ALL_METHODS`.
+/// `AJAVE_SCOPE_ALL_METHODS`. (`AJAVE_ASK_ON_DECLINE` was the third of these
+/// and was removed with CEGAR's asker on 2026-10-26 — see #40.)
 pub fn obligation_scoping_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("AJAVE_SCOPE_OBLIGATION").as_deref() != Ok("0"))
-}
-
-/// Whether an engine that cannot proceed should publish a `Query` rather than
-/// simply returning `Blocked`.
-pub fn ask_on_decline_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AJAVE_ASK_ON_DECLINE").as_deref() != Ok("0"))
 }
 
 /// Whether engines may analyse methods other than the entry point.
@@ -356,18 +350,6 @@ pub fn stmt_is_havoced_op(stmt: &Stmt) -> bool {
     }
 }
 
-// ─── Cooperation options (docs/plans/cooperation-options.md) ───
-//
-// Each defaults **off**, so the default build is unchanged and each option is
-// benchmarked individually against it. The three-levers flags above default
-// *on* because those were expected to interact; these four are independent.
-
-/// A — `interval-ai` answers `Want::Bounds` queries from its own fixpoint.
-pub fn answers_queries_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AJAVE_AI_ANSWERS").as_deref() == Ok("1"))
-}
-
 /// B — a witness the producing engine knows cannot replay becomes a published
 /// fact rather than a silent withholding.
 pub fn refute_artifact_enabled() -> bool {
@@ -379,10 +361,4 @@ pub fn refute_artifact_enabled() -> bool {
 pub fn residual_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("AJAVE_RESIDUAL").as_deref() == Ok("1"))
-}
-
-/// D — nullness as a question kind.
-pub fn null_queries_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AJAVE_NULL_QUERIES").as_deref() == Ok("1"))
 }

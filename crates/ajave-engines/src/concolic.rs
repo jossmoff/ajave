@@ -87,7 +87,10 @@ impl Default for Concolic {
 impl Concolic {
     pub fn new() -> Self {
         Concolic {
-            solver_binary: std::env::var("ROAST_SMT_SOLVER").unwrap_or_else(|_| "z3".to_string()),
+            // `ROAST_` is the pre-rename alias; see `SmtLibSolver::from_env`.
+            solver_binary: std::env::var("AJAVE_SMT_SOLVER")
+                .or_else(|_| std::env::var("ROAST_SMT_SOLVER"))
+                .unwrap_or_else(|_| "z3".to_string()),
             done: false,
         }
     }

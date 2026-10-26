@@ -821,28 +821,6 @@ impl<'a> ExploreCtx<'a> {
                     // the single most common reason a no-runtime-exception
                     // obligation stays open. Ask instead.
                     //
-                    // Asked alongside the Bounds question, not instead of it:
-                    // they are different questions about the same value, and
-                    // `Blackboard::ask` deduplicates on `(at, about, want,
-                    // given)` so the pair is two entries rather than one
-                    // overwriting the other.
-                    if crate::body_analysis::null_queries_enabled()
-                        && Self::returns_reference(&target.desc)
-                    {
-                        if self.known_nonnull.contains(&(self.body.key.clone(), v)) {
-                            // An answer already arrived: constrain the term
-                            // rather than re-asking. `bv` is the fresh havoc
-                            // term and `v` does not denote it until
-                            // `handle_assign` returns -- the distinction that
-                            // made the bounds lemma inert for a week.
-                            let zero = self.solver.bv_const(0, 32);
-                            let is_null = self.solver.bveq(bv, zero);
-                            let not_null = self.solver.not(is_null);
-                            self.path_constraints.push(not_null);
-                        } else {
-                            self.ask_nullness_of_call(v, target, args);
-                        }
-                    }
                     if let Some((lo, hi)) =
                         self.known_bounds.get(&(self.body.key.clone(), v)).copied()
                     {
@@ -1813,57 +1791,6 @@ impl<'a> ExploreCtx<'a> {
             index: 0,
         };
         self.pending_queries.push((at, about, given));
-    }
-
-    /// Does this descriptor return a reference?
-    ///
-    /// A nullness question about an `int` is meaningless, and asking one would
-    /// be noise an answerer has to decline.
-    fn returns_reference(desc: &str) -> bool {
-        match desc.rfind(')') {
-            Some(i) => matches!(desc.as_bytes().get(i + 1), Some(b'L') | Some(b'[')),
-            None => false,
-        }
-    }
-
-    /// Ask whether the result of an unmodelled call can be null.
-    ///
-    /// Same shape as `ask_about_call`: the question is about the destination
-    /// variable, with the binding in `given` so an answerer can recognise the
-    /// signature. The answerer that can reply is the contract database, which
-    /// already records non-null returns per full signature.
-    fn ask_nullness_of_call(&mut self, dest: VarId, target: &MethodKey, args: &[Operand]) {
-        let Some(block) = self.current_block else {
-            return;
-        };
-        let mut arg_exprs = Vec::new();
-        for a in args {
-            match a {
-                Operand::Var(v) => arg_exprs.push(ajave_core::term::Expr::Var(*v)),
-                Operand::Const(Const::Int(n)) => {
-                    arg_exprs.push(ajave_core::term::Expr::Int(*n as i64))
-                }
-                // Anything else: do not pretend to describe it.
-                _ => return,
-            }
-        }
-        let about = ajave_core::term::Expr::Var(dest);
-        let call =
-            ajave_core::term::Expr::call(&target.class, &target.name, &target.desc, arg_exprs);
-        let given = vec![ajave_core::term::Expr::bin(
-            ajave_core::term::Op::Eq,
-            about.clone(),
-            call,
-        )];
-        self.pending_null_queries.push((
-            ProgramPoint {
-                method: self.body.key.clone(),
-                block,
-                index: 0,
-            },
-            about,
-            given,
-        ));
     }
 
     /// Constrain a variable to a bound another engine established.

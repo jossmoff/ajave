@@ -1023,7 +1023,12 @@ impl SmtLibFactory {
     /// Read solver config from environment. Returns `None` if the solver binary
     /// is not found on PATH.
     pub fn from_env() -> Option<Self> {
-        let binary = std::env::var("ROAST_SMT_SOLVER").unwrap_or_else(|_| "z3".to_string());
+        // `ROAST_SMT_SOLVER` is the pre-rename name (the project became ajave
+        // on 2026-08-25) and is still accepted so an existing shell or script
+        // does not silently fall back to z3 while appearing to be honoured.
+        let binary = std::env::var("AJAVE_SMT_SOLVER")
+            .or_else(|_| std::env::var("ROAST_SMT_SOLVER"))
+            .unwrap_or_else(|_| "z3".to_string());
 
         // Check if binary exists on PATH.
         let check = Command::new("which")

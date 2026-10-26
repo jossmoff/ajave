@@ -4209,3 +4209,102 @@ manufactures failures, and both attempts were killed by signal after two
 minutes. The oracles have the same shape — the smoke set under a timeout — and
 a slower binary makes it worse, not better. They stay a `just` recipe run on a
 machine you control.
+
+## 2026-10-26 — Closing out the structural audit: four findings, and two of them were mine
+
+The audit of 2026-10-26 produced six findings. Four are closed here. Two of the
+four were filed wrong by me, and the corrections are the more useful record.
+
+### The interpolation engine could not run at all
+
+`find_interpolation_solver()` returned `Some(Z3)` whenever `z3 --version`
+succeeded. That is true on any machine with z3 and says nothing about
+interpolation — and **Z3 removed interpolation support upstream**; on 4.16.0
+`produce_interpolants` is not even a legal parameter. So `imc` was handed a
+solver that failed on every call with `Err("interpolation not supported")`, and
+`imc.rs` discarded that with `if let Ok(proved) = try_imc(..)`. The engine was
+scheduled, ran, proved nothing, and reported nothing.
+
+The engine census (changes.md:3861) had recorded `imc` running on 1 of 121
+tasks and discharging 0, and that was read as conservative gating. It was total
+failure. A capability check that cannot fail is not a capability check.
+
+`SmtInterpol` was a variant of `InterpolationSolver` from the beginning and
+nothing ever looked for it, so the one solver that *can* interpolate was
+unreachable. It is now found via `AJAVE_SMTINTERPOL_JAR`.
+
+The probe is cached in a `OnceLock`: it spawns a solver, and it is called more
+than once per run, which on 1,784 tasks is not free.
+
+### What I got wrong about that engine, twice
+
+The finding was filed as a latent wrong TRUE on the grounds that
+`encode_body_lia`'s block walk has arms for only `Assign`, `Assume` and
+`Check`, dropping `PutField`/`PutStatic`/`ArrayStore` through `_ => {}`.
+
+That is conservative, because `smt_text::Encoder::rvalue` ends in
+`_ => self.fresh(..)`: every rvalue the encoder does not model becomes an
+unconstrained variable, so every read of the state those writes would have
+touched is unconstrained anyway. Dropping the write cannot make the program
+look safer than it is.
+
+The second theory — terminators are dropped too, so `Diverge` and `Throw`
+edges are missing from the transition relation — is also masked, because
+`var_exprs` resets per block, so each error formula sits over that block's own
+unconstrained pre-state and a missing edge into a block cannot make its local
+error condition UNSAT.
+
+**Two independent conservatisms, each covering the other's gap, neither chosen
+for that purpose.** That is the dangerous part and it is now written beside
+`try_imc`: sharpen unmodelled rvalues and the dropped writes become unsound;
+thread state across blocks and the dropped terminators become unsound.
+`imc_conservatism_tests` pins both, and `is_fully_lifted()` is now checked as
+every other Over engine checks it.
+
+### A real bug in the new fixpoint: merging left duplicates
+
+`explore` overwrote the reached entry on a merge **and then pushed the merged
+state**, because `replaced` skips the coverage check that would have subsumed
+it. Both copies sit at the same program point. Measured on a diamond:
+`[(1,0), (2,0), (3,0), (3,0)]`.
+
+Not merely imprecise. `reached.len() >= max_states` is what reports a search
+incomplete, and an incomplete search forfeits the proof — so each duplicate
+spent part of the completeness budget on a state that said nothing new.
+
+The first test for this **passed vacuously**: `two_block_program` reaches every
+point once from a single predecessor, so no merge ever fired. The rewrite uses
+a diamond and a `CountingJoin` policy, so "a merge happened" is observed rather
+than inferred. A test about what a merge does that infers the merge from the
+bug it is testing for has its assertion and its premise as the same fact.
+
+### An interest declaration wrong in both directions
+
+`smt-bmc` declared `Interest::PRECISION`, which **no engine produces**, and
+omitted `INVARIANT`, which is the kind the interval hints its own comment asks
+for actually travel as. A `Blocked` instance was woken by a message nobody
+sends and not by the one it was waiting for. Bounded by engine order —
+`interval-ai` runs first — but `ai` also analyses further methods in `step`,
+and those later hints were unreachable.
+
+### Removals
+
+Options A and D from the cooperation measurement were falsified by their own
+pre-registered criteria and still present as flags. Both are gone, and with
+them CEGAR's `Bounds` asker: it posted 115 of 170 queries on the corpus, had no
+`Lemma` consumer and `Interest::STATUS` only, so it was never woken by an
+answer and could not have read one. The comment claiming `Interest::LEMMA`
+brought it back was never true. A bound would not have helped regardless — the
+decline above it is `body_uses_havoced_ops`, a soundness guard, not a precision
+shortfall.
+
+`ai.rs` was a second answerer for `Want::Bounds`; `ranges.rs` answers both
+`Bounds` and `NonNull` from published contracts and is the answerer `smt-bmc`'s
+questions actually reach. Net −661 lines across the two deletions.
+
+`ROAST_SMT_SOLVER`/`ROAST_CHC_SOLVER` are now `AJAVE_*` at all three sites, old
+names accepted as aliases so an existing script does not silently fall back to
+z3 while appearing to be honoured.
+
+Smoke identical before and after, on an idle machine: 124 correct, 23 unproven,
+0 WRONG, 157, 320s against 317s.

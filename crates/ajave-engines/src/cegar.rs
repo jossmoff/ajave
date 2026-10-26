@@ -17,11 +17,7 @@ use ajave_core::fixpoint::{explore, HasLocation, Join};
 use ajave_ir::*;
 use log::{debug, info};
 
-use ajave_core::term::{Expr, Op};
-
-use crate::body_analysis::{
-    all_methods_scoping_enabled, ask_on_decline_enabled, body_uses_havoced_ops, find_defining_bin,
-};
+use crate::body_analysis::{all_methods_scoping_enabled, body_uses_havoced_ops, find_defining_bin};
 use crate::interpolation::{encode_body_lia, find_interpolation_solver, InterpolationSolver};
 use crate::predicate::{
     predicates_from_interpolant, CompOp, PredPrec, Predicate, PredicateCpa, PredicateOperand,
@@ -124,7 +120,6 @@ impl Engine for CegarEngine {
 
         let mut advanced = false;
         let mut attempted = 0usize;
-        let mut asked = 0usize;
 
         for mk in &candidates {
             let Some(body) = prog.body(mk) else { continue };
@@ -152,20 +147,6 @@ impl Engine for CegarEngine {
                 debug!("cegar: {} uses havoced ops, skipping", mk);
                 // A decline is a question, not a surrender.
                 //
-                // Returning `Blocked` tells the scheduler "nothing more to do
-                // here" and nothing else. But this engine knows precisely what
-                // defeated it: a value it cannot track. Saying so costs nothing
-                // and commits to nothing — a `Query` is not a claim — and any
-                // later answerer can supply a bound that makes the predicate
-                // domain viable.
-                //
-                // That is what turns an *alternative* engine into also a
-                // *resource*, without touching its analysis: only its failure
-                // mode changes. The scheduler re-enters it when an answer lands
-                // because `Interest::LEMMA` and the delta cursor already exist.
-                if ask_on_decline_enabled() {
-                    asked += ask_about_untracked(bb, self.id(), mk, body);
-                }
                 continue;
             }
 
@@ -216,17 +197,20 @@ impl Engine for CegarEngine {
 
         if attempted == 0 {
             debug!(
-                "cegar: no analysable body among {} candidate method(s), asked {} question(s)",
-                candidates.len(),
-                asked
+                "cegar: no analysable body among {} candidate method(s)",
+                candidates.len()
             );
-            // Having asked, do not retire: `Interest::LEMMA` brings this engine
-            // back if anybody answers. Retiring would throw the answer away.
-            return if asked > 0 {
-                Progress::Blocked
-            } else {
-                Progress::Exhausted
-            };
+            // Retire. This engine briefly asked `Bounds` questions here instead
+            // — removed 2026-10-26 (#40). It posted 115 of 170 queries on the
+            // corpus and had no `Lemma` consumer and `Interest::STATUS` only, so
+            // it was never woken by an answer and could not have read one. The
+            // comment this replaces claimed `Interest::LEMMA` brought it back,
+            // which was never true.
+            //
+            // A bound would not have helped regardless: the decline above is
+            // `body_uses_havoced_ops`, a soundness guard about the predicate
+            // domain collapsing to top, not a precision shortfall a range fixes.
+            return Progress::Exhausted;
         }
 
         if advanced {
@@ -235,84 +219,6 @@ impl Engine for CegarEngine {
             Progress::Blocked
         }
     }
-}
-
-/// Ask about the values that defeated the predicate abstraction.
-///
-/// One `Bounds` question per variable assigned from an operation this engine
-/// cannot track. A bound would let the predicate domain represent the value
-/// instead of collapsing to top, which is the specific thing that makes this
-/// body unanalysable.
-///
-/// `Want::Bounds` is a universal question, so only an `Over` or `Exact`
-/// answerer may reply — enforced at publish, not here. Capped, because an
-/// engine that posts a hundred questions nobody can answer has converted a
-/// cheap decline into an expensive one.
-fn ask_about_untracked(bb: &mut Blackboard, me: EngineId, mk: &MethodKey, body: &Body) -> usize {
-    const MAX_QUESTIONS: usize = 8;
-    let mut n = 0;
-    for block in &body.blocks {
-        for (idx, stmt) in block.stmts.iter().enumerate() {
-            if n >= MAX_QUESTIONS {
-                return n;
-            }
-            let Stmt::Assign(vid, rv) = stmt else {
-                continue;
-            };
-            if !crate::body_analysis::stmt_is_havoced_op(stmt) {
-                continue;
-            }
-            // Only int-typed destinations: a bound on a reference means
-            // nothing to the predicate domain, and asking would be noise.
-            if !body
-                .vars
-                .get(vid.0 as usize)
-                .is_some_and(|vi| matches!(vi.ty, Ty::Int | Ty::Long))
-            {
-                continue;
-            }
-            // What the question is *about*, and what the asker already knows.
-            // `given` carries the binding so an answerer can recognise the
-            // shape — a library call whose range is specified, for instance.
-            let about = Expr::Var(*vid);
-            let given = match rv {
-                Rvalue::Call { target, args, .. } => {
-                    let arg_exprs: Vec<Expr> = args
-                        .iter()
-                        .filter_map(|a| match a {
-                            Operand::Var(v) => Some(Expr::Var(*v)),
-                            Operand::Const(Const::Int(i)) => Some(Expr::Int(*i as i64)),
-                            _ => None,
-                        })
-                        .collect();
-                    if arg_exprs.len() != args.len() {
-                        continue;
-                    }
-                    vec![Expr::bin(
-                        Op::Eq,
-                        about.clone(),
-                        Expr::call(&target.class, &target.name, &target.desc, arg_exprs),
-                    )]
-                }
-                // Not a call: nothing to describe it with, so the question is
-                // bare. An answerer with a whole-program fact can still reply.
-                _ => Vec::new(),
-            };
-            bb.ask(
-                me,
-                ProgramPoint {
-                    method: mk.clone(),
-                    block: block.id,
-                    index: idx,
-                },
-                about,
-                Want::Bounds,
-                given,
-            );
-            n += 1;
-        }
-    }
-    n
 }
 
 /// Run the CEGAR loop for a single obligation.
@@ -555,196 +461,4 @@ fn collect_free_vars_combined(a: &str, b: &str, declarations: &str) -> Vec<Strin
         }
     }
     vars
-}
-
-/// The L2 lever: a decline becomes a question.
-///
-/// `ask_about_untracked` is what turns this engine from an *alternative* into
-/// also a *resource*. Its analysis is unchanged; only its failure mode is. So
-/// the tests are about the questions: that they are asked at all, that they are
-/// about the right terms, that they are bounded, and that asking does not
-/// retire the engine before an answer can arrive.
-#[cfg(test)]
-mod ask_on_decline_tests {
-    use super::*;
-    use ajave_core::artifact::Want;
-
-    fn key(name: &str) -> MethodKey {
-        MethodKey {
-            class: "Main".into(),
-            name: name.into(),
-            desc: "()V".into(),
-        }
-    }
-
-    fn var(slot: u16, ty: Ty) -> VarInfo {
-        VarInfo {
-            kind: VarKind::Local(slot),
-            ty,
-        }
-    }
-
-    /// One block: an int from an unresolved call, a ref from a `New`, and a
-    /// plain copy. Only the first is worth asking about.
-    fn mixed_body() -> (Program, MethodKey) {
-        let mk = key("main");
-        let lib = MethodKey {
-            class: "java/lang/Math".into(),
-            name: "sin".into(),
-            desc: "(D)D".into(),
-        };
-        let mut prog = Program::default();
-        prog.bodies.insert(
-            mk.clone(),
-            Body {
-                is_static: true,
-                key: mk.clone(),
-                entry: BlockId(0),
-                vars: vec![
-                    var(0, Ty::Int),
-                    var(1, Ty::Ref),
-                    var(2, Ty::Int),
-                    var(3, Ty::Int),
-                ],
-                obligations: vec![],
-                blocks: vec![Block {
-                    id: BlockId(0),
-                    bytecode_offset: 0,
-                    stmts: vec![
-                        // Untracked, int-typed: ask.
-                        Stmt::Assign(
-                            VarId(0),
-                            Rvalue::Call {
-                                target: lib.clone(),
-                                args: vec![Operand::int(1)],
-                                is_virtual: false,
-                            },
-                        ),
-                        // Untracked but a reference: a bound means nothing to
-                        // the predicate domain, so do not ask.
-                        Stmt::Assign(VarId(1), Rvalue::New("java/lang/Object".into())),
-                        // Tracked: not a decline cause at all.
-                        Stmt::Assign(VarId(2), Rvalue::Use(Operand::int(7))),
-                    ],
-                    term: Terminator::Return(None),
-                    exceptional: vec![],
-                }],
-            },
-        );
-        prog.entry = Some(mk.clone());
-        (prog, mk)
-    }
-
-    /// Asks about the untracked integer, and about nothing else.
-    ///
-    /// A reference is excluded deliberately: `Want::Bounds` on a pointer is a
-    /// question no answerer can usefully reply to, and an engine that posts
-    /// unanswerable questions has converted a cheap decline into an expensive
-    /// one.
-    #[test]
-    fn it_asks_about_untracked_integers_and_not_references() {
-        let (prog, mk) = mixed_body();
-        let body = prog.body(&mk).unwrap();
-        let mut bb = Blackboard::new();
-        let n = ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
-        assert_eq!(n, 1, "one int from an untracked op, so one question");
-
-        let qs = bb.unanswered();
-        assert_eq!(qs.len(), 1);
-        assert_eq!(
-            qs[0].want,
-            Want::Bounds,
-            "a bound is what unblocks the domain"
-        );
-        assert_eq!(
-            qs[0].about,
-            ajave_core::term::Expr::Var(VarId(0)),
-            "the question is about the destination of the untracked call"
-        );
-        assert_eq!(
-            qs[0].at.method, mk,
-            "a VarId indexes one Body, so the point must name the method"
-        );
-    }
-
-    /// The question carries the call that produced the value, so an answerer
-    /// can recognise a signature whose range is specified.
-    ///
-    /// Without `given`, `ranges` sees "bound v0" with no way to know v0 came
-    /// from `Math.sin` — which is exactly the lemma it holds.
-    #[test]
-    fn the_question_carries_the_call_that_produced_the_value() {
-        let (prog, mk) = mixed_body();
-        let body = prog.body(&mk).unwrap();
-        let mut bb = Blackboard::new();
-        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
-        let qs = bb.unanswered();
-        let given = format!("{:?}", qs[0].given);
-        assert!(
-            given.contains("sin"),
-            "the binding must name the callee; given was {given}"
-        );
-    }
-
-    /// Bounded. A body with many untracked assignments must not post one
-    /// question per statement — the cap is what keeps a decline cheap.
-    #[test]
-    fn the_number_of_questions_is_capped() {
-        let mk = key("main");
-        let lib = MethodKey {
-            class: "com/example/Unknown".into(),
-            name: "f".into(),
-            desc: "(I)I".into(),
-        };
-        let mut prog = Program::default();
-        let n_stmts = 40usize;
-        prog.bodies.insert(
-            mk.clone(),
-            Body {
-                is_static: true,
-                key: mk.clone(),
-                entry: BlockId(0),
-                vars: (0..n_stmts as u16).map(|i| var(i, Ty::Int)).collect(),
-                obligations: vec![],
-                blocks: vec![Block {
-                    id: BlockId(0),
-                    bytecode_offset: 0,
-                    stmts: (0..n_stmts)
-                        .map(|i| {
-                            Stmt::Assign(
-                                VarId(i as u32),
-                                Rvalue::Call {
-                                    target: lib.clone(),
-                                    args: vec![Operand::int(1)],
-                                    is_virtual: false,
-                                },
-                            )
-                        })
-                        .collect(),
-                    term: Terminator::Return(None),
-                    exceptional: vec![],
-                }],
-            },
-        );
-        prog.entry = Some(mk.clone());
-        let body = prog.body(&mk).unwrap();
-        let mut bb = Blackboard::new();
-        let n = ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
-        assert!(n <= 8, "asked {n} questions; the cap is 8");
-        assert!(n > 0, "it must still ask something");
-    }
-
-    /// Identical questions are one question.
-    ///
-    /// `Blackboard::ask` deduplicates, and this pins that the asker benefits:
-    /// two declines over the same body must not double the queue.
-    #[test]
-    fn asking_twice_about_the_same_body_does_not_duplicate() {
-        let (prog, mk) = mixed_body();
-        let body = prog.body(&mk).unwrap();
-        let mut bb = Blackboard::new();
-        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
-        ask_about_untracked(&mut bb, EngineId("cegar"), &mk, body);
-        assert_eq!(bb.unanswered().len(), 1);
-    }
 }

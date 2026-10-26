@@ -40,7 +40,11 @@ impl Default for ChcEngine {
 
 impl ChcEngine {
     pub fn new() -> Self {
-        let binary = std::env::var("ROAST_CHC_SOLVER").unwrap_or_else(|_| "z3".to_string());
+        // See `SmtLibSolver::from_env`: the `ROAST_` name predates the rename
+        // and stays accepted rather than failing over to z3 unannounced.
+        let binary = std::env::var("AJAVE_CHC_SOLVER")
+            .or_else(|_| std::env::var("ROAST_CHC_SOLVER"))
+            .unwrap_or_else(|_| "z3".to_string());
         ChcEngine {
             solver_binary: binary,
             done: false,

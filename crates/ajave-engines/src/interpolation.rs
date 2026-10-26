@@ -28,16 +28,66 @@ pub enum InterpolationResult {
 /// Find an interpolation-capable solver binary.
 /// Prefers SMTInterpol (java -jar) if available, falls back to Z3.
 pub fn find_interpolation_solver() -> Option<InterpolationSolver> {
-    // Try Z3 first (more likely to be installed).
-    if let Ok(status) = Command::new("z3")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    // Cached: the probe spawns a solver process, and this is called more than
+    // once per run (the engine constructs one, and `available()` consults it).
+    // Paying for a z3 spawn per call on every one of 1,784 tasks is not free,
+    // and the answer cannot change within a process.
+    static FOUND: std::sync::OnceLock<Option<InterpolationSolver>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(probe_interpolation_solver).clone()
+}
+
+fn probe_interpolation_solver() -> Option<InterpolationSolver> {
+    // Probe the *capability*, not the binary.
+    //
+    // This used to return `Some(Z3)` whenever `z3 --version` succeeded, which
+    // is true on every machine that has z3 at all and says nothing about
+    // interpolation. **Z3 removed interpolation support** — on 4.16.0,
+    // `produce_interpolants` is not even a legal parameter — so the engine was
+    // handed a solver that failed on every single call with
+    // `Err("interpolation not supported")`, and `imc.rs` discarded that error
+    // with `if let Ok(..)`. The engine ran, proved nothing, and reported
+    // nothing; the census recorded it on 1 of 121 tasks discharging 0 and that
+    // was read as gating rather than as total failure (#43).
+    //
+    // A capability check that cannot fail is not a capability check.
+    if let Ok(out) = Command::new("z3")
+        .args(["-in", "-smt2"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            if let Some(mut si) = c.stdin.take() {
+                let _ = si.write_all(
+                    b"(set-option :produce-interpolants true)\n                      (declare-fun x () Int)\n                      (assert (! (> x 5) :named a))\n                      (assert (! (< x 3) :named b))\n                      (check-sat)\n(get-interpolant a b)\n",
+                );
+            }
+            c.wait_with_output()
+        })
     {
-        if status.success() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let errs = String::from_utf8_lossy(&out.stderr);
+        if !text.contains("unknown parameter")
+            && !errs.contains("unknown parameter")
+            && !text.contains("unsupported")
+        {
             return Some(InterpolationSolver::Z3("z3".to_string()));
         }
+        log::warn!(
+            "imc: z3 is present but cannot interpolate (support was removed \
+             upstream); the interpolation engine will not run. Install \
+             SMTInterpol and set AJAVE_SMTINTERPOL_JAR to enable it."
+        );
+    }
+
+    // SMTInterpol, which does support interpolation. The `SmtInterpol` variant
+    // existed from the start and nothing ever looked for it, so it was dead.
+    if let Ok(jar) = std::env::var("AJAVE_SMTINTERPOL_JAR") {
+        if std::path::Path::new(&jar).is_file() {
+            return Some(InterpolationSolver::SmtInterpol(jar));
+        }
+        log::warn!("imc: AJAVE_SMTINTERPOL_JAR={jar} is not a file; ignoring");
     }
     None
 }

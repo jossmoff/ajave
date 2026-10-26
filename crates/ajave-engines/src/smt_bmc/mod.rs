@@ -596,8 +596,21 @@ impl Engine for SmtBmc {
     /// Deliberately not `STATUS`. A closed obligation is one fewer thing to
     /// check, but it does not make any path this engine could not explore
     /// explorable, so waking on it would buy a re-exploration and nothing else.
+    ///
+    /// This declaration was wrong in both directions until 2026-10-26 (#37).
+    /// It named `PRECISION`, which **no engine in the tree produces**, and
+    /// omitted `INVARIANT`, which is the kind the interval hints named above
+    /// actually travel as (`ai.rs` publishes `Artifact::Invariant`; the
+    /// blackboard's own doc on `interval_hints_for_method` says so). So a
+    /// `Blocked` instance was woken by a message nobody sends and not by the
+    /// one it was waiting for.
+    ///
+    /// The effect is bounded by engine order — `interval-ai` runs before this
+    /// engine, so round 0's hints are already on the board at the first step —
+    /// but `ai` also analyses further methods in `step`, and those later hints
+    /// were unreachable to a blocked BMC.
     fn interest(&self) -> Interest {
-        Interest::LEMMA.union(Interest::PRECISION)
+        Interest::LEMMA.union(Interest::INVARIANT)
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
@@ -670,9 +683,6 @@ impl Engine for SmtBmc {
         // blackboard has already refused anything else at publish, so reaching
         // here means the claim is about every execution.
         let mut known_bounds: HashMap<(MethodKey, VarId), (u64, u64)> = HashMap::new();
-        // References an Over engine has established are never null (Option D).
-        let mut known_nonnull: std::collections::HashSet<(MethodKey, VarId)> =
-            std::collections::HashSet::new();
         for qid in std::mem::take(&mut self.asked) {
             let Some(q) = bb.query(qid) else { continue };
             let (method, about) = (q.at.method.clone(), q.about.clone());
@@ -682,19 +692,6 @@ impl Engine for SmtBmc {
                 // `open_for` applies to statuses.
                 if !approx.is_exact() {
                     continue;
-                }
-                // Option D: a reference the contract says is never null.
-                //
-                // Consumed as a path constraint `v != 0` rather than as a
-                // discharge: the BMC is `Under` and may not conclude safety,
-                // but it may *assume* a fact an `Over` answerer established,
-                // which prunes the null branch so the real paths are explored
-                // instead of a spurious one.
-                if matches!(lemma.answer, Answer::NonNull) {
-                    if let ajave_core::term::Expr::Var(v) = &about {
-                        debug!("smt-bmc: assuming {} non-null from {}", v.0, lemma.by);
-                        known_nonnull.insert((method.clone(), *v));
-                    }
                 }
                 if let Answer::Bounds { lo, hi } = &lemma.answer {
                     if let (
@@ -731,7 +728,6 @@ impl Engine for SmtBmc {
             deadline: budget.deadline,
             scale: self.scale,
             self_refuted: Vec::new(),
-            pending_null_queries: Vec::new(),
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
@@ -740,7 +736,6 @@ impl Engine for SmtBmc {
             approximated: Approximations::EXACT,
             pending_queries: Vec::new(),
             known_bounds,
-            known_nonnull,
             statics: HashMap::new(),
             static_str: HashMap::new(),
             static_tainted: HashSet::new(),
@@ -1002,20 +997,6 @@ impl Engine for SmtBmc {
         if asked_now {
             for (at, about, given) in pending {
                 let id = bb.ask(self.id(), at, about, Want::Bounds, given);
-                self.asked.push(id);
-            }
-        }
-        // Option D's questions, posted on the same channel.
-        //
-        // Not gated on `asked_now`: a run may raise nullness questions and no
-        // bounds questions, and gating the two together would have made the
-        // whole option silently inert — which is the shape of every defect in
-        // this session's record.
-        let null_pending = std::mem::take(&mut ctx.pending_null_queries);
-        if !null_pending.is_empty() && crate::body_analysis::null_queries_enabled() {
-            debug!("smt-bmc: asking about {} reference(s)", null_pending.len());
-            for (at, about, given) in null_pending {
-                let id = bb.ask(self.id(), at, about, Want::NonNull, given);
                 self.asked.push(id);
             }
         }
@@ -1321,11 +1302,6 @@ struct ExploreCtx<'a> {
     /// could not replay. Option B; see `handle_check`.
     self_refuted: Vec<(MethodKey, ObligationId)>,
     /// Nullness questions raised on the way. Option D.
-    pending_null_queries: Vec<(
-        ProgramPoint,
-        ajave_core::term::Expr,
-        Vec<ajave_core::term::Expr>,
-    )>,
     completeness: Completeness,
     /// Obligations whose check could not be trusted, keyed by
     /// **(method, id)**. See `violated_oids` for why the method is part of
@@ -1362,7 +1338,6 @@ struct ExploreCtx<'a> {
     /// created, which is what turns an answer into pruning.
     known_bounds: HashMap<(MethodKey, VarId), (u64, u64)>,
     /// References another engine established are never null. Option D.
-    known_nonnull: std::collections::HashSet<(MethodKey, VarId)>,
     /// What this exploration did not model faithfully.
     ///
     /// Set by `encode_binop` when it encodes a float arithmetic operator on
