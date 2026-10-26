@@ -610,7 +610,19 @@ impl Engine for SmtBmc {
     /// but `ai` also analyses further methods in `step`, and those later hints
     /// were unreachable to a blocked BMC.
     fn interest(&self) -> Interest {
-        Interest::LEMMA.union(Interest::INVARIANT)
+        let base = Interest::LEMMA.union(Interest::INVARIANT);
+        if self.fp_arith {
+            // The escalation pass is woken by what the *other* pass decided: a
+            // `Status` closed under `FLOAT_ARITH` is precisely its input. The
+            // main pass deliberately does not declare `STATUS` (a closed
+            // obligation makes no new path explorable for it), but for this
+            // instance that reasoning is inverted — a closed obligation is the
+            // whole trigger. Without it, `Blocked` above would never be
+            // re-entered and the fix to the return value would be inert.
+            base.union(Interest::STATUS)
+        } else {
+            base
+        }
     }
 
     fn step(&mut self, prog: &Program, bb: &mut Blackboard, budget: Budget) -> Progress {
@@ -636,8 +648,21 @@ impl Engine for SmtBmc {
         // needed it. `open_for` returns those obligations too, because this
         // pass models exactly what the other one approximated.
         if self.fp_arith && bb.open_for(Approximations::FLOAT_ARITH).is_empty() {
-            debug!("smt-bmc-fpa: nothing open or float-approximated, skipping the escalation pass");
-            return Progress::Exhausted;
+            // `Blocked`, not `Exhausted`. This returned `Exhausted` until
+            // 2026-10-26, and `Exhausted` means "will never publish again", so
+            // the orchestrator retired this pass permanently — in round 0,
+            // before the bitvector pass had discharged anything. The artifacts
+            // it exists to escalate are produced *later in the same run*, so
+            // the escalation mechanism could essentially never fire.
+            //
+            // `benchmarks/ajave/jvm-floats/FloatIsNotDouble` is what exposed
+            // it: the bitvector pass proves `1.0f + 1.0e-8f > 1.0f` because
+            // `bvadd` on the two bit patterns does exceed the first, while the
+            // JVM's `fadd` returns exactly `1.0f`. `Blackboard::contested()`
+            // caught the wrong TRUE against a replay-certified violation; with
+            // `AJAVE_FP_ARITH=1` the verdict is FALSE and uncontested.
+            debug!("smt-bmc-fpa: nothing float-approximated yet; waiting for a status");
+            return Progress::Blocked;
         }
 
         let Some(entry) = &prog.entry else {

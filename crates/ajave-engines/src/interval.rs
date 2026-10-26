@@ -237,11 +237,97 @@ impl Neg for Interval {
 
 /// Interval domain over IEEE 754 doubles. Uses `f64::NEG_INFINITY` /
 /// `f64::INFINITY` for top bounds. Bottom is represented by `lo > hi` (NaN
-/// bounds). All arithmetic over-approximates: rounding goes outward.
+/// bounds).
+///
+/// # Why endpoint arithmetic is sound here
+///
+/// This comment used to claim "all arithmetic over-approximates: rounding goes
+/// outward". That was false — there is no outward rounding in this file, and
+/// `add` is a plain `f64` sum under round-to-nearest-even. The code is sound
+/// for a different and stronger reason, and saying so matters because the
+/// false version invited an audit to look for unsoundness that was not there,
+/// and distracted from the one that was.
+///
+/// IEEE addition, subtraction and multiplication are **monotone** in each
+/// operand. The extremum of `fl(x ⊕ y)` over a box is therefore attained at a
+/// corner of that box, and `fl(lo ⊕ lo)` computed here is bit-identical to what
+/// the JVM computes at that corner. For `double` the result is *exact*, not an
+/// over-approximation.
+///
+/// # And why 32-bit `float` needed a rounding step
+///
+/// That argument only holds when this domain's arithmetic has the *same*
+/// precision as the JVM's. It does not for `Ty::Float`: the JVMS specifies
+/// `fadd`/`fmul` as binary32, and computing them in `f64` is **more** precise
+/// — so the resulting interval could exclude the value the JVM produces.
+///
+/// `benchmarks/ajave/jvm-floats/FloatIsNotDouble` is the case:
+/// `fadd(1.0f, 1.0e-8f)` is bit-identical to `1.0f`, because the increment is
+/// below half the gap between consecutive floats at 1.0f, while
+/// `dadd(1.0, 1.0e-8)` is `1.00000001`. The f64 model therefore proved
+/// `sum > 1.0f`, which the JVM violates — a wrong TRUE, confirmed by
+/// `Blackboard::contested()` firing against a replay-certified violation.
+///
+/// `narrow_to_f32` is applied at every assignment to a `Ty::Float`
+/// destination. Monotonicity survives it (`as f32` is itself
+/// round-to-nearest), so the endpoints stay exact — now for binary32.
 #[derive(Clone, Copy, Debug)]
 pub struct FloatInterval {
     pub lo: f64,
     pub hi: f64,
+}
+
+impl FloatInterval {
+    /// Round both endpoints to the nearest `f32`, widening outward where the
+    /// two directions disagree.
+    ///
+    /// `as f32` is round-to-nearest, so an endpoint can move *inward* by up to
+    /// half an ulp. For a bound that must contain every binary32 result, the
+    /// low end has to go down and the high end up, so each is nudged to the
+    /// adjacent float when rounding moved it the wrong way.
+    pub fn to_f32_precision(self) -> FloatInterval {
+        if self.is_bottom() {
+            return self;
+        }
+        let lo32 = self.lo as f32;
+        let hi32 = self.hi as f32;
+        let lo = if (lo32 as f64) > self.lo {
+            // Rounded up: step down to keep the true infimum inside.
+            next_f32_down(lo32) as f64
+        } else {
+            lo32 as f64
+        };
+        let hi = if (hi32 as f64) < self.hi {
+            next_f32_up(hi32) as f64
+        } else {
+            hi32 as f64
+        };
+        FloatInterval { lo, hi }
+    }
+}
+
+/// Next representable `f32` below `x`, saturating at negative infinity.
+fn next_f32_down(x: f32) -> f32 {
+    if x.is_nan() || x == f32::NEG_INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        return -f32::from_bits(1);
+    }
+    let bits = x.to_bits();
+    f32::from_bits(if x > 0.0 { bits - 1 } else { bits + 1 })
+}
+
+/// Next representable `f32` above `x`, saturating at infinity.
+fn next_f32_up(x: f32) -> f32 {
+    if x.is_nan() || x == f32::INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        return f32::from_bits(1);
+    }
+    let bits = x.to_bits();
+    f32::from_bits(if x > 0.0 { bits + 1 } else { bits - 1 })
 }
 
 impl PartialEq for FloatInterval {
@@ -1415,7 +1501,21 @@ impl AbstractDomain for IntervalCpa {
                         // longer describes, and prove an assertion that does
                         // not hold. Removing the entry restores Top.
                         if is_float_var {
-                            let fval = next.eval_rvalue_float(rv);
+                            let mut fval = next.eval_rvalue_float(rv);
+                            // A `float` destination means the JVM computed this
+                            // in binary32. This domain works in `f64`, which is
+                            // *more* precise, so without this step the interval
+                            // can exclude the value the JVM actually produces —
+                            // see `FloatInterval`'s doc and
+                            // `benchmarks/ajave/jvm-floats/FloatIsNotDouble`.
+                            let is_f32 = body
+                                .vars
+                                .get(v.0 as usize)
+                                .map(|vi| matches!(vi.ty, Ty::Float))
+                                .unwrap_or(false);
+                            if is_f32 {
+                                fval = fval.to_f32_precision();
+                            }
                             next.set_float(*v, fval);
                             next.vars.remove(v);
                         } else {
