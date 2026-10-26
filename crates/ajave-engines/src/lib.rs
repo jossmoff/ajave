@@ -25,6 +25,7 @@ pub mod float_search;
 pub mod imc;
 pub mod interpolation;
 pub mod interval;
+pub mod invariant_check;
 pub mod kinduction;
 mod math_eval;
 pub mod math_interval;
