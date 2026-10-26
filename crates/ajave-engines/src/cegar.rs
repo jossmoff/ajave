@@ -1,6 +1,7 @@
 //! CEGAR (Counterexample-Guided Abstraction Refinement) engine.
 //!
-//! Direction: Over. Drives a `PredicateCpa` through `reachability()`,
+//! Direction: Over. Drives a `PredicateCpa` through `explore()` under the
+//! `Join` merge policy,
 //! growing the precision between runs. On a spurious counterexample trace,
 //! extract predicates via interpolation and refine.
 //!
@@ -11,7 +12,7 @@
 
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
-use ajave_core::cpa::{reachability, HasLocation};
+use ajave_core::fixpoint::{explore, HasLocation, Join};
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_ir::*;
 use log::{debug, info};
@@ -342,7 +343,7 @@ fn try_cegar(
         };
 
         let (reached, complete) =
-            reachability(&PredicateCpa, prog, &start, prec.clone(), MAX_STATES);
+            explore(&PredicateCpa, &Join, prog, &start, prec.clone(), MAX_STATES);
 
         if !complete {
             debug!("cegar: reachability incomplete at {} states", MAX_STATES);

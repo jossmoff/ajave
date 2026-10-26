@@ -5,7 +5,7 @@
 //! Scoped deliberately to a single body (no interprocedural reasoning yet --
 //! consistent with the frontend, which diverges rather than guessing at
 //! unmodelled calls). Extending this across method boundaries is a `Cpa`
-//! composition exercise, not a rewrite: `core::cpa::Product` exists for
+//! composition exercise, not a rewrite: the domain and its merge policy are
 //! exactly that.
 
 use std::collections::{HashMap, HashSet};
@@ -13,10 +13,10 @@ use std::collections::{HashMap, HashSet};
 use crate::body_analysis::{
     answers_queries_enabled, body_has_loops, body_uses_float_types, body_uses_long_types,
 };
-use crate::interval::{Interval, IntervalCpa, WideningIntervalCpa, NEG_INF, POS_INF};
+use crate::interval::{Interval, IntervalCpa, WidenAtLoopHeaders, NEG_INF, POS_INF};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
-use ajave_core::cpa::{reachability, HasLocation};
+use ajave_core::fixpoint::{explore, HasLocation, Sep};
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_core::term::{Expr, Op};
 use ajave_ir::{
@@ -594,6 +594,8 @@ impl AiEngine {
 
         let mut answered = 0usize;
         let mut unknown = 0usize;
+        let mut decline_reasons: std::collections::BTreeMap<&'static str, usize> =
+            Default::default();
         for (qid, method, vid) in pending {
             // Keyed by method as well as variable: a `VarId` indexes exactly
             // one `Body`, so answering a question about a method this run did
@@ -627,6 +629,25 @@ impl AiEngine {
                 // honestly `Unknown`, and publishing it is cheaper than
                 // leaving the asker to wait.
                 _ => {
+                    // Why it could not be answered. A refusal is a result, and
+                    // "the AI cannot bound this" has at least three different
+                    // causes with three different fixes.
+                    let held_for_method = self
+                        .answerable
+                        .keys()
+                        .any(|(m, _)| *m == method);
+                    let reason = if !held_for_method {
+                        "no fixpoint for this method"
+                    } else if iv.is_some() || fp.is_some() {
+                        "fact is top"
+                    } else {
+                        "no fact for this variable"
+                    };
+                    debug!(
+                        "interval-ai: DECLINE query {} about v{} in {} — {}",
+                        qid, vid.0, method, reason
+                    );
+                    *decline_reasons.entry(reason).or_insert(0usize) += 1;
                     unknown += 1;
                     Answer::Unknown
                 }
@@ -656,6 +677,16 @@ impl AiEngine {
             self.answerable.len(),
             self.answerable_fp.len()
         );
+        if !decline_reasons.is_empty() {
+            info!(
+                "interval-ai: declines — {}",
+                decline_reasons
+                    .iter()
+                    .map(|(r, n)| format!("{r}={n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
         answered
     }
 
@@ -877,14 +908,15 @@ impl Engine for AiEngine {
         // Float-loop bodies: run widening CPA and discharge obligations during
         // init, before BMC gets a chance to publish spurious violations.
         if body_uses_float_types(body) && body_has_loops(body) {
-            let wcpa = WideningIntervalCpa::from_body(body);
+            let policy = WidenAtLoopHeaders::from_body(body);
             info!("interval-ai: init — float widening analysis on entry method");
             let start = ProgramPoint {
                 method: entry.clone(),
                 block: body.entry,
                 index: 0,
             };
-            let (reached, complete) = reachability(&wcpa, prog, &start, (), 2000);
+            let (reached, complete) =
+                explore(&IntervalCpa::default(), &policy, prog, &start, (), 2000);
             if complete {
                 self.discharge_obligations(entry, &reached, bb, body, prog);
             } else {
@@ -921,7 +953,7 @@ impl Engine for AiEngine {
             index: 0,
         };
         let max_states = 1000usize;
-        let (reached, complete) = reachability(&cpa, prog, &start, (), max_states);
+        let (reached, complete) = explore(&cpa, &Sep, prog, &start, (), max_states);
 
         if complete {
             self.publish_interval_hints(entry, &reached, bb, body);
@@ -1029,11 +1061,11 @@ impl Engine for AiEngine {
             // sequences are effectively never subsumed exactly.
             let use_widening = body_uses_float_types(body) && body_has_loops(body);
             let (reached, complete) = if use_widening {
-                let wcpa = WideningIntervalCpa::from_body_with(body, cpa.clone());
-                info!("interval-ai: using widening CPA for {:?}", method);
-                reachability(&wcpa, prog, &start, (), max_states_per_method)
+                let policy = WidenAtLoopHeaders::from_body(body);
+                info!("interval-ai: using the widening merge policy for {:?}", method);
+                explore(&cpa, &policy, prog, &start, (), max_states_per_method)
             } else {
-                let (r, c) = reachability(&cpa, prog, &start, (), max_states_per_method);
+                let (r, c) = explore(&cpa, &Sep, prog, &start, (), max_states_per_method);
                 // The precise CPA is path-sensitive and keeps loop iterations
                 // apart, so a loop whose trip count isn't statically known
                 // exhausts the state cap instead of converging. Retry those
@@ -1044,15 +1076,15 @@ impl Engine for AiEngine {
                         "interval-ai: {:?} incomplete, retrying with widening",
                         method
                     );
-                    let mut wcpa = WideningIntervalCpa::from_body_with(body, cpa.clone());
+                    let mut policy = WidenAtLoopHeaders::from_body(body);
                     // This retry exists precisely because the precise run ran
                     // out of states, so widen almost immediately rather than
                     // spending the budget re-deriving the same divergence.
-                    wcpa.widen_delay = 2;
+                    policy.widen_delay = 2;
                     // Only loop headers are merged, so the straight-line blocks
                     // between them still hold one state per path; give the
                     // retry enough room for the header states to stabilise.
-                    reachability(&wcpa, prog, &start, (), max_states_per_method * 8)
+                    explore(&cpa, &policy, prog, &start, (), max_states_per_method * 8)
                 } else {
                     (r, c)
                 }

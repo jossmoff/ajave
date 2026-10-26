@@ -14,8 +14,9 @@
 pub mod artifact;
 pub mod blackboard;
 pub mod certify;
-pub mod cpa;
+pub mod cfg;
 pub mod engine;
+pub mod fixpoint;
 pub mod orchestrator;
 pub mod plan;
 pub mod scratch;

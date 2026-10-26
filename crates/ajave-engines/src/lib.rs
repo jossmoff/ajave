@@ -2,7 +2,7 @@
 //!
 //! Each module here is deliberately small and independently removable.
 //! Adding a technique means implementing `ajave_core::engine::Engine` or
-//! `ajave_core::cpa::Cpa` in a new module and registering it in
+//! `ajave_core::fixpoint::AbstractDomain` in a new module and registering it in
 //! `ajave-cli` -- nothing in this crate or `ajave-core` should need to
 //! change. See `docs/strategies/` for the write-up of each one.
 

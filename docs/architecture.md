@@ -310,7 +310,7 @@ and it covers cases the hand-built domains miss.
 Adding a technique means implementing one of three traits, and nothing else in
 the tree changes:
 
-- `Cpa` (`ajave-core::cpa`) — a new abstract domain riding the shared fixpoint loop, implemented in `ajave-engines`.
+- `AbstractDomain` + `MergePolicy` (`ajave-core::fixpoint`) — a new abstract domain, or a new way of exploring an existing one, riding the shared fixpoint loop. Implemented in `ajave-engines`; `fixpoint::laws` states the contracts both must satisfy.
 - `Engine` (`ajave-core::engine`) — a new strategy with its own control flow and step budget, implemented in `ajave-engines` and registered in `ajave-cli`.
 - `Certifier` (`ajave-core::certify`) — a new way of checking an artifact you don't trust.
 

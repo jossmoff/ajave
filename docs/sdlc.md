@@ -167,7 +167,7 @@ first explored state look like it subsumed almost anything, silently
 truncating exploration. Produced 12 confirmed wrong `TRUE` verdicts on the
 `jbmc-regression` corpus — found by running against real tasks, not by any
 of the four hand-picked stage examples, all of which passed throughout.
-Fixed in `core::cpa`'s default `stop`, not in the interval domain, since the
+Fixed in `core::fixpoint::covered_by`, not in the interval domain, since the
 bug was general to any `Cpa` implementation. Correctness went from
 "51 correct, 12 wrong" to "32 correct, 0 wrong" — a worse headline number
 and a strictly better tool. **This is the concrete reason `scripts/run-corpus.sh`

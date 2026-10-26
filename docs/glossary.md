@@ -366,7 +366,7 @@ the same loop becomes a completely different verification technique.
 Beyer/Henzinger/Théoduloz. `merge_sep`+`stop_sep` = explicit-state model
 checking; `merge_join`+`stop_join` = abstract interpretation; predicate domain
 with refining `prec` = lazy abstraction.
-**In ajave.** `ajave_core::cpa`. The extensibility story: a new domain is a new `Cpa`
+**In ajave.** `ajave_core::fixpoint`. The extensibility story: a new domain is a new `AbstractDomain`
 impl and nothing else changes.
 
 ### Transfer relation

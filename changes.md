@@ -4017,3 +4017,114 @@ is done. Real resumption — keeping the exploration frontier and continuing in 
 later round — would let the time returned by a fast engine be spent by a slow
 one, and is the remaining half of the blackboard design. This change only stops
 one engine consuming everything.
+
+## 2026-10-26 — The CPA substrate split into an abstract domain and a merge policy
+
+`ajave_core::cpa` was named after the CPA framework and parameterised a
+fixpoint by five operators: `(initial, transfer, merge, stop, prec)`. All five
+were implemented. A census of every implementor in the workspace showed what
+was actually used:
+
+| impl | `initial` | `transfer` | `merge` | `stop` | `prec` |
+|---|---|---|---|---|---|
+| `IntervalCpa` | ✓ | ✓ | default | default | default |
+| `WideningIntervalCpa` | ✓ delegates | ✓ delegates | ✓ | default | default |
+| `PredicateCpa` | ✓ | ✓ | ✓ | default | default |
+
+`stop` and `prec` were never overridden, anywhere. The module header advertised
+three configurations — explicit-state model checking, abstract interpretation,
+lazy abstraction — and **none of the three was what any implementor did**:
+nothing did explicit-state MC through it, `stop_join` did not exist (widening
+happened in `merge`), and `prec`, documented as "the hook CEGAR lives in", did
+nothing at all. CEGAR refines from *outside* the loop, re-entering with a larger
+`Prec` in a candidates loop. That is eager outer-loop refinement, and it is all
+it ever was.
+
+So this is the sixth live-but-vacuous mechanism found in a month, and the first
+one whose dead configuration point carried a soundness-shaped claim in core.
+
+### What the split buys
+
+`AbstractDomain` (`initial` + `transfer`) says what the abstraction means.
+`MergePolicy` says how exploration combines states. They are orthogonal, and
+`WideningIntervalCpa` was the standing proof: its `initial` and `transfer`
+delegated to the plain interval CPA verbatim, so an entire second `Cpa`
+implementation existed to override one operator. It is now a 6-field policy,
+`WidenAtLoopHeaders`, and it needs no domain at all — the `base: IntervalCpa`
+field existed purely to satisfy a trait.
+
+`PredicateCpa::merge` turned out to be generic `merge_join` in disguise. Its
+guard `joined.values != reached.values` is equivalent to the generic policy's
+`!joined.leq(reached)` on that lattice: `join` keeps only agreeing predicates,
+so the result differs from `reached` exactly when some predicate disagreed,
+which is exactly the `(None, Some)` case making `leq` false. The derivation is
+an argument, so it is pinned by
+`the_join_policy_matches_the_old_predicate_merge` rather than trusted. Two
+generic policies — `Sep` and `Join` — now cover two of the three implementors,
+and the third is domain-specific and lives beside its domain.
+
+### The contract, and why it is executable
+
+Two clauses on `MergePolicy::merge`, both load-bearing, both `debug_assert`ed
+at the call site in `explore`:
+
+1. **Soundness.** `Joined(j)` requires `new.leq(j) && reached.leq(j)`. The
+   driver overwrites `reached` with `j` and discards `new`, so a `j` covering
+   neither silently loses states — and a lost state is an unexamined
+   obligation, which is discharged as vacuously safe. The −16 direction.
+2. **Progress.** `Joined(j)` requires `!j.leq(reached)`. The driver skips its
+   coverage check whenever a merge fires, so an already-covered `j` re-enqueues
+   forever. `WideningIntervalCpa::merge` documented having hit exactly this and
+   guarded it by hand; it is now a law.
+
+`fixpoint::laws` ships `check_lattice_laws` and `check_merge_policy` as library
+functions rather than test helpers, so a domain added later gets the laws for
+free. Implementing `Lattice` is not the same as satisfying it.
+
+### What had no tests
+
+| File | Lines | Tests before | After |
+|---|---|---|---|
+| `core/src/cpa.rs` → `cfg.rs` + `fixpoint.rs` | 227 | **0** | 18 |
+| `engines/src/interval.rs` | 2131 | **0** | 9 |
+| `engines/src/predicate.rs` | 495 | **0** | 4 |
+
+Two `Lattice` impls with no law checks, under the two over-approximating
+state-space engines — the most −16-exposed code in the tree. `cpa.rs:57`
+recorded the consequence: a variable absent from a state's map reads as Top, the
+empty first state subsumed states at unrelated program points, exploration
+truncated before the obligation, and `assert2` became **a false TRUE**.
+`CLAUDE.md` requires a soundness comment to have a test named after it;
+`coverage_is_filtered_by_location` is now that test.
+
+Two laws had no test and now do: that widening *terminates*
+(`widening_reaches_a_fixpoint_in_bounded_steps` — the entire reason widening
+exists, previously unchecked), and that the separation is not cosmetic
+(`the_same_domain_under_two_policies_is_two_techniques` — the same
+`IntervalCpa` exhausts a 40-state cap under `Sep` and converges under
+`WidenAtLoopHeaders`).
+
+### The 90 lines that were misfiled
+
+`successors()` — which statements can throw, when an exceptional edge exists,
+what a terminator leads to — is IR semantics, not CPA, and was 40% of
+`cpa.rs`. It carried three documented wrong answers and zero tests. It is now
+`core::cfg`, and each of the three is a test: an `Assign` emits no exceptional
+edge (spurious pre-assume states made dead catch blocks look live), a `Call`
+does (omitting it discharged an obligation inside a handler without examining
+it), and a terminator does not re-emit them.
+
+### What was deliberately not touched
+
+The merge loop folds the running join into *every* matching reached state,
+leaving earlier entries over-approximated. Sound for an Over analysis, possibly
+imprecise. Copied verbatim: this refactor's bar was no change in behaviour, and
+smoke matching the pre-edit baseline exactly is the evidence. Filed, not fixed.
+
+`PredState::is_bottom` is hardwired `false`, so the predicate domain cannot
+represent infeasibility and explores paths it could prune. No law is broken —
+bottom is simply absent — and `this_domain_cannot_represent_infeasibility`
+records it as a known limitation rather than a surprise.
+
+The name `Cpa` is kept for the engines' documentation and the literature
+traceability it buys. What got fixed is the claims around it.

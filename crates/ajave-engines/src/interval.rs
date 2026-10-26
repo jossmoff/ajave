@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::{Add, Mul, Neg, Sub};
 
 use ajave_core::artifact::ProgramPoint;
-use ajave_core::cpa::{Cpa, HasLocation, Lattice, MergeResult};
+use ajave_core::fixpoint::{AbstractDomain, HasLocation, Lattice, MergePolicy, MergeResult};
 use ajave_ir::{
     BinOp, BlockId, CmpKind, Const, Edge, FieldKey, Operand, Program, Rvalue, Stmt, Ty, VarId,
 };
@@ -1349,7 +1349,7 @@ pub struct IntervalCpa {
     pub nonnull_statics: std::collections::HashSet<ajave_ir::FieldKey>,
 }
 
-impl Cpa for IntervalCpa {
+impl AbstractDomain for IntervalCpa {
     type State = IState;
     type Prec = ();
 
@@ -1640,15 +1640,17 @@ impl Cpa for IntervalCpa {
     }
 }
 
-// ── Widening interval CPA for float-loop bodies ────────────────────────────
+// ── Widening merge policy for loop bodies ──────────────────────────────────
 
-/// An interval CPA that joins at loop headers with widening, enabling fixpoint
-/// computation over unbounded float loops. Handles both int and float variables.
-pub struct WideningIntervalCpa {
-    /// Abstract transfer is identical to the non-widening CPA — including
-    /// nullness and array-length tracking. Only `merge` differs, so we
-    /// delegate rather than maintain a second copy that can drift.
-    pub base: IntervalCpa,
+/// Joins at loop headers with widening, so a fixpoint exists over loops whose
+/// trip count is not statically known. Handles both int and float variables.
+///
+/// This used to be a whole second `Cpa` implementation, `WideningIntervalCpa`,
+/// whose `initial` and `transfer` delegated to the plain interval CPA verbatim
+/// and whose only real content was `merge`. Separating the merge policy from
+/// the abstract domain is what lets it be the one thing it always was: the
+/// same domain, explored differently.
+pub struct WidenAtLoopHeaders {
     /// Blocks that are targets of back-edges (loop headers).
     pub loop_headers: HashSet<BlockId>,
     /// Float constants from comparisons in the body — used as widening thresholds.
@@ -1662,18 +1664,17 @@ pub struct WideningIntervalCpa {
     pub join_counts: std::cell::RefCell<std::collections::HashMap<BlockId, usize>>,
 }
 
-impl WideningIntervalCpa {
-    /// Detect loop headers: any block targeted by a back-edge (target.0 <= source.0).
-    /// Detect loop headers and extract widening thresholds from the body.
-    pub fn from_body(body: &ajave_ir::Body) -> Self {
-        Self::from_body_with(body, IntervalCpa::default())
-    }
-
-    /// Same, but carrying the interprocedural nullness facts the plain CPA uses.
+impl WidenAtLoopHeaders {
+    /// Detect loop headers (any block targeted by a back-edge, i.e.
+    /// `target.0 <= source.0`) and extract widening thresholds from the body.
+    ///
+    /// Takes no domain. The old `from_body_with` had to be handed an
+    /// `IntervalCpa` purely so the struct could satisfy `Cpa::transfer`; a
+    /// merge policy needs no domain at all, which is the point.
     // The guard states the condition the arm is about; folding it into the
     // pattern hides which operators this case covers.
     #[allow(clippy::redundant_guards)]
-    pub fn from_body_with(body: &ajave_ir::Body, base: IntervalCpa) -> Self {
+    pub fn from_body(body: &ajave_ir::Body) -> Self {
         let mut headers = HashSet::new();
         for block in &body.blocks {
             let succs: Vec<BlockId> = match &block.term {
@@ -1763,8 +1764,7 @@ impl WideningIntervalCpa {
             int_thresholds,
             headers.len()
         );
-        WideningIntervalCpa {
-            base,
+        WidenAtLoopHeaders {
             loop_headers: headers,
             float_thresholds,
             int_thresholds,
@@ -2063,25 +2063,7 @@ fn narrow_float_through_cmp(
     }
 }
 
-impl Cpa for WideningIntervalCpa {
-    type State = IState;
-    type Prec = ();
-
-    fn initial(&self, prog: &Program, at: &ProgramPoint) -> IState {
-        self.base.initial(prog, at)
-    }
-
-    fn transfer(
-        &self,
-        state: &IState,
-        prog: &Program,
-        edge: &Edge,
-        to: &ProgramPoint,
-        prec: &(),
-    ) -> Vec<IState> {
-        self.base.transfer(state, prog, edge, to, prec)
-    }
-
+impl MergePolicy<IntervalCpa> for WidenAtLoopHeaders {
     /// Join-then-widen at loop headers.
     ///
     /// Without this the CPA is purely path-sensitive and a loop whose trip
@@ -2127,5 +2109,377 @@ impl Cpa for WideningIntervalCpa {
         } else {
             MergeResult::Joined(combined)
         }
+    }
+}
+
+#[cfg(test)]
+mod domain_law_tests {
+    //! The laws the interval domain must satisfy, and the two clauses its
+    //! merge policy must satisfy.
+    //!
+    //! This file had no tests at all until 2026-10-26, which is how the
+    //! coverage subtlety recorded on `fixpoint::covered_by` became a false
+    //! TRUE on `assert2`. The laws here are checked over hand-built states
+    //! rather than benchmark outcomes, so they generalise.
+
+    use super::*;
+    use ajave_core::fixpoint::laws;
+    use ajave_ir::{BlockId, MethodKey};
+
+    fn pp(block: u32) -> ProgramPoint {
+        ProgramPoint {
+            method: MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            block: BlockId(block),
+            index: 0,
+        }
+    }
+
+    fn empty(block: u32) -> IState {
+        IState {
+            at: pp(block),
+            vars: BTreeMap::new(),
+            float_vars: BTreeMap::new(),
+            nullness: BTreeMap::new(),
+            array_lens: BTreeMap::new(),
+            fields: BTreeMap::new(),
+            field_null: BTreeMap::new(),
+        }
+    }
+
+    /// Deliberately varied: Top, two incomparable narrowings, one strictly
+    /// below both, plus a float var, a nullness fact and an array length —
+    /// every map in the state, because a law can hold on one map and fail on
+    /// another.
+    fn samples() -> Vec<IState> {
+        let mut out = vec![empty(0)];
+
+        let mut a = empty(0);
+        a.vars.insert(VarId(0), Interval { lo: 0, hi: 10 });
+        out.push(a);
+
+        let mut b = empty(0);
+        b.vars.insert(VarId(0), Interval { lo: 5, hi: 20 });
+        out.push(b);
+
+        let mut c = empty(0);
+        c.vars.insert(VarId(0), Interval { lo: 5, hi: 10 });
+        c.vars.insert(VarId(1), Interval::point(7));
+        out.push(c);
+
+        let mut d = empty(0);
+        d.float_vars
+            .insert(VarId(2), FloatInterval { lo: -1.0, hi: 1.0 });
+        out.push(d);
+
+        let mut e = empty(0);
+        e.nullness.insert(VarId(3), Nullness::NonNull);
+        e.array_lens.insert(VarId(3), Interval::point(4));
+        out.push(e);
+
+        let mut f = empty(0);
+        f.nullness.insert(VarId(3), Nullness::Null);
+        out.push(f);
+
+        out
+    }
+
+    #[test]
+    fn the_interval_domain_satisfies_the_lattice_laws() {
+        laws::check_lattice_laws(&samples());
+    }
+
+    #[test]
+    fn the_separating_policy_satisfies_both_clauses() {
+        laws::check_merge_policy::<IntervalCpa, _>(&ajave_core::fixpoint::Sep, &samples(), &());
+    }
+
+    /// A body with a back-edge, so block 1 is a loop header and the policy is
+    /// not vacuous.
+    fn looping_body() -> ajave_ir::Body {
+        let mk = MethodKey {
+            class: "Main".into(),
+            name: "main".into(),
+            desc: "()V".into(),
+        };
+        ajave_ir::Body {
+            is_static: true,
+            key: mk,
+            entry: BlockId(0),
+            vars: vec![ajave_ir::VarInfo {
+                kind: ajave_ir::VarKind::Local(0),
+                ty: Ty::Int,
+            }],
+            obligations: vec![],
+            blocks: vec![
+                ajave_ir::Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![],
+                    term: ajave_ir::Terminator::Goto(BlockId(1)),
+                    exceptional: vec![],
+                },
+                ajave_ir::Block {
+                    id: BlockId(1),
+                    bytecode_offset: 1,
+                    stmts: vec![],
+                    // Back-edge to itself: BlockId(1) is a loop header.
+                    term: ajave_ir::Terminator::Branch {
+                        cond: ajave_ir::Operand::Const(ajave_ir::Const::Int(1)),
+                        then_: BlockId(1),
+                        else_: BlockId(2),
+                    },
+                    exceptional: vec![],
+                },
+                ajave_ir::Block {
+                    id: BlockId(2),
+                    bytecode_offset: 2,
+                    stmts: vec![],
+                    term: ajave_ir::Terminator::Return(None),
+                    exceptional: vec![],
+                },
+            ],
+        }
+    }
+
+    /// The point of separating the domain from the policy: the *same* domain
+    /// explored under two policies is two techniques. `Sep` keeps loop
+    /// iterations apart and exhausts its state cap; the widening policy
+    /// collapses them at the header and converges.
+    ///
+    /// This is what the deleted `WideningIntervalCpa` existed to express, and
+    /// it needed a second `Cpa` implementation to say it.
+    #[test]
+    fn the_same_domain_under_two_policies_is_two_techniques() {
+        let body = counting_loop_body();
+        let mut prog = ajave_ir::Program::default();
+        prog.bodies.insert(body.key.clone(), body.clone());
+        prog.entry = Some(body.key.clone());
+        let start = ProgramPoint {
+            method: body.key.clone(),
+            block: body.entry,
+            index: 0,
+        };
+
+        let cpa = IntervalCpa::default();
+        let (_, sep_complete) =
+            ajave_core::fixpoint::explore(&cpa, &ajave_core::fixpoint::Sep, &prog, &start, (), 40);
+
+        let mut policy = WidenAtLoopHeaders::from_body(&body);
+        policy.widen_delay = 2;
+        let (reached, widen_complete) =
+            ajave_core::fixpoint::explore(&cpa, &policy, &prog, &start, (), 40);
+
+        assert!(
+            !sep_complete,
+            "the path-sensitive policy should exhaust a 40-state cap on this loop"
+        );
+        assert!(
+            widen_complete,
+            "the widening policy should converge inside the same cap, reached {}",
+            reached.len()
+        );
+    }
+
+    /// `i = 0; while (i < 100) i++;` — a counted loop whose iterations the
+    /// path-sensitive policy keeps apart.
+    fn counting_loop_body() -> ajave_ir::Body {
+        use ajave_ir::{BinOp, Const, Operand, Rvalue, Stmt, Terminator};
+        let mk = MethodKey {
+            class: "Main".into(),
+            name: "count".into(),
+            desc: "()V".into(),
+        };
+        let i = VarId(0);
+        let c = VarId(1);
+        ajave_ir::Body {
+            is_static: true,
+            key: mk,
+            entry: BlockId(0),
+            vars: vec![
+                ajave_ir::VarInfo {
+                    kind: ajave_ir::VarKind::Local(0),
+                    ty: Ty::Int,
+                },
+                ajave_ir::VarInfo {
+                    kind: ajave_ir::VarKind::Stack(0),
+                    ty: Ty::Int,
+                },
+            ],
+            obligations: vec![],
+            blocks: vec![
+                ajave_ir::Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![Stmt::Assign(i, Rvalue::Use(Operand::Const(Const::Int(0))))],
+                    term: Terminator::Goto(BlockId(1)),
+                    exceptional: vec![],
+                },
+                // Loop header: c := i < 100; branch on c.
+                ajave_ir::Block {
+                    id: BlockId(1),
+                    bytecode_offset: 1,
+                    stmts: vec![Stmt::Assign(
+                        c,
+                        Rvalue::Bin(
+                            BinOp::Lt,
+                            Operand::Var(i),
+                            Operand::Const(Const::Int(100)),
+                        ),
+                    )],
+                    term: Terminator::Branch {
+                        cond: Operand::Var(c),
+                        then_: BlockId(2),
+                        else_: BlockId(3),
+                    },
+                    exceptional: vec![],
+                },
+                // Body: i := i + 1, back-edge to the header.
+                ajave_ir::Block {
+                    id: BlockId(2),
+                    bytecode_offset: 2,
+                    stmts: vec![Stmt::Assign(
+                        i,
+                        Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::Const(Const::Int(1))),
+                    )],
+                    term: Terminator::Goto(BlockId(1)),
+                    exceptional: vec![],
+                },
+                ajave_ir::Block {
+                    id: BlockId(3),
+                    bytecode_offset: 3,
+                    stmts: vec![],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_widening_policy_finds_its_loop_header() {
+        let policy = WidenAtLoopHeaders::from_body(&looping_body());
+        assert!(
+            policy.loop_headers.contains(&BlockId(1)),
+            "a block targeted by a back-edge is a loop header"
+        );
+        assert!(!policy.loop_headers.contains(&BlockId(0)));
+    }
+
+    #[test]
+    fn the_widening_policy_satisfies_both_clauses() {
+        let policy = WidenAtLoopHeaders::from_body(&looping_body());
+        // States must sit at the loop header for the policy to engage at all.
+        let at_header: Vec<IState> = samples()
+            .into_iter()
+            .map(|mut s| {
+                s.at = pp(1);
+                s
+            })
+            .collect();
+        laws::check_merge_policy::<IntervalCpa, _>(&policy, &at_header, &());
+    }
+
+    #[test]
+    fn the_widening_policy_leaves_other_blocks_alone() {
+        let policy = WidenAtLoopHeaders::from_body(&looping_body());
+        let mut a = empty(0);
+        a.vars.insert(VarId(0), Interval { lo: 0, hi: 1 });
+        let mut b = empty(0);
+        b.vars.insert(VarId(0), Interval { lo: 0, hi: 2 });
+        assert!(
+            matches!(
+                MergePolicy::<IntervalCpa>::merge(&policy, &b, &a, &()),
+                MergeResult::Sep
+            ),
+            "block 0 is not a loop header, so nothing is joined there"
+        );
+    }
+
+    /// Widening is delayed so loops that converge on their own keep their
+    /// precise bounds. `widen_delay` is a fitted constant, so the delay's
+    /// *semantics* are pinned here even though the value is not.
+    #[test]
+    fn widening_is_delayed_and_then_fires() {
+        let mut policy = WidenAtLoopHeaders::from_body(&looping_body());
+        policy.widen_delay = 2;
+
+        let state = |hi: i64| {
+            let mut s = empty(1);
+            s.vars.insert(VarId(0), Interval { lo: 0, hi });
+            s
+        };
+
+        // Merges 1 and 2 are inside the delay, so they are plain joins:
+        // [0,1] ⊔ [0,2] = [0,2], exactly the union, no jump to a threshold.
+        let mut reached = state(1);
+        for step in 1..=2 {
+            match MergePolicy::<IntervalCpa>::merge(&policy, &state(step + 1), &reached, &()) {
+                MergeResult::Joined(j) => {
+                    assert_eq!(
+                        j.get(VarId(0)),
+                        Interval { lo: 0, hi: step + 1 },
+                        "merge {step} should be a plain join"
+                    );
+                    reached = j;
+                }
+                MergeResult::Sep => panic!("merge {step} should have joined"),
+            }
+        }
+
+        // The next one is past the delay, so it widens rather than unions.
+        match MergePolicy::<IntervalCpa>::merge(&policy, &state(4), &reached, &()) {
+            MergeResult::Joined(j) => {
+                let w = j.get(VarId(0));
+                assert!(
+                    w.hi > 4,
+                    "past the delay the bound must jump beyond the union, got {w:?}"
+                );
+            }
+            MergeResult::Sep => panic!("the widening merge should have joined"),
+        }
+    }
+
+    /// The termination law. Widening exists so that a loop whose trip count is
+    /// not statically known still reaches a fixpoint; without it the states
+    /// just exhaust the cap and the proof is forfeited. Nothing tested this.
+    #[test]
+    fn widening_reaches_a_fixpoint_in_bounded_steps() {
+        let mut policy = WidenAtLoopHeaders::from_body(&looping_body());
+        policy.widen_delay = 2;
+
+        let mut reached = {
+            let mut s = empty(1);
+            s.vars.insert(VarId(0), Interval::point(0));
+            s
+        };
+
+        // Feed an ever-growing interval, as an unbounded counting loop does.
+        let mut settled_at = None;
+        for step in 1..=16i64 {
+            let mut next = empty(1);
+            next.vars.insert(VarId(0), Interval { lo: 0, hi: step });
+            match MergePolicy::<IntervalCpa>::merge(&policy, &next, &reached, &()) {
+                MergeResult::Joined(j) => reached = j,
+                MergeResult::Sep => {
+                    // Clause 2 says Sep here means the new state added nothing,
+                    // i.e. the sequence has stabilised.
+                    settled_at = Some(step);
+                    break;
+                }
+            }
+        }
+
+        let at = settled_at.expect(
+            "the widened sequence never stabilised in 16 steps — \
+             the analysis would exhaust its state cap instead of converging",
+        );
+        assert!(
+            at <= policy.widen_delay as i64 + 4,
+            "stabilised only after {at} steps, which is slower than the delay explains"
+        );
     }
 }

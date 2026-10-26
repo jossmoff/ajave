@@ -18,7 +18,7 @@
   competitive assessment. Dated on purpose: its scores are a snapshot, not
   the current numbers. For those, run `tools/bench.py`.
 - [`strategies/`](strategies/) — one file per verification strategy
-  (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::cpa` impls).
+  (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before
   it's registered in `ajave-cli`, not after.** A strategy without a doc is
   effectively unreviewable: nobody else can tell what it's entitled to
@@ -65,7 +65,7 @@ predicate arity), `smt_encode.rs`, `smt_text.rs`, `body_analysis.rs`.
    writing the engine. Forces the direction (over/under-approximating) and
    the soundness argument to exist before the code does, rather than being
    reconstructed afterwards.
-2. Implement `ajave_core::engine::Engine` or `ajave_core::cpa::Cpa` in
+2. Implement `ajave_core::engine::Engine` or `ajave_core::fixpoint::AbstractDomain` in
    `ajave-engines/src/<name>.rs`.
 3. Register it in `ajave-cli/src/main.rs`'s engine list.
 4. Add it to the table in this file and in `architecture.md` §6 if it

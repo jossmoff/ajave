@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use ajave_core::artifact::ProgramPoint;
-use ajave_core::cpa::{Cpa, HasLocation, Lattice, MergeResult};
+use ajave_core::fixpoint::{AbstractDomain, HasLocation, Lattice};
 use ajave_ir::*;
 
 use crate::body_analysis::{find_defining_bin, negate_binop};
@@ -265,7 +265,7 @@ impl HasLocation for PredState {
 
 pub struct PredicateCpa;
 
-impl Cpa for PredicateCpa {
+impl AbstractDomain for PredicateCpa {
     type State = PredState;
     type Prec = PredPrec;
 
@@ -354,25 +354,16 @@ impl Cpa for PredicateCpa {
         }
     }
 
-    fn merge(
-        &self,
-        new: &PredState,
-        reached: &PredState,
-        _prec: &PredPrec,
-    ) -> MergeResult<PredState> {
-        // merge_join: join states at the same location.
-        if new.at == reached.at {
-            let joined = new.join(reached);
-            if joined.values != reached.values {
-                MergeResult::Joined(joined)
-            } else {
-                MergeResult::Sep
-            }
-        } else {
-            MergeResult::Sep
-        }
-    }
 }
+
+// `merge` is deliberately absent: this domain is explored under
+// `fixpoint::Join`, the generic `merge_join` policy. The hand-rolled version
+// that lived here compared `joined.values != reached.values`, which is
+// equivalent to the policy's `!joined.leq(reached)` on this lattice --
+// `join` keeps only agreeing predicates, so the result differs from `reached`
+// exactly when some predicate disagreed, which is exactly the `(None, Some)`
+// case that makes `leq` false. `the_join_policy_matches_the_old_predicate_merge`
+// pins that equivalence.
 
 /// Try to evaluate a predicate after an assignment v := rv.
 fn evaluate_predicate_after_assign(
@@ -491,5 +482,98 @@ fn parse_predicate_operand(s: &str) -> Option<PredicateOperand> {
         Some(PredicateOperand::Const(n))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod domain_law_tests {
+    //! Laws for the predicate domain, and the one test that licenses using
+    //! the generic `Join` policy here instead of a hand-rolled `merge`.
+
+    use super::*;
+    use ajave_core::fixpoint::laws;
+    use ajave_ir::{BlockId, MethodKey};
+
+    fn pp(block: u32) -> ProgramPoint {
+        ProgramPoint {
+            method: MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            block: BlockId(block),
+            index: 0,
+        }
+    }
+
+    fn st(block: u32, values: Vec<Option<bool>>) -> PredState {
+        PredState {
+            at: pp(block),
+            values,
+        }
+    }
+
+    fn samples() -> Vec<PredState> {
+        vec![
+            st(0, vec![None, None]),              // Top: nothing known
+            st(0, vec![Some(true), None]),        //
+            st(0, vec![Some(false), None]),       // disagrees with the above
+            st(0, vec![Some(true), Some(true)]),  // knows more
+            st(0, vec![Some(true), Some(false)]), // disagrees on the second
+        ]
+    }
+
+    #[test]
+    fn the_predicate_domain_satisfies_the_lattice_laws() {
+        laws::check_lattice_laws(&samples());
+    }
+
+    #[test]
+    fn the_join_policy_satisfies_both_clauses_here_too() {
+        laws::check_merge_policy::<PredicateCpa, _>(
+            &ajave_core::fixpoint::Join,
+            &samples(),
+            &PredPrec {
+                predicates: Vec::new(),
+            },
+        );
+    }
+
+    /// The hand-rolled `merge` deleted from this file tested
+    /// `joined.values != reached.values`; the generic policy tests
+    /// `!joined.leq(reached)`. The two are equivalent on this lattice —
+    /// `join` keeps only agreeing predicates, so the result differs from
+    /// `reached` exactly when some predicate disagreed, which is exactly the
+    /// `(None, Some)` case that makes `leq` false.
+    ///
+    /// That is an argument, not a proof, which is why it is a test.
+    #[test]
+    fn the_join_policy_matches_the_old_predicate_merge() {
+        for new in &samples() {
+            for reached in &samples() {
+                let joined = new.join(reached);
+                let old_said_join = joined.values != reached.values;
+                let new_says_join = !joined.leq(reached);
+                assert_eq!(
+                    old_said_join, new_says_join,
+                    "divergence at new={:?} reached={:?} joined={:?}",
+                    new.values, reached.values, joined.values
+                );
+            }
+        }
+    }
+
+    /// `is_bottom` is hardwired to `false` and `is_consistent` to `true`, so
+    /// this domain cannot represent infeasibility: a state asserting both `p`
+    /// and `¬p` is not recognised as bottom. No law above is broken — bottom
+    /// is simply absent from the lattice — but the consequence is that
+    /// infeasible paths are explored rather than pruned, which costs
+    /// precision and states. Recorded here so it is a known limitation rather
+    /// than a surprise.
+    #[test]
+    fn this_domain_cannot_represent_infeasibility() {
+        let contradictory = st(0, vec![Some(true)]);
+        assert!(!contradictory.is_bottom());
+        assert!(contradictory.is_consistent());
     }
 }

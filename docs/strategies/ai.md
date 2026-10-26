@@ -12,12 +12,14 @@ is `ai.rs`'s own job, which is narrower than the domain itself:
 
 ## What it's responsible for that the domain isn't
 
-- **Scope.** Runs `ajave_core::cpa::reachability` starting at `prog.entry`
+- **Scope.** Runs `ajave_core::fixpoint::explore` starting at `prog.entry`
   only — no interprocedural reasoning. A call the frontend couldn't lift
   diverges the body first, so this is a consequence of the frontend's own
-  scope, not an independent limitation. Extending across method boundaries
-  is a `Cpa` composition exercise (`ajave_core::cpa::Product`), not a rewrite
-  of this file.
+  scope, not an independent limitation. (The engine does analyse further
+  methods in `step`; it is `init` that is entry-only — see #40's diagnosis.)
+  Extending the *domain* across method boundaries needs a new
+  `AbstractDomain`, not a rewrite of this file. The `cpa::Product` this
+  paragraph used to cite was removed as unused long before the CPA split.
 - **Refusing to run on an unlifted body.** `Body::is_fully_lifted` is checked
   before anything else — an over-approximating engine cannot see past a
   `Diverge` region, so it reports `Stalled` rather than silently proving

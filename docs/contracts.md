@@ -257,11 +257,38 @@ need no corpus time at all.
 Part I ranked artifact monotonicity as the important check. On the evidence
 here the order is:
 
-1. **Lattice and widening laws** — a defect class with a recorded false TRUE, a
-   substrate with zero tests, and property tests that cost no corpus time.
+1. ~~**Lattice and widening laws**~~ — **done 2026-10-26.** The CPA substrate
+   is split into `AbstractDomain` + `MergePolicy`, the laws ship as
+   `fixpoint::laws` so a later domain inherits them, and the merge contract is
+   `debug_assert`ed at the call site. 30 tests where there were none; see
+   `docs/plans/cpa-to-domain-and-policy.md`.
 2. **Honest-approximation audit** — static, and it settles whether the single
    consumer of `open_for` is being starved.
 3. **Every asker has a consumer** (#40) and **every interest has a producer**
    (#37) — both static, both would have caught a defect committed this month.
 4. **Artifact monotonicity** — the most general check, and the only one that
    needs corpus runs. Worth building, worth building last.
+
+### What the first one actually found
+
+Not a broken law. The substrate's *configuration surface* was the defect:
+`stop` and `prec` were never overridden by any of the three implementors, and
+`prec` — documented as "the hook CEGAR lives in" — did nothing, while CEGAR
+refined from outside the loop all along. None of the three configurations the
+module header advertised was what any implementor did.
+
+That is worth recording because it is a **different shape** from the five
+live-but-vacuous defects that motivated Part I. Those were artifacts nobody
+consumed. This was a *parameter nobody varied* — the same vacuity one level
+down, in a trait rather than a message. The check that catches it is the same
+census: enumerate the implementors, intersect with what the interface offers,
+and fail on a configuration point with no variation.
+
+So the mechanical check list gains a fifth entry, and it is cheap:
+
+### 5. Every configuration point is varied — static
+
+For each trait with defaulted methods, count overrides across the workspace. A
+defaulted method no implementor overrides is not a configuration point; it is a
+decision wearing a parameter's clothes, and its doc comment is unverified by
+construction. Delete it or document it as fixed.
