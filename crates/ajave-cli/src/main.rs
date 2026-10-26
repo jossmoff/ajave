@@ -26,8 +26,20 @@ use log::{debug, info, warn};
 struct Cli {
     /// Input files or directories (.java source or pre-compiled .class bytecode).
     /// BenchExec passes every entry of the task YAML's input_files as a separate argument.
-    #[arg(required = true)]
+    #[arg(required_unless_present = "build_info")]
     inputs: Vec<PathBuf>,
+
+    /// Report which build this is and exit, in particular whether the internal
+    /// contract assertions are compiled in.
+    ///
+    /// Exists because a profile is a claim nobody checks. `debug_assert!` is
+    /// compiled out of `release`, so the `MergePolicy` clauses that guard
+    /// against losing an abstract state were enforced only under `cargo test`
+    /// -- and a harness that means to exercise them has no way to tell a
+    /// `release-checked` binary from a `release` one by looking at it. Now it
+    /// can ask, and `just oracles` does before it runs.
+    #[arg(long)]
+    build_info: bool,
 
     /// Print the lifted IR for every loaded method before verification begins.
     #[arg(long)]
@@ -624,8 +636,27 @@ fn format_nondet_value(value: &verdict::NondetValue) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Whether the internal contract assertions are compiled into this binary.
+///
+/// `cfg!(debug_assertions)` is evaluated in *this* crate, and the flag is set
+/// per profile rather than per crate, so it answers for the whole build.
+fn contract_checks_on() -> bool {
+    cfg!(debug_assertions)
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // Before anything else: this must work without inputs, and must not depend
+    // on logging being initialised.
+    if cli.build_info {
+        println!(
+            "ajave {}\ncontract_checks={}",
+            env!("CARGO_PKG_VERSION"),
+            if contract_checks_on() { "on" } else { "off" }
+        );
+        std::process::exit(0);
+    }
 
     // Initialise logging. RUST_LOG takes absolute precedence (power-user override);
     // otherwise --verbose/-v controls the level (default: WARN, keeping stderr
@@ -642,7 +673,11 @@ fn main() {
     }
     log_builder.init();
 
-    info!("ajave starting, inputs={:?}", cli.inputs);
+    info!(
+        "ajave starting, inputs={:?}, contract_checks={}",
+        cli.inputs,
+        if contract_checks_on() { "on" } else { "off" }
+    );
 
     // `_scratch` must stay bound for the rest of main: it owns the compiled
     // classes, and dropping it early would delete the classpath mid-run.

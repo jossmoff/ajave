@@ -42,7 +42,12 @@ from procguard import run_guarded
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "benchmarks")
-AJAVE = os.path.join(ROOT, "target", "release", "ajave")
+# Which binary to exercise. `AJAVE_BIN` lets `just oracles` point this at
+# `target/release-checked/ajave`, whose `debug_assert!`s enforce the internal
+# contracts (`core::fixpoint`'s MergePolicy clauses, among others). Scoring
+# runs keep the plain `release` build, where those are compiled out -- see
+# `[profile.release-checked]` in Cargo.toml.
+AJAVE = os.environ.get("AJAVE_BIN") or os.path.join(ROOT, "target", "release", "ajave")
 
 # An extra method whose obligations are all satisfied, called from main so that
 # it is reachable and its obligations are seeded. It exists to occupy obligation

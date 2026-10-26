@@ -24,3 +24,22 @@ cvc5 = { version = "0.4", features = ["static"] }
 # replay stack traces) without anyone having to remember to set it.
 [profile.release]
 debug = true
+
+# Release speed, with the contract assertions left in.
+#
+# `debug_assert!` is compiled out of `release`, and `debug-assertions` defaults
+# to off, so the `MergePolicy` clauses in `core::fixpoint` -- including the
+# soundness one, whose violation loses a state and discharges an unexamined
+# obligation -- fired only under `cargo test`. Every smoke run, every scoring
+# run and every oracle sweep ran unchecked.
+#
+# Turning them on in `release` is the wrong fix: `merge` is in the hot loop of
+# the engine that discharges most of the corpus, so that trades soundness
+# checking for timeouts. Instead the label-free oracles (`just oracles`) run
+# this profile, because they already sweep real programs and do not need
+# competition speed. Scoring stays on `release`.
+#
+# Ask the binary which one it is: `ajave --build-info`.
+[profile.release-checked]
+inherits = "release"
+debug-assertions = true

@@ -42,7 +42,12 @@ from procguard import install_signal_handlers, run_guarded, sweep  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "benchmarks")
 SETS = os.path.join(BENCH, "sets")
-BINARY = os.path.join(ROOT, "target/release/ajave")
+# Which binary to exercise. `AJAVE_BIN` lets `just oracles` point this at
+# `target/release-checked/ajave`, whose `debug_assert!`s enforce the internal
+# contracts (`core::fixpoint`'s MergePolicy clauses, among others). Scoring
+# runs keep the plain `release` build, where those are compiled out -- see
+# `[profile.release-checked]` in Cargo.toml.
+BINARY = os.environ.get("AJAVE_BIN") or os.path.join(ROOT, "target/release/ajave")
 
 # Property file substring -> ajave's --property value.
 PROPERTIES = {

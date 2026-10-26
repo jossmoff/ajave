@@ -4128,3 +4128,84 @@ records it as a known limitation rather than a surprise.
 
 The name `Cpa` is kept for the engines' documentation and the literature
 traceability it buys. What got fixed is the claims around it.
+
+## 2026-10-26 — A build profile that keeps the contract assertions
+
+The `MergePolicy` clauses added earlier today were `debug_assert!`s, and
+`[profile.release]` set only `debug = true`. `debug-assertions` defaults to
+**off** in release and appears in no `Cargo.toml` in the tree, so the clauses
+fired under `cargo test` and nowhere else. Every smoke run, every scoring run
+and every oracle sweep ran with the soundness check — the one guarding against
+losing an abstract state, and so against discharging an obligation nobody
+examined — compiled out.
+
+That is the same shape as the defects this substrate work was about: a
+mechanism that exists, is correct, and is never reached. Writing the assertion
+is not the same as running it.
+
+### Why not just turn them on in release
+
+`merge` is in the hot loop of the engine that discharges most of the corpus.
+Enabling assertions there trades soundness checking for timeouts, and a task
+that falls off the cliff costs real points while proving nothing. The scoring
+build must stay the fast one.
+
+So there is a third profile. `release-checked` inherits `release` and adds
+`debug-assertions = true`, and the label-free oracles (`just oracles`) run it:
+they already sweep real programs, they compare a binary against *itself*, and
+they do not need competition speed. A uniform slowdown therefore cannot
+manufacture a flip — only a weakening, which those harnesses already report
+rather than fail on.
+
+### The profile asserts itself
+
+A build profile is a claim, and the entire reason this one exists is that the
+previous claim went unchecked for months. So the binary answers the question
+directly:
+
+```
+$ ./target/release/ajave --build-info
+ajave 0.1.0
+contract_checks=off
+$ ./target/release-checked/ajave --build-info
+ajave 0.1.0
+contract_checks=on
+```
+
+`just build-checked` greps for `contract_checks=on` and fails loudly if it is
+absent. A profile rename, an `inherits` change or a cargo default moving would
+otherwise leave the oracles running an unchecked binary and reporting that
+everything is fine — which is precisely the failure this whole sequence of
+findings is made of. The same string is logged at INFO on every run, so a
+recorded log says which build produced it.
+
+`AJAVE_BIN` overrides the binary path in `metamorphic.py`,
+`engine_ablation.py`, `contract_monotonicity.py` and `bench.py`; the default is
+unchanged, so every existing invocation behaves exactly as before.
+
+### The cost, measured
+
+Assertions slow the binary and verdicts are timeout-sensitive, so the obvious
+objection is that the oracles would start losing answers. Measured instead of
+assumed: `metamorphic.py --set smoke` against both binaries, 69 transformed
+runs each, **identical results** — same flip (`HttpTransport_false`, #38,
+pre-existing), same single inconclusive, same five weakened tasks. The
+assertions cost zero answers on this set.
+
+No contract assertion fired across either sweep, which is the first evidence
+that the `MergePolicy` clauses hold on real programs rather than only on the
+hand-built states in `fixpoint::laws`. `contract_monotonicity.py` also ran
+clean through the checked binary: 6 perturbations, 6 weakenings, no violations.
+
+One pre-existing condition this exposes: `just oracles` **currently exits 1**,
+because `metamorphic` fails on #38 and that flip predates all of this work. The
+gate is red for a real reason and should stay red until #38 is fixed.
+
+### Not added to CI, deliberately
+
+`nightly.yml` already explains why the corpus regression test is not there: six
+workers and a per-task timeout on a shared two-core runner means contention
+manufactures failures, and both attempts were killed by signal after two
+minutes. The oracles have the same shape — the smoke set under a timeout — and
+a slower binary makes it worse, not better. They stay a `just` recipe run on a
+machine you control.

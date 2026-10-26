@@ -8,6 +8,7 @@
 set shell := ["bash", "-uc"]
 
 BIN := "./target/release/ajave"
+CHECKED_BIN := "./target/release-checked/ajave"
 COMMON := "benchmarks/sv-comp/common"
 
 # Show the available recipes.
@@ -54,6 +55,35 @@ strategy-docs:
 # Release build. Everything below assumes this has run.
 build:
     cargo build --release
+
+# Release build with the internal contract assertions left in.
+#
+# `debug_assert!` is compiled out of `release`, so `core::fixpoint`'s
+# MergePolicy clauses -- one of which guards against losing an abstract state,
+# and so against discharging an obligation nobody examined -- fired only under
+# `cargo test`. This profile is what the label-free oracles run, because they
+# sweep real programs and do not need competition speed. Scoring stays on
+# `release`; see `[profile.release-checked]` in Cargo.toml.
+#
+# The `--build-info` check is not ceremony. A build profile is a claim, and the
+# entire reason this profile exists is that the previous claim went unchecked
+# for months. If the flag ever stops being set -- a profile rename, an
+# `inherits` change, a cargo default moving -- this fails loudly instead of
+# quietly running the oracles against an unchecked binary and reporting that
+# everything is fine.
+#
+# Release build with the internal contract assertions left in.
+build-checked:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --profile release-checked
+    info="$({{CHECKED_BIN}} --build-info)"
+    echo "$info"
+    if ! grep -qx 'contract_checks=on' <<<"$info"; then
+      echo "FAIL: {{CHECKED_BIN}} reports contract checks off." >&2
+      echo "      The release-checked profile is not doing what it claims." >&2
+      exit 1
+    fi
 
 # ---------------------------------------------------------------------------
 # Scoring. CLAUDE.md's measurement rules apply to every recipe here.
@@ -111,19 +141,35 @@ survey-now kind="engines" set="smoke": build
 # ---------------------------------------------------------------------------
 
 # Run every label-free differential oracle.
+#
+# All three binary-driven oracles run `build-checked`, so a violated internal
+# contract aborts the run instead of silently losing a state.
+#
+# The cost was measured rather than assumed, because assertions slow the binary
+# and verdicts are timeout-sensitive. On 2026-10-26 `metamorphic.py --set smoke`
+# was run against both binaries: 69 transformed runs, and the results were
+# *identical* -- same flip (#38, pre-existing), same 1 inconclusive, same 5
+# weakened tasks. The assertions cost zero answers here. That is a measurement
+# on one set, not a guarantee; re-measure if it ever looks like the oracles are
+# losing answers the scoring build keeps.
+#
+# Each oracle also compares the checked binary against *itself*, so even a
+# uniform slowdown could only weaken a verdict, never manufacture a flip.
+#
+# Run every label-free differential oracle, on the contract-checked binary.
 oracles: metamorphic ablation contracts own-benchmarks
 
 # Meaning-preserving edits must not change a verdict.
-metamorphic set="smoke": build
-    python3 tools/metamorphic.py --set {{set}}
+metamorphic set="smoke": build-checked
+    AJAVE_BIN={{CHECKED_BIN}} python3 tools/metamorphic.py --set {{set}}
 
 # Removing an engine may lose an answer; it must never flip TRUE and FALSE.
-ablation set="smoke": build
-    python3 tools/engine_ablation.py --set {{set}}
+ablation set="smoke": build-checked
+    AJAVE_BIN={{CHECKED_BIN}} python3 tools/engine_ablation.py --set {{set}}
 
 # Perturbing one library contract to OPAQUE may only weaken a verdict.
-contracts: build
-    python3 tools/contract_monotonicity.py
+contracts: build-checked
+    AJAVE_BIN={{CHECKED_BIN}} python3 tools/contract_monotonicity.py
 
 # Check ajave's own benchmarks against a real JVM.
 own-benchmarks dir="benchmarks/ajave":

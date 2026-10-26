@@ -262,6 +262,18 @@ here the order is:
    `fixpoint::laws` so a later domain inherits them, and the merge contract is
    `debug_assert`ed at the call site. 30 tests where there were none; see
    `docs/plans/cpa-to-domain-and-policy.md`.
+
+   A follow-on finding worth keeping separate, because it is the lesson rather
+   than the work: **the assertions were compiled out of every build that
+   matters.** `debug_assert!` is absent from `release`, and `debug-assertions`
+   appeared in no `Cargo.toml` in the tree, so the soundness clause ran under
+   `cargo test` and nowhere else. Writing a contract, checking it in unit
+   tests, and *running* it on real programs are three different things, and
+   only the third was missing — which made it invisible. Fixed by
+   `[profile.release-checked]`, which the label-free oracles now use; scoring
+   stays on `release` because `merge` is in the hot loop. The profile asserts
+   itself via `ajave --build-info`, because a profile is a claim and this
+   entire section exists because of unchecked claims.
 2. **Honest-approximation audit** — static, and it settles whether the single
    consumer of `open_for` is being starved.
 3. **Every asker has a consumer** (#40) and **every interest has a producer**

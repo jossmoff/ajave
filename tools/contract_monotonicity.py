@@ -22,7 +22,12 @@ sys.path.insert(0, "tools")
 import bench
 from procguard import run_guarded
 
-BIN = "./target/release/ajave"
+# Which binary to exercise. `AJAVE_BIN` lets `just oracles` point this at
+# `target/release-checked/ajave`, whose `debug_assert!`s enforce the internal
+# contracts (`core::fixpoint`'s MergePolicy clauses, among others). Scoring
+# runs keep the plain `release` build, where those are compiled out -- see
+# `[profile.release-checked]` in Cargo.toml.
+BIN = os.environ.get("AJAVE_BIN") or "./target/release/ajave"
 
 # Signatures the smoke set actually consults, measured with
 # AJAVE_REPORT_UNCONTRACTED rather than guessed. That distinction is the whole
