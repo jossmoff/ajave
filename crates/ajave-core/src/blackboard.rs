@@ -60,6 +60,19 @@ pub struct Blackboard {
     status_approx: BTreeMap<ObligationRef, Approximations>,
 }
 
+/// Whether an invariant-backed discharge must name a checked invariant.
+///
+/// Off by default while workstream A is built: turning it on today rejects
+/// every `ProofKind::Invariant` discharge, because nothing promotes an
+/// invariant to `Inductive` yet. The flag exists so the cost can be *measured*
+/// — `AJAVE_CERTIFY_TRUE=1` against a smoke run is the worst case, with zero
+/// certification, and the difference from the default run is the number of
+/// points currently resting on certificates that were never written.
+pub fn certify_true_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_CERTIFY_TRUE").as_deref() == Ok("1"))
+}
+
 impl Blackboard {
     pub fn new() -> Self {
         Self::default()
@@ -169,6 +182,33 @@ impl Blackboard {
                     return self.reject(format!(
                         "{producer} is over-approximating and may not violate {oref}"
                     ))
+                }
+                // An invariant-backed proof must name an invariant that
+                // exists and has been checked.
+                //
+                // `InvStatus`'s own doc comments state this rule —
+                // "Candidate: never enough on its own to discharge" and
+                // "Inductive: verified initial-and-preserved by the certifier"
+                // — and nothing enforced it. Worse, nothing *produced*
+                // `Inductive` anywhere in the tree, so
+                // `inductive_invariants()` always returned empty, and
+                // `interval-ai` discharged against an id for which no
+                // `Invariant` had been published at all.
+                //
+                // Gated while the certifier is built out: this rejects every
+                // invariant-backed discharge until something can promote one,
+                // and `interval-ai` is 55 of 57 discharges on the sampled
+                // corpus. See docs/plans/codebase-health.md workstream A.
+                (
+                    _,
+                    Status::Discharged {
+                        proof: ProofKind::Invariant(inv_id),
+                        ..
+                    },
+                ) if certify_true_enabled() => {
+                    if let Err(why) = self.check_invariant_proof(producer, oref, *inv_id) {
+                        return self.reject(why);
+                    }
                 }
                 // An engine that does not model threads may not prove anything
                 // about a program that starts them.
@@ -466,6 +506,42 @@ impl Blackboard {
 
     pub fn query(&self, id: u32) -> Option<&Query> {
         self.queries.iter().find(|q| q.id == id)
+    }
+
+    /// Whether `inv_id` is a certificate this blackboard will accept.
+    ///
+    /// Factored out so the rule is testable without the process-wide env gate:
+    /// a test that toggles a `OnceLock` is order-sensitive and passes or fails
+    /// depending on which test ran first.
+    pub fn check_invariant_proof(
+        &self,
+        producer: EngineId,
+        oref: &ObligationRef,
+        inv_id: u32,
+    ) -> Result<(), String> {
+        match self.invariant(inv_id) {
+            None => Err(format!(
+                "{producer} discharges {oref} by invariant {inv_id}, which was \
+                 never published"
+            )),
+            Some(inv) if inv.status != InvStatus::Inductive => Err(format!(
+                "{producer} discharges {oref} by invariant {inv_id}, which is \
+                 {:?} and not Inductive",
+                inv.status
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The invariant with this id, if one was ever published.
+    ///
+    /// `ProofKind::Invariant(id)` names a certificate. Until 2026-10-26 nothing
+    /// checked that the certificate *existed*: `interval-ai` called
+    /// `fresh_invariant_id()`, put the result in the proof, and published no
+    /// `Invariant` carrying it. Every one of its discharges therefore named a
+    /// certificate that was never written.
+    pub fn invariant(&self, id: u32) -> Option<&Invariant> {
+        self.invariants.iter().find(|i| i.id == id)
     }
 
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {
@@ -1048,5 +1124,105 @@ mod tests {
             ),
         );
         assert!(r.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod certification_tests {
+    //! Workstream A1: an invariant-backed proof must name a checked invariant.
+    //!
+    //! These run the rule directly rather than through the env gate, because a
+    //! test that depends on a process-wide `OnceLock` is order-sensitive and
+    //! would pass or fail depending on which test touched it first.
+
+    use super::*;
+    use ajave_ir::{MethodKey, ObligationId};
+
+    fn oref() -> ObligationRef {
+        ObligationRef {
+            method: MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            id: ObligationId(0),
+        }
+    }
+
+    fn inv(id: u32, status: InvStatus) -> Invariant {
+        Invariant {
+            id,
+            at: ProgramPoint {
+                method: oref().method,
+                block: ajave_ir::BlockId(0),
+                index: 0,
+            },
+            formula: crate::term::Expr::Int(1),
+            status,
+        }
+    }
+
+    /// The state the tree was in before 2026-10-26: `interval-ai` burned a
+    /// fresh id into the proof and published no `Invariant` carrying it, so
+    /// the certificate the proof named did not exist.
+    #[test]
+    fn a_discharge_naming_an_unpublished_invariant_is_rejected() {
+        let mut bb = Blackboard::new();
+        let id = bb.fresh_invariant_id();
+        assert!(
+            bb.invariant(id).is_none(),
+            "precondition: no invariant with this id has been published"
+        );
+        let r = bb.check_invariant_proof(EngineId("interval-ai"), &oref(), id);
+        assert!(
+            r.is_err(),
+            "a dangling certificate reference must not discharge"
+        );
+    }
+
+    #[test]
+    fn a_candidate_invariant_is_not_enough_to_discharge() {
+        let mut bb = Blackboard::new();
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(inv(id, InvStatus::Candidate)),
+        )
+        .unwrap();
+        assert!(bb.invariant(id).is_some(), "precondition: it was published");
+        let r = bb.check_invariant_proof(EngineId("interval-ai"), &oref(), id);
+        assert!(
+            r.is_err(),
+            "InvStatus::Candidate documents itself as never enough on its own"
+        );
+    }
+
+    #[test]
+    fn an_inductive_invariant_is_enough_to_discharge() {
+        let mut bb = Blackboard::new();
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(inv(id, InvStatus::Inductive)),
+        )
+        .unwrap();
+        let r = bb.check_invariant_proof(EngineId("interval-ai"), &oref(), id);
+        assert!(r.is_ok(), "a checked invariant is what the rule asks for");
+    }
+
+    /// The gate must not change anything when off, which is what makes the
+    /// before/after measurement meaningful.
+    #[test]
+    fn the_rule_is_inert_unless_the_flag_is_set() {
+        // `certify_true_enabled()` reads the environment once per process, so
+        // this asserts the default rather than toggling it.
+        if std::env::var("AJAVE_CERTIFY_TRUE").is_err() {
+            assert!(
+                !certify_true_enabled(),
+                "certification must be off by default while workstream A is built"
+            );
+        }
     }
 }
