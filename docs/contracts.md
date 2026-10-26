@@ -156,3 +156,112 @@ analysis. It is a contract between *parts of ajave*, and the thing it buys is
 that a defect in the seams becomes a test failure rather than a quiet loss of
 score. Every such defect this session was found by hand, mostly by accident, and
 four of them had been live for months.
+
+---
+
+# Part II: the seams, surveyed
+
+Added 2026-10-26. Part I above treats *one* interface — what an engine puts on
+the blackboard. A verifier sits behind seven, and surveying them changes which
+of Part I's four checks is worth building first.
+
+Enforcement is scored in four tiers:
+
+* **checked** — a violation fails a test or a harness
+* **typed** — the compiler rejects some violations, nothing checks meaning
+* **prose** — stated in a doc comment, nothing checks it
+* **absent** — not stated
+
+## The census
+
+| Seam | Interface | Contract | Enforcement |
+|---|---|---|---|
+| engine → models | `contract_of` | total, refinement order, full-signature keys | **checked** — `contract_monotonicity.py`, `validate_jdk_allowlist.py`, Rust tests |
+| engine → orchestrator | `Progress`, `Interest`, `Budget` | `Suspended` must raise a bounded parameter; `Blocked` re-entered only on a matching publish | **checked** — 13 tests, incl. `an_engine_that_always_suspends_terminates_without_a_deadline` |
+| engine → blackboard: *direction* | `publish_with` | Over may discharge, Under may violate, nobody may discharge in a threaded program | **checked** — rejected at publish, 16 tests |
+| engine → blackboard: *approximations* | `publish_with` | producer declares what it did not model faithfully | **typed** — see "The dishonest default" |
+| engine → blackboard: *meaning* | doc comments | scope, units, publishable-when, purpose | **prose** — this is Part I |
+| engine → certifier | `CertResult` | Confirmed / Refuted / Inconclusive, and what may rest on each | **prose** |
+| engine → solver | `Solver` | push/pop pairing; `Unknown` concludes nothing | **prose** — a `CLAUDE.md` rule and one helper |
+| engine → CPA | `Lattice`, `Cpa` | `leq` a partial order, `join` an upper bound, widening terminating, `transfer` sound | **prose** — and see "The untested substrate" |
+| frontend → IR | `Diverge`, obligation seeding, `guarded` | an unmodelled instruction costs completeness, not soundness | **prose** — tested only end-to-end, via `validate_own_benchmarks.py` |
+
+The top three rows are in good shape. The survey's value is that the two worst
+rows are **not** the ones Part I was written about.
+
+## The dishonest default
+
+`Approximations` is the mechanism that hands an obligation back to a more
+faithful engine: `open_for(models_faithfully)` returns obligations closed under
+an approximation the caller does not make. Under-declaring means the better
+engine never sees the obligation again. That asymmetry is why the rule is *when
+in doubt, declare*.
+
+The API inverts it. Measured 2026-10-26:
+
+* **19** publish sites across the engines; **14** call `publish()`, which
+  hardcodes `Approximations::EXACT`. Five call `publish_with`.
+* **9** sites name an approximation flag at all.
+* `open_for` has exactly **one** non-test consumer: `smt-bmc`, three sites.
+
+So silence declares perfect faithfulness, and silence is the common case. This
+is the `Option`-versus-total mistake that `contract_for` exists to fix,
+reproduced one layer up: the default answer is the *strongest* claim rather than
+the most conservative one.
+
+The concrete suspect: `ai.rs` publishes `Status::Discharged` through
+`publish()`, so `EXACT`, while `interval.rs` carries 80 lines of float-interval
+handling and names `Approximations` nowhere. If outward-rounded float intervals
+are faithful then the declaration is right — but nobody has ever established
+that, and if it is wrong the BMC's FPA pass is silently never offered those
+obligations. That pass exists precisely to reconsider them (#27).
+
+Two fixes, independent:
+
+1. **Invert the default.** `publish()` declares the widest plausible set for the
+   producer, and an engine that wants `EXACT` says so. Over-declaring costs time
+   and is measurable; under-declaring loses answers silently.
+2. **Check honesty mechanically.** For each published `Discharged`, intersect
+   the IR constructs reachable from the obligation with the flags declared. A
+   float op in the body under an `EXACT` declaration is a candidate defect. This
+   is static, cheap, and needs no corpus run.
+
+## The untested substrate
+
+`Cpa` is the shared fixpoint for the interval AI and for CEGAR's predicate
+domain — the substrate under the portfolio's only two over-approximating
+state-space engines.
+
+| File | Lines | Tests |
+|---|---|---|
+| `ajave-core/src/cpa.rs` | 227 | **0** |
+| `ajave-engines/src/interval.rs` | 2131 | **0** |
+| `ajave-engines/src/predicate.rs` | 495 | **0** |
+
+Two `Lattice` impls, no law checks of any kind. `stop_sep`'s correctness rests
+entirely on those laws, and the comment at `cpa.rs:57` records what happens when
+a subtlety there goes unnoticed: a variable absent from a state's map reads as
+Top, the first (empty, therefore Top-everywhere) state subsumed states at
+unrelated program points, exploration was truncated before the obligation, and
+`assert2` became **a false TRUE**.
+
+`CLAUDE.md` requires that a comment stating a soundness argument have a test
+named after it. For the substrate carrying the most −16-exposed engines in the
+tree, that requirement is unmet — and this is the cheapest gap in the census to
+close, because lattice laws are property tests over generated intervals, not
+benchmark canaries. They generalise in exactly the way Part I asks for, and they
+need no corpus time at all.
+
+## What the survey changes
+
+Part I ranked artifact monotonicity as the important check. On the evidence
+here the order is:
+
+1. **Lattice and widening laws** — a defect class with a recorded false TRUE, a
+   substrate with zero tests, and property tests that cost no corpus time.
+2. **Honest-approximation audit** — static, and it settles whether the single
+   consumer of `open_for` is being starved.
+3. **Every asker has a consumer** (#40) and **every interest has a producer**
+   (#37) — both static, both would have caught a defect committed this month.
+4. **Artifact monotonicity** — the most general check, and the only one that
+   needs corpus runs. Worth building, worth building last.
