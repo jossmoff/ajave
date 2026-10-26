@@ -16,8 +16,8 @@ use crate::body_analysis::{
 use crate::interval::{Interval, IntervalCpa, WidenAtLoopHeaders, NEG_INF, POS_INF};
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
-use ajave_core::fixpoint::{explore, HasLocation, Sep};
 use ajave_core::engine::{Budget, Engine, Progress};
+use ajave_core::fixpoint::{explore, HasLocation, Sep};
 use ajave_core::term::{Expr, Op};
 use ajave_ir::{
     BlockId, Const, FieldKey, MethodKey, ObligationId, Operand, Program, Rvalue, Stmt, Terminator,
@@ -632,10 +632,7 @@ impl AiEngine {
                     // Why it could not be answered. A refusal is a result, and
                     // "the AI cannot bound this" has at least three different
                     // causes with three different fixes.
-                    let held_for_method = self
-                        .answerable
-                        .keys()
-                        .any(|(m, _)| *m == method);
+                    let held_for_method = self.answerable.keys().any(|(m, _)| *m == method);
                     let reason = if !held_for_method {
                         "no fixpoint for this method"
                     } else if iv.is_some() || fp.is_some() {
@@ -1062,7 +1059,10 @@ impl Engine for AiEngine {
             let use_widening = body_uses_float_types(body) && body_has_loops(body);
             let (reached, complete) = if use_widening {
                 let policy = WidenAtLoopHeaders::from_body(body);
-                info!("interval-ai: using the widening merge policy for {:?}", method);
+                info!(
+                    "interval-ai: using the widening merge policy for {:?}",
+                    method
+                );
                 explore(&cpa, &policy, prog, &start, (), max_states_per_method)
             } else {
                 let (r, c) = explore(&cpa, &Sep, prog, &start, (), max_states_per_method);

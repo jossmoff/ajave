@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn an_assign_has_only_a_fallthrough_edge() {
         let prog = prog_with(
-            vec![Stmt::Assign(VarId(0), Rvalue::Use(Operand::Const(Const::Int(1))))],
+            vec![Stmt::Assign(
+                VarId(0),
+                Rvalue::Use(Operand::Const(Const::Int(1))),
+            )],
             Terminator::Return(None),
             vec![BlockId(1), BlockId(2)],
         );

@@ -2324,11 +2324,7 @@ mod domain_law_tests {
                     bytecode_offset: 1,
                     stmts: vec![Stmt::Assign(
                         c,
-                        Rvalue::Bin(
-                            BinOp::Lt,
-                            Operand::Var(i),
-                            Operand::Const(Const::Int(100)),
-                        ),
+                        Rvalue::Bin(BinOp::Lt, Operand::Var(i), Operand::Const(Const::Int(100))),
                     )],
                     term: Terminator::Branch {
                         cond: Operand::Var(c),
@@ -2421,7 +2417,10 @@ mod domain_law_tests {
                 MergeResult::Joined(j) => {
                     assert_eq!(
                         j.get(VarId(0)),
-                        Interval { lo: 0, hi: step + 1 },
+                        Interval {
+                            lo: 0,
+                            hi: step + 1
+                        },
                         "merge {step} should be a plain join"
                     );
                     reached = j;

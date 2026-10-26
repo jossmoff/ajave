@@ -12,8 +12,8 @@
 
 use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
-use ajave_core::fixpoint::{explore, HasLocation, Join};
 use ajave_core::engine::{Budget, Engine, Progress};
+use ajave_core::fixpoint::{explore, HasLocation, Join};
 use ajave_ir::*;
 use log::{debug, info};
 

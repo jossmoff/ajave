@@ -113,19 +113,19 @@ pub trait AbstractDomain {
 /// Both clauses are vacuous for a policy that never joins, which is why `Sep`
 /// is always safe and never terminating-relevant.
 pub trait MergePolicy<D: AbstractDomain> {
-    fn merge(
-        &self,
-        new: &D::State,
-        reached: &D::State,
-        prec: &D::Prec,
-    ) -> MergeResult<D::State>;
+    fn merge(&self, new: &D::State, reached: &D::State, prec: &D::Prec) -> MergeResult<D::State>;
 }
 
 /// `merge_sep`: never combine. Exploration stays path-sensitive.
 pub struct Sep;
 
 impl<D: AbstractDomain> MergePolicy<D> for Sep {
-    fn merge(&self, _new: &D::State, _reached: &D::State, _prec: &D::Prec) -> MergeResult<D::State> {
+    fn merge(
+        &self,
+        _new: &D::State,
+        _reached: &D::State,
+        _prec: &D::Prec,
+    ) -> MergeResult<D::State> {
         MergeResult::Sep
     }
 }
@@ -258,7 +258,10 @@ pub mod laws {
     /// supply states that actually differ — Top, a narrow one, two that
     /// disagree, and anything the domain treats specially.
     pub fn check_lattice_laws<L: Lattice + std::fmt::Debug>(samples: &[L]) {
-        assert!(samples.len() >= 2, "a law check over fewer than two samples proves nothing");
+        assert!(
+            samples.len() >= 2,
+            "a law check over fewer than two samples proves nothing"
+        );
         for a in samples {
             assert!(a.leq(a), "leq is not reflexive at {a:?}");
             if a.is_bottom() {
@@ -270,13 +273,25 @@ pub mod laws {
         for a in samples {
             for b in samples {
                 let j = a.join(b);
-                assert!(a.leq(&j), "join is not an upper bound of its left input: {a:?} ⊔ {b:?}");
-                assert!(b.leq(&j), "join is not an upper bound of its right input: {a:?} ⊔ {b:?}");
+                assert!(
+                    a.leq(&j),
+                    "join is not an upper bound of its left input: {a:?} ⊔ {b:?}"
+                );
+                assert!(
+                    b.leq(&j),
+                    "join is not an upper bound of its right input: {a:?} ⊔ {b:?}"
+                );
                 let k = b.join(a);
-                assert!(j.leq(&k) && k.leq(&j), "join is not commutative up to leq at {a:?}, {b:?}");
+                assert!(
+                    j.leq(&k) && k.leq(&j),
+                    "join is not commutative up to leq at {a:?}, {b:?}"
+                );
             }
             let s = a.join(a);
-            assert!(s.leq(a) && a.leq(&s), "join is not idempotent up to leq at {a:?}");
+            assert!(
+                s.leq(a) && a.leq(&s),
+                "join is not idempotent up to leq at {a:?}"
+            );
         }
     }
 
@@ -292,7 +307,10 @@ pub mod laws {
         D::State: std::fmt::Debug,
         M: MergePolicy<D>,
     {
-        assert!(samples.len() >= 2, "a policy check over fewer than two samples proves nothing");
+        assert!(
+            samples.len() >= 2,
+            "a policy check over fewer than two samples proves nothing"
+        );
         for new in samples {
             for reached in samples {
                 if let MergeResult::Joined(j) = policy.merge(new, reached, prec) {
@@ -390,10 +408,10 @@ mod tests {
 
     fn samples() -> Vec<Facts> {
         vec![
-            facts(0, &[]),        // Top: nothing known
-            facts(0, &[1]),       //
-            facts(0, &[2]),       // incomparable with the above
-            facts(0, &[1, 2]),    // below both
+            facts(0, &[]),     // Top: nothing known
+            facts(0, &[1]),    //
+            facts(0, &[2]),    // incomparable with the above
+            facts(0, &[1, 2]), // below both
         ]
     }
 
@@ -540,7 +558,7 @@ mod tests {
              the missing filter dangerous"
         );
         assert!(
-            !covered_by(&narrow_elsewhere, &[top_here.clone()]),
+            !covered_by(&narrow_elsewhere, std::slice::from_ref(&top_here)),
             "a state at another program point must not be covered"
         );
         let top_there = Facts {
@@ -548,7 +566,7 @@ mod tests {
             known: vec![],
         };
         assert!(
-            covered_by(&narrow_elsewhere, &[top_there]),
+            covered_by(&narrow_elsewhere, std::slice::from_ref(&top_there)),
             "but it is covered by a Top state at its own point"
         );
     }
@@ -558,7 +576,10 @@ mod tests {
         let prog = two_block_program();
         let start = pp(0, 0);
         let (_, complete) = explore(&FactsDomain, &Sep, &prog, &start, (), 1);
-        assert!(!complete, "a one-state cap cannot cover a two-block program");
+        assert!(
+            !complete,
+            "a one-state cap cannot cover a two-block program"
+        );
         let (reached, complete) = explore(&FactsDomain, &Sep, &prog, &start, (), 1000);
         assert!(complete);
         assert!(

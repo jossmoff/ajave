@@ -353,7 +353,6 @@ impl AbstractDomain for PredicateCpa {
             Edge::Exit(_) => vec![next],
         }
     }
-
 }
 
 // `merge` is deliberately absent: this domain is explored under
