@@ -1291,6 +1291,98 @@ fn search(prog: &Program, body: &Body) -> Vec<(MethodKey, ObligationId, Witness)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The differential entry point
+// ---------------------------------------------------------------------------
+
+/// What one interpreter run did, stated so a real JVM run of the same program
+/// on the same inputs can be compared against it.
+///
+/// This is deliberately coarser than `Outcome`: the comparison that is
+/// *meaningful* across the IR/JVM boundary is "how did the program terminate",
+/// and nothing finer survives it. A `Violated` and a `Threw` are the same
+/// event seen from two sides — an obligation we seeded versus an exception the
+/// program raised — and on the JVM both are simply an exception escaping
+/// `main`, so they collapse to one variant here.
+///
+/// `Inconclusive` is not a result and must never be read as agreement or
+/// disagreement. The interpreter ignores `ArrayStore`, returns `Unknown` for
+/// most heap reads, and gives up on `Diverge`; a differential that counted
+/// those as matches would report a clean run while checking nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Interpretation {
+    /// Ran to a return with nothing escaping.
+    Clean,
+    /// `Verifier.assume` failed, so this input is outside the program's
+    /// intended domain. The JVM counterpart is `Runtime.halt(1)` with no
+    /// exception text.
+    Halted,
+    /// An exception left the entry method. Internal (slash-separated) class
+    /// name, or `java/lang/RuntimeException` where the kind records only that
+    /// *some* `RuntimeException` subclass was raised.
+    Escaped(String),
+    /// Out of step budget, or the interpreter reached something it does not
+    /// model. No claim either way.
+    Inconclusive,
+}
+
+impl std::fmt::Display for Interpretation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Interpretation::Clean => f.write_str("CLEAN"),
+            Interpretation::Halted => f.write_str("HALTED"),
+            Interpretation::Escaped(c) => write!(f, "ESCAPED {}", c.replace('/', ".")),
+            Interpretation::Inconclusive => f.write_str("INCONCLUSIVE"),
+        }
+    }
+}
+
+/// Interpret `body` against a fixed nondet sequence and report how it
+/// terminated.
+///
+/// Exists for `tools/lifter_differential.py`, which runs this and a real JVM
+/// on the same program with the same inputs and compares. That oracle uses no
+/// expected-verdict label, so it holds on programs no benchmark covers — but
+/// note what it validates: the *pair* (lifter, interpreter). An identical
+/// misunderstanding in both is invisible to it. It still catches everything
+/// where exactly one of the two is wrong, which is the common case.
+///
+/// Assertions are modelled as **enabled** (`Class.desiredAssertionStatus()` is
+/// modelled as returning true, so `$assertionsDisabled` is false), so the JVM
+/// side of the differential must run with `-ea` or the two are not executing
+/// the same program.
+pub fn interpret(prog: &Program, body: &Body, choices: &[i64], step_budget: u64) -> Interpretation {
+    match run_with_choices(prog, body, choices, step_budget) {
+        Outcome::Clean | Outcome::ReturnedValue(_) => Interpretation::Clean,
+        Outcome::Halted => Interpretation::Halted,
+        Outcome::Threw(cls) => Interpretation::Escaped(cls),
+        Outcome::Inconclusive => Interpretation::Inconclusive,
+        Outcome::Violated { method, oid, .. } => {
+            // The obligation lives in the body that raised it, which during
+            // inlining is a callee rather than `body`. Keying the lookup by
+            // `oid` alone is the mistake CLAUDE.md names: an `ObligationId`
+            // indexes into one `Body`.
+            let kind = prog
+                .body(&method)
+                .and_then(|b| b.obligations.get(oid.0 as usize))
+                .map(|o| o.kind);
+            match kind {
+                // `exception_class` answers `None` for an assertion because
+                // `AssertionError` is an `Error`, not an exception, and no
+                // `catch` clause in the corpus routes it.
+                Some(ObligationKind::Assertion) => {
+                    Interpretation::Escaped("java/lang/AssertionError".into())
+                }
+                Some(k) => match models::exception_class(k) {
+                    Some(c) => Interpretation::Escaped(c.into()),
+                    None => Interpretation::Inconclusive,
+                },
+                None => Interpretation::Inconclusive,
+            }
+        }
+    }
+}
+
 pub struct Concrete {
     done: bool,
 }

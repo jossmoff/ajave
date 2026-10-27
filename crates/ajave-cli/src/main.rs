@@ -26,7 +26,9 @@ use log::{debug, info, warn};
 struct Cli {
     /// Input files or directories (.java source or pre-compiled .class bytecode).
     /// BenchExec passes every entry of the task YAML's input_files as a separate argument.
-    #[arg(required_unless_present = "build_info")]
+    // Both `--build-info` and `--emit-shadow` are modes that consume no
+    // program, so either one makes the inputs optional.
+    #[arg(required_unless_present_any = ["build_info", "emit_shadow"])]
     inputs: Vec<PathBuf>,
 
     /// Report which build this is and exit, in particular whether the internal
@@ -87,6 +89,37 @@ struct Cli {
     /// non-ASCII chars that our Character method encodings can't model.
     #[arg(long = "ascii-only")]
     ascii_only: bool,
+
+    /// Run the IR interpreter on the entry method against a fixed nondet
+    /// sequence, print how it terminated, and exit without verifying.
+    ///
+    /// For `tools/lifter_differential.py`: the same program and the same
+    /// sequence are run on a real JVM through the shadow `Verifier`, and the
+    /// two terminations compared. Takes a comma-separated list of raw i64
+    /// values, matching the `-Dajave.seq=` encoding the replay harness already
+    /// uses; an empty list means all-zero, which is the probe the concrete
+    /// engine itself runs.
+    ///
+    /// Deliberately not a verification mode: it prints `INTERPRET <outcome>`
+    /// and no verdict line, so nothing downstream can mistake an interpreter
+    /// run for an answer about the program.
+    #[arg(long = "interpret", value_name = "SEQ", num_args = 0..=1,
+          default_missing_value = "")]
+    interpret: Option<String>,
+
+    /// Write the deterministic shadow `Verifier` sources into this directory
+    /// and exit. The JVM half of `tools/lifter_differential.py` compiles them,
+    /// so the harness feeds a real JVM through exactly the stub `JvmReplay`
+    /// uses rather than a second copy of it.
+    #[arg(long = "emit-shadow", value_name = "DIR")]
+    emit_shadow: Option<PathBuf>,
+
+    /// Step budget for `--interpret`. Separate from `--timeout`: the
+    /// interpreter has no solver to yield to, and a differential wants the
+    /// same bound on every task rather than a wall-clock one that varies with
+    /// machine load.
+    #[arg(long = "interpret-steps", default_value = "200000")]
+    interpret_steps: u64,
 
     /// SV-COMP property to check. Defaults to `assert`.
     ///   assert              — valid-assert (assertion violations)
@@ -738,6 +771,25 @@ fn main() {
     }
     log_builder.init();
 
+    // Before anything is loaded: this mode consumes no program.
+    if let Some(dir) = &cli.emit_shadow {
+        for (rel, src) in ajave_core::certify::JvmReplay::shadow_sources() {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("--emit-shadow: {}: {e}", parent.display());
+                    std::process::exit(2);
+                }
+            }
+            if let Err(e) = std::fs::write(&path, src) {
+                eprintln!("--emit-shadow: {}: {e}", path.display());
+                std::process::exit(2);
+            }
+            println!("{}", path.display());
+        }
+        return;
+    }
+
     info!(
         "ajave starting, inputs={:?}, contract_checks={}",
         cli.inputs,
@@ -830,6 +882,39 @@ fn main() {
             print!("{}", prog.bodies[&k].render());
         }
         println!();
+    }
+
+    // Interpreter mode, off the verification path entirely.
+    //
+    // Placed after lifting and IR reduction so it runs on exactly the IR the
+    // engines see — a differential against a real JVM is only evidence about
+    // the production pipeline if it uses the production pipeline.
+    if let Some(seq) = &cli.interpret {
+        let choices: Vec<i64> = seq
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<i64>())
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| {
+                eprintln!("--interpret: could not parse the nondet sequence: {e}");
+                std::process::exit(2);
+            });
+        let Some(entry) = prog.entry.clone() else {
+            println!("INTERPRET NO-ENTRY");
+            return;
+        };
+        let Some(body) = prog.body(&entry) else {
+            println!("INTERPRET NO-ENTRY");
+            return;
+        };
+        let outcome =
+            ajave_engines::concrete::interpret(&prog, body, &choices, cli.interpret_steps);
+        // No verdict line. BenchExec reads the last line of stdout, and a mode
+        // that prints TRUE/FALSE/UNKNOWN from an under-approximating single
+        // run would be a wrong answer waiting for a stray flag.
+        println!("INTERPRET {outcome}");
+        return;
     }
 
     let obligations = prog.obligations();
