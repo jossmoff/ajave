@@ -179,3 +179,43 @@ the baseline and each flag is judged only against it.
 Stop rules as ever: any wrong answer that is not the `ReverseInterpolator`
 mislabel reverts that option; an option inert on both properties is filed
 `status:explored` and removed rather than left behind a flag.
+
+---
+
+# Heap options (2026-10-27), from `heap-full-implementation.md`
+
+Recorded here rather than in `CLAUDE.md`, which says not to restate a flag's
+default there because that is the claim that rots.
+
+| flag | default | what it does | measured |
+|---|---|---|---|
+| `AJAVE_SITE_FIELDS` | **on** (`=0` ablates) | B2/B3: site-indexed field cells and array element intervals in `interval` | smoke neutral; see below |
+| `AJAVE_CHC_HEAP_SUMMARY` | **off** (`=1` enables) | C1: field footprint threaded through CHC summary relations | smoke **neutral**, 171 vs 171, 0 WRONG |
+| `AJAVE_CHC_QGEN` | **off** (`=1` enables) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | see below |
+
+## What each is for, and what the measurement does and does not say
+
+**B2/B3** refine the flat field abstraction, which keys one cell per field with
+the receiver ignored and is exact only for a class with a single allocation
+site. Site cells are a *refinement*: `flat(f)` meet `cell(s, f)`, with a write
+through an unknown receiver marking the field escaped so every read falls back
+to the flat cell. `AJAVE_SITE_FIELDS=0` restores the pre-B2 behaviour exactly,
+and was used to establish that the three tasks lost to #101 are **not**
+attributable to this work — identical either way.
+
+**C1** is neutral on smoke and demonstrably capable with CHC isolated:
+`engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller` and
+`ACalleeThatWritesNothingInvalidatesNothing` are both UNKNOWN without it and
+TRUE with it. Neutral-on-smoke is a weak claim — 156 tasks against the corpus's
+1784 — and the arity risk it is restricted against (`MAX_SUMMARY_FIELDS`) is
+precisely the risk a small set cannot see. It stays off until a corpus run.
+
+**D1** required the array-store fix in 2d51c22 before it did anything at all.
+Before that fix Spacer reported the error *reachable* on the array-fill shape,
+and quantified generalisation cannot help when the abstraction genuinely admits
+a counterexample. After it,
+`heap/EveryElementNonNullAfterAFillLoop` is UNKNOWN with the flag off and TRUE
+with it on, in CHC-only and full-portfolio alike. That benchmark is now the
+smoke canary that prices the flag — the earlier three-arm run showed qgen
+neutral only because its single beneficiary was not in the set, which is worth
+recording as a way to measure a flag and learn nothing.
