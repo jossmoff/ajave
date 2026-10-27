@@ -403,6 +403,11 @@ mod tests {
             },
             formula,
             status: ajave_core::artifact::InvStatus::Candidate,
+            scope: ajave_core::artifact::Scope::Point(ProgramPoint {
+                method: mk(),
+                block: BlockId(0),
+                index: 0,
+            }),
         }
     }
 

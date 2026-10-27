@@ -305,6 +305,26 @@ pub enum InvStatus {
     Inductive,
 }
 
+/// What an artifact's variable references are relative to.
+///
+/// The field `docs/contracts.md` Part I identified as missing. Heap work is
+/// what forces it: a `VarId` indexes exactly one `Body`, but `o.f` means the
+/// same cell in every method, so the two cannot share a scope. A consumer
+/// reading a method-relative claim as a global one is the defect class
+/// `CLAUDE.md` records as having cost 32 points.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Scope {
+    /// True of every execution of the whole program.
+    Execution,
+    /// `VarId`s are relative to this method's `Body`.
+    Method(MethodKey),
+    /// As `Method`, and only at this point.
+    Point(ProgramPoint),
+    /// About heap cells, which are global. Mentions no `VarId` that needs a
+    /// method to interpret it — a `Field`'s receiver is itself an expression.
+    Heap,
+}
+
 #[derive(Clone, Debug)]
 pub struct Invariant {
     pub id: u32,
@@ -315,6 +335,12 @@ pub struct Invariant {
     /// different body must not read this — see `Expr::vars`.
     pub formula: Expr,
     pub status: InvStatus,
+    /// What `formula`'s variable references are relative to.
+    ///
+    /// `Scope::Point(at)` is the historical behaviour and what every producer
+    /// meant before this existed; a heap claim must say `Scope::Heap` instead,
+    /// because its truth does not depend on which method is executing.
+    pub scope: Scope,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -487,9 +487,10 @@ impl AiEngine {
                     Direction::Over,
                     Artifact::Invariant(Invariant {
                         id,
-                        at,
+                        at: at.clone(),
                         formula: Expr::bin(Op::And, lo, hi),
                         status: InvStatus::Candidate,
+                        scope: Scope::Point(at.clone()),
                     }),
                 );
                 hint_count += 1;
@@ -604,6 +605,7 @@ impl AiEngine {
                             at: at.clone(),
                             formula,
                             status: InvStatus::Candidate,
+                            scope: Scope::Point(at.clone()),
                         }),
                     );
                 }

@@ -580,6 +580,15 @@ mod scheduling_tests {
                         },
                         formula: crate::term::Expr::Bool(true),
                         status: crate::artifact::InvStatus::Candidate,
+                        scope: crate::artifact::Scope::Point(crate::artifact::ProgramPoint {
+                            method: MethodKey {
+                                class: "Main".into(),
+                                name: "main".into(),
+                                desc: "()V".into(),
+                            },
+                            block: BlockId(0),
+                            index: 0,
+                        }),
                     }),
                 );
             }

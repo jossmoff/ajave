@@ -852,6 +852,58 @@ mod tests {
         bb
     }
 
+    /// B1. A heap claim and a method-relative claim cannot share a scope: a
+    /// `VarId` indexes one `Body`, while `o.f` is the same cell everywhere.
+    /// Reading one as the other is the defect class that cost 32 points.
+    #[test]
+    fn a_heap_scoped_invariant_is_distinguishable_from_a_point_scoped_one() {
+        let mut bb = seeded();
+        let at = ProgramPoint {
+            method: oref().method,
+            block: ajave_ir::BlockId(0),
+            index: 0,
+        };
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id: 1,
+                at: at.clone(),
+                formula: crate::term::Expr::Int(1),
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id: 2,
+                at: at.clone(),
+                formula: crate::term::Expr::Int(1),
+                status: InvStatus::Candidate,
+                scope: Scope::Heap,
+            }),
+        )
+        .unwrap();
+
+        let heap: Vec<u32> = bb
+            .invariants_for(&at.method)
+            .iter()
+            .filter(|i| i.scope == Scope::Heap)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(heap, vec![2], "only the heap claim is heap-scoped");
+        let pointy: Vec<u32> = bb
+            .invariants_for(&at.method)
+            .iter()
+            .filter(|i| matches!(i.scope, Scope::Point(_)))
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(pointy, vec![1], "and only the other is point-scoped");
+    }
+
     /// H1 (#99). `HEAP_ALIASING` existed with a display name and no producer
     /// for its whole life, so `open_for` could never return anything closed
     /// under it. Now that `interval-ai` declares it, this pins the other half:
@@ -1025,6 +1077,7 @@ mod tests {
                 at: at.clone(),
                 formula: Expr::bin(Op::And, lo, hi),
                 status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
             }),
         )
         .unwrap();
@@ -1054,6 +1107,7 @@ mod tests {
                     Expr::Var(ajave_ir::VarId(1)),
                 ),
                 status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
             }),
         )
         .unwrap();
@@ -1259,6 +1313,11 @@ mod certification_tests {
             },
             formula: crate::term::Expr::Int(1),
             status,
+            scope: Scope::Point(ProgramPoint {
+                method: oref().method,
+                block: ajave_ir::BlockId(0),
+                index: 0,
+            }),
         }
     }
 
