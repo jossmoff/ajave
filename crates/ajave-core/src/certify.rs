@@ -152,6 +152,26 @@ package org.sosy_lab.sv_benchmarks;
 public interface ObjectFactory<T> { T createObject(); }
 "#;
 
+    /// The shadow `Verifier` sources, as `(relative path, content)`.
+    ///
+    /// Exposed so an external harness can run the same deterministic JVM-side
+    /// `Verifier` this certifier does, without a second copy of it.
+    /// `tools/lifter_differential.py` needs exactly that: it compares the IR
+    /// interpreter against a real JVM fed the same nondet sequence, and a
+    /// divergence is only evidence about the lifter if both sides are being
+    /// fed by the *same* stub. A reimplementation in the harness would be a
+    /// second source of truth for `-Dajave.seq` decoding, and the first thing
+    /// it would do is disagree about float bit patterns.
+    pub fn shadow_sources() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("org/sosy_lab/sv_benchmarks/Verifier.java", Self::SHADOW_SRC),
+            (
+                "org/sosy_lab/sv_benchmarks/ObjectFactory.java",
+                Self::SHADOW_FACTORY_SRC,
+            ),
+        ]
+    }
+
     /// Compile the shadow class into a temp directory, returning its path for
     /// use as the front of the classpath. Cached per-process would be nicer;
     /// kept simple since replay runs are few and this is a one-off tool.

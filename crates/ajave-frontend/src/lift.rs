@@ -753,6 +753,26 @@ pub fn lift_method_with_lambdas(
         }
     }
 
+    // Every debug-mode lift checks its own output.
+    //
+    // The lifter is where every engine's correctness begins, so a defect here
+    // is a *systematic* wrong answer across the whole portfolio, where an
+    // engine defect is localised and usually caught by JVM replay. The
+    // cheapest guard against that is to assert the output is at least
+    // structurally indexable: `Body::block`, `Body::var` and
+    // `Body::obligation` index their vectors directly, and the historical
+    // defects in this area were range violations.
+    //
+    // A `debug_assert!` rather than a hard check: a release build must not pay
+    // a second walk of every body per lift, and the condition is one no input
+    // program can cause — only a bug in this file can. Release behaviour is
+    // therefore unchanged, and `cargo test` plus
+    // `tests/wellformed.rs` is where it actually fires.
+    debug_assert!(
+        ajave_ir::validate(&body).is_ok(),
+        "lifter produced an ill-formed body: {}",
+        ajave_ir::validate(&body).unwrap_err()
+    );
     Ok((body, lambdas))
 }
 
@@ -2691,7 +2711,7 @@ fn lambda_forwarder(
             is_virtual: false,
         },
     ));
-    Some(Body {
+    let body = Body {
         is_static: true,
         key: sam_key.clone(),
         entry: BlockId(0),
@@ -2704,7 +2724,16 @@ fn lambda_forwarder(
         }],
         vars,
         obligations: vec![],
-    })
+    };
+    // Hand-built rather than lifted, so nothing upstream guarantees its var
+    // ids line up with the `VarInfo` list it just assembled. Same check as the
+    // lifted path takes.
+    debug_assert!(
+        ajave_ir::validate(&body).is_ok(),
+        "synthesised lambda forwarder is ill-formed: {}",
+        ajave_ir::validate(&body).unwrap_err()
+    );
+    Some(body)
 }
 
 /// Lift every method in a class into the program.
