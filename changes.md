@@ -4308,3 +4308,61 @@ z3 while appearing to be honoured.
 
 Smoke identical before and after, on an idle machine: 124 correct, 23 unproven,
 0 WRONG, 157, 320s against 317s.
+
+## 2026-10-27 — Full corpus after the soundness work: 2059, and nothing lost
+
+Both properties, idle-gated, nothing else running. The first scored run since
+the structural audit and the certifier work.
+
+| property | runs | correct | unproven | WRONG | score | previous |
+|---|---|---|---|---|---|---|
+| valid-assert | 1013 | 736 | 276 | 1 | **877** | 871 |
+| no-runtime-exception | 771 | 599 | 172 | **0** | **1182** | 1182 |
+| | | | | | **2059** | 2053 |
+
+3276s and 2193s respectively, 23 and 18 timeouts.
+
+The single WRONG is `ReverseInterpolator_true`, the benchmark whose declared
+verdict is itself wrong — ajave's FALSE is correct and the label is not. So
+there are **no wrong answers of ajave's own making on either property**. With
+that task labelled correctly, valid-assert would be 910: the −32 penalty
+removed and +1 for a correct FALSE.
+
+### The prediction was wrong, in the useful direction
+
+This was expected to *cost* points. #48 refuses every discharge the bitvector
+pass derived from float arithmetic encoded as operations on IEEE-754 bit
+patterns, and those were real TRUEs in the results table. The measured cost is
+**zero on both properties** — which matters most on no-runtime-exception, where
+the float-heavy tasks concentrate, and that came back exactly flat.
+
+The likeliest reason is that the two FPA-escalation declaration bugs fixed the
+same day mean the faithful pass can now actually run and re-prove them. Before
+those fixes it returned `Progress::Exhausted` when nothing was
+float-approximated *yet* — retiring permanently in round 0, before the
+bitvector pass had discharged anything — and declared no `Interest::STATUS`, so
+even as `Blocked` it could not have been woken by the discharge it exists to
+revisit. Refusing the unsound discharge without first repairing the pass that
+recovers it would have cost real points.
+
+### Where the +6 came from
+
+Not measured, so not claimed. The likeliest source is the merge-loop
+deduplication (#41): duplicate reached states consumed `max_states`, and
+exhausting that cap reports a search incomplete, which forfeits the proof. One
+fewer duplicate per merge is one more body converging inside its budget, and
+that converts UNKNOWN to TRUE directly. #37 — the BMC being woken by
+`Interest::INVARIANT`, so it receives the interval hints it was structurally
+unable to see — is the other candidate.
+
+Both were filed as hygiene rather than as score work, which is the pattern the
+engine census already named: the gains come from finding where the portfolio
+structurally refuses work it could already do, not from improving an engine.
+
+### What this does not include
+
+`AJAVE_CERTIFY_TRUE` is off. With it on, smoke measured 151 against 157 — a
+−6 for certifying what `interval-ai` claims. Part of that −6 is false refusals
+from the single-invariant limitation documented on `invariant_check`, not
+unsoundness, and separating the two is the next measurement rather than a
+guess. The corpus cost of certification is unmeasured.
