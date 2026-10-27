@@ -234,3 +234,8 @@ ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths.yml valid-assert
 # Heap: the site-indexed field refinement, and the escape rule it rests on.
 ajave/heap/TwoObjectsDistinctFieldValues.yml valid-assert
 ajave/heap/UnknownReceiverReadsTheMergedCell.yml valid-assert
+
+# B3: array element values, and the rule that a store at an index the domain
+# cannot evaluate must weaken every element (2026-10-27).
+ajave/heap/ArrayElementWrittenThenRead.yml valid-assert
+ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement.yml valid-assert
