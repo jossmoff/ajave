@@ -239,3 +239,8 @@ ajave/heap/UnknownReceiverReadsTheMergedCell.yml valid-assert
 # cannot evaluate must weaken every element (2026-10-27).
 ajave/heap/ArrayElementWrittenThenRead.yml valid-assert
 ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement.yml valid-assert
+
+# C1: a heap effect crossing a call through the summary relation, and the frame
+# condition that keeps a non-writing callee from invalidating anything (2026-10-27).
+ajave/engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller.yml valid-assert
+ajave/engine-chc/ACalleeThatWritesNothingInvalidatesNothing.yml valid-assert

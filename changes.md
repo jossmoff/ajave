@@ -84,6 +84,73 @@ the benchmark that turned up the hint bug above.
 `AJAVE_SITE_FIELDS=0` restores the flat abstraction exactly, so the refinement
 is measurable as an ablation rather than argued.
 
+## 2026-10-27 — C1: a heap effect crossing a call, and the binder that made the first attempt a lie
+
+CHC summary relations had arity `params + 1`, so they could say nothing about a
+heap effect. A call to a method that might write a field therefore **clobbered**
+it: the caller's knowledge was replaced by an unconstrained array. Worse, a
+*void* method got no summary at all — and a void method is exactly the one that
+exists for its heap effect, so a constructor or setter could never be described.
+
+C1 threads a **field footprint** through the summary: `m_s(params, pre-heap...,
+ret?, post-heap...)`, with a summary now declared for a void method whenever its
+footprint is non-empty.
+
+Measured in isolation with every other engine disabled, both benchmarks go
+UNKNOWN → TRUE:
+
+- `engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller` — the effect crosses.
+- `engine-chc/ACalleeThatWritesNothingInvalidatesNothing` — the frame holds. A
+  two-state summary can lose a fact as easily as carry one, and a C1 that
+  carried the write but dropped the frame would look like a success on the first
+  benchmark and cost points everywhere else.
+
+### Why the footprint, and not the program's fields
+
+Every summary argument costs Spacer, sharply, and this file already records a
+five-line program that times out with 14-ary block predicates and is `sat` in
+0.01s over its two live variables. A field array is `(Array Int Int)`, harder to
+synthesise an interpretation over than an `Int`, and C1 adds *two* per field.
+Threading the program's whole field set would make every summary unusable;
+threading a setter's own field costs two arguments. `MAX_SUMMARY_FIELDS = 6` is
+an upper bound on damage rather than a tuning target, and
+`c1_does_not_change_the_encoding_of_a_method_with_no_fields` pins that a
+field-free program encodes byte-identically either way.
+
+### The first version shipped a false claim, and the SMT text is what showed it
+
+A summary is a relation between two heaps. The conclusion at a `return` has the
+heap *at the return block* in scope, and the first version used that binder for
+both halves:
+
+```
+(=> (m1_b1 v0 fld_Box_v) (m1_s v0 fld_Box_v fld_Box_v))
+```
+
+`m_s(params, H, H)` — "this method changes nothing". A caller reading it
+concludes the field still holds its pre-call value. It is false about the
+method, and it happened to not produce a wrong answer only because CHC is an
+`Over` engine that cannot publish FALSE: the companion program asserting the
+*wrong* value answered UNKNOWN rather than TRUE.
+
+The fix is a distinct binder for the entry heap, threaded unchanged through
+every block relation so that it still means "on entry" once control reaches a
+return. Note what the threading costs: it is one extra array argument per
+footprint field on the block relations of summarised methods only, which is why
+the footprint restriction had to come first.
+
+Two things are worth recording about how this was caught. The structural check
+`a_summary_relates_the_entry_heap_to_the_exit_heap_not_one_to_itself` exists now
+and fails on the first version — but it was written *after* reading the
+generated SMT-LIB, not before. And the benchmark passed with the defect present:
+a program can be TRUE for the wrong reason, so **a capability benchmark going
+UNKNOWN → TRUE is evidence that something changed, not that the encoding is
+right.** Reading the clauses is what distinguishes those.
+
+The mechanism is **off by default** (`AJAVE_CHC_HEAP_SUMMARY=1`), and per
+`CLAUDE.md` that makes it unfinished: the encoding is complete and tested, what
+it lacks is a corpus measurement showing the capability outweighs the arity.
+
 ## 2026-09-09 — the round loop and cursor deltas, measured
 
 Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181

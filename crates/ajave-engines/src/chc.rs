@@ -13,6 +13,37 @@
 //! BV for the single-method encoding when there are no inter-procedural calls.
 
 use crate::body_analysis::{body_uses_float_types, obligation_scoping_enabled};
+
+/// C1. How many fields a summary relation may carry before the encoding gives
+/// up and the call site clobbers instead.
+///
+/// A fitted constant, and recorded as such per `CLAUDE.md`. Each footprint
+/// field adds two `(Array Int Int)` arguments to the summary, and this file
+/// records a five-line program that times out with 14-ary block predicates and
+/// is `sat` in 0.01s over two live variables. Six fields means twelve array
+/// arguments on top of the parameters, which is already past where that
+/// measurement says Spacer struggles — so this is an upper bound on damage,
+/// not a tuning target. The score must not be sensitive to its exact value;
+/// if it is, the mechanism is not earning its keep.
+const MAX_SUMMARY_FIELDS: usize = 6;
+
+/// The SMT sort of a field array or an array site's contents in the LIA
+/// encoding. Hoisted to module scope because C1's summary declarations, which
+/// run before the per-body encoder, need it too.
+const ARR_SORT: &str = "(Array Int Int)";
+
+/// Whether C1's heap-carrying summary relations are used.
+///
+/// **Off by default, and that is a statement about evidence rather than a
+/// default to be flipped later.** `CLAUDE.md` is explicit that a producer which
+/// is off by default is not finished, and the condition for leaving a mechanism
+/// there is saying so. The encoding is complete and tested; what it is missing
+/// is a measurement showing it gains more than the arity costs, and this file's
+/// own recorded Spacer arity results are reason to expect it may not.
+pub fn chc_heap_summary_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_CHC_HEAP_SUMMARY").as_deref() == Ok("1"))
+}
 use crate::smt_text::{self, LiaTheory, SmtTheory};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as IoWrite;
@@ -318,7 +349,13 @@ impl Engine for ChcEngine {
 
         let smt2 = if has_interproc_calls {
             info!("chc: using inter-procedural LIA encoding");
-            drop_empty_quantifiers(&encode_chc_interproc(prog, entry, &obs, &invariants))
+            drop_empty_quantifiers(&encode_chc_interproc(
+                prog,
+                entry,
+                &obs,
+                &invariants,
+                chc_heap_summary_enabled(),
+            ))
         } else {
             info!("chc: using single-method BV encoding");
             drop_empty_quantifiers(&encode_chc_single(body, &obs_ids))
@@ -620,6 +657,19 @@ impl FreshGen {
         name
     }
 
+    /// A fresh array-sorted binder, for C1's post-call heap names.
+    ///
+    /// Separate from `fresh` because the sort is part of the binder and an
+    /// `Int` binder standing for a field array makes the clause ill-sorted —
+    /// z3 then drops the whole assert and answers `sat`, which this file
+    /// records as having been read once as "the property is not preserved".
+    fn fresh_arr(&mut self) -> String {
+        let name = format!("_h{}", self.counter);
+        self.counter += 1;
+        self.extra_forall.push(format!("({} {})", name, ARR_SORT));
+        name
+    }
+
     /// Record a binder for a fresh value the shared theory produced.
     ///
     /// `LiaTheory::encode_fresh` names unconstrained values from a
@@ -866,6 +916,13 @@ fn encode_chc_interproc(
     // wrong TRUE at -16, which is why only bounds from an over-approximating
     // producer that approximated nothing are accepted; see the caller.
     invariants: &BlockInvariants,
+    // C1. Whether summary relations carry a heap footprint.
+    //
+    // A parameter rather than a read of `chc_heap_summary_enabled()` inside
+    // the encoder: an encoder that consults the environment cannot be tested
+    // both ways in one process, because the flag is cached in a `OnceLock`.
+    // The conformance tests below need exactly that.
+    heap_summary: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str("(set-logic HORN)\n\n");
@@ -902,18 +959,141 @@ fn encode_chc_interproc(
         })
         .collect();
 
-    // Declare summary relations for non-void methods.
-    for mk in &all_methods {
-        let mid = &method_ids[mk];
+    // ── C1: the field footprint of each method ──────────────────────────
+    //
+    // The fields a method, or anything it transitively calls, reads or writes.
+    // This is what a summary relation has to carry for a heap effect to cross a
+    // call instead of being havoced at the call site.
+    //
+    // **It is a footprint, not the whole program's field set, and that is the
+    // entire engineering question here.** Every summary argument costs Spacer,
+    // and sharply: this file already records a five-line program that times out
+    // with 14-ary block predicates and is `sat` in 0.01s over two live
+    // variables. A field array is `(Array Int Int)`, which is harder for
+    // Spacer to synthesise an interpretation over than an `Int`, and C1 adds
+    // *two* per footprint field — pre and post. Threading the program's whole
+    // field set would make every summary unusable; threading a constructor's
+    // own class's fields costs two arguments.
+    //
+    // Reads need the pre half so the callee's constraint sees the caller's
+    // value; writes need the post half so the caller sees the callee's. A
+    // field in neither set is untouched by the call and is simply not passed.
+    let field_footprint: HashMap<MethodKey, BTreeSet<FieldKey>> = {
+        let mut direct: HashMap<MethodKey, BTreeSet<FieldKey>> = HashMap::new();
+        let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
+        for (mk2, body2) in &prog.bodies {
+            let mut fs: BTreeSet<FieldKey> = BTreeSet::new();
+            let mut cs = Vec::new();
+            for block in &body2.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            fs.insert(field.clone());
+                        }
+                        Stmt::Assign(_, rv) => {
+                            if let Rvalue::GetField { field, .. } = rv {
+                                fs.insert(field.clone());
+                            }
+                            if let Rvalue::Call { target, .. } = rv {
+                                cs.push(target.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            direct.insert(mk2.clone(), fs);
+            callees.insert(mk2.clone(), cs);
+        }
+        // Transitive closure. A callee without a body could touch anything, so
+        // its caller gets no summary-threaded heap at all — `heap_summary_of`
+        // returns `None` for those and the call site falls back to clobbering.
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                let mut add: BTreeSet<FieldKey> = BTreeSet::new();
+                for c in cs {
+                    if let Some(f) = direct.get(c) {
+                        add.extend(f.iter().cloned());
+                    }
+                }
+                let e = direct.entry(caller.clone()).or_default();
+                let before = e.len();
+                e.extend(add);
+                if e.len() != before {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        direct
+    };
+
+    // Which methods may be summarised with their heap effect threaded through.
+    //
+    // `None` means "clobber at the call site", the pre-C1 behaviour, and is the
+    // answer whenever the footprint is empty (nothing to thread), too large to
+    // be worth the arity, or the callee has an unresolved callee of its own.
+    let heap_summary_of = |mk: &MethodKey| -> Option<&BTreeSet<FieldKey>> {
+        if !heap_summary {
+            return None;
+        }
+        let fp = field_footprint.get(mk)?;
+        if fp.is_empty() || fp.len() > MAX_SUMMARY_FIELDS {
+            return None;
+        }
+        Some(fp)
+    };
+
+    // Declare summary relations.
+    //
+    // Shape: `(params..., pre-heap..., ret?, post-heap...)`. The pre-heap and
+    // post-heap blocks are present only for a method `heap_summary_of` accepts,
+    // and `ret` only for a non-void one.
+    //
+    // A **void** method gets a summary whenever it has a heap footprint, which
+    // it never did before C1. That is the whole point: a constructor or a setter
+    // returns nothing and exists entirely for its heap effect, so a summary
+    // keyed on the return value cannot describe it, and the call site had no
+    // choice but to clobber.
+    //
+    // The argument order is fixed here and consumed in two other places — the
+    // conclusion at each `return` and the application at each call site. All
+    // three are built from `summary_sig` so they cannot drift; a positional
+    // signature agreed by eye across three sites is how a producer and a
+    // consumer come to disagree about an artifact.
+    let summary_sig = |mk: &MethodKey| -> Option<(usize, bool, Vec<FieldKey>)> {
         let ret_ch = return_type_char(&mk.desc);
-        if ret_ch == 'V' {
-            continue;
+        let fp: Vec<FieldKey> = heap_summary_of(mk)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        // Nothing to say about a void method with no heap footprint.
+        if ret_ch == 'V' && fp.is_empty() {
+            return None;
         }
         let params = method_params.get(mk).map(|v| v.len()).unwrap_or(0);
-        let sig = (0..params + 1).map(|_| "Int").collect::<Vec<_>>().join(" ");
+        Some((params, ret_ch != 'V', fp))
+    };
+    for mk in &all_methods {
+        let Some((params, has_ret, fp)) = summary_sig(mk) else {
+            continue;
+        };
+        let mut sig: Vec<&str> = (0..params).map(|_| "Int").collect();
+        // Pre-heap, then the return value if there is one, then post-heap.
+        // `summary_sig` is the single definition of this order; the conclusion
+        // at each return and the application at each call site read it too.
+        sig.extend(std::iter::repeat_n(ARR_SORT, fp.len()));
+        if has_ret {
+            sig.push("Int");
+        }
+        sig.extend(std::iter::repeat_n(ARR_SORT, fp.len()));
         out.push_str(&format!(
             "; summary for {}\n(declare-fun {}_s ({}) Bool)\n",
-            mk, mid, sig
+            mk,
+            method_ids[mk],
+            sig.join(" ")
         ));
     }
 
@@ -1102,6 +1282,15 @@ fn encode_chc_interproc(
     };
     let fld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
     let fld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
+    // C1. The field array as it was on **method entry**, threaded unchanged
+    // through every block relation of a summarised method.
+    //
+    // A summary is a relation between two heaps, and without a name for the
+    // entry heap the conclusion at a `return` can only use the binder it
+    // already has — the heap *at the return block*. The clause then reads
+    // `m_s(params, H, H)`: the method changes nothing. That is a false claim
+    // about the method, and the first version of C1 emitted exactly it.
+    let fld_entry = |f: &FieldKey| format!("{}_e", crate::invariant_check::field_array_name(f));
 
     // Which methods may write each field, transitively.
     //
@@ -1218,12 +1407,17 @@ fn encode_chc_interproc(
         .collect();
     let arr_src = |st: &ajave_ir::AllocSite| format!("a{}_{}", st.block.0, st.index);
     let arr_dst = |st: &ajave_ir::AllocSite| format!("b{}_{}", st.block.0, st.index);
-    const ARR_SORT: &str = "(Array Int Int)";
 
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = &method_ids[mk];
         let sites = method_arrays.get(mk).cloned().unwrap_or_default();
+        // C1. The fields whose *entry* value this method's block relations
+        // carry. Empty unless the method has a summary with a heap footprint,
+        // so an unsummarised method's predicates keep exactly their pre-C1
+        // arity — which matters, because the cost of this mechanism is arity
+        // and nothing else.
+        let entry_fp: Vec<FieldKey> = summary_sig(mk).map(|(_, _, fp)| fp).unwrap_or_default();
 
         out.push_str(&format!("; blocks for {}\n", mk));
         for block in &body.blocks {
@@ -1235,6 +1429,9 @@ fn encode_chc_interproc(
                 parts.push(ARR_SORT.to_string());
             }
             for _ in &all_fields {
+                parts.push(ARR_SORT.to_string());
+            }
+            for _ in &entry_fp {
                 parts.push(ARR_SORT.to_string());
             }
             let sig = parts.join(" ");
@@ -1259,9 +1456,12 @@ fn encode_chc_interproc(
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = method_ids[mk].clone();
+        // C1. Must agree exactly with the declaration loop above, which
+        // computes the same list from the same function. See `fld_entry`.
+        let entry_fp: Vec<FieldKey> = summary_sig(mk).map(|(_, _, fp)| fp).unwrap_or_default();
         let n_vars = body.vars.len();
         let param_indices = method_params.get(mk).cloned().unwrap_or_default();
-        let ret_ch = return_type_char(&mk.desc);
+        let _ret_ch = return_type_char(&mk.desc);
         // Obligations are no longer entry-only, so this is kept only for the
         // summary/return clauses that still distinguish the entry method.
         let _is_entry = mk == entry;
@@ -1283,6 +1483,9 @@ fn encode_chc_interproc(
             }
             for f in &all_fields {
                 v.push(format!("({} {})", fld_src(f), ARR_SORT));
+            }
+            for f in &entry_fp {
+                v.push(format!("({} {})", fld_entry(f), ARR_SORT));
             }
             v.join(" ")
         };
@@ -1308,6 +1511,11 @@ fn encode_chc_interproc(
             }
             for f in &all_fields {
                 arg_parts.push(fld_src(f));
+            }
+            // Threaded unchanged: this is the heap on method entry, and no
+            // statement in the body may alter it.
+            for f in &entry_fp {
+                arg_parts.push(fld_entry(f));
             }
             let args = arg_parts.join(" ");
             let app = app_of(&mid, bid, &args);
@@ -1387,6 +1595,11 @@ fn encode_chc_interproc(
             for f in &all_fields {
                 arg_parts.push(fld_dst(f));
             }
+            // The entry heap passes through a transition unchanged, which is
+            // what makes it still mean "on entry" at the return block.
+            for f in &entry_fp {
+                arg_parts.push(fld_entry(f));
+            }
             let args = arg_parts.join(" ");
             app_of(&mid, bid, &args)
         };
@@ -1427,6 +1640,13 @@ fn encode_chc_interproc(
                     parts.push(arr_src(st));
                 }
                 for f in &all_fields {
+                    parts.push(fld_src(f));
+                }
+                // At the entry block the two coincide: nothing has run yet.
+                // Passing `fld_src` here rather than a separate binder is what
+                // *defines* `fld_entry` — it is the entry heap because the only
+                // fact that introduces it says so.
+                for f in &entry_fp {
                     parts.push(fld_src(f));
                 }
                 parts.join(" ")
@@ -1580,11 +1800,32 @@ fn encode_chc_interproc(
                                         arr_map.insert(*st, arr_dst(st));
                                     }
                                 }
+                                // C1. Which fields this call relates through
+                                // the callee's summary rather than havocing.
+                                //
+                                // `summary_sig` is the single source of the
+                                // argument order; the declaration and the
+                                // conclusion at each `return` read the same
+                                // function, so the three cannot drift.
+                                let callee_sig = method_ids
+                                    .get(target)
+                                    .and_then(|_| summary_sig(target))
+                                    .filter(|(_, _, fp)| !fp.is_empty());
+                                let threaded: BTreeSet<FieldKey> = callee_sig
+                                    .as_ref()
+                                    .map(|(_, _, fp)| fp.iter().cloned().collect())
+                                    .unwrap_or_default();
+
                                 // Field writes are per-field, so only the
                                 // fields the callee may write are clobbered —
                                 // which for a constructor is usually its own
                                 // class's, leaving everything else provable.
+                                // A field carried by the summary is *related*
+                                // instead, which is strictly more information.
                                 for f in all_fields.iter() {
+                                    if threaded.contains(f) {
+                                        continue;
+                                    }
                                     if field_writers.get(f).is_some_and(|ws| ws.contains(target))
                                         || !prog.bodies.contains_key(target)
                                     {
@@ -1592,7 +1833,49 @@ fn encode_chc_interproc(
                                     }
                                 }
                                 let callee_ret_ch = return_type_char(&target.desc);
-                                if let Some(callee_mid) = method_ids.get(target) {
+                                if let (Some(callee_mid), Some((_, has_ret, fp))) =
+                                    (method_ids.get(target), callee_sig)
+                                {
+                                    let callee_params =
+                                        method_params.get(target).cloned().unwrap_or_default();
+                                    let mut call_args: Vec<String> = Vec::new();
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if i < callee_params.len() {
+                                            call_args.push(lia_operand(arg, &var_map));
+                                        }
+                                    }
+                                    while call_args.len() < callee_params.len() {
+                                        call_args.push("0".to_string());
+                                    }
+                                    // Pre-heap: the caller's current value for
+                                    // each threaded field.
+                                    for f in &fp {
+                                        call_args.push(
+                                            fld_map.get(f).cloned().unwrap_or_else(|| fld_src(f)),
+                                        );
+                                    }
+                                    if has_ret {
+                                        let ret_var = fresh.fresh();
+                                        call_args.push(ret_var.clone());
+                                        var_map.insert(vid.0 as usize, ret_var);
+                                    }
+                                    // Post-heap: a fresh name per field, which
+                                    // the summary constrains and which the
+                                    // caller reads from here on. This is the
+                                    // whole gain — the field is no longer
+                                    // unconstrained after the call.
+                                    for f in &fp {
+                                        let post = fresh.fresh_arr();
+                                        call_args.push(post.clone());
+                                        fld_map.insert(f.clone(), post);
+                                    }
+                                    call_constraints.push(format!(
+                                        "({}_s {})",
+                                        callee_mid,
+                                        call_args.join(" ")
+                                    ));
+                                } else if let Some(callee_mid) = method_ids.get(target) {
+                                    // No threaded heap: the pre-C1 shape.
                                     if callee_ret_ch != 'V' {
                                         let callee_params =
                                             method_params.get(target).cloned().unwrap_or_default();
@@ -1605,7 +1888,6 @@ fn encode_chc_interproc(
                                         while call_args.len() < callee_params.len() {
                                             call_args.push("0".to_string());
                                         }
-
                                         let ret_var = fresh.fresh();
                                         call_args.push(ret_var.clone());
                                         call_constraints.push(format!(
@@ -1615,11 +1897,9 @@ fn encode_chc_interproc(
                                         ));
                                         var_map.insert(vid.0 as usize, ret_var);
                                     }
-                                } else {
-                                    if callee_ret_ch != 'V' {
-                                        let v = fresh.fresh();
-                                        var_map.insert(vid.0 as usize, v);
-                                    }
+                                } else if callee_ret_ch != 'V' {
+                                    let v = fresh.fresh();
+                                    var_map.insert(vid.0 as usize, v);
                                 }
                             }
                             // Allocation yields a non-null reference.
@@ -2007,6 +2287,9 @@ fn encode_chc_interproc(
                     v.push(format!("({} {})", fld_src(f), ARR_SORT));
                     v.push(format!("({} {})", fld_dst(f), ARR_SORT));
                 }
+                for f in &entry_fp {
+                    v.push(format!("({} {})", fld_entry(f), ARR_SORT));
+                }
                 v.join(" ")
             };
 
@@ -2100,8 +2383,11 @@ fn encode_chc_interproc(
                     }
                     mk_trans(default.0, &neg, &mut out);
                 }
-                Terminator::Return(Some(op)) if ret_ch != 'V' => {
-                    let ret_expr = lia_operand(op, &var_map);
+                Terminator::Return(ret_op)
+                    if summary_sig(mk).is_some()
+                        && (ret_op.is_some() || return_type_char(&mk.desc) == 'V') =>
+                {
+                    let (_, has_ret, ref fp) = summary_sig(mk).unwrap();
                     let mut summary_args: Vec<String> = param_indices
                         .iter()
                         .map(|&pi| {
@@ -2111,7 +2397,28 @@ fn encode_chc_interproc(
                                 .unwrap_or_else(|| format!("v{}", pi))
                         })
                         .collect();
-                    summary_args.push(ret_expr);
+                    // C1. Pre-heap: the field array as it was on entry. These
+                    // are the universally quantified `fld_src` binders, so the
+                    // summary relates *this* method's effect rather than
+                    // asserting anything about the caller's heap.
+                    for f in fp {
+                        summary_args.push(fld_entry(f));
+                    }
+                    if has_ret {
+                        let Some(op) = ret_op else {
+                            // A non-void method whose `return` carries no
+                            // operand cannot happen in verified bytecode, but
+                            // emitting a malformed clause would be worse than
+                            // emitting none: it would report `unknown` and
+                            // look like an inconclusive proof.
+                            continue;
+                        };
+                        summary_args.push(lia_operand(op, &var_map));
+                    }
+                    // Post-heap: the field array as this path left it.
+                    for f in fp {
+                        summary_args.push(fld_map.get(f).cloned().unwrap_or_else(|| fld_src(f)));
+                    }
 
                     let mut all = constraints.clone();
                     // The binding equalities, without which the returned value
@@ -3128,6 +3435,213 @@ mod tests {
         (prog, main)
     }
 
+    /// ```text
+    /// class Box { int v; void set() { this.v = 5; } }
+    /// void main() { Box b = new Box(); b.set(); assert b.v == 5; }
+    /// ```
+    ///
+    /// A **void** callee whose only effect is a field write: the exact shape a
+    /// summary keyed on a return value cannot describe.
+    fn setter_program() -> (Program, MethodKey) {
+        use ajave_ir::FieldKey;
+        let mut prog = Program::default();
+        let main = mk("main", "()V");
+        let set = MethodKey {
+            class: "Box".into(),
+            name: "set".into(),
+            desc: "()V".into(),
+        };
+        let fv = FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let ref_var = |slot: u16| VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Ref,
+        };
+
+        // void set() { this.v = 5; }
+        prog.bodies.insert(
+            set.clone(),
+            Body {
+                is_static: false,
+                key: set.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0)],
+                obligations: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![Stmt::PutField {
+                        obj: Operand::Var(VarId(0)),
+                        field: fv.clone(),
+                        val: Operand::int(5),
+                    }],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+
+        let (b, r, c) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0), int_var(1), int_var(2)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(c),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            b,
+                            Rvalue::New {
+                                class: "Box".into(),
+                                site: ajave_ir::AllocSite {
+                                    block: BlockId(0),
+                                    index: 0,
+                                },
+                            },
+                        ),
+                        Stmt::Assign(
+                            VarId(3),
+                            Rvalue::Call {
+                                target: set.clone(),
+                                args: vec![Operand::Var(b)],
+                                is_virtual: false,
+                            },
+                        ),
+                        Stmt::Assign(
+                            r,
+                            Rvalue::GetField {
+                                obj: Operand::Var(b),
+                                field: fv.clone(),
+                            },
+                        ),
+                        Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(r), Operand::int(5))),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+        (prog, main)
+    }
+
+    fn setter_obs() -> Vec<ObligationRef> {
+        vec![ObligationRef {
+            method: mk("main", "()V"),
+            id: ObligationId(0),
+        }]
+    }
+
+    /// C1. A void method with a heap footprint gets a summary. Before C1 it got
+    /// none at all, which is why a call to it could only be answered by
+    /// clobbering every field it might write.
+    #[test]
+    fn a_void_method_with_a_field_footprint_gets_a_summary() {
+        let (prog, main) = setter_program();
+        let obs = setter_obs();
+        let off = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        let on = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+
+        let summaries = |t: &str| {
+            t.lines()
+                .filter(|l| l.contains("declare-fun") && l.contains("_s ("))
+                .count()
+        };
+        assert_eq!(
+            summaries(&off),
+            0,
+            "without C1 there is no summary for a void method:\n{off}"
+        );
+        assert!(
+            summaries(&on) >= 1,
+            "with C1 the void setter is summarised:\n{on}"
+        );
+    }
+
+    /// **The defect the first version of C1 shipped.**
+    ///
+    /// A summary is a relation between two heaps. The conclusion at a `return`
+    /// has the heap *at the return block* in scope, and using that binder for
+    /// both halves produces `m_s(params, H, H)` — "this method changes
+    /// nothing". That is a false claim about the method, and a caller reading
+    /// it concludes the field still holds its pre-call value.
+    ///
+    /// The fix is `fld_entry`: a distinct binder for the entry heap, threaded
+    /// unchanged through every block relation so it still means "on entry" by
+    /// the time control reaches a return.
+    #[test]
+    fn a_summary_relates_the_entry_heap_to_the_exit_heap_not_one_to_itself() {
+        let (prog, main) = setter_program();
+        let on = encode_chc_interproc(&prog, &main, &setter_obs(), &HashMap::new(), true);
+
+        // Every application of a summary in a *head* position — the conclusion
+        // at a return — must name two different arrays.
+        let mut checked = 0;
+        for line in on.lines() {
+            // The conclusion is the final application in the implication.
+            let Some(idx) = line.rfind("_s ") else {
+                continue;
+            };
+            if !line.contains("=>") {
+                continue;
+            }
+            let rest = &line[idx + 3..];
+            let Some(end) = rest.find(')') else { continue };
+            let args: Vec<&str> = rest[..end].split_whitespace().collect();
+            let arrays: Vec<&&str> = args.iter().filter(|a| a.contains("fld_")).collect();
+            if arrays.len() < 2 {
+                continue;
+            }
+            checked += 1;
+            assert_ne!(
+                arrays[0],
+                arrays[arrays.len() - 1],
+                "summary conclusion relates a heap to itself, so it claims the \
+                 method has no effect:\n{line}"
+            );
+            assert!(
+                arrays[0].ends_with("_e"),
+                "the pre half must be the entry heap, not the heap at the \
+                 return block:\n{line}"
+            );
+        }
+        assert!(checked > 0, "no summary conclusion found to check:\n{on}");
+    }
+
+    /// The arity bound is the whole cost of C1, so it must be bounded by the
+    /// *footprint* and not by the program's field set. A method that touches no
+    /// field must keep exactly its pre-C1 predicate arity.
+    #[test]
+    fn c1_does_not_change_the_encoding_of_a_method_with_no_fields() {
+        let (prog, main) = overflow_program();
+        let obs = vec![ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let off = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        let on = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        assert_eq!(
+            off, on,
+            "a program with no field access must encode identically either way"
+        );
+    }
+
     pub(super) fn z3_available() -> bool {
         Command::new("which")
             .arg("z3")
@@ -3225,7 +3739,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let interproc = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let interproc = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
         assert!(
             derives_handler(&interproc, "m0_b0", "m0_b1"),
             "LIA encoder has no clause deriving the handler:\n{interproc}"
@@ -3253,7 +3767,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         // `main`'s obligation is `c`, defined by `c = inc(n) > n`. The clause
         // whose head is `error` must therefore constrain whatever name `c` is
@@ -3348,7 +3862,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         let guards: Vec<&str> = smt2
             .lines()
@@ -3389,7 +3903,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         for line in smt2.lines().filter(|l| l.starts_with("(assert")) {
             // An entry fact is the only assertion with no implication in it.
@@ -3447,7 +3961,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         // Isolate the callee's clauses -- the entry method legitimately
         // carries assumptions, so a whole-file search would not discriminate.
@@ -3488,7 +4002,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &no_invariants);
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &no_invariants, false);
         assert!(
             smt2.contains("; overflow"),
             "the inter-procedural encoding must route 32-bit overflow to \
@@ -3778,7 +4292,10 @@ mod encoder_conformance {
             id: ObligationId(0),
         }];
         let body = prog.body(m).expect("body");
-        let lia = asks_safe(encode_chc_interproc(prog, m, &obs, &HashMap::new()), m);
+        let lia = asks_safe(
+            encode_chc_interproc(prog, m, &obs, &HashMap::new(), false),
+            m,
+        );
         let bv = asks_safe(encode_chc_single(body, &[ObligationId(0)]), m);
         (lia, bv)
     }
