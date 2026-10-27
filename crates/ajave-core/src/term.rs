@@ -143,6 +143,36 @@ pub enum Expr {
         field: ajave_ir::FieldKey,
         obj: Box<Expr>,
     },
+    /// The ghost **depth** of a reference along a reference field: the number
+    /// of `field` links from it to null.
+    ///
+    /// E1's contract addition, and the cheapest shape property worth having.
+    /// Maintained the way the CHC encoder already maintains ghost array
+    /// lengths: `new` gives depth 0, and `o.f = p` gives
+    /// `depth(o) = depth(p) + 1` when `p` is non-null.
+    ///
+    /// # What a consumer may conclude
+    ///
+    /// **Only that depth is well-founded, which is acyclicity along `field`
+    /// and nothing more.** A cycle `o.f = o` would need
+    /// `depth(o) = depth(o) + 1`, which no integer satisfies, so a state
+    /// containing one is infeasible — that is the whole proof, and it is why
+    /// this needs no separation logic and no reachability relation.
+    ///
+    /// It says nothing about *disjointness*. Two acyclic chains may share a
+    /// tail and both have well-founded depth, so a consumer that read this as
+    /// "these structures do not overlap" would be unsound. That claim is
+    /// `Disjoint`, which does not exist yet, and an engine reasoning about
+    /// depth alone must still declare `HEAP_NO_SHAPE`.
+    ///
+    /// Depth is also *partial*: a reference reached from a parameter or an
+    /// unmodelled call has no known depth, and an engine must treat an absent
+    /// depth as unconstrained rather than as zero. Zero means "points at
+    /// null", which is a real and much stronger claim.
+    Depth {
+        field: ajave_ir::FieldKey,
+        obj: Box<Expr>,
+    },
     /// A named library method applied to arguments. Present so a claim can be
     /// *about* `Math.sin(x)` without anyone having to model it — which is the
     /// whole point of being able to ask.
@@ -202,6 +232,8 @@ impl Expr {
                 b.collect_vars(out);
             }
             Expr::Not(a) => a.collect_vars(out),
+            // The receiver may mention variables; the field key never does.
+            Expr::Depth { obj, .. } => obj.collect_vars(out),
             // The site is not a variable; the index may mention some.
             Expr::Select { index, .. } => index.collect_vars(out),
             // The receiver is a reference-valued expression and may be a var.
@@ -246,6 +278,7 @@ impl std::fmt::Display for Expr {
                 write!(f, "a[bb{}:{}][{index}]", site.block.0, site.index)
             }
             Expr::Field { field, obj } => write!(f, "{obj}.{}", field.name),
+            Expr::Depth { field, obj } => write!(f, "depth_{}({obj})", field.name),
             Expr::Int(n) => write!(f, "{n}"),
             Expr::Double(bits) => {
                 let d = f64::from_bits(*bits);

@@ -244,3 +244,8 @@ ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement.yml valid-assert
 # condition that keeps a non-writing callee from invalidating anything (2026-10-27).
 ajave/engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller.yml valid-assert
 ajave/engine-chc/ACalleeThatWritesNothingInvalidatesNothing.yml valid-assert
+
+# The CHC encoders read arrays they never wrote: a reused local slot made the
+# store's receiver ambiguous and havoced every array. Constant bound, so no
+# quantified invariant is involved (2026-10-27).
+ajave/heap/ArrayElementNonNullWithAConstantBound.yml valid-assert

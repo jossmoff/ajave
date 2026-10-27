@@ -151,6 +151,84 @@ The mechanism is **off by default** (`AJAVE_CHC_HEAP_SUMMARY=1`), and per
 `CLAUDE.md` that makes it unfinished: the encoding is complete and tested, what
 it lacks is a corpus measurement showing the capability outweighs the arity.
 
+## 2026-10-27 — the CHC encoders read arrays they never wrote, and what that says about where the heap gate was
+
+The most consequential finding of the heap work, and it is not a theory gap.
+
+### The symptom
+
+`docs/proposals/heap-full-implementation.md` places the array-fill shape under
+Part D, "quantified invariants", on the reasoning that `aastore_aaload1` needs
+`∀j. 0 ≤ j < size → a[j] ≠ null`. Checking that claim against a **constant**
+bound — where three unrollings suffice and no quantified invariant is needed at
+all — the CHC encoding still reported the assertion reachable.
+
+The encoding of that three-element program contained **twenty** uses of the
+array havoc destination and **zero** `store`s. The encoder read an array it
+never wrote. Every element was therefore unconstrained, including null, so the
+assertion was trivially reachable.
+
+### The cause
+
+`array_sites_of` answers one allocation site per variable **for the whole
+body**, and marks a variable ambiguous as soon as it is assigned from anything
+that is not a known array. That is a correct whole-body statement and useless
+as a resolution for a particular use, because **javac reuses local slots**. The
+lifted body for
+
+```java
+A[] a = new A[3];
+for (int i = 0; i < 3; i++) { a[i] = new A(); }
+for (int i = 0; i < 3; i++) { assert a[i] != null; }
+```
+
+assigns one slot the array, then an *element* of it, then an `AssertionError`.
+The store's receiver is that slot, so it resolved to nothing and took the "may
+land in any array, so havoc every site" branch — while the reads happened to go
+through a different, non-reused variable and resolved fine. Reads worked,
+writes did not, and the asymmetry is why nothing looked obviously broken.
+
+There was a second instance of the same root cause one level up: the *site set*
+was derived from the same map's image, so a body whose only array variable was
+a reused slot got an **empty** site set and no array state threaded at all —
+each load compiling to a fresh unconstrained constant. Which sites a body has
+is syntactic; whether a use resolves to one is a flow question. Using one map
+for both let an ambiguity at a use delete the state every other use needed.
+
+### The fix
+
+`array_sites_at_block_entry` — a forward dataflow over `VarId -> AllocSite`
+with join by agreement — plus `update_sites_for`, which both encoders apply
+statement by statement as they already traverse. `array_sites_in` answers the
+set syntactically. Both CHC encoders got it: `CLAUDE.md` records that a fix to
+one silently leaves the other exposed.
+
+### What it changes
+
+- The constant-bound fill loop is now **TRUE** under CHC alone, having been
+  unprovable.
+- **D1 (`fp.spacer.q3.use_qgen`) starts working.** Before the fix, qgen made no
+  difference to the nondet-bound fixture — Spacer reported the error
+  *reachable* (`unsat` in Horn's inverted convention), and quantified
+  generalisation cannot help when the abstraction genuinely admits a
+  counterexample. After it, `EveryElementNonNullAfterAFillLoop` goes UNKNOWN →
+  TRUE with qgen and stays UNKNOWN without, in both CHC-only and
+  full-portfolio.
+
+So the capability the plan predicted does exist; the plan was wrong about what
+stood in front of it.
+
+### The methodological point
+
+A1–A3 and B2/B3 made array and field contents *expressible* and returned zero
+points, which was read as "expressibility is not the gate, quantified inference
+is". That conclusion was right about expressibility and wrong about the cause,
+and the thing that separated them was **testing the easy case**. A quantified
+benchmark failing is consistent with both a missing quantified invariant and a
+missing `store`; a *constant-bound* benchmark failing is consistent with only
+one of them. The cheaper test was the discriminating one, and it was not run
+until the expensive explanation had already been adopted.
+
 ## 2026-09-09 — the round loop and cursor deltas, measured
 
 Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181

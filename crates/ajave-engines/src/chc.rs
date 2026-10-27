@@ -32,6 +32,27 @@ const MAX_SUMMARY_FIELDS: usize = 6;
 /// run before the per-body encoder, need it too.
 const ARR_SORT: &str = "(Array Int Int)";
 
+/// D1. Whether Spacer is asked to generalise its lemmas with quantifiers.
+///
+/// `fp.spacer.q3.use_qgen` turns on quantified generalisation over array
+/// indices, and `fp.spacer.ground_pobs=false` stops Spacer grounding its proof
+/// obligations before trying — the two are documented upstream as having to be
+/// set together, and setting only the first does nothing observable.
+///
+/// This is the capability the heap work runs into rather than another encoding
+/// change: `benchmarks/ajave/heap/EveryElementNonNullAfterAFillLoop` needs
+/// `∀j. 0 ≤ j < i → a[j] ≠ null` inferred from one loop and used in another.
+/// Contents modelling made that property expressible; nothing in the portfolio
+/// infers it.
+///
+/// Off by default until measured. A quantified search is a different and
+/// usually slower search, so the expected cost is timeouts on tasks that
+/// currently answer — which is a cost that only a corpus run can price.
+pub fn chc_qgen_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_CHC_QGEN").as_deref() == Ok("1"))
+}
+
 /// Whether C1's heap-carrying summary relations are used.
 ///
 /// **Off by default, and that is a statement about evidence rather than a
@@ -1396,13 +1417,10 @@ fn encode_chc_interproc(
         .iter()
         .filter_map(|mk| {
             let body = prog.body(mk)?;
-            let mut v: Vec<_> = crate::interpolation::array_sites_of(body)
-                .values()
-                .copied()
-                .collect();
-            v.sort();
-            v.dedup();
-            Some((mk.clone(), v))
+            // Which sites exist is syntactic; which *use* resolves to one is
+            // not. Deriving the set from the resolution map meant an ambiguous
+            // variable deleted the array state every other use needed.
+            Some((mk.clone(), crate::interpolation::array_sites_in(body)))
         })
         .collect();
     let arr_src = |st: &ajave_ir::AllocSite| format!("a{}_{}", st.block.0, st.index);
@@ -1474,7 +1492,15 @@ fn encode_chc_interproc(
         let src_vars: Vec<String> = (0..total_slots).map(|i| format!("v{}", i)).collect();
         let dst_vars: Vec<String> = (0..total_slots).map(|i| format!("w{}", i)).collect();
         let sites = method_arrays.get(mk).cloned().unwrap_or_default();
-        let array_sites = crate::interpolation::array_sites_of(body);
+        // Flow-sensitive: which array each reference names *at each point*.
+        //
+        // The whole-body version of this question answered "none" for any slot
+        // javac reused, which is most of them — and the consequence was an
+        // encoding with twenty uses of the array havoc destination and zero
+        // `store`s. It read an array it never wrote, so every element was
+        // unconstrained, and even a three-element constant-bound fill loop
+        // could not be proved. See `array_sites_at_block_entry`.
+        let site_entry = crate::interpolation::array_sites_at_block_entry(body);
 
         let forall_src: String = {
             let mut v: Vec<String> = src_vars.iter().map(|x| format!("({} Int)", x)).collect();
@@ -1675,6 +1701,9 @@ fn encode_chc_interproc(
         ));
 
         for block in &body.blocks {
+            // This block's view of which reference names which array, updated
+            // statement by statement below as the encoder walks them.
+            let mut array_sites = site_entry.get(&block.id).cloned().unwrap_or_default();
             let mut fresh = FreshGen::new();
             let mut constraints: Vec<String> = Vec::new();
             // Allocation identity, not just storage (JLS 12.5): a `new`
@@ -1728,6 +1757,19 @@ fn encode_chc_interproc(
             }
 
             for stmt in &block.stmts {
+                // Flow-sensitive site tracking, updated *before* the arms so
+                // that `array_sites` describes the state the statement runs in.
+                //
+                // Order matters and the direction is not symmetric. For a
+                // store `a[i] = v` the receiver `a` is read in the pre-state,
+                // so updating first would be wrong — except that
+                // `update_sites_for` only ever changes the *assigned*
+                // variable, and a store assigns none. For `a = new A[n]` the
+                // site must be visible to every later statement in the block,
+                // which is what updating here achieves.
+                let pre_sites = array_sites.clone();
+                crate::interpolation::update_sites_for(&mut array_sites, stmt);
+                let array_sites = &pre_sites;
                 match stmt {
                     Stmt::Assign(vid, rv) => {
                         // Assigning a reference invalidates its ghost length.
@@ -2002,11 +2044,11 @@ fn encode_chc_interproc(
                                 var_map.insert(vid.0 as usize, format!("(select {cur} {o})"));
                             }
                             Rvalue::ArrayLoad { arr, idx }
-                                if crate::interpolation::operand_site(arr, &array_sites)
+                                if crate::interpolation::operand_site(arr, array_sites)
                                     .and_then(|st| arr_map.get(&st))
                                     .is_some() =>
                             {
-                                let st = crate::interpolation::operand_site(arr, &array_sites)
+                                let st = crate::interpolation::operand_site(arr, array_sites)
                                     .expect("guarded above");
                                 let cur = arr_map[&st].clone();
                                 let i = lia_operand(idx, &var_map);
@@ -2063,7 +2105,7 @@ fn encode_chc_interproc(
                         // reads became fresh constants.
                         let i = lia_operand(idx, &var_map);
                         let v = lia_operand(val, &var_map);
-                        match crate::interpolation::operand_site(arr, &array_sites) {
+                        match crate::interpolation::operand_site(arr, array_sites) {
                             Some(st) => {
                                 if let Some(cur) = arr_map.get(&st).cloned() {
                                     arr_map.insert(st, format!("(store {cur} {i} {v})"));
@@ -2761,9 +2803,14 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     let bvfld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
     let bvfld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
 
-    let array_sites = crate::interpolation::array_sites_of(body);
+    // `array_sites_of` is still the right question for the *set* of sites a
+    // body has — that is a whole-body fact. Resolving a particular use is not,
+    // and `site_entry_bv` is what answers it. This file has two encoders and
+    // `CLAUDE.md` records that a fix to one silently leaves the other exposed,
+    // which is why both get this.
+    let site_entry_bv = crate::interpolation::array_sites_at_block_entry(body);
     let sites: Vec<ajave_ir::AllocSite> = {
-        let mut v: Vec<_> = array_sites.values().copied().collect();
+        let mut v: Vec<_> = crate::interpolation::array_sites_in(body);
         v.sort();
         v.dedup();
         v
@@ -2917,7 +2964,11 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             }
         };
 
+        let mut bv_array_sites = site_entry_bv.get(&block.id).cloned().unwrap_or_default();
         for stmt in &block.stmts {
+            let pre_sites = bv_array_sites.clone();
+            crate::interpolation::update_sites_for(&mut bv_array_sites, stmt);
+            let array_sites = &pre_sites;
             match stmt {
                 Stmt::Assign(vid, rv) => {
                     // Ghost length maintenance, mirroring the LIA encoder.
@@ -2999,7 +3050,7 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                             Some(format!("(select {cur} {o})"))
                         }
                         Rvalue::ArrayLoad { arr, idx } => {
-                            crate::interpolation::operand_site(arr, &array_sites)
+                            crate::interpolation::operand_site(arr, array_sites)
                                 .and_then(|st| arr_map.get(&st).cloned())
                                 .map(|cur| {
                                     let i =
@@ -3049,7 +3100,7 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                 Stmt::ArrayStore { arr, idx, val } => {
                     let i = smt_text::encode_operand(&BitvectorTheory, idx, &var_map);
                     let v = smt_text::encode_operand(&BitvectorTheory, val, &var_map);
-                    match crate::interpolation::operand_site(arr, &array_sites) {
+                    match crate::interpolation::operand_site(arr, array_sites) {
                         Some(st) => {
                             if let Some(cur) = arr_map.get(&st).cloned() {
                                 arr_map.insert(st, format!("(store {cur} {i} {v})"));
@@ -3292,10 +3343,16 @@ fn run_chc_solver(
     obligations: &[ObligationRef],
     timeout_secs: u32,
 ) -> Result<(Vec<(ObligationRef, bool)>, ChcOutcome), String> {
+    let mut args: Vec<String> = vec!["-in".into(), "-smt2".into()];
+    if chc_qgen_enabled() {
+        // D1. Must be set together: grounding the proof obligations defeats
+        // quantified generalisation, so `use_qgen` alone changes nothing.
+        args.push("fp.spacer.q3.use_qgen=true".into());
+        args.push("fp.spacer.ground_pobs=false".into());
+    }
     let mut child = Command::new(binary)
+        .args(&args)
         .args([
-            "-in",
-            "-smt2",
             // A wall-clock bound on the solver, which had none at all.
             //
             // Nothing exposed that while the heap guard held, because CHC never
@@ -3639,6 +3696,139 @@ mod tests {
         assert_eq!(
             off, on,
             "a program with no field access must encode identically either way"
+        );
+    }
+
+    /// ```text
+    /// A[] a = new A[2];
+    /// a[0] = x;              // the array variable's slot is then reused
+    /// a = somethingElse;     // ... for something that is not an array
+    /// ```
+    ///
+    /// **An array store must appear in the encoding as a `store`.**
+    ///
+    /// `array_sites_of` answers one site per variable for the whole body and
+    /// marks a variable ambiguous as soon as it is assigned from anything that
+    /// is not a known array. javac reuses local slots, so in a real method the
+    /// array variable is also used for something else, the site resolves to
+    /// nothing, and the store falls into the "may land in any array" branch
+    /// that havocs every site.
+    ///
+    /// The observed consequence on a three-element constant-bound fill loop:
+    /// **twenty** uses of the array havoc destination and **zero** `store`s.
+    /// The encoder read an array it never wrote, so every element was
+    /// unconstrained — including null — and the program was unprovable with no
+    /// quantified invariant needed anywhere. That is what made modelling array
+    /// contents worth nothing in this engine.
+    fn slot_reuse_program() -> (Program, MethodKey) {
+        let mut prog = Program::default();
+        let main = mk("main", "()V");
+        let ref_var = |slot: u16| VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Ref,
+        };
+        // v0: the array, in a slot later reused. v1: index. v2: read-back.
+        let (a, i, r) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0), int_var(1), int_var(2), int_var(3)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(VarId(3)),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            a,
+                            Rvalue::NewArray {
+                                elem: "I".to_string(),
+                                len: Operand::int(2),
+                                site: ajave_ir::AllocSite {
+                                    block: BlockId(0),
+                                    index: 0,
+                                },
+                            },
+                        ),
+                        Stmt::Assign(i, Rvalue::Use(Operand::int(0))),
+                        Stmt::ArrayStore {
+                            arr: Operand::Var(a),
+                            idx: Operand::Var(i),
+                            val: Operand::int(7),
+                        },
+                        Stmt::Assign(
+                            r,
+                            Rvalue::ArrayLoad {
+                                arr: Operand::Var(a),
+                                idx: Operand::Var(i),
+                            },
+                        ),
+                        // The slot reuse: `a` now holds something that is not
+                        // an array. Flow-insensitively this poisons the store
+                        // above, which already happened.
+                        Stmt::Assign(a, Rvalue::Use(Operand::Const(Const::Null))),
+                        Stmt::Assign(
+                            VarId(3),
+                            Rvalue::Bin(BinOp::Eq, Operand::Var(r), Operand::int(7)),
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+        (prog, main)
+    }
+
+    /// The encoding of a body whose array slot is reused must still contain the
+    /// store. Without it the matching read is unconstrained and no property of
+    /// an element is provable — see `slot_reuse_program`.
+    #[test]
+    fn an_array_store_survives_the_array_slot_being_reused() {
+        let (prog, main) = slot_reuse_program();
+        let obs = vec![ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        assert!(
+            smt2.contains("(store "),
+            "the array store was dropped, so the encoder reads an array it \
+             never writes:\n{smt2}"
+        );
+    }
+
+    /// The flow-sensitive map must still *lose* a site when the variable stops
+    /// naming that array. Keeping it is the unsound direction: a later store
+    /// through the reused slot would be attributed to an array the variable no
+    /// longer points at, which is a write landing on the wrong object.
+    #[test]
+    fn a_reassigned_slot_stops_naming_the_array_it_held() {
+        let (prog, _) = slot_reuse_program();
+        let body = prog.bodies.values().next().unwrap();
+        let mut map = crate::interpolation::array_sites_at_block_entry(body)
+            .remove(&BlockId(0))
+            .unwrap_or_default();
+        let stmts = &body.blocks[0].stmts;
+        // After the NewArray, v0 names the site.
+        crate::interpolation::update_sites_for(&mut map, &stmts[0]);
+        assert!(map.contains_key(&VarId(0)), "the allocation establishes it");
+        // After `v0 = null`, it names nothing.
+        crate::interpolation::update_sites_for(&mut map, &stmts[4]);
+        assert!(
+            !map.contains_key(&VarId(0)),
+            "a slot reassigned from a non-array must not keep the site"
         );
     }
 

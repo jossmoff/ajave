@@ -352,6 +352,184 @@ pub fn array_sites_of(
 }
 
 /// The allocation site an operand names, if exactly one.
+/// Every array allocation site in a body.
+///
+/// Distinct from `array_sites_of().values()`, which was being used for this and
+/// is wrong for it. That map drops a variable the moment it becomes ambiguous,
+/// so a body whose only array variable is a reused slot produced an **empty**
+/// site set — and then the encoder threaded no array state at all, compiling
+/// each load to a fresh unconstrained constant.
+///
+/// Which site set a body has is a whole-body, syntactic fact. Whether a
+/// particular *use* resolves to one of them is a flow question, and
+/// `array_sites_at_block_entry` is what answers that. Using one map for both
+/// let an ambiguity at a use delete the state the other uses needed.
+pub fn array_sites_in(body: &ajave_ir::Body) -> Vec<ajave_ir::AllocSite> {
+    use ajave_ir::{Rvalue, Stmt};
+    let mut v: Vec<ajave_ir::AllocSite> = Vec::new();
+    for block in &body.blocks {
+        for st in &block.stmts {
+            if let Stmt::Assign(_, Rvalue::NewArray { site, .. }) = st {
+                v.push(*site);
+            }
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Flow-sensitive allocation sites: which array each reference *names at each
+/// program point*, rather than one answer per variable for the whole body.
+///
+/// # Why this exists, and what it cost before
+///
+/// `array_sites_of` gives one answer per `VarId`, and marks a variable
+/// ambiguous the moment it is assigned from anything that is not a known
+/// array. That is correct as a whole-body statement and useless in practice,
+/// because **javac reuses local slots**. In
+///
+/// ```text
+/// A[] a = new A[3];
+/// for (int i = 0; i < 3; i++) { a[i] = new A(); }
+/// for (int i = 0; i < 3; i++) { assert a[i] != null; }
+/// ```
+///
+/// the lifted body assigns one slot the array, then an *element* of it, then
+/// an `AssertionError`. The variable the store goes through is therefore
+/// ambiguous and the store havocs every array, while the reads happen to go
+/// through a different variable that is not reused and so resolve fine.
+///
+/// The CHC encoding for that program contained **twenty** uses of the havoc
+/// destination and **zero** `store`s: it read an array it never wrote. Every
+/// element therefore read as unconstrained, including null, so the assertion
+/// was reachable and the program was reported unprovable — with a *constant*
+/// loop bound, where no quantified invariant is needed at all.
+///
+/// This is what made modelling array contents worth nothing in this engine.
+/// Expressibility was never the gate.
+///
+/// # The analysis
+///
+/// A forward dataflow over `VarId -> AllocSite`, with join by agreement: a
+/// variable keeps a site only if every predecessor agrees on it. Absence means
+/// "may name any array", which is what every consumer must treat
+/// conservatively — and is what `operand_site` returning `None` already means.
+///
+/// Returned per block entry; a consumer walking a block's statements updates
+/// its copy with `update_sites_for` as it goes, which is exactly how the
+/// encoders already traverse.
+pub fn array_sites_at_block_entry(
+    body: &ajave_ir::Body,
+) -> std::collections::BTreeMap<ajave_ir::BlockId, SiteMap> {
+    use std::collections::BTreeMap;
+    let mut entry: BTreeMap<ajave_ir::BlockId, SiteMap> = BTreeMap::new();
+    for b in &body.blocks {
+        entry.insert(b.id, SiteMap::new());
+    }
+
+    // Successors including exceptional edges: a handler is reachable from the
+    // block it guards, and giving it an empty-but-not-bottom map would let it
+    // claim a site no predecessor established.
+    let succs = |b: &ajave_ir::Block| -> Vec<ajave_ir::BlockId> {
+        use ajave_ir::Terminator::*;
+        let mut v = match &b.term {
+            Goto(t) => vec![*t],
+            Branch { then_, else_, .. } => vec![*then_, *else_],
+            Switch { cases, default, .. } => {
+                let mut c: Vec<_> = cases.iter().map(|(_, t)| *t).collect();
+                c.push(*default);
+                c
+            }
+            // `Return`, `Throw`, `Halt` and `Diverge` leave the body. For
+            // `Diverge` in particular there is nothing to propagate *to*: the
+            // lift stopped, and a successor map that invented one would be
+            // claiming knowledge about code nobody read.
+            Return(_) | Throw(_) | Halt | Diverge(_) => vec![],
+        };
+        v.extend(b.exceptional.iter().map(|e| e.target));
+        v
+    };
+
+    // `None` distinguishes "not yet reached" from "reached, knows nothing".
+    // Without it the entry block's empty map would look like a predecessor
+    // that disagrees with everything, and no site would ever propagate.
+    let mut reached: BTreeMap<ajave_ir::BlockId, bool> =
+        body.blocks.iter().map(|b| (b.id, false)).collect();
+    reached.insert(body.entry, true);
+
+    // Bounded by the block count: each round can only shrink a map or mark one
+    // block reached, and both are monotone over a finite domain.
+    for _ in 0..=body.blocks.len() {
+        let mut changed = false;
+        for b in &body.blocks {
+            if !reached[&b.id] {
+                continue;
+            }
+            let mut out = entry[&b.id].clone();
+            for st in &b.stmts {
+                update_sites_for(&mut out, st);
+            }
+            for s in succs(b) {
+                let merged = if reached[&s] {
+                    // Join by agreement: keep only what both sides assert, with
+                    // the same site. A disagreement is a variable that names
+                    // different arrays on different paths, so it names none.
+                    out.iter()
+                        .filter(|(v, site)| entry[&s].get(v) == Some(*site))
+                        .map(|(v, site)| (*v, *site))
+                        .collect()
+                } else {
+                    out.clone()
+                };
+                if !reached[&s] || merged != entry[&s] {
+                    entry.insert(s, merged);
+                    reached.insert(s, true);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    entry
+}
+
+/// `VarId -> AllocSite` at one program point. Absence means "may name any
+/// array", never "names no array".
+pub type SiteMap = std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite>;
+
+/// Apply one statement's effect on which array each variable names.
+///
+/// Every assignment must be handled, including the ones that destroy
+/// knowledge: a slot reassigned from an element load or a `new` of a
+/// non-array no longer names the array it did, and leaving the stale entry is
+/// the unsound direction — it would let a store be attributed to an array the
+/// variable no longer points at.
+pub fn update_sites_for(map: &mut SiteMap, st: &ajave_ir::Stmt) {
+    use ajave_ir::{Operand, Rvalue, Stmt};
+    let Stmt::Assign(v, rv) = st else { return };
+    match rv {
+        Rvalue::NewArray { site, .. } => {
+            map.insert(*v, *site);
+        }
+        Rvalue::Use(Operand::Var(w)) => match map.get(w).copied() {
+            Some(site) => {
+                map.insert(*v, site);
+            }
+            None => {
+                map.remove(v);
+            }
+        },
+        // Anything else: the variable now holds something we cannot attribute
+        // to a site.
+        _ => {
+            map.remove(v);
+        }
+    }
+}
+
 pub fn operand_site(
     op: &ajave_ir::Operand,
     sites: &std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite>,

@@ -66,6 +66,17 @@ use crate::interpolation::{encode_body_lia, run_solver_batch_pub};
 ///
 /// Shared by the checker and `interpolation`'s encoder so the two cannot spell
 /// it differently. Non-identifier characters in a class name are mapped, since
+/// The SMT name of the ghost depth array for a reference field.
+///
+/// E1. Distinct from `field_array_name` because the two arrays hold different
+/// things about the same field: `fld_C_f` maps a receiver to the reference it
+/// stores, `depth_C_f` maps it to the number of `f` links from it to null.
+/// Sharing a name would make a depth claim read as a value claim, which is the
+/// producer-and-consumer-disagree fault `CLAUDE.md` names.
+pub fn depth_array_name(f: &ajave_ir::FieldKey) -> String {
+    format!("depth_{}_{}", f.class.replace('/', "_"), f.name)
+}
+
 /// `java/lang/Object` is not an SMT-LIB symbol.
 pub fn field_array_name(f: &ajave_ir::FieldKey) -> String {
     let sanitise = |t: &str| {
@@ -169,6 +180,25 @@ fn render(e: &Expr, post: bool) -> Option<String> {
             format!(
                 "(select {}{} {})",
                 field_array_name(field),
+                if post { "p" } else { "" },
+                render(obj, post)?
+            )
+        }
+        // The ghost depth array for a reference field, named to match the
+        // encoder for the same reason `Select` and `Field` must.
+        //
+        // Declining a float-typed field is not a concern here — depth is only
+        // defined along a *reference* field — but a non-reference descriptor
+        // means the producer published a claim it had no business making, and
+        // the safe reading of a claim we cannot interpret is to refuse the
+        // discharge rather than to guess at it.
+        Expr::Depth { field, obj } => {
+            if !(field.desc.starts_with('L') || field.desc.starts_with('[')) {
+                return None;
+            }
+            format!(
+                "(select {}{} {})",
+                depth_array_name(field),
                 if post { "p" } else { "" },
                 render(obj, post)?
             )
