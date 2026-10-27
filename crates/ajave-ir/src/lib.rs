@@ -190,6 +190,35 @@ pub struct FieldKey {
     pub desc: String,
 }
 
+/// Where an object was allocated: one `new` or `newarray` instruction.
+///
+/// **A site is not an object.** A `new` inside a loop produces many objects at
+/// one site, and an analysis keyed by site conflates them. That is the standard
+/// allocation-site abstraction: sound as an over-approximation, and strictly
+/// more precise than the alternative the tree had before it, which was to merge
+/// every instance of a class into one cell because there was no identity to key
+/// on at all.
+///
+/// # Scope
+///
+/// Body-relative, like `BlockId` and `ObligationId`. A global identity is
+/// `(MethodKey, AllocSite)`, and `CLAUDE.md` is explicit that a collection
+/// keyed by a body-relative id alone, outliving that body, is the defect class
+/// that cost 32 points once.
+///
+/// Deliberately *not* an interned program-wide `u32`. Interning would need a
+/// deterministic order over `Program::bodies`, which is a `HashMap` — and a
+/// verdict that depends on hash iteration order is the noise source
+/// `CLAUDE.md` records as having been mistaken for timeout variance for a long
+/// time. Deriving the site from its syntactic position makes it deterministic
+/// by construction rather than by discipline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AllocSite {
+    pub block: BlockId,
+    /// Index of the allocating statement within the block.
+    pub index: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rvalue {
     Use(Operand),
@@ -229,6 +258,8 @@ pub enum Rvalue {
     NewArray {
         elem: String,
         len: Operand,
+        /// Where this array was allocated. See `AllocSite`.
+        site: AllocSite,
     },
     InstanceOf {
         obj: Operand,
@@ -239,7 +270,11 @@ pub enum Rvalue {
     Cast(Ty, Ty, Operand),
     /// Three-way comparison (`lcmp`, `fcmpl`, `dcmpg`): -1 / 0 / 1.
     Cmp(CmpKind, Operand, Operand),
-    New(String),
+    New {
+        class: String,
+        /// Where this object was allocated. See `AllocSite`.
+        site: AllocSite,
+    },
     Call {
         target: MethodKey,
         args: Vec<Operand>,
@@ -696,7 +731,7 @@ impl Program {
                             }
                         }
                         // new X triggers X.<clinit>
-                        Stmt::Assign(_, Rvalue::New(class)) => {
+                        Stmt::Assign(_, Rvalue::New { class, .. }) => {
                             let clinit = MethodKey {
                                 class: class.clone(),
                                 name: "<clinit>".into(),
@@ -787,11 +822,11 @@ impl fmt::Display for Rvalue {
             Rvalue::GetField { obj, field } => write!(f, "{obj}.{}", field.name),
             Rvalue::ArrayLoad { arr, idx } => write!(f, "{arr}[{idx}]"),
             Rvalue::ArrayLength(a) => write!(f, "{a}.length"),
-            Rvalue::NewArray { elem, len } => write!(f, "new {elem}[{len}]"),
+            Rvalue::NewArray { elem, len, .. } => write!(f, "new {elem}[{len}]"),
             Rvalue::InstanceOf { obj, class } => write!(f, "{obj} instanceof {class}"),
             Rvalue::Cast(t, _src, o) => write!(f, "({t:?}) {o}"),
             Rvalue::Cmp(k, a, b) => write!(f, "cmp({k:?}, {a}, {b})"),
-            Rvalue::New(c) => write!(f, "new {c}"),
+            Rvalue::New { class: c, .. } => write!(f, "new {c}"),
             Rvalue::Call { target, args, .. } => {
                 let a: Vec<String> = args.iter().map(|x| x.to_string()).collect();
                 write!(f, "call {}({})", target, a.join(", "))
@@ -888,6 +923,8 @@ pub fn rvalue_operands(rv: &Rvalue) -> Vec<&Operand> {
         Rvalue::ArrayLoad { arr, idx } => vec![arr, idx],
         Rvalue::NewArray { len, .. } => vec![len],
         Rvalue::Call { args, .. } => args.iter().collect(),
-        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New(_) => vec![],
+        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New { .. } => {
+            vec![]
+        }
     }
 }

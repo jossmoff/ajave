@@ -59,7 +59,7 @@ fn rvalue_uses(rv: &Rvalue, out: &mut BTreeSet<usize>) {
         }
         Rvalue::NewArray { len, .. } => operand_var(len, out),
         Rvalue::Call { args, .. } => operands_var(args, out),
-        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New(_) => {}
+        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New { .. } => {}
     }
 }
 

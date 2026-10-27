@@ -155,6 +155,8 @@ pub(crate) fn rvalue_operands_mut(rv: &mut Rvalue) -> Vec<&mut Operand> {
         Rvalue::ArrayLoad { arr, idx } => vec![arr, idx],
         Rvalue::NewArray { len, .. } => vec![len],
         Rvalue::Call { args, .. } => args.iter_mut().collect(),
-        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New(_) => vec![],
+        Rvalue::Nondet(..) | Rvalue::Havoc(..) | Rvalue::GetStatic(_) | Rvalue::New { .. } => {
+            vec![]
+        }
     }
 }

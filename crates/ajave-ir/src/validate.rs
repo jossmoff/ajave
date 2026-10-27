@@ -70,6 +70,20 @@ pub enum Defect {
     /// A `BlockId` outside this body. The historical instance: `current_block`
     /// was not restored after inlining, so a callee's id indexed the caller's
     /// blocks.
+    /// An allocation names a position that is not where it appears.
+    ///
+    /// `AllocSite` is body-relative and derived from the allocation's own
+    /// syntactic position, so a site disagreeing with where the statement
+    /// actually sits means something rewrote statements without updating the
+    /// sites — and an analysis keyed by site would then attribute two
+    /// different objects to one cell, or one object to a cell nothing writes.
+    /// `ajave-opt` moves statements, which is exactly how this would happen.
+    AllocSiteMisplaced {
+        at: BlockId,
+        index: usize,
+        claimed_block: BlockId,
+        claimed_index: u32,
+    },
     BlockOutOfRange {
         site: String,
         target: u32,
@@ -117,6 +131,16 @@ impl fmt::Display for Defect {
             Defect::VarOutOfRange { site, var, vars } => {
                 write!(f, "{site} refers to v{var} of {vars}")
             }
+            Defect::AllocSiteMisplaced {
+                at,
+                index,
+                claimed_block,
+                claimed_index,
+            } => write!(
+                f,
+                "allocation at bb{}[{index}] claims site bb{}[{claimed_index}]",
+                at.0, claimed_block.0
+            ),
             Defect::BlockOutOfRange {
                 site,
                 target,
@@ -201,12 +225,29 @@ pub fn defects(body: &Body) -> Vec<Defect> {
     let mut checked: Vec<usize> = vec![0; nobs];
     for b in &body.blocks {
         let at = format!("bb{}", b.id.0);
-        for s in &b.stmts {
+        for (si, s) in b.stmts.iter().enumerate() {
             match s {
                 Stmt::Assign(v, rv) => {
                     var(&mut out, *v, format!("{at} assignment target"));
                     for op in rvalue_operands(rv) {
                         operand(&mut out, op, format!("{at} rvalue"));
+                    }
+                    // An allocation must name where it actually is.
+                    let site = match rv {
+                        crate::Rvalue::New { site, .. } | crate::Rvalue::NewArray { site, .. } => {
+                            Some(*site)
+                        }
+                        _ => None,
+                    };
+                    if let Some(site) = site {
+                        if site.block != b.id || site.index as usize != si {
+                            out.push(Defect::AllocSiteMisplaced {
+                                at: b.id,
+                                index: si,
+                                claimed_block: site.block,
+                                claimed_index: site.index,
+                            });
+                        }
                     }
                 }
                 Stmt::Check(oid) => {
@@ -485,5 +526,137 @@ mod tests {
         let msg = check(&b).unwrap_err();
         assert!(msg.starts_with("C.m()V: "), "{msg}");
         assert!(msg.contains("bb9"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod alloc_site_tests {
+    //! H0 (#98). An allocation must name where it actually is.
+
+    use super::*;
+    use crate::*;
+
+    fn body_with(stmts: Vec<Stmt>) -> Body {
+        Body {
+            is_static: true,
+            key: MethodKey {
+                class: "Main".into(),
+                name: "m".into(),
+                desc: "()V".into(),
+            },
+            entry: BlockId(0),
+            vars: vec![VarInfo {
+                kind: VarKind::Local(0),
+                ty: Ty::Ref,
+            }],
+            obligations: vec![],
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts,
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_correctly_placed_allocation_validates() {
+        let b = body_with(vec![Stmt::Assign(
+            VarId(0),
+            Rvalue::New {
+                class: "Foo".into(),
+                site: AllocSite {
+                    block: BlockId(0),
+                    index: 0,
+                },
+            },
+        )]);
+        assert!(check(&b).is_ok(), "{:?}", defects(&b));
+    }
+
+    /// The failure mode this check exists for: `ajave-opt` moves statements,
+    /// and a site left behind would make an analysis attribute two different
+    /// objects to one cell, or one object to a cell nothing writes.
+    #[test]
+    fn a_site_that_disagrees_with_its_position_is_a_defect() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), Rvalue::Use(Operand::Const(Const::Null))),
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Foo".into(),
+                    // Sits at index 1, claims index 0 — what a statement
+                    // reorder that forgot to update the site looks like.
+                    site: AllocSite {
+                        block: BlockId(0),
+                        index: 0,
+                    },
+                },
+            ),
+        ]);
+        let d = defects(&b);
+        assert!(
+            d.iter()
+                .any(|x| matches!(x, Defect::AllocSiteMisplaced { .. })),
+            "expected AllocSiteMisplaced, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn an_array_allocation_is_checked_the_same_way() {
+        let b = body_with(vec![Stmt::Assign(
+            VarId(0),
+            Rvalue::NewArray {
+                elem: "I".into(),
+                len: Operand::Const(Const::Int(3)),
+                site: AllocSite {
+                    block: BlockId(1),
+                    index: 9,
+                },
+            },
+        )]);
+        assert!(defects(&b)
+            .iter()
+            .any(|x| matches!(x, Defect::AllocSiteMisplaced { .. })));
+    }
+
+    /// Two allocations in one block get distinct sites, which is the whole
+    /// point: without identity the tree merged every instance of a class.
+    #[test]
+    fn two_allocations_in_one_block_have_distinct_sites() {
+        let b = body_with(vec![
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Foo".into(),
+                    site: AllocSite {
+                        block: BlockId(0),
+                        index: 0,
+                    },
+                },
+            ),
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Foo".into(),
+                    site: AllocSite {
+                        block: BlockId(0),
+                        index: 1,
+                    },
+                },
+            ),
+        ]);
+        assert!(check(&b).is_ok(), "{:?}", defects(&b));
+        let sites: Vec<AllocSite> = b.blocks[0]
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Assign(_, Rvalue::New { site, .. }) => Some(*site),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sites.len(), 2);
+        assert_ne!(sites[0], sites[1], "same class, same block, same site");
     }
 }

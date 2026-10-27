@@ -126,7 +126,7 @@ pub fn discover(prog: &Program) -> ThreadDiscovery {
         for block in &body.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    Stmt::Assign(v, Rvalue::New(class)) => {
+                    Stmt::Assign(v, Rvalue::New { class, .. }) => {
                         next_alloc += 1;
                         var_alloc.insert(*v, next_alloc);
                         alloc_class.insert(next_alloc, class.clone());

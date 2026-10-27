@@ -36,7 +36,7 @@ fn removable(rv: &Rvalue) -> bool {
         // NegativeArraySizeException for n < 0, and object identity is
         // observable through reference equality, which is exactly what the
         // heap encoding's allocation addresses rely on.
-        Rvalue::New(_) | Rvalue::NewArray { .. } => false,
+        Rvalue::New { .. } | Rvalue::NewArray { .. } => false,
 
         // A load can throw — NullPointerException, ArrayIndexOutOfBounds — and
         // the obligation for that is a separate statement, so dropping the load

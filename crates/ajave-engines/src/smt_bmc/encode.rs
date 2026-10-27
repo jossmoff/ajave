@@ -296,7 +296,7 @@ impl<'a> ExploreCtx<'a> {
                 let arr = self.get_field_array(&k, w);
                 self.solver.array_select(arr, obj_term)
             }
-            Rvalue::New(class) => {
+            Rvalue::New { class, .. } => {
                 let id = self.next_alloc_id;
                 self.next_alloc_id += 1;
                 let ref_term = self.solver.bv_const(id, 32);

@@ -144,7 +144,7 @@ pub fn check_preconditions(prog: &Program) -> Result<Vec<crate::threads::ThreadE
         for block in &body.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    Stmt::Assign(v, Rvalue::New(cls)) => {
+                    Stmt::Assign(v, Rvalue::New { class: cls, .. }) => {
                         *alloc_count.entry(cls.clone()).or_insert(0) += 1;
                         var_class.insert(*v, cls.clone());
                         if UNMODELLED_PRIMITIVES.contains(&cls.as_str()) {

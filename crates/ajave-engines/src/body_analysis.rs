@@ -342,7 +342,7 @@ pub fn stmt_is_havoced_op(stmt: &Stmt) -> bool {
                 | Rvalue::Havoc(_, _)
                 | Rvalue::ArrayLoad { .. }
                 | Rvalue::ArrayLength(_)
-                | Rvalue::New(_)
+                | Rvalue::New { .. }
                 | Rvalue::NewArray { .. }
         ),
         Stmt::PutField { .. } | Stmt::PutStatic { .. } | Stmt::ArrayStore { .. } => true,

@@ -205,8 +205,8 @@ impl Run {
                 }
                 self.eval_bin(*op, self.eval(a), self.eval(b))
             }
-            Rvalue::New(_cls) => Value::Unknown, // handled in run_with_choices
-            Rvalue::NewArray { .. } => Value::Ref(0), // handled in run_with_choices
+            Rvalue::New { class: _cls, .. } => Value::Unknown, // handled in run_with_choices
+            Rvalue::NewArray { .. } => Value::Ref(0),          // handled in run_with_choices
             Rvalue::GetStatic(_) | Rvalue::GetField { .. } | Rvalue::ArrayLoad { .. } => {
                 Value::Unknown
             }
@@ -643,7 +643,7 @@ impl<'a> ConcreteState<'a> {
         match rv {
             Rvalue::Nondet(ty, _) => Ok(self.eval_nondet(ty)),
             Rvalue::Havoc(ty, _) => Ok(self.eval_havoc(ty)),
-            Rvalue::New(cls) => {
+            Rvalue::New { class: cls, .. } => {
                 let aid = self.alloc_id;
                 self.alloc_id += 1;
                 self.alloc_types.insert(aid, cls.clone());

@@ -1197,7 +1197,7 @@ impl<'a> Interp<'a> {
                 };
                 Val::Int(c as i64)
             }
-            Rvalue::New(class) => {
+            Rvalue::New { class, .. } => {
                 let id = self.next_obj;
                 self.next_obj += 1;
                 // Remember the class: `start()` resolves a thread's body from
@@ -3600,7 +3600,16 @@ mod tests {
                 mk("Main", "main", "()V"),
                 4,
                 vec![
-                    Stmt::Assign(VarId(1), Rvalue::New("Main$W".into())),
+                    Stmt::Assign(
+                        VarId(1),
+                        Rvalue::New {
+                            class: "Main$W".into(),
+                            site: ajave_ir::AllocSite {
+                                block: BlockId(0),
+                                index: 0,
+                            },
+                        },
+                    ),
                     // What the implicit `super()` in `W.<init>` compiles to.
                     call(2, mk(THREAD, "<init>", "()V"), vec![v(1)]),
                     // javac emits the declared type here, not java/lang/Thread.
@@ -3706,9 +3715,27 @@ mod tests {
                 mk("Main", "main", "()V"),
                 5,
                 vec![
-                    Stmt::Assign(VarId(1), Rvalue::New(THREAD.into())),
+                    Stmt::Assign(
+                        VarId(1),
+                        Rvalue::New {
+                            class: THREAD.into(),
+                            site: ajave_ir::AllocSite {
+                                block: BlockId(0),
+                                index: 0,
+                            },
+                        },
+                    ),
                     call(3, mk(THREAD, "<init>", "()V"), vec![v(1)]),
-                    Stmt::Assign(VarId(2), Rvalue::New(THREAD.into())),
+                    Stmt::Assign(
+                        VarId(2),
+                        Rvalue::New {
+                            class: THREAD.into(),
+                            site: ajave_ir::AllocSite {
+                                block: BlockId(0),
+                                index: 0,
+                            },
+                        },
+                    ),
                     call(4, mk(THREAD, "<init>", "()V"), vec![v(2)]),
                 ],
             ),
@@ -3737,8 +3764,26 @@ mod tests {
     /// its own receiver.
     fn runnable_program(join: bool) -> Program {
         let mut stmts = vec![
-            Stmt::Assign(VarId(1), Rvalue::New("W".into())),
-            Stmt::Assign(VarId(2), Rvalue::New(THREAD.into())),
+            Stmt::Assign(
+                VarId(1),
+                Rvalue::New {
+                    class: "W".into(),
+                    site: ajave_ir::AllocSite {
+                        block: BlockId(0),
+                        index: 0,
+                    },
+                },
+            ),
+            Stmt::Assign(
+                VarId(2),
+                Rvalue::New {
+                    class: THREAD.into(),
+                    site: ajave_ir::AllocSite {
+                        block: BlockId(0),
+                        index: 0,
+                    },
+                },
+            ),
             call(
                 3,
                 mk(THREAD, "<init>", "(Ljava/lang/Runnable;)V"),
@@ -3989,7 +4034,16 @@ mod tests {
                 mk("Main", "main", "()V"),
                 7,
                 vec![
-                    Stmt::Assign(VarId(1), Rvalue::New("Main$W".into())),
+                    Stmt::Assign(
+                        VarId(1),
+                        Rvalue::New {
+                            class: "Main$W".into(),
+                            site: ajave_ir::AllocSite {
+                                block: BlockId(0),
+                                index: 0,
+                            },
+                        },
+                    ),
                     call(2, mk(THREAD, "<init>", "()V"), vec![v(1)]),
                     call(3, mk("Main$W", "isAlive", "()Z"), vec![v(1)]),
                     call(4, mk("Main$W", "start", "()V"), vec![v(1)]),
@@ -4081,7 +4135,16 @@ mod tests {
                 mk("Main", "main", "()V"),
                 2,
                 vec![
-                    Stmt::Assign(VarId(0), Rvalue::New(THREAD.into())),
+                    Stmt::Assign(
+                        VarId(0),
+                        Rvalue::New {
+                            class: THREAD.into(),
+                            site: ajave_ir::AllocSite {
+                                block: BlockId(0),
+                                index: 0,
+                            },
+                        },
+                    ),
                     // No `<init>`, so no identity was ever assigned.
                     call(1, mk(THREAD, "start", "()V"), vec![v(0)]),
                 ],

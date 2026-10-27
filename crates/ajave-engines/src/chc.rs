@@ -820,7 +820,7 @@ fn lia_rvalue(
             let r = lia_operand(b, var_map);
             format!("(ite (< {} {}) (- 1) (ite (= {} {}) 0 1))", l, r, l, r)
         }
-        Rvalue::New(_) => fresh.fresh(),
+        Rvalue::New { .. } => fresh.fresh(),
         other => {
             log::debug!(
                 "chc-imprecision: rvalue {}",
@@ -1386,7 +1386,7 @@ fn encode_chc_interproc(
                             // The lifter represents null as 0, so "non-null" is
                             // `> 0`. Asserting a fact the JVM guarantees narrows no
                             // reachable behaviour, so this cannot hide a violation.
-                            Rvalue::New(_) | Rvalue::NewArray { .. } => {
+                            Rvalue::New { .. } | Rvalue::NewArray { .. } => {
                                 let r = fresh.fresh();
                                 constraints.push(format!("(> {} 0)", r));
                                 if let Rvalue::NewArray { len, .. } = rv {

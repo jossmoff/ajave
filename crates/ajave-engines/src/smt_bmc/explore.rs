@@ -940,7 +940,7 @@ impl<'a> ExploreCtx<'a> {
         self.var_widths.insert(v, self.rvalue_result_width(rv));
         // Track concrete class from `new` for exception dispatch / instanceof.
         match rv {
-            Rvalue::New(class) => {
+            Rvalue::New { class, .. } => {
                 self.concrete_classes.insert(v, class.clone());
             }
             Rvalue::Use(Operand::Var(src)) => {

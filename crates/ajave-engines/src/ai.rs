@@ -53,7 +53,7 @@ fn analyze_constructor_fields(prog: &Program) -> HashSet<FieldKey> {
             for stmt in &block.stmts {
                 if let Stmt::Assign(v, rv) = stmt {
                     match rv {
-                        Rvalue::New(_) | Rvalue::NewArray { .. } => {
+                        Rvalue::New { .. } | Rvalue::NewArray { .. } => {
                             nonnull_vars.insert(*v);
                         }
                         Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => {
@@ -219,7 +219,7 @@ fn analyze_return_nullness(
             for stmt in &block.stmts {
                 if let Stmt::Assign(v, rv) = stmt {
                     let nonnull = match rv {
-                        Rvalue::New(_) | Rvalue::NewArray { .. } => true,
+                        Rvalue::New { .. } | Rvalue::NewArray { .. } => true,
                         Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => true,
                         Rvalue::GetStatic(fk) if crate::interval::is_nonnull_static(fk) => true,
                         Rvalue::GetField {
@@ -292,7 +292,7 @@ fn analyze_field_precision(prog: &Program) -> crate::interval::FieldPrec {
         let looping = body_has_loops(body);
         for block in &body.blocks {
             for stmt in &block.stmts {
-                if let Stmt::Assign(_, Rvalue::New(cls)) = stmt {
+                if let Stmt::Assign(_, Rvalue::New { class: cls, .. }) = stmt {
                     *alloc_sites.entry(cls.clone()).or_insert(0) += 1;
                     if looping {
                         // Conservative: we do not check whether this particular

@@ -738,6 +738,10 @@ mod tests {
                     Rvalue::NewArray {
                         elem: "I".into(),
                         len: Operand::int(4),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
                     },
                 ),
                 Stmt::ArrayStore {
@@ -776,6 +780,10 @@ mod tests {
                     Rvalue::NewArray {
                         elem: "I".into(),
                         len: Operand::int(4),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
                     },
                 ),
                 Stmt::ArrayStore {
@@ -817,6 +825,10 @@ mod tests {
                     Rvalue::NewArray {
                         elem: "I".into(),
                         len: Operand::int(4),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
                     },
                 ),
                 Stmt::ArrayStore {
@@ -863,8 +875,26 @@ mod tests {
         };
         let body = straight_line(
             vec![
-                Stmt::Assign(o, Rvalue::New("Obj".into())),
-                Stmt::Assign(q, Rvalue::New("Obj".into())),
+                Stmt::Assign(
+                    o,
+                    Rvalue::New {
+                        class: "Obj".into(),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
+                    },
+                ),
+                Stmt::Assign(
+                    q,
+                    Rvalue::New {
+                        class: "Obj".into(),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
+                    },
+                ),
                 Stmt::PutField {
                     obj: Operand::Var(o),
                     field: f.clone(),
@@ -907,7 +937,16 @@ mod tests {
         };
         let body = straight_line(
             vec![
-                Stmt::Assign(o, Rvalue::New("Obj".into())),
+                Stmt::Assign(
+                    o,
+                    Rvalue::New {
+                        class: "Obj".into(),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
+                    },
+                ),
                 Stmt::PutField {
                     obj: Operand::Var(o),
                     field: f.clone(),
@@ -955,7 +994,16 @@ mod tests {
         };
         let body = straight_line(
             vec![
-                Stmt::Assign(o, Rvalue::New("Obj".into())),
+                Stmt::Assign(
+                    o,
+                    Rvalue::New {
+                        class: "Obj".into(),
+                        site: ajave_ir::AllocSite {
+                            block: BlockId(0),
+                            index: 0,
+                        },
+                    },
+                ),
                 Stmt::PutField {
                     obj: Operand::Var(o),
                     field: f.clone(),

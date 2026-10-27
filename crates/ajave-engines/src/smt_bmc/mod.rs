@@ -1578,7 +1578,7 @@ impl<'a> ExploreCtx<'a> {
                 Self::field_elem_width(&fk.desc)
             }
             Rvalue::ArrayLoad { .. } => 32, // element arrays are 32-bit
-            Rvalue::New(_) | Rvalue::NewArray { .. } => 32,
+            Rvalue::New { .. } | Rvalue::NewArray { .. } => 32,
             Rvalue::Call { target, .. } => Self::ret_width_from_desc(&target.desc),
         }
     }
@@ -1669,7 +1669,7 @@ impl<'a> ExploreCtx<'a> {
             Rvalue::ArrayLength(arr) => self.operand_tainted(arr),
             Rvalue::NewArray { len, .. } => self.operand_tainted(len),
             Rvalue::InstanceOf { obj, .. } => self.operand_tainted(obj),
-            Rvalue::New(_) => false,
+            Rvalue::New { .. } => false,
             Rvalue::Call {
                 target,
                 args,

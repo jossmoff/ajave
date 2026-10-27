@@ -231,7 +231,9 @@ public class Socket implements java.io.Closeable {
                     ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::Call { target, .. }) => {
                         target.class == "java/net/Socket"
                     }
-                    ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::New(c)) => c == "java/net/Socket",
+                    ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::New { class: c, .. }) => {
+                        c == "java/net/Socket"
+                    }
                     _ => false,
                 })
             })

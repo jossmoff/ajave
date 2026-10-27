@@ -158,6 +158,13 @@ fn an_unread_allocation_is_never_removed() {
                 Rvalue::NewArray {
                     elem: "I".into(),
                     len: Operand::Var(n),
+                    // Index 1: the `Nondet` above is statement 0. The
+                    // validator checks that a site names where it actually
+                    // sits, and caught this fixture claiming index 0.
+                    site: ajave_ir::AllocSite {
+                        block: BlockId(0),
+                        index: 1,
+                    },
                 },
             ),
         ],
@@ -221,7 +228,16 @@ fn monitors_are_never_removed() {
     let m = VarId(0);
     let src = body(
         vec![
-            Stmt::Assign(m, Rvalue::New("java/lang/Object".into())),
+            Stmt::Assign(
+                m,
+                Rvalue::New {
+                    class: "java/lang/Object".into(),
+                    site: ajave_ir::AllocSite {
+                        block: BlockId(0),
+                        index: 0,
+                    },
+                },
+            ),
             Stmt::MonitorEnter(Operand::Var(m)),
             Stmt::MonitorExit(Operand::Var(m)),
         ],

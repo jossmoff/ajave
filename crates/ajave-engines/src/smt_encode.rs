@@ -1060,12 +1060,12 @@ impl<'a> Env<'a> {
                 let inner = self.solver.ite(eq, zero, one);
                 (self.solver.ite(lt, m1, inner), None)
             }
-            Rvalue::New(_) => {
+            Rvalue::New { .. } => {
                 // Non-null by construction, and the index into this object's
                 // field maps.
                 (self.alloc_ref(), None)
             }
-            Rvalue::NewArray { elem, len } => {
+            Rvalue::NewArray { elem, len, .. } => {
                 let site = self.next_site;
                 self.next_site += 1;
                 let w = field_width(elem);

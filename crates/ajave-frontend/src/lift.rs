@@ -598,6 +598,7 @@ pub fn lift_method_with_lambdas(
                 stmts: &mut stmts,
                 block_of: &block_of,
                 insn: &n,
+                block: BlockId(bi as u32),
                 code_len: code.bytes.len(),
             };
             match context.lift() {
@@ -856,9 +857,25 @@ struct InsnContext<'a, 'b> {
     block_of: &'a HashMap<usize, BlockId>,
     insn: &'a Insn,
     code_len: usize,
+    /// The block being built, so an allocation can name where it happened.
+    block: BlockId,
 }
 
 impl<'a, 'b> InsnContext<'a, 'b> {
+    /// Where the *next* statement pushed will sit.
+    ///
+    /// Derived from the syntactic position rather than a counter, so it is
+    /// deterministic by construction. An interned program-wide id would need a
+    /// stable order over `Program::bodies`, which is a `HashMap`, and a verdict
+    /// that depends on hash iteration order is the noise `CLAUDE.md` records as
+    /// having been mistaken for timeout variance for a long time.
+    fn alloc_site(&self) -> ajave_ir::AllocSite {
+        ajave_ir::AllocSite {
+            block: self.block,
+            index: self.stmts.len() as u32,
+        }
+    }
+
     fn pop(&mut self) -> Result<Operand, String> {
         self.stack
             .pop()
@@ -1890,8 +1907,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     // The default is a primitive; the method returns a box.
                     Some(ty) => {
                         let obj = self.lifter.temp(Ty::Ref);
-                        self.stmts
-                            .push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                        let site = self.alloc_site();
+                        self.stmts.push(Stmt::Assign(
+                            obj,
+                            Rvalue::New {
+                                class: target.class.clone(),
+                                site,
+                            },
+                        ));
                         self.stmts.push(Stmt::PutField {
                             obj: Operand::Var(obj),
                             field: FieldKey {
@@ -1912,8 +1935,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 // argument into a synthetic $$value field.
                 let val = args.into_iter().next().unwrap_or(Operand::int(0));
                 let obj = self.lifter.temp(Ty::Ref);
-                self.stmts
-                    .push(Stmt::Assign(obj, Rvalue::New(target.class.clone())));
+                let site = self.alloc_site();
+                self.stmts.push(Stmt::Assign(
+                    obj,
+                    Rvalue::New {
+                        class: target.class.clone(),
+                        site,
+                    },
+                ));
                 self.stmts.push(Stmt::PutField {
                     obj: Operand::Var(obj),
                     field: FieldKey {
@@ -2243,9 +2272,13 @@ impl<'a, 'b> InsnContext<'a, 'b> {
         // `StringBuilder.append` is `Contract::TOTAL_MUT`: total, and
         // `append(null)` appends "null" exactly as concatenation does.
         let sb = self.lifter.temp(Ty::Ref);
+        let site = self.alloc_site();
         self.stmts.push(Stmt::Assign(
             sb,
-            Rvalue::New("java/lang/StringBuilder".into()),
+            Rvalue::New {
+                class: "java/lang/StringBuilder".into(),
+                site,
+            },
         ));
         self.lifter
             .new_classes
@@ -2402,7 +2435,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
 
         let synth = format!("$lambda${}${}", imp.owner, imp.name);
         let t = self.lifter.temp(Ty::Ref);
-        self.stmts.push(Stmt::Assign(t, Rvalue::New(synth.clone())));
+        let site = self.alloc_site();
+        self.stmts.push(Stmt::Assign(
+            t,
+            Rvalue::New {
+                class: synth.clone(),
+                site,
+            },
+        ));
         self.lifter.new_classes.insert(t, synth.clone());
         // Captured values live on the object, exactly as javac stores them on
         // the generated class.
@@ -2436,7 +2476,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
             0xbb => {
                 let cls = self.lifter.cf.class_name(self.insn.imm as u16)?;
                 let t = self.lifter.temp(Ty::Ref);
-                self.stmts.push(Stmt::Assign(t, Rvalue::New(cls.clone())));
+                let site = self.alloc_site();
+                self.stmts.push(Stmt::Assign(
+                    t,
+                    Rvalue::New {
+                        class: cls.clone(),
+                        site,
+                    },
+                ));
                 self.lifter.new_classes.insert(t, cls);
                 self.stack.push(Operand::Var(t));
             }
@@ -2459,7 +2506,8 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                 } else {
                     primitive_array_elem(self.insn.imm).to_string()
                 };
-                let result = self.assign(Ty::Ref, Rvalue::NewArray { elem, len });
+                let site = self.alloc_site();
+                let result = self.assign(Ty::Ref, Rvalue::NewArray { elem, len, site });
                 self.stack.push(result);
             }
             // multianewarray
@@ -2525,12 +2573,14 @@ impl<'a, 'b> InsnContext<'a, 'b> {
                     .class_name(self.insn.imm as u16)
                     .unwrap_or_else(|_| "?".into());
                 let elem = elem.strip_prefix('[').unwrap_or(&elem).to_string();
+                let site = self.alloc_site();
                 let result = match lens.last() {
                     Some(outer) => self.assign(
                         Ty::Ref,
                         Rvalue::NewArray {
                             elem,
                             len: outer.clone(),
+                            site,
                         },
                     ),
                     None => self.assign(Ty::Ref, Rvalue::Havoc(Ty::Ref, None)),

@@ -1100,7 +1100,7 @@ impl IState {
             Rvalue::Use(Operand::Const(Const::Null)) => Nullness::Null,
             Rvalue::Use(Operand::Const(Const::Str(_) | Const::Class(_))) => Nullness::NonNull,
             Rvalue::Use(Operand::Var(v)) => self.get_nullness(*v),
-            Rvalue::New(_) => Nullness::NonNull,
+            Rvalue::New { .. } => Nullness::NonNull,
             Rvalue::NewArray { .. } => Nullness::NonNull,
             Rvalue::GetStatic(fk) if is_nonnull_static(fk) => Nullness::NonNull,
             // An erased call whose result the JDK documents as never null.
