@@ -1058,17 +1058,107 @@ fn encode_chc_interproc(
     // Field and array *contents* are unconstrained reads again: less precise,
     // and honest.
 
+    // Which methods may write an array, transitively (#95).
+    //
+    // A call used to clobber every site's contents unconditionally, which is
+    // sound but defeats the exact programs this work is for:
+    //
+    //     for (i = 0; i < n; i++) array[i] = new A();
+    //
+    // `new A()` is a constructor *call*, so every iteration erased what the
+    // previous one established and no loop invariant about the array could
+    // survive. `A.<init>` writes no array at all.
+    //
+    // Same shape as `FieldPrec::writes` in the interval AI, which records the
+    // fields a method may write so a call invalidates those cells rather than
+    // the whole map. An unresolved callee still clobbers everything, because
+    // nothing is known about it.
+    let array_writers: std::collections::HashSet<MethodKey> = {
+        let mut direct: std::collections::HashSet<MethodKey> = Default::default();
+        let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
+        for (mk2, body2) in &prog.bodies {
+            let mut cs = Vec::new();
+            for block in &body2.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::ArrayStore { .. } => {
+                            direct.insert(mk2.clone());
+                        }
+                        Stmt::Assign(_, Rvalue::Call { target, .. }) => cs.push(target.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            callees.insert(mk2.clone(), cs);
+        }
+        // Transitive closure: a caller of a writer is a writer.
+        loop {
+            let before = direct.len();
+            for (caller, cs) in &callees {
+                if direct.contains(caller) {
+                    continue;
+                }
+                // An unresolved callee is unknown, so assume it writes.
+                if cs
+                    .iter()
+                    .any(|c| direct.contains(c) || !prog.bodies.contains_key(c))
+                {
+                    direct.insert(caller.clone());
+                }
+            }
+            if direct.len() == before {
+                break;
+            }
+        }
+        direct
+    };
+
+    // Array contents, per method, as extra relation arguments (#95).
+    //
+    // Computed once here and shared by the declaration loop below and the
+    // encoding loop further down, rather than recomputed per method in each —
+    // `array_sites_of` walks every statement twice, and this encoder already
+    // generates tens of kilobytes per task.
+    //
+    // Appended *uniformly* to every block relation of a method, not filtered
+    // by `live_at`. Liveness is computed over the integer slot space and knows
+    // nothing about arrays, and a relation whose arity varied by block would
+    // have to agree with every application site — a mismatch there produces a
+    // malformed or subtly wrong Horn query, and in Horn mode `unsat` means
+    // *unsafe*, so the failure mode is a lost proof that looks like an honest
+    // UNKNOWN. Uniform arity cannot drift.
+    let method_arrays: HashMap<MethodKey, Vec<ajave_ir::AllocSite>> = all_methods
+        .iter()
+        .filter_map(|mk| {
+            let body = prog.body(mk)?;
+            let mut v: Vec<_> = crate::interpolation::array_sites_of(body)
+                .values()
+                .copied()
+                .collect();
+            v.sort();
+            v.dedup();
+            Some((mk.clone(), v))
+        })
+        .collect();
+    let arr_src = |st: &ajave_ir::AllocSite| format!("a{}_{}", st.block.0, st.index);
+    let arr_dst = |st: &ajave_ir::AllocSite| format!("b{}_{}", st.block.0, st.index);
+    const ARR_SORT: &str = "(Array Int Int)";
+
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = &method_ids[mk];
+        let sites = method_arrays.get(mk).cloned().unwrap_or_default();
 
         out.push_str(&format!("; blocks for {}\n", mk));
         for block in &body.blocks {
-            let sig = live_at(mk, block.id.0)
+            let mut parts: Vec<String> = live_at(mk, block.id.0)
                 .iter()
-                .map(|_| "Int")
-                .collect::<Vec<_>>()
-                .join(" ");
+                .map(|_| "Int".to_string())
+                .collect();
+            for _ in &sites {
+                parts.push(ARR_SORT.to_string());
+            }
+            let sig = parts.join(" ");
             out.push_str(&format!(
                 "(declare-fun {}_b{} ({}) Bool)\n",
                 mid, block.id.0, sig
@@ -1104,12 +1194,16 @@ fn encode_chc_interproc(
         let total_slots = 2 * n_vars;
         let src_vars: Vec<String> = (0..total_slots).map(|i| format!("v{}", i)).collect();
         let dst_vars: Vec<String> = (0..total_slots).map(|i| format!("w{}", i)).collect();
+        let sites = method_arrays.get(mk).cloned().unwrap_or_default();
+        let array_sites = crate::interpolation::array_sites_of(body);
 
-        let forall_src: String = src_vars
-            .iter()
-            .map(|v| format!("({} Int)", v))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let forall_src: String = {
+            let mut v: Vec<String> = src_vars.iter().map(|x| format!("({} Int)", x)).collect();
+            for st in &sites {
+                v.push(format!("({} {})", arr_src(st), ARR_SORT));
+            }
+            v.join(" ")
+        };
 
         // Every clause body that mentions a source block goes through here, so
         // conjoining the block's invariant once reaches all of them.
@@ -1123,11 +1217,14 @@ fn encode_chc_interproc(
             }
         };
         let block_app_src = |bid: u32| -> String {
-            let args = live_at(mk, bid)
+            let mut arg_parts: Vec<String> = live_at(mk, bid)
                 .iter()
                 .map(|i| src_vars[*i].clone())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect();
+            for st in &sites {
+                arg_parts.push(arr_src(st));
+            }
+            let args = arg_parts.join(" ");
             let app = app_of(&mid, bid, &args);
 
             // Every integral variable is within its JVM type's range.
@@ -1195,11 +1292,14 @@ fn encode_chc_interproc(
             }
         };
         let block_app_dst = |bid: u32| -> String {
-            let args = live_at(mk, bid)
+            let mut arg_parts: Vec<String> = live_at(mk, bid)
                 .iter()
                 .map(|i| dst_vars[*i].clone())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect();
+            for st in &sites {
+                arg_parts.push(arr_dst(st));
+            }
+            let args = arg_parts.join(" ");
             app_of(&mid, bid, &args)
         };
 
@@ -1222,12 +1322,23 @@ fn encode_chc_interproc(
         // state instead of being asserted as global truths.
         let entry_body = {
             let full = block_app_src(body.entry.0);
+            // The same argument list `block_app_src` builds, arrays included.
+            //
+            // This rebuilt it from `live_at` alone, which was identical while
+            // the relation's arguments *were* the live set. Adding array
+            // arguments made the two disagree: the entry clause applied a
+            // 1-ary relation with no arguments, and z3 rejected the whole
+            // file — reported as `unknown`, which reads as the solver giving
+            // up rather than the query being malformed.
             let app = app_of(&mid, body.entry.0, &{
-                live_at(mk, body.entry.0)
+                let mut parts: Vec<String> = live_at(mk, body.entry.0)
                     .iter()
                     .map(|i| src_vars[*i].clone())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                    .collect();
+                for st in &sites {
+                    parts.push(arr_src(st));
+                }
+                parts.join(" ")
             });
             if full == app {
                 app
@@ -1283,6 +1394,9 @@ fn encode_chc_interproc(
             };
             let mut var_map: HashMap<usize, String> = HashMap::new();
             let mut call_constraints: Vec<String> = Vec::new();
+            // Current symbolic value of each site's array, rewritten by stores.
+            let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
+                sites.iter().map(|st| (*st, arr_src(st))).collect();
 
             for i in 0..total_slots {
                 var_map.insert(i, format!("v{}", i));
@@ -1339,6 +1453,28 @@ fn encode_chc_interproc(
                         }
                         match rv {
                             Rvalue::Call { target, args, .. } => {
+                                // Clobber this method's array contents only
+                                // if the callee may actually write an array.
+                                //
+                                // Arrays are not threaded through the summary
+                                // relations — those have arity `params + 1`
+                                // and caller and callee have different site
+                                // sets — so a callee that *does* write one
+                                // must be treated as writing all of them. A
+                                // callee that writes none, which is every
+                                // ordinary constructor, leaves them alone.
+                                //
+                                // That distinction is the difference between
+                                // proving `for (i..) a[i] = new A();` and not:
+                                // clobbering on the constructor erased each
+                                // iteration's work.
+                                if array_writers.contains(target)
+                                    || !prog.bodies.contains_key(target)
+                                {
+                                    for st in sites.iter() {
+                                        arr_map.insert(*st, arr_dst(st));
+                                    }
+                                }
                                 let callee_ret_ch = return_type_char(&target.desc);
                                 if let Some(callee_mid) = method_ids.get(target) {
                                     if callee_ret_ch != 'V' {
@@ -1441,6 +1577,22 @@ fn encode_chc_interproc(
                                     .unwrap_or_else(|| format!("v{}", g));
                                 var_map.insert(vid.0 as usize, v);
                             }
+                            // An element read resolves to a `select` on the
+                            // site's array when the reference names exactly one
+                            // site (#95). Otherwise it falls through below to a
+                            // fresh constant, which is what every array read
+                            // did before.
+                            Rvalue::ArrayLoad { arr, idx }
+                                if crate::interpolation::operand_site(arr, &array_sites)
+                                    .and_then(|st| arr_map.get(&st))
+                                    .is_some() =>
+                            {
+                                let st = crate::interpolation::operand_site(arr, &array_sites)
+                                    .expect("guarded above");
+                                let cur = arr_map[&st].clone();
+                                let i = lia_operand(idx, &var_map);
+                                var_map.insert(vid.0 as usize, format!("(select {cur} {i})"));
+                            }
                             // Heap reads: a fresh value constrained by the space
                             // invariant, rather than an unconstrained one.
                             _ => {
@@ -1471,6 +1623,29 @@ fn encode_chc_interproc(
                                     name
                                 };
                                 var_map.insert(vid.0 as usize, expr);
+                            }
+                        }
+                    }
+                    Stmt::ArrayStore { arr, idx, val } => {
+                        // This loop had no arm for stores at all, so an
+                        // `ArrayStore` was dropped outright — which is why
+                        // array contents meant nothing here even before the
+                        // reads became fresh constants.
+                        let i = lia_operand(idx, &var_map);
+                        let v = lia_operand(val, &var_map);
+                        match crate::interpolation::operand_site(arr, &array_sites) {
+                            Some(st) => {
+                                if let Some(cur) = arr_map.get(&st).cloned() {
+                                    arr_map.insert(st, format!("(store {cur} {i} {v})"));
+                                }
+                            }
+                            // A store through a reference naming no single site
+                            // may land in any array, so no site's contents
+                            // survive it. Dropping only some would be unsound.
+                            None => {
+                                for st in sites.iter() {
+                                    arr_map.insert(*st, arr_dst(st));
+                                }
                             }
                         }
                     }
@@ -1648,13 +1823,30 @@ fn encode_chc_interproc(
                     assign_conds.push(format!("(= {} {})", dst, val));
                 }
             }
+            // Arrays are state, so the post-state must say what happened to
+            // them. Leaving the post-state array unconstrained would let an
+            // invariant about it survive a transition that clobbers the array.
+            for st in &sites {
+                let dst = arr_dst(st);
+                if let Some(cur) = arr_map.get(st) {
+                    if *cur != dst {
+                        assign_conds.push(format!("(= {} {})", dst, cur));
+                    }
+                }
+            }
 
-            let forall_both: String = src_vars
-                .iter()
-                .chain(dst_vars.iter())
-                .map(|v| format!("({} Int)", v))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let forall_both: String = {
+                let mut v: Vec<String> = src_vars
+                    .iter()
+                    .chain(dst_vars.iter())
+                    .map(|x| format!("({} Int)", x))
+                    .collect();
+                for st in &sites {
+                    v.push(format!("({} {})", arr_src(st), ARR_SORT));
+                    v.push(format!("({} {})", arr_dst(st), ARR_SORT));
+                }
+                v.join(" ")
+            };
 
             let mk_trans = |target_bid: u32, extra: &[String], out: &mut String| {
                 let mut all = constraints.clone();
@@ -1919,7 +2111,7 @@ fn clause(binders: &str, body: &str, head: &str) -> String {
 
 fn tighten_forall(binders: &str, clause_body: &str, clause_head: &str) -> String {
     let mut kept = Vec::new();
-    for decl in binders.split(") (") {
+    for decl in split_binders(binders) {
         let name = decl
             .trim_start_matches('(')
             .split_whitespace()
@@ -1929,10 +2121,48 @@ fn tighten_forall(binders: &str, clause_body: &str, clause_head: &str) -> String
             continue;
         }
         if mentions(clause_body, name) || mentions(clause_head, name) {
-            kept.push(format!("({} Int)", name));
+            // The declaration is kept verbatim, sort included.
+            //
+            // This used to rebuild it as `(name Int)`, discarding the sort.
+            // That was correct for exactly as long as every binder was an
+            // `Int`, and silently wrong the moment one was not: an array
+            // binder came back as `(a0_0 Int)`, so `store` was applied to
+            // something of integer sort and z3 rejected the clause. The whole
+            // file then answers `unknown`, which reads as "the solver could
+            // not decide" rather than "the query was malformed".
+            kept.push(decl.to_string());
         }
     }
     kept.join(" ")
+}
+
+/// Split a `forall` binder list into its declarations.
+///
+/// Parenthesis-aware, because a sort can itself be a list: splitting the text
+/// on `") ("` tears `(a0_0 (Array Int Int))` in half.
+fn split_binders(binders: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, None);
+    for (i, c) in binders.char_indices() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(st) = start.take() {
+                        out.push(&binders[st..=i]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Does `text` contain `name` as a whole token?
@@ -3675,6 +3905,27 @@ mod encoder_conformance {
             ChcOutcome::Safe,
             "the bitvector encoder could not prove `a[0] == 5` after `a[0] = 5`; \
              array contents are not reaching the relation state"
+        );
+    }
+
+    /// The same for the **interprocedural LIA** encoder, asserted separately
+    /// because the two encoders are independent and `docs/` records that a fix
+    /// to one silently leaves the other exposed. The #95 victims
+    /// (`jbmc-regression/aastore_aaload1`, `argv-tasks/StrictLineReader`) route
+    /// to this one, not the bitvector encoder.
+    #[test]
+    fn the_interproc_encoder_proves_an_array_element_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_array_element();
+        let (lia, _) = both(&prog, &m);
+        assert_eq!(
+            lia,
+            ChcOutcome::Safe,
+            "the interprocedural encoder could not prove `a[0] == 5` after \
+             `a[0] = 5`; array contents are not reaching its relation state"
         );
     }
 
