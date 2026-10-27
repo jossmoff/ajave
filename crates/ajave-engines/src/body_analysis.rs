@@ -362,3 +362,123 @@ pub fn residual_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("AJAVE_RESIDUAL").as_deref() == Ok("1"))
 }
+
+/// Map each reference variable to the allocation site it provably holds.
+///
+/// A variable is mapped only when **every** assignment to it in the body is an
+/// allocation, and they all name the same site. One assignment from anywhere
+/// else — a parameter, a field load, a phi of two `new`s — and the variable is
+/// absent, which every consumer must read as "receiver unknown".
+///
+/// That is the whole precondition for `IState`'s site-indexed field cells: a
+/// write through a variable that is *not* in this map is a write that might
+/// have gone anywhere, and must fall back to the flat cell.
+///
+/// Single pass over the body, and the result is a `BTreeMap` rather than a
+/// `HashMap` because the interval domain's `leq`/`join` iterate it and
+/// `CLAUDE.md` forbids hash iteration order from reaching a solver or a
+/// search decision.
+pub fn ref_alloc_sites(body: &Body) -> std::collections::BTreeMap<VarId, ajave_ir::AllocSite> {
+    use std::collections::BTreeMap;
+    // `None` marks a variable seen with a non-allocation definition, or with
+    // two different sites. Those entries are dropped at the end rather than
+    // tracked in a second set.
+    let mut seen: BTreeMap<VarId, Option<ajave_ir::AllocSite>> = BTreeMap::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let Stmt::Assign(v, rv) = stmt else { continue };
+            let site = match rv {
+                Rvalue::New { site, .. } | Rvalue::NewArray { site, .. } => Some(*site),
+                _ => None,
+            };
+            seen.entry(*v)
+                .and_modify(|e| {
+                    if *e != site {
+                        *e = None;
+                    }
+                })
+                .or_insert(site);
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(v, s)| Some((v, s?)))
+        .collect()
+}
+
+#[cfg(test)]
+mod alloc_site_tests {
+    use super::*;
+    use ajave_ir::{AllocSite, Block, BlockId, Body, Rvalue, Stmt, Terminator, VarId};
+
+    fn body_with(stmts: Vec<Stmt>) -> Body {
+        Body {
+            key: ajave_ir::MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            entry: BlockId(0),
+            blocks: vec![Block {
+                id: BlockId(0),
+                stmts,
+                term: Terminator::Return(None),
+                bytecode_offset: 0,
+                exceptional: Vec::new(),
+            }],
+            vars: Vec::new(),
+            obligations: Vec::new(),
+            is_static: true,
+        }
+    }
+
+    fn new_at(idx: u32) -> Rvalue {
+        Rvalue::New {
+            class: "Box".into(),
+            site: AllocSite {
+                block: BlockId(0),
+                index: idx,
+            },
+        }
+    }
+
+    #[test]
+    fn a_variable_assigned_one_allocation_maps_to_its_site() {
+        let b = body_with(vec![Stmt::Assign(VarId(0), new_at(0))]);
+        let m = ref_alloc_sites(&b);
+        assert_eq!(m.get(&VarId(0)).map(|s| s.index), Some(0));
+    }
+
+    /// The precondition B2's soundness rests on. A variable that two different
+    /// allocations reach denotes either object, so a strong update through it
+    /// would be a lie about one of them.
+    #[test]
+    fn a_variable_reaching_two_sites_is_not_mapped() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), new_at(0)),
+            Stmt::Assign(VarId(0), new_at(1)),
+        ]);
+        assert!(!ref_alloc_sites(&b).contains_key(&VarId(0)));
+    }
+
+    #[test]
+    fn a_variable_also_assigned_from_elsewhere_is_not_mapped() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), new_at(0)),
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::Use(ajave_ir::Operand::Const(ajave_ir::Const::Null)),
+            ),
+        ]);
+        assert!(!ref_alloc_sites(&b).contains_key(&VarId(0)));
+    }
+
+    #[test]
+    fn two_variables_from_two_sites_stay_separate() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), new_at(0)),
+            Stmt::Assign(VarId(1), new_at(1)),
+        ]);
+        let m = ref_alloc_sites(&b);
+        assert_ne!(m[&VarId(0)], m[&VarId(1)]);
+    }
+}

@@ -2,6 +2,88 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-27 — an interval hint that was true on one path, and site-indexed field cells
+
+Two things, found in that order, because the first was found by writing the
+benchmark for the second.
+
+### The sparse-map fault: a hint published at a join that holds on one branch
+
+`interval-ai` publishes `Artifact::Invariant` per `(block, variable)`, and
+`smt-bmc` asserts those into its path formula as facts true at that block **on
+every path**. `join_block_intervals` built them by iterating `state.vars` over
+the reached states and joining.
+
+`IState` stores intervals sparsely, and `IState::set` *removes* an entry rather
+than storing Top — deliberately, with a comment saying so, because absence
+already means Top. So a state that knew nothing about a variable had no entry
+for it, and **contributed nothing to the join instead of widening it to Top**.
+
+A bound narrowed on one branch was therefore published as holding at the join of
+that branch with one that knew nothing. The BMC asserted it, found the violating
+path infeasible, reported `all_paths_complete`, and discharged the obligation.
+That is a wrong TRUE at −16, and it needs six lines of Java to trigger:
+
+```java
+int n = Verifier.nondetInt();
+if (n == 0) { sink = 10; } else { sink = 20; }
+assert n == 0;              // discharged; a JVM-confirmed witness violates it
+```
+
+Two things are worth drawing out.
+
+**The comment was right and the consumer was wrong.** Nothing here contradicted
+itself: `IState`'s doc says absence is Top, `set` maintains exactly that, and
+`join_block_intervals` was the only reader that treated absence as "no opinion".
+No test could catch it from inside either engine, because each is correct on its
+own terms. This is the artifact-contract discipline in `CLAUDE.md` applied to a
+*representation* rather than a type: a sparse encoding is a claim about what
+absence means, and every consumer has to honour it.
+
+**Only `Blackboard::contested()` saw it.** The verdict stayed FALSE throughout,
+because `concolic` independently found the violation and JVM replay confirmed
+it. The wrong discharge was recorded in `proved_safe` and reported as a
+contradiction — which is what that mechanism exists for, and the first time it
+has caught a live defect rather than a legitimate candidate. On a task where no
+under-approximating engine reaches the violation, nothing would have reported
+anything.
+
+The consumer half was tightened too. `interval_hints_for_method` resolved two
+claims for one `(block, var)` with a plain `insert`, so publication order decided
+which survived. Each `Over` invariant is a claim that holds at the point, so
+their conjunction holds: it now takes the **meet**, and drops the key entirely
+if the meet is empty — two producers that disagree means one is unsound, and an
+unsatisfiable hint would make every path look infeasible, discharging everything.
+
+### B2: site-indexed field cells, and the rule that keeps them sound
+
+The flat field abstraction keeps one cell per `(class, name, desc)` with the
+receiver ignored, and is safe *because* it merges: every write to `Box.v` lands
+in one cell, so no read is narrower than the truth. It is also exact only when a
+class has one live instance, which is why `FieldPrec::may_update_strongly`
+requires a single allocation site for the whole class — two `new Box()` in a
+program and the analysis gives up on both.
+
+Site-indexed cells key on the receiver's allocation site, as a *refinement*
+layered over the flat cell rather than a replacement: the effective value of
+`o.f` for a receiver at site `s` is `flat(f) ⊓ cell(s, f)`. Both conjuncts hold
+of the object, so the meet does.
+
+The soundness rests on one rule. A write whose receiver's site is not known
+marks the field **escaped**, after which its cells are void and every read falls
+back to the flat cell — exactly the pre-B2 behaviour. Escape is monotone, which
+is also what bounds the fixpoint. `body_analysis::ref_alloc_sites` supplies the
+receiver map and maps a variable only when *every* definition of it is the same
+allocation; a variable two allocations reach is "unknown", because a strong
+update through it would be a lie about one of the objects.
+
+`benchmarks/ajave/heap/UnknownReceiverReadsTheMergedCell` is the program named
+after that rule, written before the change and wrong-TRUE without it — and it is
+the benchmark that turned up the hint bug above.
+
+`AJAVE_SITE_FIELDS=0` restores the flat abstraction exactly, so the refinement
+is measurable as an ablation rather than argued.
+
 ## 2026-09-09 — the round loop and cursor deltas, measured
 
 Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181

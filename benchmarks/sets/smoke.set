@@ -225,3 +225,12 @@ sv-comp/java-ranger-regression/TCAS_prop1.yml valid-assert
 # exactly 1.0f. A confirmed wrong TRUE, caught only because float-search found
 # the violation and replay certified it.
 ajave/jvm-floats/FloatIsNotDouble.yml valid-assert
+
+# Engine seams: an interval hint published at a join must hold on both paths.
+# Without the join fix, smt-bmc discharges the assertion and Blackboard::contested
+# reports a JVM-confirmed contradiction (2026-10-27).
+ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths.yml valid-assert
+
+# Heap: the site-indexed field refinement, and the escape rule it rests on.
+ajave/heap/TwoObjectsDistinctFieldValues.yml valid-assert
+ajave/heap/UnknownReceiverReadsTheMergedCell.yml valid-assert
