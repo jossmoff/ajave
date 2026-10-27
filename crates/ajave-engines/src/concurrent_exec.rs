@@ -1301,6 +1301,45 @@ impl<'a> Interp<'a> {
     }
 
     /// Enter a callee by pushing a frame, or model it if there is no body.
+    ///
+    /// # What this function does, in order
+    ///
+    /// Every branch below is a `return`, so the order *is* the dispatch order:
+    /// an earlier class test shadows a later one. The list is a map for anyone
+    /// splitting it up — the behaviour of each entry is pinned by a test in
+    /// this file's `tests` module, named in the right-hand column.
+    ///
+    /// | # | Receiver class | What is modelled | Pinned by |
+    /// |---|---|---|---|
+    /// | 1 | `java/lang/Thread` **or any subclass** | lifecycle | `start_is_recognised_on_a_thread_subclass` |
+    /// | | | `sleep`/`yield`/`onSpinWait` as genuine no-ops (no hb edge) | `sleep_establishes_no_happens_before_edge` |
+    /// | | | `currentThread`, `isAlive`, `interrupt`, `isInterrupted` | `is_alive_is_false_before_start_and_after_termination`, `interrupt_wakes_a_parked_thread` |
+    /// | | | `<init>`: allocate a `ThreadId` in construction order, record the Runnable | `construction_assigns_thread_ids_in_order_without_starting_anything` |
+    /// | | | `start`: create the thread state, resolve `run()` from the *object's* class, bind `this`, fork the hb edge, `NotStarted` → `Runnable`, enforce `max_threads` | `start_binds_this_to_the_runnable_main_allocated`, `start_orders_the_starters_writes_before_the_worker`, `the_live_thread_bound_refuses_rather_than_dropping_a_thread` |
+    /// | | | `join`: park as `Joining{on}` or take the acquire edge | `join_on_a_live_thread_parks_without_advancing`, `join_orders_the_workers_writes_before_the_joiner` |
+    /// | 2 | `ReentrantLock` | monitor machinery under another name: `lock`/`unlock` (reentrant, with hb release/acquire and waking blocked threads), `tryLock()Z`, `isLocked`, `newCondition` (fresh object remembering its lock in `$lock`) | `reentrant_lock_blocks_a_second_thread_and_orders_the_handoff`, `try_lock_reports_failure_instead_of_blocking` |
+    /// | 3 | `Atomic{Integer,Long,Boolean,Reference}` | a `$value` heap cell; each operation one transition. `weakCompareAndSet` may fail spuriously (a `choose`) | `increment_and_get_is_one_transition`, `weak_cas_may_fail_spuriously_and_then_succeeds` |
+    /// | 4 | `java/lang/Object` `wait`/`notify`/`notifyAll` | interruption first; phase 2 (resume, reacquiring *every* released level); phase 1 (spurious-wakeup choice, then release the monitor and park). `notify` picks one waiter by `choose`; both wake to `Blocked`, not `Runnable`; a signal with no waiter is lost | `wait_releases_the_monitor_and_notify_wakes_to_blocked`, `wait_restores_every_reentrant_level`, `notify_with_no_waiter_is_lost` |
+    /// | 5 | `CountDownLatch`, `Semaphore`, `CyclicBarrier` | counters in the heap, parking on `Waiting{recv}` with `wait_depth == 0`; timed forms are choices; the barrier additionally carries per-thread release flags and a broken flag | `count_down_releases_waiters_and_orders_them`, `semaphore_acquire_parks_when_no_permit_is_free` |
+    /// | 6 | `locks/Condition` | `Object.wait` with the wait set and the lock separated: parks on the condition, releases `$lock` | `condition_await_releases_the_lock_it_was_created_from` |
+    /// | 7 | `Executors` | factory: a pool object carrying `$workers`/`$submitted` | `a_pool_with_fewer_workers_than_tasks_is_refused` |
+    /// | 8 | `ExecutorService` & friends | `execute`/`submit` (capacity check, fork edge, `Future` object), `shutdown`, `isShutdown`/`isTerminated`, `awaitTermination` | `a_pool_with_fewer_workers_than_tasks_is_refused` |
+    /// | 9 | `Future` | `get` as a join edge, `isDone`, `cancel` (refused while running) | `cancelling_a_running_task_is_refused` |
+    /// | 10 | `ArrayBlockingQueue`/`LinkedBlockingQueue`/… | an exact FIFO in `$e{i}` with `$head`/`$tail`/`$cap`; `put`/`take` park, `offer`/`poll` report | `blocking_queue_is_fifo_and_take_parks_when_empty` |
+    /// | 11 | `ReentrantReadWriteLock` | view objects pointing at the parent through `$rwlock`; readers are concurrent, a writer waits for all of them | `read_lock_admits_two_readers_but_a_writer_waits` |
+    /// | 12 | `ConcurrentHashMap`/`ConcurrentMap` | `$k{k}`/`$p{k}`/`$n`; `putIfAbsent` is one transition | `put_if_absent_is_atomic` |
+    /// | 13 | `ThreadLocal` | one `$tl{tid}` cell per thread, so these are not shared state | `thread_local_cells_are_per_thread` |
+    /// | 14 | `CompletableFuture` | `$done`/`$v`, `complete` wakes waiters and publishes, `get`/`join` park | `completable_future_get_parks_until_complete` |
+    /// | 15 | anything with no body | step over it: `stepped_over += 1`, and `skipped_calls` too unless `contract_of` says `Effect::Pure` | `a_library_call_with_no_body_is_stepped_over_and_an_impure_one_recorded` |
+    /// | 16 | anything with a body | push a frame, binding arguments by **JVM slot**, bounded at depth 32 | `arguments_bind_by_jvm_slot_not_by_argument_index` |
+    ///
+    /// # The invariant every modelled branch holds
+    ///
+    /// **Do not touch the frame's program counter.** `advance` steps past the
+    /// statement afterwards unless the call parked the thread, which it detects
+    /// from the thread status. Advancing here drops a model's own return value
+    /// (`Stmt::Assign` stores it only while the frame has not moved) and sends
+    /// a parked thread past the call it is blocked on.
     fn do_call(
         &mut self,
         g: &mut GlobalState,
@@ -3329,4 +3368,765 @@ fn jdk_exception_super(class: &str) -> Option<&'static str> {
         "java/lang/Throwable" => "java/lang/Object",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Characterisation tests for the stepping interpreter, and for `do_call`
+    //! in particular.
+    //!
+    //! # Why these exist
+    //!
+    //! `Blackboard` refuses a `Status::Discharged` from any producer other than
+    //! `EngineId("concurrency")` once `Program::uses_concurrency()` holds. That
+    //! gate is correct — a sequential engine treats `Thread.start()` as a no-op,
+    //! so an obligation reachable only through another thread's writes looks
+    //! unreachable and gets "proved" (`UnsafePublicationSeesStaleData`). Its
+    //! consequence is that this module holds the discharge rights for every
+    //! other engine on any program that starts a thread, so what it does with a
+    //! lifecycle call, a monitor and a join is load-bearing for the whole
+    //! verdict.
+    //!
+    //! # The rule every test here follows
+    //!
+    //! **Assert the precondition, not only the conclusion.** A test that parks
+    //! a thread must first assert the thread was runnable; a test that claims
+    //! two clocks became ordered must first assert they were not. A premise
+    //! that cannot hold makes the conclusion free, and a test that passes for
+    //! free is worse than no test.
+    //!
+    //! The semantic reference is `benchmarks/ajave/concurrency/`, whose 14+
+    //! litmus programs each argue their expected verdict from the JLS; the
+    //! benchmark a test corresponds to is named in its comment.
+
+    use super::*;
+    use ajave_ir::{Block, Body, Const, Terminator, Ty, VarInfo, VarKind};
+
+    // ── building programs ───────────────────────────────────────────────
+
+    fn mk(class: &str, name: &str, desc: &str) -> MethodKey {
+        MethodKey {
+            class: class.into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
+    }
+
+    fn fld(class: &str, name: &str, desc: &str) -> FieldKey {
+        FieldKey {
+            class: class.into(),
+            name: name.into(),
+            desc: desc.into(),
+        }
+    }
+
+    /// A single-block body whose locals are `nslots` JVM slots, so `VarId(i)`
+    /// is slot `i`. Tests that care about the slot/index distinction build
+    /// their own `vars` instead.
+    fn body(key: MethodKey, nslots: usize, stmts: Vec<Stmt>) -> Body {
+        let mut b = body_with_vars(
+            key,
+            (0..nslots)
+                .map(|i| VarInfo {
+                    ty: Ty::Ref,
+                    kind: VarKind::Local(i as u16),
+                })
+                .collect(),
+            stmts,
+        );
+        b.is_static = true;
+        b
+    }
+
+    fn body_with_vars(key: MethodKey, vars: Vec<VarInfo>, stmts: Vec<Stmt>) -> Body {
+        Body {
+            is_static: true,
+            key,
+            vars,
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts,
+                term: Terminator::Return(None),
+                exceptional: Vec::new(),
+            }],
+            entry: BlockId(0),
+            obligations: Vec::new(),
+        }
+    }
+
+    fn program(bodies: Vec<Body>) -> Program {
+        // Field-by-field, not struct-update syntax: `Program` has a private
+        // field (`uses_concurrency`), which `..Default::default()` cannot see.
+        let mut p = Program::default();
+        p.entry = Some(bodies[0].key.clone());
+        for b in bodies {
+            p.bodies.insert(b.key.clone(), b);
+        }
+        p
+    }
+
+    fn call(dst: u32, target: MethodKey, args: Vec<Operand>) -> Stmt {
+        Stmt::Assign(
+            VarId(dst),
+            Rvalue::Call {
+                target,
+                args,
+                is_virtual: true,
+            },
+        )
+    }
+
+    fn v(i: u32) -> Operand {
+        Operand::Var(VarId(i))
+    }
+
+    fn int(n: i32) -> Operand {
+        Operand::Const(Const::Int(n))
+    }
+
+    // ── driving the interpreter ─────────────────────────────────────────
+
+    /// An interpreter and a state with thread 0 at `prog.entry`, exactly as
+    /// `concurrency::build_initial_state` sets up the main thread.
+    fn fixture(prog: &Program) -> (Interp<'_>, GlobalState) {
+        let entry = prog.entry.clone().expect("fixture needs an entry method");
+        let mut interp = Interp::new(prog, 10_000);
+        let f = interp
+            .initial_frame(&entry, None)
+            .expect("no body for the entry method");
+        interp.frames = vec![vec![f]];
+        let main = spawn_state(ThreadId(0), &entry, prog, true).expect("no body for main");
+        let g = GlobalState {
+            threads: vec![main],
+            monitor_owner: Default::default(),
+            heap: Default::default(),
+            statics: Default::default(),
+            schedule: Vec::new(),
+            switches: 0,
+        };
+        (interp, g)
+    }
+
+    /// A hand-built thread already running `method`. Used where a test needs a
+    /// second thread without going through `Thread.start()` — the lifecycle
+    /// tests are the ones that exercise `start`.
+    fn add_thread(
+        i: &mut Interp,
+        g: &mut GlobalState,
+        tid: u32,
+        method: &MethodKey,
+        locals: &[(u32, Val)],
+    ) {
+        let prog = i.prog;
+        let st = spawn_state(ThreadId(tid), method, prog, true).expect("no body for the thread");
+        let mut f = i
+            .initial_frame(method, None)
+            .expect("no frame for the thread");
+        for (slot, val) in locals {
+            f.locals.insert(VarId(*slot), *val);
+        }
+        while i.frames.len() <= tid as usize {
+            i.frames.push(Vec::new());
+        }
+        i.frames[tid as usize] = vec![f];
+        g.threads.push(st);
+    }
+
+    fn set_local(i: &mut Interp, tid: u32, slot: u32, val: Val) {
+        i.frames[tid as usize]
+            .last_mut()
+            .expect("no frame")
+            .locals
+            .insert(VarId(slot), val);
+    }
+
+    fn local(i: &Interp, tid: u32, slot: u32) -> Option<Val> {
+        i.frames[tid as usize]
+            .last()
+            .and_then(|f| f.locals.get(&VarId(slot)))
+            .copied()
+    }
+
+    fn status(g: &GlobalState, tid: u32) -> Option<ThreadStatus> {
+        g.threads
+            .iter()
+            .find(|t| t.id == ThreadId(tid))
+            .map(|t| t.status)
+    }
+
+    fn pc_index(i: &Interp, tid: u32) -> usize {
+        i.frames[tid as usize].last().expect("no frame").at.index
+    }
+
+    /// One visible action of `tid`, asserting it was not refused.
+    fn step(i: &mut Interp, g: &mut GlobalState, tid: u32) -> Step {
+        let s = i.advance(g, ThreadId(tid));
+        if let Step::Unsupported(why) = &s {
+            panic!("thread {tid} refused: {why}");
+        }
+        s
+    }
+
+    /// Advance `tid` until it terminates or stops making progress.
+    fn drive(i: &mut Interp, g: &mut GlobalState, tid: u32, max: usize) -> Step {
+        let mut last = Step::Advanced(Vec::new());
+        for _ in 0..max {
+            last = i.advance(g, ThreadId(tid));
+            if !matches!(last, Step::Advanced(_)) {
+                return last;
+            }
+        }
+        last
+    }
+
+    fn obj(val: Option<Val>) -> u32 {
+        match val {
+            Some(Val::Ref(r)) => r,
+            other => panic!("expected a reference, got {other:?}"),
+        }
+    }
+
+    const THREAD: &str = "java/lang/Thread";
+
+    // ── 1. thread lifecycle ─────────────────────────────────────────────
+
+    /// A program whose main method constructs `Main$W extends Thread` and
+    /// starts it through the *declared* type, as javac emits it.
+    fn subclass_program(with_hierarchy: bool) -> Program {
+        let run = mk("Main$W", "run", "()V");
+        let mut p = program(vec![
+            body(
+                mk("Main", "main", "()V"),
+                4,
+                vec![
+                    Stmt::Assign(VarId(1), Rvalue::New("Main$W".into())),
+                    // What the implicit `super()` in `W.<init>` compiles to.
+                    call(2, mk(THREAD, "<init>", "()V"), vec![v(1)]),
+                    // javac emits the declared type here, not java/lang/Thread.
+                    call(3, mk("Main$W", "start", "()V"), vec![v(1)]),
+                ],
+            ),
+            body(run, 1, vec![Stmt::PutStatic(fld("Main", "n", "I"), int(1))]),
+        ]);
+        if with_hierarchy {
+            p.supers.insert("Main$W".into(), THREAD.into());
+        }
+        p
+    }
+
+    #[test]
+    fn start_is_recognised_on_a_thread_subclass() {
+        // benchmarks/ajave/concurrency/ThreadSubclassRuns.
+        //
+        // `class W extends Thread` makes javac emit `invokevirtual
+        // Main$W.start()`, so an equality test against java/lang/Thread sees no
+        // thread start at all and the worker never runs.
+        let prog = subclass_program(true);
+        let (mut i, mut g) = fixture(&prog);
+
+        // Precondition: the start call really is on the subclass, so this
+        // cannot be passing through the exact-match branch.
+        let Stmt::Assign(_, Rvalue::Call { target, .. }) = &prog
+            .body(&mk("Main", "main", "()V"))
+            .unwrap()
+            .block(BlockId(0))
+            .stmts[2]
+        else {
+            panic!("expected the third statement to be the start() call")
+        };
+        assert_eq!(
+            target.class, "Main$W",
+            "test no longer exercises a subclass"
+        );
+
+        // `new` + `<init>`: an identity is reserved, and nothing runs yet.
+        step(&mut i, &mut g, 0);
+        assert_eq!(
+            i.thread_objs.len(),
+            1,
+            "Thread.<init> did not reserve a ThreadId"
+        );
+        assert_eq!(
+            g.threads.len(),
+            1,
+            "a thread became schedulable before start()"
+        );
+
+        // start().
+        step(&mut i, &mut g, 0);
+        assert_eq!(g.threads.len(), 2, "start() created no thread");
+        assert_eq!(
+            status(&g, 1),
+            Some(ThreadStatus::Runnable),
+            "the started thread is not schedulable"
+        );
+        assert_eq!(
+            i.frames[1]
+                .last()
+                .expect("no frame for the worker")
+                .at
+                .method,
+            mk("Main$W", "run", "()V"),
+            "the worker is not bound to the subclass's run()"
+        );
+    }
+
+    #[test]
+    fn start_on_an_unknown_hierarchy_is_stepped_over_and_recorded_as_skipped() {
+        // The other half of the test above, and the reason it is not vacuous:
+        // with `supers` empty, `Main$W.start` matches no model, has no body,
+        // and is stepped over. No thread is created — so the failure mode is a
+        // *silent* no-op whose only trace is `skipped_calls`, which the
+        // explorer reads to refuse a proof. Pinned so that trace cannot be
+        // dropped: without it the search would look exhaustive.
+        let prog = subclass_program(false);
+        assert!(
+            prog.supers.is_empty(),
+            "this test needs the hierarchy to be absent"
+        );
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0);
+        assert_eq!(i.thread_objs.len(), 1, "Thread.<init> was not modelled");
+        step(&mut i, &mut g, 0);
+        assert_eq!(g.threads.len(), 1, "a thread was started after all");
+        assert!(
+            i.skipped_calls.iter().any(|c| c.contains("Main$W.start")),
+            "an unresolved start() left no trace: {:?}",
+            i.skipped_calls
+        );
+    }
+
+    #[test]
+    fn construction_assigns_thread_ids_in_order_without_starting_anything() {
+        // Identities come from construction order, which is what lets `start`
+        // and `join` name a thread at all. Nothing is schedulable yet.
+        let prog = program(vec![
+            body(
+                mk("Main", "main", "()V"),
+                5,
+                vec![
+                    Stmt::Assign(VarId(1), Rvalue::New(THREAD.into())),
+                    call(3, mk(THREAD, "<init>", "()V"), vec![v(1)]),
+                    Stmt::Assign(VarId(2), Rvalue::New(THREAD.into())),
+                    call(4, mk(THREAD, "<init>", "()V"), vec![v(2)]),
+                ],
+            ),
+            body(mk("W", "run", "()V"), 1, vec![]),
+        ]);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0);
+        step(&mut i, &mut g, 0);
+
+        let (first, second) = (obj(local(&i, 0, 1)), obj(local(&i, 0, 2)));
+        assert_ne!(first, second, "two `new Thread` gave one object");
+        assert_eq!(
+            i.thread_objs.get(&first).copied(),
+            Some(ThreadId(1)),
+            "the first-constructed Thread is not ThreadId(1)"
+        );
+        assert_eq!(
+            i.thread_objs.get(&second).copied(),
+            Some(ThreadId(2)),
+            "the second-constructed Thread is not ThreadId(2)"
+        );
+        assert_eq!(g.threads.len(), 1, "construction alone started a thread");
+    }
+
+    /// `new Thread(new W())` then `t.start()`, with `W.run` writing to `$f` of
+    /// its own receiver.
+    fn runnable_program(join: bool) -> Program {
+        let mut stmts = vec![
+            Stmt::Assign(VarId(1), Rvalue::New("W".into())),
+            Stmt::Assign(VarId(2), Rvalue::New(THREAD.into())),
+            call(
+                3,
+                mk(THREAD, "<init>", "(Ljava/lang/Runnable;)V"),
+                vec![v(2), v(1)],
+            ),
+            call(4, mk(THREAD, "start", "()V"), vec![v(2)]),
+        ];
+        if join {
+            stmts.push(call(5, mk(THREAD, "join", "()V"), vec![v(2)]));
+        }
+        stmts.push(Stmt::Assign(
+            VarId(6),
+            Rvalue::GetStatic(fld("Main", "n", "I")),
+        ));
+        program(vec![
+            body(mk("Main", "main", "()V"), 7, stmts),
+            body(
+                mk("W", "run", "()V"),
+                1,
+                vec![Stmt::PutStatic(fld("Main", "n", "I"), int(42))],
+            ),
+        ])
+    }
+
+    #[test]
+    fn start_binds_this_to_the_runnable_main_allocated() {
+        // The worker's `this` must be the very object main passed to
+        // `new Thread(r)`. Fabricating a fresh identity makes the thread write
+        // to a different object than main reads, so a write that should be
+        // visible after join() silently is not.
+        let prog = runnable_program(false);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0); // new W, new Thread, <init>
+        let runnable = obj(local(&i, 0, 1));
+        let thread_obj = obj(local(&i, 0, 2));
+        assert_ne!(
+            runnable, thread_obj,
+            "the Runnable and the Thread must be distinct for this test to \
+             distinguish binding `this` to the receiver"
+        );
+        assert_eq!(
+            i.runnable_objs.get(&ThreadId(1)).copied(),
+            Some(runnable),
+            "Thread.<init> did not record its Runnable argument"
+        );
+
+        step(&mut i, &mut g, 0); // start
+        assert_eq!(
+            local(&i, 1, 0),
+            Some(Val::Ref(runnable)),
+            "the worker's `this` is not the object main allocated"
+        );
+    }
+
+    #[test]
+    fn start_orders_the_starters_writes_before_the_worker() {
+        // JLS 17.4.5: everything the starter did happens-before the started
+        // thread's first action.
+        let prog = runnable_program(false);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0);
+
+        let starter = i.hb.clock(0);
+        let worker_before = i.hb.clock(1);
+        // Precondition: not already ordered, or the assertion below is free.
+        assert!(
+            !starter.happens_before(&worker_before),
+            "the clocks were already ordered before start()"
+        );
+
+        step(&mut i, &mut g, 0); // start
+        assert!(
+            starter.happens_before(&i.hb.clock(1)),
+            "start() created no happens-before edge"
+        );
+    }
+
+    #[test]
+    fn join_orders_the_workers_write_before_the_joiners_read() {
+        // benchmarks/ajave/concurrency/JoinOrdersWrite. The write in run() is
+        // ordered before the joiner's next action, so the read is not a race
+        // and observes 42.
+        let prog = runnable_program(true);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0); // construct
+        step(&mut i, &mut g, 0); // start
+                                 // Main reaches the join while the worker is still live: the precondition
+                                 // for the edge being the join's doing rather than the schedule's.
+        assert_eq!(
+            drive(&mut i, &mut g, 0, 8),
+            Step::Blocked(None),
+            "main did not park on join()"
+        );
+        assert_eq!(
+            drive(&mut i, &mut g, 1, 8),
+            Step::Terminated,
+            "the worker did not finish"
+        );
+        assert_eq!(
+            g.statics.get(&("Main".to_string(), "n".to_string())),
+            Some(&(false, 42)),
+            "the worker never performed its write"
+        );
+
+        // One step at a time, stopping as soon as the read lands.
+        //
+        // The first version of this drove main for 8 steps and then read
+        // local 6. That ran main to *termination*, which pops the frame the
+        // local lives in, so the assertion saw `None` and looked like the
+        // joiner never observing the write. The engine was right and the
+        // observation was wrong: a local can only be inspected while its
+        // frame is live.
+        let mut observed = None;
+        for _ in 0..8 {
+            step(&mut i, &mut g, 0);
+            if let Some(v) = local(&i, 0, 6) {
+                observed = Some(v);
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            Some(Val::Int(42)),
+            "the joiner did not observe the worker's write before its frame was popped"
+        );
+        assert!(
+            i.race.is_none(),
+            "a joined write was reported as a race: {:?}",
+            i.race
+        );
+    }
+
+    #[test]
+    fn without_a_join_the_same_write_is_a_race() {
+        // benchmarks/ajave/concurrency/NoJoinNoOrdering, and the control for
+        // the test above: the only difference is the join() statement.
+        let prog = runnable_program(false);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0); // construct
+        step(&mut i, &mut g, 0); // start
+        assert_eq!(
+            drive(&mut i, &mut g, 1, 8),
+            Step::Terminated,
+            "the worker did not finish"
+        );
+        assert!(i.race.is_none(), "a race before main read anything");
+        drive(&mut i, &mut g, 0, 8);
+        let race = i.race.expect("an unordered read/write pair was not a race");
+        assert_eq!(race.location, "Main.n");
+        assert_eq!(race.threads, (1, 0));
+    }
+
+    #[test]
+    fn join_on_a_live_thread_parks_without_advancing() {
+        // A parked join must be *retried*, not stepped past: advancing here as
+        // well as in `advance`'s prologue was two advances for one statement,
+        // silently skipping whatever followed the join.
+        let prog = runnable_program(true);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0);
+        step(&mut i, &mut g, 0);
+        assert_eq!(
+            status(&g, 1),
+            Some(ThreadStatus::Runnable),
+            "the join target must still be live for this test to park"
+        );
+        let at = pc_index(&i, 0);
+        assert_eq!(at, 4, "the join is not the next statement");
+
+        assert_eq!(i.advance(&mut g, ThreadId(0)), Step::Blocked(None));
+        assert_eq!(
+            status(&g, 0),
+            Some(ThreadStatus::Joining { on: ThreadId(1) }),
+            "join() did not park the joiner on its target"
+        );
+        assert_eq!(
+            pc_index(&i, 0),
+            at,
+            "a parked join was stepped past its own call"
+        );
+    }
+
+    #[test]
+    fn a_joiner_resumes_by_re_executing_the_join() {
+        // The release path: `advance`'s prologue makes the joiner runnable and
+        // deliberately does not advance, so the call runs again and takes its
+        // "target already finished" branch.
+        let prog = runnable_program(true);
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0);
+        step(&mut i, &mut g, 0);
+        let at = pc_index(&i, 0);
+        assert_eq!(i.advance(&mut g, ThreadId(0)), Step::Blocked(None));
+        assert_eq!(drive(&mut i, &mut g, 1, 8), Step::Terminated);
+        assert_eq!(
+            status(&g, 0),
+            Some(ThreadStatus::Joining { on: ThreadId(1) }),
+            "main must still be parked for the prologue to be what releases it"
+        );
+
+        step(&mut i, &mut g, 0);
+        assert_eq!(
+            status(&g, 0),
+            Some(ThreadStatus::Runnable),
+            "the joiner was not released"
+        );
+        assert!(
+            pc_index(&i, 0) > at,
+            "the joiner never got past its own join()"
+        );
+    }
+
+    #[test]
+    fn sleep_establishes_no_happens_before_edge() {
+        // benchmarks/ajave/concurrency/SleepIsNotSynchronization. The JLS gives
+        // sleep no memory-model meaning, so modelling it as ordering would
+        // prove racy programs safe. A real JVM nearly always makes that
+        // benchmark pass, and it is still a race.
+        let prog = program(vec![body(
+            mk("Main", "main", "()V"),
+            2,
+            vec![call(
+                1,
+                mk(THREAD, "sleep", "(J)V"),
+                vec![Operand::Const(Const::Long(50))],
+            )],
+        )]);
+        let (mut i, mut g) = fixture(&prog);
+        let before = i.hb.clock(0);
+        step(&mut i, &mut g, 0);
+        assert_eq!(i.hb.clock(0), before, "sleep() moved the clock");
+        // Non-vacuity: a *stepped-over* call would also leave the clock alone,
+        // so pin that sleep was modelled rather than skipped. The difference
+        // matters: a skipped call costs the search its claim to completeness.
+        assert_eq!(i.stepped_over, 0, "sleep() was stepped over, not modelled");
+        assert!(
+            i.skipped_calls.is_empty(),
+            "sleep() was recorded as skipped"
+        );
+    }
+
+    #[test]
+    fn is_alive_is_false_before_start_and_after_termination() {
+        // benchmarks/ajave/concurrency/JoinThenNotAlive. Alive means started
+        // and not yet finished; an unstarted thread is not alive either.
+        let mut prog = program(vec![
+            body(
+                mk("Main", "main", "()V"),
+                7,
+                vec![
+                    Stmt::Assign(VarId(1), Rvalue::New("Main$W".into())),
+                    call(2, mk(THREAD, "<init>", "()V"), vec![v(1)]),
+                    call(3, mk("Main$W", "isAlive", "()Z"), vec![v(1)]),
+                    call(4, mk("Main$W", "start", "()V"), vec![v(1)]),
+                    call(5, mk("Main$W", "isAlive", "()Z"), vec![v(1)]),
+                    call(6, mk("Main$W", "isAlive", "()Z"), vec![v(1)]),
+                ],
+            ),
+            body(mk("Main$W", "run", "()V"), 1, vec![]),
+        ]);
+        prog.supers.insert("Main$W".into(), THREAD.into());
+        let (mut i, mut g) = fixture(&prog);
+        step(&mut i, &mut g, 0); // new + <init>
+        step(&mut i, &mut g, 0); // isAlive, unstarted
+        step(&mut i, &mut g, 0); // start
+        step(&mut i, &mut g, 0); // isAlive, running
+        assert_eq!(
+            status(&g, 1),
+            Some(ThreadStatus::Runnable),
+            "the worker must be live here"
+        );
+        assert_eq!(drive(&mut i, &mut g, 1, 8), Step::Terminated);
+        step(&mut i, &mut g, 0); // isAlive, finished
+
+        assert_eq!(local(&i, 0, 3), Some(Val::Int(0)), "unstarted reads alive");
+        assert_eq!(
+            local(&i, 0, 5),
+            Some(Val::Int(1)),
+            "running reads not alive"
+        );
+        assert_eq!(local(&i, 0, 6), Some(Val::Int(0)), "finished reads alive");
+    }
+
+    #[test]
+    fn interrupt_wakes_a_thread_parked_in_wait() {
+        // benchmarks/ajave/concurrency/InterruptWakesParkedThread. Setting the
+        // flag is not enough: a thread already parked must be made to re-run
+        // its wait and observe it, or it hangs forever in a program the JVM
+        // completes. Getting this wrong was a wrong FALSE.
+        let prog = program(vec![
+            body(
+                mk("Main", "main", "()V"),
+                2,
+                vec![call(1, mk(THREAD, "interrupt", "()V"), vec![v(0)])],
+            ),
+            body(mk("W", "run", "()V"), 1, vec![]),
+        ]);
+        let (mut i, mut g) = fixture(&prog);
+        add_thread(&mut i, &mut g, 1, &mk("W", "run", "()V"), &[]);
+        // A Thread object for the worker, as `Thread.<init>` would have made.
+        i.thread_objs.insert(9, ThreadId(1));
+        i.obj_class.insert(9, "W".into());
+        set_local(&mut i, 0, 0, Val::Ref(9));
+        let w = g.threads.iter_mut().find(|t| t.id == ThreadId(1)).unwrap();
+        w.status = ThreadStatus::Waiting { monitor: ObjId(5) };
+        w.wait_depth = 1;
+        w.timed_wait = true;
+        // Preconditions: parked, and not already interrupted.
+        assert_eq!(
+            status(&g, 1),
+            Some(ThreadStatus::Waiting { monitor: ObjId(5) })
+        );
+        assert!(!i.interrupted.contains(&ThreadId(1)));
+
+        step(&mut i, &mut g, 0);
+        assert!(
+            i.interrupted.contains(&ThreadId(1)),
+            "interrupt() did not set the flag"
+        );
+        assert_eq!(
+            status(&g, 1),
+            Some(ThreadStatus::Runnable),
+            "a parked thread was left parked by interrupt()"
+        );
+        assert!(
+            !g.threads
+                .iter()
+                .any(|t| t.id == ThreadId(1) && t.timed_wait),
+            "the woken thread is still inside a timed wait"
+        );
+    }
+
+    #[test]
+    fn start_on_an_unrecognised_thread_object_is_refused() {
+        // An untracked Thread object means we do not know which body it runs.
+        // Treating that as a no-op would hide the thread's writes, and an Under
+        // engine would then report violations of a program it never explored.
+        let prog = program(vec![
+            body(
+                mk("Main", "main", "()V"),
+                2,
+                vec![
+                    Stmt::Assign(VarId(0), Rvalue::New(THREAD.into())),
+                    // No `<init>`, so no identity was ever assigned.
+                    call(1, mk(THREAD, "start", "()V"), vec![v(0)]),
+                ],
+            ),
+            body(mk("W", "run", "()V"), 1, vec![]),
+        ]);
+        let (mut i, mut g) = fixture(&prog);
+        assert!(
+            i.thread_objs.is_empty(),
+            "this test needs an unmapped Thread object"
+        );
+        match i.advance(&mut g, ThreadId(0)) {
+            Step::Unsupported(why) => assert!(
+                why.contains("unrecognised Thread object"),
+                "refused for the wrong reason: {why}"
+            ),
+            other => panic!("an unrecognised Thread object was accepted: {other:?}"),
+        }
+        assert_eq!(g.threads.len(), 1, "a thread was started anyway");
+    }
+
+    #[test]
+    fn the_live_thread_bound_refuses_rather_than_dropping_a_thread() {
+        // Every bound in this engine must cost completeness, never soundness.
+        // Silently declining to create the thread would leave its writes out of
+        // the exploration while the search still looked exhaustive.
+        let prog = runnable_program(false);
+        let (mut i, mut g) = fixture(&prog);
+        i.max_threads = 1;
+        step(&mut i, &mut g, 0);
+        assert_eq!(
+            g.threads.len(),
+            i.max_threads,
+            "the bound must already be reached for this test to exercise it"
+        );
+        assert_eq!(
+            i.thread_objs.len(),
+            1,
+            "start() must get as far as the bound check"
+        );
+        match i.advance(&mut g, ThreadId(0)) {
+            Step::Unsupported(why) => {
+                assert!(why.contains("exceeds bound"), "wrong refusal: {why}")
+            }
+            other => panic!("the thread bound was exceeded silently: {other:?}"),
+        }
+    }
 }
