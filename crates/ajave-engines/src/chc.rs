@@ -1073,6 +1073,82 @@ fn encode_chc_interproc(
     // fields a method may write so a call invalidates those cells rather than
     // the whole map. An unresolved callee still clobbers everything, because
     // nothing is known about it.
+    // One array per field name, indexed by the receiver (Burstall), shared
+    // across all methods: a field cell is global, unlike an array site, which
+    // is body-relative. So the field arrays are declared once and appended to
+    // every method's relations.
+    let all_fields: std::collections::BTreeSet<FieldKey> = {
+        let mut out: std::collections::BTreeSet<FieldKey> = Default::default();
+        for mk2 in &all_methods {
+            let Some(b) = prog.body(mk2) else { continue };
+            for block in &b.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            out.insert(field.clone());
+                        }
+                        Stmt::Assign(_, Rvalue::GetField { field, .. }) => {
+                            out.insert(field.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // A float-valued field cannot live in an (Array Int Int), and the LIA
+        // theory has nothing to say about one anyway.
+        out.retain(|f| f.desc != "D" && f.desc != "F");
+        out
+    };
+    let fld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
+    let fld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
+
+    // Which methods may write each field, transitively.
+    //
+    // Per-field rather than all-or-nothing, because field writes are
+    // per-field: a constructor that sets `this.v` says nothing about `other.w`.
+    // That is what lets `for (..) a[i] = new A();` keep an invariant about a
+    // *different* field across the constructor call.
+    let field_writers: HashMap<FieldKey, std::collections::HashSet<MethodKey>> = {
+        let mut direct: HashMap<FieldKey, std::collections::HashSet<MethodKey>> = HashMap::new();
+        let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
+        for (mk2, body2) in &prog.bodies {
+            let mut cs = Vec::new();
+            for block in &body2.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            direct.entry(field.clone()).or_default().insert(mk2.clone());
+                        }
+                        Stmt::Assign(_, Rvalue::Call { target, .. }) => cs.push(target.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            callees.insert(mk2.clone(), cs);
+        }
+        // A caller of a writer is a writer, per field.
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                for (f, ws) in direct.iter_mut() {
+                    let _ = f;
+                    if ws.contains(caller) {
+                        continue;
+                    }
+                    if cs.iter().any(|c| ws.contains(c)) {
+                        ws.insert(caller.clone());
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        direct
+    };
+
     let array_writers: std::collections::HashSet<MethodKey> = {
         let mut direct: std::collections::HashSet<MethodKey> = Default::default();
         let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
@@ -1158,6 +1234,9 @@ fn encode_chc_interproc(
             for _ in &sites {
                 parts.push(ARR_SORT.to_string());
             }
+            for _ in &all_fields {
+                parts.push(ARR_SORT.to_string());
+            }
             let sig = parts.join(" ");
             out.push_str(&format!(
                 "(declare-fun {}_b{} ({}) Bool)\n",
@@ -1202,6 +1281,9 @@ fn encode_chc_interproc(
             for st in &sites {
                 v.push(format!("({} {})", arr_src(st), ARR_SORT));
             }
+            for f in &all_fields {
+                v.push(format!("({} {})", fld_src(f), ARR_SORT));
+            }
             v.join(" ")
         };
 
@@ -1223,6 +1305,9 @@ fn encode_chc_interproc(
                 .collect();
             for st in &sites {
                 arg_parts.push(arr_src(st));
+            }
+            for f in &all_fields {
+                arg_parts.push(fld_src(f));
             }
             let args = arg_parts.join(" ");
             let app = app_of(&mid, bid, &args);
@@ -1299,6 +1384,9 @@ fn encode_chc_interproc(
             for st in &sites {
                 arg_parts.push(arr_dst(st));
             }
+            for f in &all_fields {
+                arg_parts.push(fld_dst(f));
+            }
             let args = arg_parts.join(" ");
             app_of(&mid, bid, &args)
         };
@@ -1338,6 +1426,9 @@ fn encode_chc_interproc(
                 for st in &sites {
                     parts.push(arr_src(st));
                 }
+                for f in &all_fields {
+                    parts.push(fld_src(f));
+                }
                 parts.join(" ")
             });
             if full == app {
@@ -1366,6 +1457,18 @@ fn encode_chc_interproc(
         for block in &body.blocks {
             let mut fresh = FreshGen::new();
             let mut constraints: Vec<String> = Vec::new();
+            // Allocation identity, not just storage (JLS 12.5): a `new`
+            // yields a reference distinct from every live one and from null.
+            // Nothing said so, so the solver could decide two separate
+            // allocations were the same object — which with field cells
+            // indexed by receiver immediately permits `o.f = 7; p.f = 99` to
+            // prove `o.f == 99`.
+            //
+            // Two objects from the *same* allocation may still coincide: a
+            // `new` in a loop produces many, and conflating them is the site
+            // abstraction and the sound direction.
+            let mut fresh_refs: Vec<String> = Vec::new();
+
             // Overflow conditions from this block's arithmetic; any one of them
             // makes `error` reachable.
             let mut overflow: Vec<String> = Vec::new();
@@ -1397,6 +1500,8 @@ fn encode_chc_interproc(
             // Current symbolic value of each site's array, rewritten by stores.
             let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
                 sites.iter().map(|st| (*st, arr_src(st))).collect();
+            let mut fld_map: std::collections::BTreeMap<FieldKey, String> =
+                all_fields.iter().map(|f| (f.clone(), fld_src(f))).collect();
 
             for i in 0..total_slots {
                 var_map.insert(i, format!("v{}", i));
@@ -1475,6 +1580,17 @@ fn encode_chc_interproc(
                                         arr_map.insert(*st, arr_dst(st));
                                     }
                                 }
+                                // Field writes are per-field, so only the
+                                // fields the callee may write are clobbered —
+                                // which for a constructor is usually its own
+                                // class's, leaving everything else provable.
+                                for f in all_fields.iter() {
+                                    if field_writers.get(f).is_some_and(|ws| ws.contains(target))
+                                        || !prog.bodies.contains_key(target)
+                                    {
+                                        fld_map.insert(f.clone(), fld_dst(f));
+                                    }
+                                }
                                 let callee_ret_ch = return_type_char(&target.desc);
                                 if let Some(callee_mid) = method_ids.get(target) {
                                     if callee_ret_ch != 'V' {
@@ -1525,6 +1641,21 @@ fn encode_chc_interproc(
                             Rvalue::New { .. } | Rvalue::NewArray { .. } => {
                                 let r = fresh.fresh();
                                 constraints.push(format!("(> {} 0)", r));
+                                // And distinct from every earlier allocation
+                                // in this block (JLS 12.5). Non-nullness alone
+                                // left the solver free to decide two separate
+                                // `new`s were the same object, which with
+                                // field cells indexed by receiver lets
+                                // `o.f = 7; p.f = 99` prove `o.f == 99`.
+                                //
+                                // Two objects from the *same* allocation may
+                                // still coincide — a `new` in a loop produces
+                                // many — and conflating those is the sound
+                                // direction.
+                                for prev in &fresh_refs {
+                                    constraints.push(format!("(not (= {} {}))", r, prev));
+                                }
+                                fresh_refs.push(r.clone());
                                 if let Rvalue::NewArray { len, .. } = rv {
                                     // JLS 15.10.1: a negative dimension throws
                                     // `NegativeArraySizeException`, so a *created*
@@ -1582,6 +1713,14 @@ fn encode_chc_interproc(
                             // site (#95). Otherwise it falls through below to a
                             // fresh constant, which is what every array read
                             // did before.
+                            // `o.f` as a select at the receiver. Aliasing is
+                            // the solver's: two names for one object give the
+                            // same cell without any points-to analysis.
+                            Rvalue::GetField { field, obj } if fld_map.contains_key(field) => {
+                                let cur = fld_map[field].clone();
+                                let o = lia_operand(obj, &var_map);
+                                var_map.insert(vid.0 as usize, format!("(select {cur} {o})"));
+                            }
                             Rvalue::ArrayLoad { arr, idx }
                                 if crate::interpolation::operand_site(arr, &array_sites)
                                     .and_then(|st| arr_map.get(&st))
@@ -1624,6 +1763,17 @@ fn encode_chc_interproc(
                                 };
                                 var_map.insert(vid.0 as usize, expr);
                             }
+                        }
+                    }
+                    Stmt::PutField { obj, field, val } => {
+                        // This loop had no arm for field writes either, so a
+                        // `PutField` was dropped outright. Only this field's
+                        // array changes: a write to `o.f` cannot alter `o.g`.
+                        if fld_map.contains_key(field) {
+                            let o = lia_operand(obj, &var_map);
+                            let v = lia_operand(val, &var_map);
+                            let cur = fld_map[field].clone();
+                            fld_map.insert(field.clone(), format!("(store {cur} {o} {v})"));
                         }
                     }
                     Stmt::ArrayStore { arr, idx, val } => {
@@ -1834,6 +1984,14 @@ fn encode_chc_interproc(
                     }
                 }
             }
+            for f in &all_fields {
+                let dst = fld_dst(f);
+                if let Some(cur) = fld_map.get(f) {
+                    if *cur != dst {
+                        assign_conds.push(format!("(= {} {})", dst, cur));
+                    }
+                }
+            }
 
             let forall_both: String = {
                 let mut v: Vec<String> = src_vars
@@ -1844,6 +2002,10 @@ fn encode_chc_interproc(
                 for st in &sites {
                     v.push(format!("({} {})", arr_src(st), ARR_SORT));
                     v.push(format!("({} {})", arr_dst(st), ARR_SORT));
+                }
+                for f in &all_fields {
+                    v.push(format!("({} {})", fld_src(f), ARR_SORT));
+                    v.push(format!("({} {})", fld_dst(f), ARR_SORT));
                 }
                 v.join(" ")
             };
@@ -2270,6 +2432,28 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     // As an argument there is no such escape: the solver must find an
     // interpretation of the relation that holds for *all* values of that
     // argument, exactly as for the integer state.
+    // Field arrays, same Burstall model as the interprocedural encoder.
+    let bv_fields: std::collections::BTreeSet<FieldKey> = {
+        let mut out: std::collections::BTreeSet<FieldKey> = Default::default();
+        for block in &body.blocks {
+            for st in &block.stmts {
+                match st {
+                    Stmt::PutField { field, .. } => {
+                        out.insert(field.clone());
+                    }
+                    Stmt::Assign(_, Rvalue::GetField { field, .. }) => {
+                        out.insert(field.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.retain(|f| f.desc != "D" && f.desc != "F");
+        out
+    };
+    let bvfld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
+    let bvfld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
+
     let array_sites = crate::interpolation::array_sites_of(body);
     let sites: Vec<ajave_ir::AllocSite> = {
         let mut v: Vec<_> = array_sites.values().copied().collect();
@@ -2298,6 +2482,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             sig.push(' ');
             sig.push_str(arr_sort);
         }
+        for _ in &bv_fields {
+            sig.push(' ');
+            sig.push_str(arr_sort);
+        }
         out.push_str(&format!(
             "(declare-fun block_{} ({}) Bool)\n",
             block.id.0, sig
@@ -2314,6 +2502,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         src_vars.push(arr_name(st, false));
         dst_vars.push(arr_name(st, true));
     }
+    for f in &bv_fields {
+        src_vars.push(bvfld_src(f));
+        dst_vars.push(bvfld_dst(f));
+    }
     let src_vars = src_vars;
     let dst_vars = dst_vars;
 
@@ -2328,6 +2520,9 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             v.push(format!("({} {})", arr_name(st, false), arr_sort));
         }
+        for f in &bv_fields {
+            v.push(format!("({} {})", bvfld_src(f), arr_sort));
+        }
         v.join(" ")
     };
     let forall_both: String = {
@@ -2341,6 +2536,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             v.push(format!("({} {})", arr_name(st, false), arr_sort));
             v.push(format!("({} {})", arr_name(st, true), arr_sort));
+        }
+        for f in &bv_fields {
+            v.push(format!("({} {})", bvfld_src(f), arr_sort));
+            v.push(format!("({} {})", bvfld_dst(f), arr_sort));
         }
         v.join(" ")
     };
@@ -2362,6 +2561,8 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 
     for block in &body.blocks {
         let mut constraints: Vec<String> = Vec::new();
+        // Allocation identity, as in the interprocedural encoder.
+        let mut bv_fresh_refs: Vec<String> = Vec::new();
         // Dense, indexed by slot id, not a hash map.
         //
         // `smt_text::encode_operand` is generic over `VarLookup` and already
@@ -2381,6 +2582,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         // Current symbolic value of each site's array, rewritten by stores.
         let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
             sites.iter().map(|st| (*st, arr_name(st, false))).collect();
+        let mut bvfld_map: std::collections::BTreeMap<FieldKey, String> = bv_fields
+            .iter()
+            .map(|f| (f.clone(), bvfld_src(f)))
+            .collect();
         let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
         let is_wide = |op: &Operand| -> bool {
             match op {
@@ -2481,6 +2686,11 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     // valid-assert 867 -> 860, where the victims were `unsat`
                     // answers that stopped going through rather than timeouts.
                     let select_expr = match rv {
+                        Rvalue::GetField { field, obj } if bvfld_map.contains_key(field) => {
+                            let cur = bvfld_map[field].clone();
+                            let o = smt_text::encode_operand(&BitvectorTheory, obj, &var_map);
+                            Some(format!("(select {cur} {o})"))
+                        }
                         Rvalue::ArrayLoad { arr, idx } => {
                             crate::interpolation::operand_site(arr, &array_sites)
                                 .and_then(|st| arr_map.get(&st).cloned())
@@ -2512,7 +2722,22 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                             fresh_decls.push((name, w));
                         }
                     }
+                    if matches!(rv, Rvalue::New { .. } | Rvalue::NewArray { .. }) {
+                        constraints.push(format!("(not (= {expr} (_ bv0 32)))"));
+                        for prev in &bv_fresh_refs {
+                            constraints.push(format!("(not (= {expr} {prev}))"));
+                        }
+                        bv_fresh_refs.push(expr.clone());
+                    }
                     var_map[vid.0 as usize] = expr;
+                }
+                Stmt::PutField { obj, field, val } => {
+                    if bvfld_map.contains_key(field) {
+                        let o = smt_text::encode_operand(&BitvectorTheory, obj, &var_map);
+                        let v = smt_text::encode_operand(&BitvectorTheory, val, &var_map);
+                        let cur = bvfld_map[field].clone();
+                        bvfld_map.insert(field.clone(), format!("(store {cur} {o} {v})"));
+                    }
                 }
                 Stmt::ArrayStore { arr, idx, val } => {
                     let i = smt_text::encode_operand(&BitvectorTheory, idx, &var_map);
@@ -2597,6 +2822,14 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             let post = arr_name(st, true);
             if let Some(cur) = arr_map.get(st) {
+                if *cur != post {
+                    assign_constraints.push(format!("(= {post} {cur})"));
+                }
+            }
+        }
+        for f in &bv_fields {
+            let post = bvfld_dst(f);
+            if let Some(cur) = bvfld_map.get(f) {
                 if *cur != post {
                     assign_constraints.push(format!("(= {post} {cur})"));
                 }
@@ -3771,6 +4004,165 @@ mod encoder_conformance {
         (prog, m)
     }
 
+    /// `o = new Box(); o.v = stored; e = o.v; c = (e == asserted); check(c)`,
+    /// with a second distinct object when `two` is set.
+    fn field_fixture(stored: i32, asserted: i32, two: bool) -> (Program, MethodKey) {
+        let m = mk("main");
+        let f = FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let site = |i: u32| ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: i,
+        };
+        let mut stmts = vec![
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site: site(0),
+                },
+            ),
+            Stmt::PutField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+                val: Operand::Const(Const::Int(stored)),
+            },
+        ];
+        if two {
+            stmts.push(Stmt::Assign(
+                VarId(3),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site: site(2),
+                },
+            ));
+            stmts.push(Stmt::PutField {
+                obj: Operand::Var(VarId(3)),
+                field: f.clone(),
+                val: Operand::int(99),
+            });
+        }
+        stmts.push(Stmt::Assign(
+            VarId(1),
+            Rvalue::GetField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+            },
+        ));
+        stmts.push(Stmt::Assign(
+            VarId(2),
+            Rvalue::Bin(
+                BinOp::Eq,
+                Operand::Var(VarId(1)),
+                Operand::Const(Const::Int(asserted)),
+            ),
+        ));
+        stmts.push(Stmt::Check(ObligationId(0)));
+
+        let mut vars: Vec<ajave_ir::VarInfo> = (0..4).map(ivar).collect();
+        vars[0].ty = Ty::Ref;
+        vars[3].ty = Ty::Ref;
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            m.clone(),
+            Body {
+                is_static: true,
+                key: m.clone(),
+                entry: BlockId(0),
+                vars,
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(VarId(2)),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts,
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(m.clone());
+        (prog, m)
+    }
+
+    fn safe_field_value() -> (Program, MethodKey) {
+        field_fixture(5, 5, false)
+    }
+    fn unsafe_field_value() -> (Program, MethodKey) {
+        field_fixture(5, 7, false)
+    }
+
+    /// A3 capability, interprocedural encoder. `PutField` had no arm in either
+    /// encoder — field writes were dropped outright — so this was unprovable.
+    #[test]
+    fn the_interproc_encoder_proves_a_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_field_value();
+        let (lia, _) = both(&prog, &m);
+        assert_eq!(lia, ChcOutcome::Safe, "LIA could not prove `o.v == 5`");
+    }
+
+    /// The same for the bitvector encoder, asserted separately because a fix
+    /// to one silently leaves the other exposed.
+    #[test]
+    fn the_bitvector_encoder_proves_a_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_field_value();
+        let (_, bv) = both(&prog, &m);
+        assert_eq!(bv, ChcOutcome::Safe, "BV could not prove `o.v == 5`");
+    }
+
+    #[test]
+    fn neither_encoder_proves_a_false_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = unsafe_field_value();
+        let (lia, bv) = both(&prog, &m);
+        assert_ne!(lia, ChcOutcome::Safe, "LIA called a false field claim safe");
+        assert_ne!(bv, ChcOutcome::Safe, "BV called a false field claim safe");
+    }
+
+    /// The reason for the Burstall model. A second receiver's write must not
+    /// disturb the first's cell — which the flat abstraction cannot express and
+    /// which this gets from the solver, provided allocations are known
+    /// distinct.
+    #[test]
+    fn neither_encoder_confuses_two_receivers_of_one_field() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = field_fixture(5, 5, true);
+        let (lia, bv) = both(&prog, &m);
+        assert_eq!(
+            lia,
+            ChcOutcome::Safe,
+            "LIA: p.v = 99 must not make o.v == 5 unprovable"
+        );
+        assert_eq!(
+            bv,
+            ChcOutcome::Safe,
+            "BV: p.v = 99 must not make o.v == 5 unprovable"
+        );
+    }
+
     fn corpus() -> Vec<(&'static str, bool, (Program, MethodKey))> {
         vec![
             ("safe_constant", true, safe_constant()),
@@ -3781,6 +4173,8 @@ mod encoder_conformance {
             ("unsafe_float_result", false, unsafe_float_result()),
             ("safe_array_element", true, safe_array_element()),
             ("unsafe_array_element", false, unsafe_array_element()),
+            ("safe_field_value", true, safe_field_value()),
+            ("unsafe_field_value", false, unsafe_field_value()),
         ]
     }
 
