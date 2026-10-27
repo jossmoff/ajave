@@ -384,6 +384,40 @@ pub fn encode_body_lia(
     // unrelated and nothing about array contents could be proved — the
     // regression #95 measured as valid-assert 867 -> 860, where the losses
     // were `unsat` answers that stopped being provable rather than timeouts.
+    // One SMT array per field name, indexed by the receiver reference
+    // (Burstall field-as-array). Aliasing is then the solver's: `o.f` and
+    // `p.f` are the same cell exactly when `o = p`, so this needs no
+    // points-to analysis — unlike arrays, whose identity has to come from the
+    // allocation site because the IR gives a reference no array sort.
+    let mut fields: std::collections::BTreeSet<ajave_ir::FieldKey> = Default::default();
+    for block in &body.blocks {
+        for st in &block.stmts {
+            match st {
+                ajave_ir::Stmt::PutField { field, .. } => {
+                    fields.insert(field.clone());
+                }
+                ajave_ir::Stmt::Assign(_, ajave_ir::Rvalue::GetField { field, .. }) => {
+                    fields.insert(field.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    // A float-valued field cannot live in an `(Array Int Int)`, and claiming
+    // otherwise would let the checker confirm something it cannot state.
+    fields.retain(|f| f.desc != "D" && f.desc != "F");
+    let fld_name = crate::invariant_check::field_array_name;
+    for f in &fields {
+        decls.push_str(&format!(
+            "(declare-fun {} () (Array Int Int))\n",
+            fld_name(f)
+        ));
+        decls.push_str(&format!(
+            "(declare-fun {}p () (Array Int Int))\n",
+            fld_name(f)
+        ));
+    }
+
     let array_sites = array_sites_of(body);
     let sites: std::collections::BTreeSet<ajave_ir::AllocSite> =
         array_sites.values().copied().collect();
@@ -422,6 +456,19 @@ pub fn encode_body_lia(
         // encoder previously did not collect at all, so its proofs held only
         // for unbounded integers and not for Java's 32-bit arithmetic.
         let mut enc = smt_text::Encoder::new(&theory, &format!("{prefix}e{}_", block.id.0));
+        // Collected into `declarations` at the end of the block, below.
+        //
+        // They were not collected at all before, which `invariant_check`'s
+        // preservation query silently depended on being harmless: a
+        // fresh binder appeared in the transition relation and nowhere else,
+        // so z3 reported `unknown constant`, *dropped that whole assertion*,
+        // and answered `sat` on what was left. The query then read as "the
+        // invariant is not preserved" when it had never been checked.
+        //
+        // It stayed hidden because the post-state renderer only prefixed
+        // variables, so the preservation check was `inv ∧ T ∧ ¬inv` over one
+        // state — trivially UNSAT, and therefore confirming regardless. Two
+        // defects, each concealing the other.
         let is_wide = |op: &Operand| -> bool {
             match op {
                 Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
@@ -438,6 +485,19 @@ pub fn encode_body_lia(
         // pre-state constant and rewritten by each store.
         let mut arr_exprs: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
             sites.iter().map(|st| (*st, arr_name(st, false))).collect();
+        let mut fld_exprs: std::collections::BTreeMap<ajave_ir::FieldKey, String> =
+            fields.iter().map(|f| (f.clone(), fld_name(f))).collect();
+        // References produced by allocations in this block.
+        //
+        // The JLS guarantees `new` yields a reference distinct from every live
+        // one and from null, and nothing here said so: each `New` became a
+        // fresh *name* with no constraint relating it to the others, so the
+        // solver was free to decide two separate allocations were the same
+        // object. With field cells indexed by receiver that is immediately
+        // visible — `o.f = 7; p.f = 99` then permits `o.f == 99` — and it is
+        // the difference between modelling the heap's *storage* and modelling
+        // its *identity*.
+        let mut fresh_refs: Vec<String> = Vec::new();
 
         for stmt in &block.stmts {
             match stmt {
@@ -447,6 +507,15 @@ pub fn encode_body_lia(
                     // Otherwise it falls through to the encoder's fresh
                     // constant, which is what every heap read used to do.
                     let expr = match rv {
+                        // `o.f` is a select on the field's array at the
+                        // receiver. No points-to needed: if the receiver is a
+                        // variable, the solver relates it to any aliased name
+                        // itself — which is the whole reason for this model.
+                        Rvalue::GetField { field, obj } if fld_exprs.contains_key(field) => {
+                            let cur = fld_exprs[field].clone();
+                            let o = smt_text::encode_operand(&theory, obj, &var_exprs);
+                            Some(format!("(select {cur} {o})"))
+                        }
                         Rvalue::ArrayLoad { arr, idx } => {
                             match operand_site(arr, &array_sites)
                                 .and_then(|st| arr_exprs.get(&st).cloned())
@@ -464,7 +533,30 @@ pub fn encode_body_lia(
                         Some(e) => e,
                         None => enc.rvalue(rv, &var_exprs, &is_wide),
                     };
+                    if matches!(rv, Rvalue::New { .. } | Rvalue::NewArray { .. }) {
+                        // Pushed *here*, not after the loop: an error formula
+                        // snapshots `path_conds` at its `Check`, so a
+                        // condition added later never reaches it. An
+                        // allocation's freshness holds from the allocation
+                        // onward, which is exactly this point.
+                        path_conds.push(format!("(not (= {expr} 0))"));
+                        for prev in &fresh_refs {
+                            path_conds.push(format!("(not (= {expr} {prev}))"));
+                        }
+                        fresh_refs.push(expr.clone());
+                    }
                     var_exprs[vid.0 as usize] = expr;
+                }
+                Stmt::PutField { obj, field, val } => {
+                    // A write to `o.f` cannot alter `o.g`, so only this
+                    // field's array changes — unlike an array store through an
+                    // unresolvable reference, which may land anywhere.
+                    if fld_exprs.contains_key(field) {
+                        let o = smt_text::encode_operand(&theory, obj, &var_exprs);
+                        let v = smt_text::encode_operand(&theory, val, &var_exprs);
+                        let cur = fld_exprs[field].clone();
+                        fld_exprs.insert(field.clone(), format!("(store {cur} {o} {v})"));
+                    }
                 }
                 Stmt::ArrayStore { arr, idx, val } => {
                     let i = smt_text::encode_operand(&theory, idx, &var_exprs);
@@ -533,6 +625,13 @@ pub fn encode_body_lia(
             }
         }
 
+        for (name, wide) in enc.binders.drain(..) {
+            let _ = wide;
+            if !decls.contains(&format!("(declare-fun {name} ")) {
+                decls.push_str(&format!("(declare-fun {name} () Int)\n"));
+            }
+        }
+
         // Build successor transition clauses.
         let mk_assign = |var_exprs: &[String]| -> Vec<String> {
             let mut out: Vec<String> = var_exprs
@@ -553,6 +652,12 @@ pub fn encode_body_lia(
             // "preserved" by a transition that in fact clobbers the array.
             for (st, cur) in arr_exprs.iter() {
                 let post = arr_name(st, true);
+                if *cur != post {
+                    out.push(format!("(= {post} {cur})"));
+                }
+            }
+            for (f, cur) in fld_exprs.iter() {
+                let post = format!("{}p", fld_name(f));
                 if *cur != post {
                     out.push(format!("(= {post} {cur})"));
                 }

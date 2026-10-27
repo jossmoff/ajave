@@ -124,6 +124,25 @@ pub enum Expr {
         site: ajave_ir::AllocSite,
         index: Box<Expr>,
     },
+    /// A field of a particular object.
+    ///
+    /// `obj` is an `Expr` denoting the **receiver reference**, not an
+    /// `AllocSite`, because fields are encoded Burstall-style: one array per
+    /// field name, indexed by the reference. `o.f` and `p.f` are then the same
+    /// cell exactly when `o = p`, so aliasing is the solver's job and no
+    /// points-to analysis is needed.
+    ///
+    /// # Strength, versus `Select`
+    ///
+    /// A `Field` claim is about **one receiver**. A `Select` claim is about
+    /// **every array from a site**, because a `newarray` in a loop produces
+    /// many arrays at one site. Those are different strengths and a consumer
+    /// must not read one as the other: a fact about `o.f` says nothing about
+    /// `p.f`, while a fact about a site's elements must hold for all of them.
+    Field {
+        field: ajave_ir::FieldKey,
+        obj: Box<Expr>,
+    },
     /// A named library method applied to arguments. Present so a claim can be
     /// *about* `Math.sin(x)` without anyone having to model it — which is the
     /// whole point of being able to ask.
@@ -185,6 +204,8 @@ impl Expr {
             Expr::Not(a) => a.collect_vars(out),
             // The site is not a variable; the index may mention some.
             Expr::Select { index, .. } => index.collect_vars(out),
+            // The receiver is a reference-valued expression and may be a var.
+            Expr::Field { obj, .. } => obj.collect_vars(out),
             Expr::Apply { args, .. } => {
                 for a in args {
                     a.collect_vars(out);
@@ -224,6 +245,7 @@ impl std::fmt::Display for Expr {
             Expr::Select { site, index } => {
                 write!(f, "a[bb{}:{}][{index}]", site.block.0, site.index)
             }
+            Expr::Field { field, obj } => write!(f, "{obj}.{}", field.name),
             Expr::Int(n) => write!(f, "{n}"),
             Expr::Double(bits) => {
                 let d = f64::from_bits(*bits);
