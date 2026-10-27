@@ -191,7 +191,7 @@ default there because that is the claim that rots.
 |---|---|---|---|
 | `AJAVE_SITE_FIELDS` | **on** (`=0` ablates) | B2/B3: site-indexed field cells and array element intervals in `interval` | smoke neutral; see below |
 | `AJAVE_CHC_HEAP_SUMMARY` | **off** (`=1` enables) | C1: field footprint threaded through CHC summary relations | smoke **neutral**, 171 vs 171, 0 WRONG |
-| `AJAVE_CHC_QGEN` | **off** (`=1` enables) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | see below |
+| `AJAVE_CHC_QGEN` | **on** (`=0` ablates) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | smoke **173 vs 171**, 134 correct vs 133, 0 WRONG either way, 319s vs 320s |
 
 ## What each is for, and what the measurement does and does not say
 
@@ -219,3 +219,15 @@ with it on, in CHC-only and full-portfolio alike. That benchmark is now the
 smoke canary that prices the flag — the earlier three-arm run showed qgen
 neutral only because its single beneficiary was not in the set, which is worth
 recording as a way to measure a flag and learn nothing.
+
+Priced with the canary present: **173 against 171, 134 correct against 133, 0
+wrong either way, 319s against 320s and the same timeout count.** The expected
+cost was timeouts, since a quantified search is a different and usually slower
+search, and on this set there is none. So it is **on by default**.
+
+Two caveats belong next to that number. It is 157 tasks, and the gain is
+exactly the one task that needs a quantified array invariant — nothing else
+moved, which is as consistent with "no other task in this set needs it" as with
+"it is free". And it does nothing at all without the array-store fix it shipped
+beside, so the flag's value is not separable from that fix on any set where
+both are present.

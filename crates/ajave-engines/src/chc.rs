@@ -45,12 +45,23 @@ const ARR_SORT: &str = "(Array Int Int)";
 /// Contents modelling made that property expressible; nothing in the portfolio
 /// infers it.
 ///
-/// Off by default until measured. A quantified search is a different and
-/// usually slower search, so the expected cost is timeouts on tasks that
-/// currently answer — which is a cost that only a corpus run can price.
+/// **On by default**, measured. `AJAVE_CHC_QGEN=0` ablates it.
+///
+/// The expected cost was timeouts: a quantified search is a different and
+/// usually slower search. Measured on smoke it is not: **173 against 171, 134
+/// correct against 133, 0 wrong either way, 319s against 320s and the same
+/// timeout count**. The gain is the one task that needs a quantified array
+/// invariant, and nothing else moved.
+///
+/// Two caveats on that number, because it is a small set. The flag was
+/// *first* measured as neutral, on a set that contained nothing exercising it
+/// — a number with no information in it. And it does nothing at all without
+/// the array-store fix it shipped alongside: before that, Spacer reported the
+/// error reachable on the array-fill shape, and quantified generalisation
+/// cannot help when the abstraction genuinely admits a counterexample.
 pub fn chc_qgen_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AJAVE_CHC_QGEN").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("AJAVE_CHC_QGEN").as_deref() != Ok("0"))
 }
 
 /// Whether C1's heap-carrying summary relations are used.

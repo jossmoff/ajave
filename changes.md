@@ -229,6 +229,60 @@ missing `store`; a *constant-bound* benchmark failing is consistent with only
 one of them. The cheaper test was the discriminating one, and it was not run
 until the expensive explanation had already been adopted.
 
+## 2026-10-27 — D1 measured, and a flag that was first measured as neutral because nothing exercised it
+
+`AJAVE_CHC_QGEN` (`fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false`,
+which upstream documents as having to be set together) is **on by default**:
+
+| | runs | correct | WRONG | score | wall |
+|---|---|---|---|---|---|
+| off | 157 | 133 | 0 | 171 | 320s |
+| on | 157 | **134** | 0 | **173** | 319s |
+
+The expected cost was timeouts — a quantified search is a different and usually
+slower search — and on this set there is none: same wall clock, same timeout
+count, no task moved except the one that needs a quantified array invariant.
+
+Two things about this measurement are worth more than the number.
+
+### A flag measured against a set that does not exercise it produces no information
+
+The first three-arm run reported qgen as exactly neutral: 171 against 171, with
+identical correct counts. That looked like a clean negative result. It was not
+a result at all — **qgen's only demonstrated beneficiary was not in the smoke
+set.** The run measured the flag's cost on 156 tasks that do not use it and its
+gain on none.
+
+Adding `heap/EveryElementNonNullAfterAFillLoop` as a canary changed the answer
+from "neutral" to "+2". Nothing about the flag changed.
+
+`CLAUDE.md` already requires that a change be measured on both properties,
+because they consume different obligation kinds. This is the same failure one
+level down: a measurement is only evidence about the mechanism if the set
+contains something the mechanism acts on. Worth checking for any flag whose
+population is narrow — and narrowness is exactly why these flags exist.
+
+### The flag's value is not separable from the fix it shipped with
+
+qgen did nothing before the array-store fix. Spacer was reporting the error
+*reachable* on the array-fill shape, and quantified generalisation cannot help
+when the abstraction genuinely admits a counterexample — there was a real
+counterexample to find, because the encoding read an array it never wrote.
+
+So `AJAVE_CHC_QGEN=0` does not measure "the portfolio without D1" on any build
+that has the store fix. It measures the last step of a two-step change. Said
+here because the ablation switch looks like it isolates one decision and does
+not.
+
+### Gate hygiene, incidentally
+
+With qgen off, the new canary burns the full solver budget before answering
+UNKNOWN — a 300s tax on every smoke run. With it on by default the same task
+answers TRUE in 3s, so the suite stays near its five-minute budget and the
+expensive path is only taken when someone deliberately ablates. A canary whose
+cost depends on the default it is testing is worth noticing before it is
+committed.
+
 ## 2026-09-09 — the round loop and cursor deltas, measured
 
 Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181
