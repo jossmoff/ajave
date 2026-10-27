@@ -2028,12 +2028,46 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     }
     let var_indices = &var_widths;
 
+    // Array contents as *relation arguments* (#95).
+    //
+    // Deliberately not an uninterpreted predicate in a clause body. That was
+    // the previous attempt (JayHorn-style space invariants): the solver
+    // interprets such a predicate and may choose it **empty**, which makes
+    // `assume phi(..)` unsatisfiable and the read path vacuously safe. It
+    // produced wrong TRUEs on MinePump/spec1-5_product45 and
+    // java-ranger-regression/TCAS_prop1, both now smoke canaries.
+    //
+    // As an argument there is no such escape: the solver must find an
+    // interpretation of the relation that holds for *all* values of that
+    // argument, exactly as for the integer state.
+    let array_sites = crate::interpolation::array_sites_of(body);
+    let sites: Vec<ajave_ir::AllocSite> = {
+        let mut v: Vec<_> = array_sites.values().copied().collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let arr_name = |st: &ajave_ir::AllocSite, post: bool| {
+        format!(
+            "arr{}_{}{}",
+            st.block.0,
+            st.index,
+            if post { "p" } else { "" }
+        )
+    };
+    // Indices and elements are 32-bit here, matching this encoder's word size.
+    let arr_sort = "(Array (_ BitVec 32) (_ BitVec 32))";
+
     for block in &body.blocks {
-        let sig: String = var_indices
+        let mut sig: String = var_indices
             .iter()
             .map(|(_, w)| format!("(_ BitVec {})", w))
             .collect::<Vec<_>>()
             .join(" ");
+        for _ in &sites {
+            sig.push(' ');
+            sig.push_str(arr_sort);
+        }
         out.push_str(&format!(
             "(declare-fun block_{} ({}) Bool)\n",
             block.id.0, sig
@@ -2041,20 +2075,31 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     }
     out.push_str("(declare-fun error () Bool)\n");
 
-    let src_vars: Vec<String> = var_indices.iter().map(|(i, _)| format!("v{}", i)).collect();
-    let dst_vars: Vec<String> = var_indices
+    let mut src_vars: Vec<String> = var_indices.iter().map(|(i, _)| format!("v{}", i)).collect();
+    let mut dst_vars: Vec<String> = var_indices
         .iter()
         .map(|(i, _)| format!("v{}p", i))
         .collect();
+    for st in &sites {
+        src_vars.push(arr_name(st, false));
+        dst_vars.push(arr_name(st, true));
+    }
+    let src_vars = src_vars;
+    let dst_vars = dst_vars;
 
     // Binder names come from the *slot id*, not the position. Ghost slots are
     // appended at `n_vars + var`, so those two stopped agreeing the moment the
     // slot space grew past the program's own variables.
-    let forall_src: String = var_indices
-        .iter()
-        .map(|(i, w)| format!("(v{} (_ BitVec {}))", i, w))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let forall_src: String = {
+        let mut v: Vec<String> = var_indices
+            .iter()
+            .map(|(i, w)| format!("(v{} (_ BitVec {}))", i, w))
+            .collect();
+        for st in &sites {
+            v.push(format!("({} {})", arr_name(st, false), arr_sort));
+        }
+        v.join(" ")
+    };
     let forall_both: String = {
         let src = var_indices
             .iter()
@@ -2062,17 +2107,22 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         let dst = var_indices
             .iter()
             .map(|(i, w)| format!("(v{}p (_ BitVec {}))", i, w));
-        src.chain(dst).collect::<Vec<_>>().join(" ")
+        let mut v: Vec<String> = src.chain(dst).collect();
+        for st in &sites {
+            v.push(format!("({} {})", arr_name(st, false), arr_sort));
+            v.push(format!("({} {})", arr_name(st, true), arr_sort));
+        }
+        v.join(" ")
     };
 
-    let block_app = |bid: u32| -> String {
-        let args = src_vars.join(" ");
-        format!("(block_{} {})", bid, args)
-    };
-    let block_app_dst = |bid: u32| -> String {
-        let args = dst_vars.join(" ");
-        format!("(block_{} {})", bid, args)
-    };
+    // Joined once, not per call. These closures are invoked for every clause
+    // of every block, and each call used to re-join the whole state vector
+    // into a fresh String. Appending array arguments made that vector longer,
+    // so the redundant work grew with exactly the change that needed it least.
+    let src_args = src_vars.join(" ");
+    let dst_args = dst_vars.join(" ");
+    let block_app = |bid: u32| -> String { format!("(block_{} {})", bid, src_args) };
+    let block_app_dst = |bid: u32| -> String { format!("(block_{} {})", bid, dst_args) };
 
     out.push_str(&format!(
         "(assert (forall ({}) {}))\n",
@@ -2082,11 +2132,25 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 
     for block in &body.blocks {
         let mut constraints: Vec<String> = Vec::new();
-        let mut var_map: HashMap<usize, String> = HashMap::new();
-
-        for (i, _) in var_indices.iter() {
-            var_map.insert(*i, format!("v{}", i));
-        }
+        // Dense, indexed by slot id, not a hash map.
+        //
+        // `smt_text::encode_operand` is generic over `VarLookup` and already
+        // has an impl for `Vec<String>`, so this needs no signature change
+        // anywhere. The slot space is dense — program vars at `0..n_vars`,
+        // ghost lengths at `n_vars + var` — and this is the hottest read in
+        // the encoder: every operand of every statement goes through it. A
+        // direct index replaces a hash and a probe.
+        //
+        // It is also deterministic by construction, which a `HashMap` is only
+        // by discipline. `CLAUDE.md` records hash iteration order having cost
+        // ±15-30 points of verdict noise that was mistaken for timeout
+        // variance; a structure that cannot be iterated in a bad order is
+        // better than one that must not be.
+        let max_slot = var_indices.iter().map(|(i, _)| *i).max().unwrap_or(0);
+        let mut var_map: Vec<String> = (0..=max_slot).map(|i| format!("v{}", i)).collect();
+        // Current symbolic value of each site's array, rewritten by stores.
+        let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
+            sites.iter().map(|st| (*st, arr_name(st, false))).collect();
         let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
         let is_wide = |op: &Operand| -> bool {
             match op {
@@ -2131,13 +2195,13 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                         match rv {
                             Rvalue::NewArray { len, .. } => {
                                 let l = smt_text::encode_operand(&BitvectorTheory, len, &var_map);
-                                var_map.insert(g, l);
+                                var_map[g] = l;
                             }
                             Rvalue::Use(Operand::Var(src))
                                 if ghost_want.contains(&(src.0 as usize)) =>
                             {
                                 let sg = ghost_of(src.0 as usize);
-                                if let Some(sv) = var_map.get(&sg).cloned() {
+                                if let Some(sv) = var_map.get(sg).cloned() {
                                     var_map.insert(g, sv);
                                 }
                             }
@@ -2154,11 +2218,8 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     if let Rvalue::ArrayLength(Operand::Var(arr)) = rv {
                         if ghost_want.contains(&(arr.0 as usize)) {
                             let g = ghost_of(arr.0 as usize);
-                            let v = var_map
-                                .get(&g)
-                                .cloned()
-                                .unwrap_or_else(|| format!("v{}", g));
-                            var_map.insert(vid.0 as usize, v);
+                            let v = var_map.get(g).cloned().unwrap_or_else(|| format!("v{}", g));
+                            var_map[vid.0 as usize] = v;
                             continue;
                         }
                     }
@@ -2182,7 +2243,28 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     // The decline it replaces cost 37 of 142 unproven TRUE
                     // tasks — every program whose assertion is about integers
                     // and whose `double` is incidental.
-                    let expr = if obligation_scoping_enabled() && rvalue_is_float(rv, &is_float) {
+                    // An element read resolves to a `select` on the site's
+                    // array when the reference names exactly one site (#95).
+                    // Before this it fell through to a fresh constant, so two
+                    // reads of the same element were unrelated and nothing
+                    // about contents was provable — the loss #95 measured as
+                    // valid-assert 867 -> 860, where the victims were `unsat`
+                    // answers that stopped going through rather than timeouts.
+                    let select_expr = match rv {
+                        Rvalue::ArrayLoad { arr, idx } => {
+                            crate::interpolation::operand_site(arr, &array_sites)
+                                .and_then(|st| arr_map.get(&st).cloned())
+                                .map(|cur| {
+                                    let i =
+                                        smt_text::encode_operand(&BitvectorTheory, idx, &var_map);
+                                    format!("(select {cur} {i})")
+                                })
+                        }
+                        _ => None,
+                    };
+                    let expr = if let Some(e) = select_expr {
+                        e
+                    } else if obligation_scoping_enabled() && rvalue_is_float(rv, &is_float) {
                         let f = format!("bvfp_{}_{}", block.id.0, vid.0);
                         let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);
                         if !fresh_decls.iter().any(|(n, _)| n == &f) {
@@ -2200,7 +2282,26 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                             fresh_decls.push((name, w));
                         }
                     }
-                    var_map.insert(vid.0 as usize, expr);
+                    var_map[vid.0 as usize] = expr;
+                }
+                Stmt::ArrayStore { arr, idx, val } => {
+                    let i = smt_text::encode_operand(&BitvectorTheory, idx, &var_map);
+                    let v = smt_text::encode_operand(&BitvectorTheory, val, &var_map);
+                    match crate::interpolation::operand_site(arr, &array_sites) {
+                        Some(st) => {
+                            if let Some(cur) = arr_map.get(&st).cloned() {
+                                arr_map.insert(st, format!("(store {cur} {i} {v})"));
+                            }
+                        }
+                        // A store through a reference naming no single site may
+                        // land in any array, so no site's contents survive it.
+                        // Dropping only some would be the unsound direction.
+                        None => {
+                            for st in sites.iter() {
+                                arr_map.insert(*st, arr_name(st, true));
+                            }
+                        }
+                    }
                 }
                 Stmt::Assume(op) => {
                     let expr = smt_text::encode_operand(&BitvectorTheory, op, &var_map);
@@ -2255,9 +2356,20 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         // or the length does not survive into the loop body where the bound is
         // actually proved.
         for (i, _) in var_indices.iter() {
-            let Some(val) = var_map.get(i) else { continue };
+            let Some(val) = var_map.get(*i) else { continue };
             if *val != format!("v{}p", i) {
                 assign_constraints.push(format!("(= v{}p {})", i, val));
+            }
+        }
+        // Arrays are state, so the post-state must say what happened to them.
+        // Leaving `arr{site}p` unconstrained would let an invariant about it
+        // be "preserved" by a transition that in fact clobbers the array.
+        for st in &sites {
+            let post = arr_name(st, true);
+            if let Some(cur) = arr_map.get(st) {
+                if *cur != post {
+                    assign_constraints.push(format!("(= {post} {cur})"));
+                }
             }
         }
 
@@ -3341,6 +3453,94 @@ mod encoder_conformance {
         (prog, m)
     }
 
+    /// `int[] a = new int[4]; a[0] = 5; assert a[0] == 5;` — safe, and
+    /// provable **only** if the encoding relates the store to the load.
+    ///
+    /// With array contents as unconstrained reads (the state #95 left behind)
+    /// `a[0]` is a fresh constant, `a[0] == 5` is satisfiable-false, and this
+    /// program is unprovable. So this fixture is the non-vacuity witness for
+    /// the array path: if it is not `safe`, the arrays are not threaded.
+    fn safe_array_element() -> (Program, MethodKey) {
+        array_fixture(5, 5)
+    }
+
+    /// The same shape, storing 5 and asserting 7 — **unsafe**, and the
+    /// soundness case. An encoding that mishandled `store`/`select` could make
+    /// the read vacuous and call this safe, which is the shape of the two
+    /// wrong TRUEs the JayHorn space invariants produced.
+    fn unsafe_array_element() -> (Program, MethodKey) {
+        array_fixture(5, 7)
+    }
+
+    /// `a = new int[4]; a[0] = stored; c = (a[0] == asserted); check(c)`.
+    fn array_fixture(stored: i32, asserted: i32) -> (Program, MethodKey) {
+        let (a, e, c) = (VarId(0), VarId(1), VarId(2));
+        let m = mk("main");
+        let site = ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: 0,
+        };
+        let mut prog = Program::default();
+        let mut vars: Vec<ajave_ir::VarInfo> = (0..3).map(ivar).collect();
+        vars[0].ty = Ty::Ref;
+        prog.bodies.insert(
+            m.clone(),
+            Body {
+                is_static: true,
+                key: m.clone(),
+                entry: BlockId(0),
+                vars,
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(c),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            a,
+                            Rvalue::NewArray {
+                                elem: "I".into(),
+                                len: Operand::int(4),
+                                site,
+                            },
+                        ),
+                        Stmt::ArrayStore {
+                            arr: Operand::Var(a),
+                            idx: Operand::int(0),
+                            val: Operand::Const(Const::Int(stored)),
+                        },
+                        Stmt::Assign(
+                            e,
+                            Rvalue::ArrayLoad {
+                                arr: Operand::Var(a),
+                                idx: Operand::int(0),
+                            },
+                        ),
+                        Stmt::Assign(
+                            c,
+                            Rvalue::Bin(
+                                BinOp::Eq,
+                                Operand::Var(e),
+                                Operand::Const(Const::Int(asserted)),
+                            ),
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(m.clone());
+        (prog, m)
+    }
+
     fn corpus() -> Vec<(&'static str, bool, (Program, MethodKey))> {
         vec![
             ("safe_constant", true, safe_constant()),
@@ -3349,6 +3549,8 @@ mod encoder_conformance {
             ("unsafe_nondet", false, unsafe_nondet()),
             ("unsafe_overflow", false, unsafe_overflow()),
             ("unsafe_float_result", false, unsafe_float_result()),
+            ("safe_array_element", true, safe_array_element()),
+            ("unsafe_array_element", false, unsafe_array_element()),
         ]
     }
 
@@ -3447,6 +3649,47 @@ mod encoder_conformance {
         let (lia, bv) = both(&prog, &m);
         assert_eq!(lia, ChcOutcome::Unsafe, "LIA did not decide `assert false`");
         assert_eq!(bv, ChcOutcome::Unsafe, "BV did not decide `assert false`");
+    }
+
+    /// The capability witness for #95's array work, and the test that would
+    /// have failed before it.
+    ///
+    /// `a[0] = 5; assert a[0] == 5` is provable only if the encoding relates
+    /// the store to the load. With contents as unconstrained reads — the state
+    /// #95 left behind after the unsound space invariants were removed —
+    /// `a[0]` is a fresh constant and this is simply not provable.
+    ///
+    /// Asserting `Safe` rather than "answered" matters: a corpus entry that is
+    /// merely *present* proves nothing, and the conformance tests around this
+    /// one either report or only exercise `assert false`.
+    #[test]
+    fn the_bitvector_encoder_proves_an_array_element_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_array_element();
+        let (_, bv) = both(&prog, &m);
+        assert_eq!(
+            bv,
+            ChcOutcome::Safe,
+            "the bitvector encoder could not prove `a[0] == 5` after `a[0] = 5`; \
+             array contents are not reaching the relation state"
+        );
+    }
+
+    /// The soundness half, stated separately from the corpus sweep so a
+    /// failure names the array path rather than "something in the corpus".
+    #[test]
+    fn neither_encoder_proves_a_false_array_element_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = unsafe_array_element();
+        let (lia, bv) = both(&prog, &m);
+        assert_ne!(lia, ChcOutcome::Safe, "LIA called a false array claim safe");
+        assert_ne!(bv, ChcOutcome::Safe, "BV called a false array claim safe");
     }
 
     /// The precision half. A difference here is legitimate — the theories are

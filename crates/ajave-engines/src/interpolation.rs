@@ -306,7 +306,7 @@ fn parse_interpolant_response(lines: &[String]) -> InterpolationResult {
 /// site, and they share a cell here. That conflation is an over-approximation
 /// in the direction a proof needs, because a claim about the cell must then
 /// hold for every array the site produced.
-fn array_sites_of(
+pub fn array_sites_of(
     body: &ajave_ir::Body,
 ) -> std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite> {
     use ajave_ir::{Operand, Rvalue, Stmt};
@@ -352,7 +352,7 @@ fn array_sites_of(
 }
 
 /// The allocation site an operand names, if exactly one.
-fn operand_site(
+pub fn operand_site(
     op: &ajave_ir::Operand,
     sites: &std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite>,
 ) -> Option<ajave_ir::AllocSite> {
