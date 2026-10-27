@@ -289,6 +289,79 @@ fn parse_interpolant_response(lines: &[String]) -> InterpolationResult {
 /// Returns (declarations, transition_formula, init_formula, error_formulas).
 /// Variables are encoded as integers (not bitvectors) since interpolation
 /// requires LIA.
+/// Which array allocation site each reference variable names, within one body.
+///
+/// Deliberately tiny and deliberately conservative. A variable assigned from
+/// exactly one `NewArray` site names that site; a copy inherits its source's;
+/// anything else, or a variable that could name two sites, names **none** and
+/// every read through it stays unconstrained.
+///
+/// That last case is the whole soundness argument. A `select` on the wrong
+/// array is a fact about a different program, and an engine publishing `Over`
+/// cannot afford one — so an ambiguous reference buys nothing rather than
+/// guessing. A points-to analysis worth the name would do better; this is the
+/// cheapest thing that is *correct*, and the loss is precision only.
+///
+/// A site is not an object: a `newarray` in a loop produces many arrays at one
+/// site, and they share a cell here. That conflation is an over-approximation
+/// in the direction a proof needs, because a claim about the cell must then
+/// hold for every array the site produced.
+fn array_sites_of(
+    body: &ajave_ir::Body,
+) -> std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite> {
+    use ajave_ir::{Operand, Rvalue, Stmt};
+    let mut out: std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite> =
+        std::collections::BTreeMap::new();
+    let mut ambiguous: std::collections::BTreeSet<ajave_ir::VarId> = Default::default();
+
+    // Two passes so a copy from a variable defined later still resolves.
+    for _ in 0..2 {
+        for block in &body.blocks {
+            for st in &block.stmts {
+                let Stmt::Assign(v, rv) = st else { continue };
+                let found = match rv {
+                    Rvalue::NewArray { site, .. } => Some(*site),
+                    Rvalue::Use(Operand::Var(w)) => out.get(w).copied(),
+                    _ => None,
+                };
+                match found {
+                    Some(site) => match out.get(v) {
+                        Some(prev) if *prev != site => {
+                            ambiguous.insert(*v);
+                        }
+                        _ => {
+                            out.insert(*v, site);
+                        }
+                    },
+                    // Assigned from something that is not a known array: the
+                    // variable may name anything, so it names nothing.
+                    None => {
+                        if matches!(rv, Rvalue::NewArray { .. }) {
+                        } else if out.contains_key(v) {
+                            ambiguous.insert(*v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for v in ambiguous {
+        out.remove(&v);
+    }
+    out
+}
+
+/// The allocation site an operand names, if exactly one.
+fn operand_site(
+    op: &ajave_ir::Operand,
+    sites: &std::collections::BTreeMap<ajave_ir::VarId, ajave_ir::AllocSite>,
+) -> Option<ajave_ir::AllocSite> {
+    match op {
+        ajave_ir::Operand::Var(v) => sites.get(v).copied(),
+        _ => None,
+    }
+}
+
 pub fn encode_body_lia(
     body: &ajave_ir::Body,
     obligations: &[ajave_ir::ObligationId],
@@ -304,6 +377,33 @@ pub fn encode_body_lia(
     for i in 0..n_vars {
         decls.push_str(&format!("(declare-fun {prefix}v{i} () Int)\n"));
         decls.push_str(&format!("(declare-fun {prefix}v{i}p () Int)\n"));
+    }
+    // One SMT array per allocation site, threaded pre-state to post-state
+    // exactly as the locals are. Before this, `ArrayLoad` fell through to a
+    // fresh unconstrained constant, so two reads of the same element were
+    // unrelated and nothing about array contents could be proved — the
+    // regression #95 measured as valid-assert 867 -> 860, where the losses
+    // were `unsat` answers that stopped being provable rather than timeouts.
+    let array_sites = array_sites_of(body);
+    let sites: std::collections::BTreeSet<ajave_ir::AllocSite> =
+        array_sites.values().copied().collect();
+    let arr_name = |site: &ajave_ir::AllocSite, post: bool| {
+        format!(
+            "{prefix}arr{}_{}{}",
+            site.block.0,
+            site.index,
+            if post { "p" } else { "" }
+        )
+    };
+    for site in &sites {
+        decls.push_str(&format!(
+            "(declare-fun {} () (Array Int Int))\n",
+            arr_name(site, false)
+        ));
+        decls.push_str(&format!(
+            "(declare-fun {} () (Array Int Int))\n",
+            arr_name(site, true)
+        ));
     }
 
     // Build per-block transition clauses.
@@ -334,11 +434,57 @@ pub fn encode_body_lia(
             }
         };
 
+        // Current symbolic value of each site's array, starting at its
+        // pre-state constant and rewritten by each store.
+        let mut arr_exprs: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
+            sites.iter().map(|st| (*st, arr_name(st, false))).collect();
+
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Assign(vid, rv) => {
-                    let expr = enc.rvalue(rv, &var_exprs, &is_wide);
+                    // An element read resolves to a `select` on the site's
+                    // array when the reference names exactly one site.
+                    // Otherwise it falls through to the encoder's fresh
+                    // constant, which is what every heap read used to do.
+                    let expr = match rv {
+                        Rvalue::ArrayLoad { arr, idx } => {
+                            match operand_site(arr, &array_sites)
+                                .and_then(|st| arr_exprs.get(&st).cloned())
+                            {
+                                Some(cur) => {
+                                    let i = smt_text::encode_operand(&theory, idx, &var_exprs);
+                                    Some(format!("(select {cur} {i})"))
+                                }
+                                None => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let expr = match expr {
+                        Some(e) => e,
+                        None => enc.rvalue(rv, &var_exprs, &is_wide),
+                    };
                     var_exprs[vid.0 as usize] = expr;
+                }
+                Stmt::ArrayStore { arr, idx, val } => {
+                    let i = smt_text::encode_operand(&theory, idx, &var_exprs);
+                    let v = smt_text::encode_operand(&theory, val, &var_exprs);
+                    match operand_site(arr, &array_sites) {
+                        Some(st) => {
+                            if let Some(cur) = arr_exprs.get(&st).cloned() {
+                                arr_exprs.insert(st, format!("(store {cur} {i} {v})"));
+                            }
+                        }
+                        // A store through a reference naming no single site
+                        // may land in any array, so no site's contents
+                        // survive it. Dropping only *some* of them would be
+                        // the unsound direction.
+                        None => {
+                            for st in sites.iter() {
+                                arr_exprs.insert(*st, arr_name(st, true));
+                            }
+                        }
+                    }
                 }
                 Stmt::Assume(op) => {
                     let expr = smt_text::encode_operand(&theory, op, &var_exprs);
@@ -389,7 +535,7 @@ pub fn encode_body_lia(
 
         // Build successor transition clauses.
         let mk_assign = |var_exprs: &[String]| -> Vec<String> {
-            var_exprs
+            let mut out: Vec<String> = var_exprs
                 .iter()
                 .enumerate()
                 .filter_map(|(i, e)| {
@@ -400,7 +546,18 @@ pub fn encode_body_lia(
                         None
                     }
                 })
-                .collect()
+                .collect();
+            // Arrays are part of the state, so the post-state must say what
+            // happened to them. Omitting this would leave `arr{site}p`
+            // unconstrained, and an invariant about it could then be
+            // "preserved" by a transition that in fact clobbers the array.
+            for (st, cur) in arr_exprs.iter() {
+                let post = arr_name(st, true);
+                if *cur != post {
+                    out.push(format!("(= {post} {cur})"));
+                }
+            }
+            out
         };
 
         match &block.term {

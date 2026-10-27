@@ -114,6 +114,20 @@ fn render(e: &Expr, prefix: &str) -> Option<String> {
             };
             format!("({sym} {l} {r})")
         }
+        // The array constant the LIA encoder declares for this site. The
+        // naming must match `encode_body_lia`'s `arr_name` exactly: a checker
+        // that invented its own spelling would read a different array from the
+        // one the transition relation writes, and then confirm invariants
+        // about nothing. Producer and consumer disagreeing about an artifact
+        // is worse than no artifact.
+        Expr::Select { site, index } => {
+            format!(
+                "(select arr{}_{} {})",
+                site.block.0,
+                site.index,
+                render(index, prefix)?
+            )
+        }
         // A double is held as a bit pattern and means nothing in LIA; an
         // `Apply` is an unmodelled library call by construction.
         Expr::Double(_) | Expr::Apply { .. } => return None,
@@ -157,7 +171,11 @@ pub fn check_inductive(
     solver: &str,
 ) -> CertResult {
     // An invariant about a float says nothing checkable here, and must not be
-    // waved through. See the module doc.
+    // waved through. See the module doc. `Expr::Select`'s index is screened by
+    // this too, via `mentioned_vars`; the *element* type is integer by
+    // construction, because `encode_body_lia` declares every site's array as
+    // `(Array Int Int)` and a float array would have fallen through to an
+    // unconstrained read rather than a `select`.
     let mut vars = Vec::new();
     mentioned_vars(&inv.formula, &mut vars);
     if vars.iter().any(|v| {
@@ -415,6 +433,114 @@ mod tests {
     /// LIA cannot state a float invariant, and a checker that cannot see
     /// floats must decline rather than wave them through. ajave's one
     /// confirmed wrong TRUE is a float-arithmetic proof (#48).
+    /// `a = new int[4]; a[0] = 7; check(a[0]);` — the obligation is violated
+    /// where the element is 0, and the invariant says it is 7.
+    ///
+    /// Before H2/H4 this was uncheckable: `ArrayLoad` fell through to a fresh
+    /// unconstrained constant, so two reads of the same element were unrelated
+    /// and no invariant could mention an array at all.
+    fn array_body(store_value: i32) -> Body {
+        let site = ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: 0,
+        };
+        Body {
+            is_static: true,
+            key: mk(),
+            entry: BlockId(0),
+            vars: vec![
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Ref,
+                },
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(1),
+                    ty: Ty::Int,
+                },
+            ],
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(VarId(1)),
+                guarded: false,
+                bytecode_offset: 0,
+                line: None,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts: vec![
+                    Stmt::Assign(
+                        VarId(0),
+                        Rvalue::NewArray {
+                            elem: "I".into(),
+                            len: Operand::Const(Const::Int(4)),
+                            site,
+                        },
+                    ),
+                    Stmt::ArrayStore {
+                        arr: Operand::Var(VarId(0)),
+                        idx: Operand::Const(Const::Int(0)),
+                        val: Operand::Const(Const::Int(store_value)),
+                    },
+                    Stmt::Assign(
+                        VarId(1),
+                        Rvalue::ArrayLoad {
+                            arr: Operand::Var(VarId(0)),
+                            idx: Operand::Const(Const::Int(0)),
+                        },
+                    ),
+                    Stmt::Check(ObligationId(0)),
+                ],
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            }],
+        }
+    }
+
+    fn elem_eq(n: i64) -> Expr {
+        Expr::bin(
+            Op::Eq,
+            Expr::Select {
+                site: ajave_ir::AllocSite {
+                    block: BlockId(0),
+                    index: 0,
+                },
+                index: Box::new(Expr::Int(0)),
+            },
+            Expr::Int(n),
+        )
+    }
+
+    /// The control for the array path. If this cannot confirm, every negative
+    /// array result below is vacuous.
+    #[test]
+    fn an_array_element_invariant_can_be_confirmed() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(&array_body(7), &inv(elem_eq(7)), ObligationId(0), s);
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "the store writes 7, so `a[0] == 7` is sufficient and preserved"
+        );
+    }
+
+    /// The store writes 0, so the element *is* the violating value and an
+    /// invariant claiming otherwise must not be confirmed. This is the test
+    /// that would have passed vacuously before the encoder modelled arrays:
+    /// an unconstrained read makes every array invariant unprovable, so a
+    /// `Refuted` here would have meant nothing without the control above.
+    #[test]
+    fn an_array_invariant_contradicted_by_the_store_is_refuted() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(&array_body(0), &inv(elem_eq(7)), ObligationId(0), s);
+        assert_ne!(
+            r,
+            CertResult::Confirmed,
+            "the store writes 0; `a[0] == 7` cannot be confirmed"
+        );
+    }
+
     #[test]
     fn a_float_invariant_cannot_be_confirmed() {
         let Some(s) = solver() else { return };

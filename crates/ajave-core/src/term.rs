@@ -108,6 +108,22 @@ pub enum Expr {
     Bool(bool),
     Bin(Op, Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
+    /// An element of the array allocated at `site`.
+    ///
+    /// Named by **allocation site**, not by a local, because a heap fact
+    /// outlives any particular variable: `a[i] > 0` is a claim about the
+    /// array, and the local that happened to point at it when the claim was
+    /// made may be dead or reassigned by the time a consumer reads it.
+    ///
+    /// A site is not an object — a `new` in a loop produces many arrays at one
+    /// site, and a claim keyed by site must hold for all of them. That is what
+    /// makes it sound as an over-approximation, and it is why an engine
+    /// publishing one must have reasoned about every array from that site, not
+    /// the one in front of it.
+    Select {
+        site: ajave_ir::AllocSite,
+        index: Box<Expr>,
+    },
     /// A named library method applied to arguments. Present so a claim can be
     /// *about* `Math.sin(x)` without anyone having to model it — which is the
     /// whole point of being able to ask.
@@ -167,6 +183,8 @@ impl Expr {
                 b.collect_vars(out);
             }
             Expr::Not(a) => a.collect_vars(out),
+            // The site is not a variable; the index may mention some.
+            Expr::Select { index, .. } => index.collect_vars(out),
             Expr::Apply { args, .. } => {
                 for a in args {
                     a.collect_vars(out);
@@ -203,6 +221,9 @@ impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expr::Var(v) => write!(f, "v{}", v.0),
+            Expr::Select { site, index } => {
+                write!(f, "a[bb{}:{}][{index}]", site.block.0, site.index)
+            }
             Expr::Int(n) => write!(f, "{n}"),
             Expr::Double(bits) => {
                 let d = f64::from_bits(*bits);
