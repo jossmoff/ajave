@@ -15,7 +15,7 @@ Ordering between workstreams is by value, not dependency:
 | **A** | The TRUE certifier | weeks | minutes per phase, one corpus run at the end | now |
 | **B** | Frontend/IR differential testing | ~1 week | seconds to minutes | now |
 | **C** | Narrow the portfolio | ~2 days | one ablation run | now |
-| **D** | An independent oracle (JBMC) | ~3 days | minutes | needs JBMC installed |
+| **D** | An independent oracle (JBMC) | ~3 days | minutes | **blocked — #97** |
 | **E** | Static contract checks | ~1 day | **seconds**, in CI | now |
 
 **Start with E.** It is a day's work, runs in the existing toolchain-free CI
@@ -275,6 +275,10 @@ boundaries` and `just strategy-docs` must still pass (the latter tracks a
 
 # Workstream D — An independent oracle
 
+**Status: filed as issue #97, `status:blocked`, not started.** `jbmc` is not
+installed and that is the only external prerequisite in this plan. The issue
+carries the full design; what follows is the summary.
+
 ## Why
 
 `metamorphic`, `engine_ablation` and `contract_monotonicity` are all
@@ -301,7 +305,13 @@ JBMC wrong, benchmark mislabelled. The third is already known to exist, which
 is why the harness must not assume the label is truth.
 
 **Dependency.** Needs JBMC installed (`jbmc` is not on PATH today). That is the
-only external prerequisite in this plan.
+only external prerequisite in this plan. Tracked as #97.
+
+One constraint worth repeating here because it is easy to get wrong: **the
+harness must not treat the benchmark label as the referee.** `ReverseInterpolator`
+is a task where ajave's FALSE is correct and the declared TRUE is wrong, costing
+−32. A differential that scored against the label would read that as an ajave
+defect and send someone to break a correct answer.
 
 ---
 
