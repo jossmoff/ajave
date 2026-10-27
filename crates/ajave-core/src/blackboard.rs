@@ -852,6 +852,71 @@ mod tests {
         bb
     }
 
+    /// H1 (#99). `HEAP_ALIASING` existed with a display name and no producer
+    /// for its whole life, so `open_for` could never return anything closed
+    /// under it. Now that `interval-ai` declares it, this pins the other half:
+    /// an engine that models aliasing must actually be offered the obligation
+    /// back, or the declaration is a producer with no consumer.
+    #[test]
+    fn a_heap_approximated_discharge_is_offered_to_a_faithful_engine() {
+        let mut bb = seeded();
+        bb.publish_with(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Approximations::HEAP_ALIASING,
+            Artifact::Status(
+                oref(),
+                Status::Discharged {
+                    by: EngineId("interval-ai"),
+                    proof: ProofKind::Trivial,
+                },
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            bb.open().is_empty(),
+            "precondition: it really is closed, so `open()` hides it"
+        );
+        assert_eq!(
+            bb.open_for(Approximations::HEAP_ALIASING),
+            vec![oref()],
+            "an engine that models aliasing faithfully must get it back"
+        );
+        assert!(
+            bb.open_for(Approximations::HEAP_NO_CONTENTS).is_empty(),
+            "modelling contents does not repair an aliasing loss, and \
+             reclaiming it anyway is the pure cost open_for exists to avoid"
+        );
+    }
+
+    /// Shape is declared by every engine, so an obligation also lost to shape
+    /// must not be handed to an engine that only fixes aliasing — it would be
+    /// work nothing can improve.
+    #[test]
+    fn an_obligation_also_lost_to_shape_is_not_offered_for_aliasing_alone() {
+        let mut bb = seeded();
+        bb.publish_with(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Approximations::HEAP_ALIASING.union(Approximations::HEAP_NO_SHAPE),
+            Artifact::Status(
+                oref(),
+                Status::Discharged {
+                    by: EngineId("interval-ai"),
+                    proof: ProofKind::Trivial,
+                },
+            ),
+        )
+        .unwrap();
+        assert!(bb.open_for(Approximations::HEAP_ALIASING).is_empty());
+        assert_eq!(
+            bb.open_for(Approximations::HEAP_ALIASING.union(Approximations::HEAP_NO_SHAPE)),
+            vec![oref()],
+            "an engine fixing both is the one that may reclaim it"
+        );
+    }
+
     fn violate(bb: &mut Blackboard, approx: Approximations) {
         bb.publish_with(
             EngineId("smt-bmc"),

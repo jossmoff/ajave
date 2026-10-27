@@ -62,7 +62,66 @@ impl Approximations {
 
     /// The heap modelled per-variable rather than through an addressable
     /// store, so a write through one alias is invisible to another name.
+    ///
+    /// # Parked: no producer, and the reason is worth keeping
+    ///
+    /// Nothing in the tree sets this, and an attempt to make `interval-ai` set
+    /// it (#99) established why. This flag describes an **unsound** scheme —
+    /// losing a write — and no engine here has that defect:
+    ///
+    /// * `interval`'s field cells are flat (one per `(class, name, desc)`,
+    ///   receiver ignored), but a non-strong update **joins**
+    ///   (`IState::set_field`), and an absent cell reads as Top. Every heap
+    ///   fact it holds is an over-approximation, so it never closes an
+    ///   obligation on a too-narrow one. A strong update is taken only for a
+    ///   static or a proven-singleton class, where it is exact.
+    /// * `chc` reads array and field contents as unconstrained values, which
+    ///   is the same widening.
+    ///
+    /// So their heap limitation is **imprecision, not unfaithfulness**, and
+    /// `Approximations` is the vocabulary for the second. The right vocabulary
+    /// for "a better heap would let me prove more" is `Artifact::Precision` —
+    /// which also has no producer.
+    ///
+    /// Kept rather than deleted because an engine *could* acquire this defect:
+    /// a site-indexed abstraction that reads a cell no write reached would
+    /// have exactly it. That is the risk H3 of
+    /// `docs/proposals/heap-theory.md` carries, and this flag is where it
+    /// would be declared.
     pub const HEAP_ALIASING: Approximations = Approximations(1 << 3);
+
+    /// Heap *reads* return a value narrower than the program permits.
+    ///
+    /// # Parked: no producer
+    ///
+    /// Not to be confused with reading Top, which is what `chc` and `interval`
+    /// actually do and which is a sound widening. This is for an engine that
+    /// claims to know a cell's contents and is wrong — which nothing here does
+    /// yet, and which H4 of `docs/proposals/heap-theory.md` could introduce by
+    /// threading heap state through Horn clauses incorrectly. The previous
+    /// attempt at that (#95) used an uninterpreted predicate in a clause body
+    /// that the solver could read as empty, making the read path vacuously
+    /// safe; that is precisely this flag's situation.
+    ///
+    /// Distinct from `HEAP_ALIASING`, which is about *identity* — an engine
+    /// that keys cells per-object but still cannot say what is in them has
+    /// fixed the second and not the first. `open_for` requires a caller to fix
+    /// everything that went wrong, not merely something, so handing a
+    /// contents-blind engine an obligation lost to aliasing is pure cost.
+    pub const HEAP_NO_CONTENTS: Approximations = Approximations(1 << 5);
+
+    /// No reasoning about shape: acyclicity, disjointness, reachability
+    /// through a linked structure.
+    ///
+    /// # Parked: no producer
+    ///
+    /// Array theory cannot express these, so no engine here reasons about
+    /// shape — but none *claims* to either, and an engine that leaves a
+    /// shape-dependent obligation open has not approximated anything. It would
+    /// be declared by an engine that discharged such an obligation while
+    /// assuming acyclicity, which H6 of `docs/proposals/heap-theory.md` would
+    /// be the first to do.
+    pub const HEAP_NO_SHAPE: Approximations = Approximations(1 << 6);
 
     /// A call whose behaviour we do not model at all, replaced by a fresh
     /// unconstrained value. No encoding fixes this — only a model of the
@@ -106,6 +165,8 @@ impl std::fmt::Debug for Approximations {
             (Self::REAL_ARITH, "real-arith"),
             (Self::INT_WRAPPING, "int-wrapping"),
             (Self::HEAP_ALIASING, "heap-aliasing"),
+            (Self::HEAP_NO_CONTENTS, "heap-no-contents"),
+            (Self::HEAP_NO_SHAPE, "heap-no-shape"),
             (Self::UNMODELLED_CALL, "unmodelled-call"),
         ] {
             if self.contains(bit) {
