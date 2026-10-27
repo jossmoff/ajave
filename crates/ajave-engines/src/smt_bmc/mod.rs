@@ -1118,7 +1118,37 @@ impl Engine for SmtBmc {
                             }
                         }
                     }
-                    let blocker = if at_risk.contains(&(oref.method.clone(), oref.id)) {
+                    let blocker = if !self.fp_arith
+                        && approximated.intersects(Approximations::FLOAT_ARITH)
+                    {
+                        // #48. This pass encoded float arithmetic as bitvector
+                        // operations on IEEE-754 bit patterns, so its model is
+                        // not of this program and a proof over it is not a
+                        // proof. `bvadd(0x3F800000, 0x322BCC77)` exceeds
+                        // `0x3F800000`, which is how it proved
+                        // `1.0f + 1.0e-8f > 1.0f` — a claim the JVM refutes,
+                        // because the increment is below half the gap between
+                        // consecutive floats at 1.0f. See
+                        // `benchmarks/ajave/jvm-floats/FloatIsNotDouble`;
+                        // `Blackboard::contested()` caught it against a
+                        // replay-certified violation.
+                        //
+                        // The FPA escalation pass exists to revisit exactly
+                        // these, and two declaration bugs that kept it from
+                        // ever running were fixed on 2026-10-26. It is still
+                        // not the right place for this: the blackboard is
+                        // append-only, so an unsound discharge stays published
+                        // whatever a later pass concludes, and CLAUDE.md's own
+                        // rule applies — "a guard that says something else
+                        // carries this burden is only as sound as that thing
+                        // actually running". Soundness must not depend on a
+                        // second pass being scheduled, budgeted and reached.
+                        //
+                        // `self.fp_arith` excepts the escalation instance,
+                        // which models floats faithfully and is the pass that
+                        // may legitimately conclude here.
+                        "float_arith_approximated"
+                    } else if at_risk.contains(&(oref.method.clone(), oref.id)) {
                         "all_paths_complete"
                     } else if !ctx.completeness.can_discharge(
                         &oref.method,

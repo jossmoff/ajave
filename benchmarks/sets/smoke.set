@@ -219,3 +219,9 @@ sv-comp/jbmc-regression/ClassCastException1.yml valid-assert
 # CHC: uninterpreted space invariants can be read as empty (vacuous proof)
 sv-comp/MinePump/spec1-5_product45.yml valid-assert
 sv-comp/java-ranger-regression/TCAS_prop1.yml valid-assert
+
+# #48: the bitvector BMC proved `1.0f + 1.0e-8f > 1.0f` because `bvadd` on the
+# two IEEE-754 bit patterns exceeds the first, while the JVM's `fadd` returns
+# exactly 1.0f. A confirmed wrong TRUE, caught only because float-search found
+# the violation and replay certified it.
+ajave/jvm-floats/FloatIsNotDouble.yml valid-assert
