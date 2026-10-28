@@ -397,7 +397,7 @@ fn analyze_field_precision(prog: &Program) -> crate::interval::FieldPrec {
             (
                 mk.clone(),
                 crate::interval::SiteInfo {
-                    of_var: crate::body_analysis::ref_alloc_sites(body),
+                    at: crate::body_analysis::ref_alloc_sites_at(body),
                     unique: !body_has_loops(body),
                 },
             )

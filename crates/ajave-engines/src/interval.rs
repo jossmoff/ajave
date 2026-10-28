@@ -1846,9 +1846,14 @@ pub struct FieldPrec {
 /// Where a method's allocations are, and whether they are unique.
 #[derive(Default, Clone)]
 pub struct SiteInfo {
-    /// Variables whose every definition is the same allocation. See
-    /// `body_analysis::ref_alloc_sites`.
-    pub of_var: BTreeMap<VarId, ajave_ir::AllocSite>,
+    /// Which object each reference holds, **before each statement**.
+    ///
+    /// Per program point, not per variable. The per-variable version was dead
+    /// code on every real program: the lifter always inserts copies between a
+    /// `new` and the receiver it is used as, and javac reuses slots so one
+    /// variable holds different objects at different points. See
+    /// `body_analysis::ref_alloc_sites_at` and issue #104.
+    pub at: BTreeMap<(ajave_ir::BlockId, u32), crate::body_analysis::RefSiteMap>,
     /// Whether a site in this body denotes at most one object, which is what
     /// permits a *strong* update to its cell. False when the body has a loop:
     /// a `new` on a back-edge runs repeatedly, so the site summarises many
@@ -1957,13 +1962,21 @@ impl AbstractDomain for IntervalCpa {
         // body with a loop, or site tracking switched off — means "unknown
         // receiver", which is what every caller must treat conservatively.
         let site_info = self.field_prec.sites.get(&to.method);
+        // The point this edge's statement runs at, which is what the site map
+        // is keyed by. A terminator edge has no statement index and resolves
+        // nothing, which costs precision on branch conditions and is correct.
+        let here: Option<(ajave_ir::BlockId, u32)> = match edge {
+            Edge::Stmt(block, idx) => Some((*block, *idx as u32)),
+            _ => None,
+        };
         let site_of = |op: &Operand| -> Option<ajave_ir::AllocSite> {
             let si = site_info?;
             if !si.unique || !site_fields_enabled() {
                 return None;
             }
+            let m = si.at.get(&here?)?;
             match op {
-                Operand::Var(v) => si.of_var.get(v).copied(),
+                Operand::Var(v) => m.get(v).copied(),
                 _ => None,
             }
         };

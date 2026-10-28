@@ -2,6 +2,78 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-28 — B2/B3 had never executed, and three wrong explanations for why
+
+`ref_alloc_sites` resolved **no real receiver on any program**, so B2's site
+cells and B3's array cells were dead code from the day they were written.
+Smoke: **173 with them on, 173 with `AJAVE_SITE_FIELDS=0`** — identical in
+runs, correct, unproven, WRONG and score. The corpus is flat too.
+
+### The defect
+
+Two independent causes, both visible in any lifter dump.
+
+*No copy propagation.* It matched `Rvalue::New` directly, but the lifter never
+names the receiver — for `Box a = new Box(); a.v = 1;` it emits
+`v0 = new Box; v2 = v0; v1 = v2; v5 = v1; v5.v = 1`. Every real receiver
+resolved to `None`, so every `PutField` took the unknown-receiver branch and
+every read fell back to the flat cell.
+
+*Flow insensitivity.* javac reuses slots: in a two-object program `v1` holds
+**both** allocations at different points, so a per-variable map must drop it as
+ambiguous — correctly, which is why per-point resolution is required rather
+than merely nicer.
+
+Fixed with `ref_alloc_sites_at`, a per-program-point forward dataflow with
+join-by-agreement. Kept separate from `array_sites_at_block_entry` rather than
+generalised: the CHC encoders index sites by `NewArray` only, and an object site
+arriving there hits the silent-drop path that cost a day earlier.
+
+**This is the same bug class, in the same session, fixed once.**
+`array_sites_at_block_entry` was written hours earlier *specifically because*
+flow-insensitive per-variable resolution dies on slot reuse, diagnosed from a
+dump showing this exact pattern. The function with both flaws was written
+earlier the same day and never revisited. Having the general lesson available
+did not produce the second application of it.
+
+### Three explanations for the null result, two of them wrong
+
+Worth recording in full, because the second is a trap the setup invites.
+
+**"The corpus lacks the shape."** Asserted before checking whether the feature
+ran. It had not.
+
+**"There is a third blocker."** Asserted from an isolated-AI experiment —
+disable everything but `interval-ai`, compare B2 on and off, observe UNKNOWN
+either way. The control that settles it:
+with the AI isolated, `int x = 1; assert x == 1;` is **also UNKNOWN**. The
+harness cannot observe a discharge at all, so it could never show B2 working,
+and "still UNKNOWN with B2 on" carried no information. **An experiment whose
+negative result is guaranteed by its setup is not evidence.** Run the control
+that proves the apparatus can detect a positive.
+
+**The benchmarks were incapable of the job.** On
+`heap/TwoObjectsDistinctFieldValues`, written to demonstrate B2, the trace is
+`timing step smt-bmc 6ms discharged=2` — `interval-ai` never runs. The BMC
+closes both obligations first. The B3 commit message had already said "a
+benchmark that passes either way is not evidence for the change"; the
+observation was recorded and then not acted on, and both benchmarks kept being
+cited as capability evidence.
+
+**A capability benchmark must be run with the capability disabled, and the
+engine that implements it must be shown to have run.** Passing proves nothing.
+
+### Still open
+
+Whether site-indexed cells can help is **unmeasured in both directions**.
+`SiteInfo.unique = !body_has_loops(body)` is computed per *body*, not per site,
+so a loop anywhere disables site-indexing for every allocation in the method —
+while a program that needs the AI at all requires a loop the BMC cannot unroll.
+Whether those conditions are disjoint is the next check, offered as a
+hypothesis rather than a finding, since this entry already contains two
+confident explanations that were not. Reverting B2/B3 remains on the table and
+needs that answer first. See #104.
+
 ## 2026-10-28 — the corpus measurement: flat, and what a flat result is evidence of
 
 Full corpus at `0030a62`, idle, nothing else running. 1785 runs in 5298s.
