@@ -514,6 +514,16 @@ impl Default for AiEngine {
     }
 }
 
+/// Whether the hint exploration widens at loop headers so it can converge.
+///
+/// `AJAVE_WIDEN_HINTS=0` restores the pure-`Sep` exploration, which publishes
+/// nothing on any program with an unbounded loop. See
+/// `docs/interval-ai-hint-path.md` for the measurement that motivated this.
+pub fn widened_hints_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_WIDEN_HINTS").as_deref() != Ok("0"))
+}
+
 impl AiEngine {
     /// Collect per-block-per-variable interval bounds from the reached states
     /// and publish them to the blackboard for other engines to consume.
@@ -864,7 +874,34 @@ impl Engine for AiEngine {
             index: 0,
         };
         let max_states = 1000usize;
-        let (reached, complete) = explore(&cpa, &Sep, prog, &start, (), max_states);
+        // Widen at loop headers so the exploration can actually converge.
+        //
+        // `&Sep` is pure path sensitivity: a loop whose trip count is not
+        // statically known enumerates states until `max_states`, returns
+        // `complete = false`, and then **nothing is published at all** —
+        // measured as 83 hints on a bounded loop against 0 on the same program
+        // with an unbounded one. Since `publish` is gated on completeness (it
+        // must be: an unfinished search has not visited every state, and
+        // `smt-bmc` asserts a hint as a fact), the engine was silent on exactly
+        // the programs where the BMC cannot unroll and needs help.
+        //
+        // Soundness is unchanged. Both join and widen are upper bounds on the
+        // states they replace, so a converged widening analysis still
+        // over-approximates every reachable state — which is all a published
+        // `Over` interval claims. This is the same argument the float-loop
+        // branch above already relies on, with the same policy.
+        //
+        // The cost is precision at loop headers: a hint may be weaker than the
+        // path-sensitive one would have been. Weaker is not wrong, and a weaker
+        // hint that exists beats a sharper one that is never published.
+        //
+        // See `docs/interval-ai-hint-path.md`.
+        let (reached, complete) = if widened_hints_enabled() {
+            let policy = WidenAtLoopHeaders::from_body(body);
+            explore(&cpa, &policy, prog, &start, (), max_states)
+        } else {
+            explore(&cpa, &Sep, prog, &start, (), max_states)
+        };
 
         if complete {
             self.publish_interval_hints(entry, &reached, bb, body);
