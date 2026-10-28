@@ -2,6 +2,58 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-28 — the corpus measurement: flat, and what a flat result is evidence of
+
+Full corpus at `0030a62`, idle, nothing else running. 1785 runs in 5298s.
+
+| property | runs | correct | WRONG | score | previous | delta |
+|---|---|---|---|---|---|---|
+| valid-assert | 1012 | 734 | 1 | 874 | 877 | −3 |
+| no-runtime-exception | 771 | 600 | 0 | 1184 | 1182 | +2 |
+| | 1783 | 1334 | 1 | **2058** | 2059 | **−1** |
+
+37 timeouts against 41. The single WRONG is `ReverseInterpolator_true`, the
+known SV-COMP mislabel, so **zero wrong answers of ajave's own making** after a
+branch touching the interval domain, both CHC encoders, the hint seam and the
+artifact contract.
+
+### Flat is the predicted result, and it is still worth having measured
+
+The heap work's capability gains are real and invisible here. The array-store
+fix and D1's qgen each turn UNKNOWN into TRUE with CHC isolated; the corpus
+contains a handful of array-fill-shaped tasks. **A fix that unblocks a
+capability nothing in the corpus exercises scores zero on the corpus**, and that
+is a fact about the corpus rather than about the fix.
+
+What the run does establish, which nothing cheaper could:
+
+- **#101 cost nothing at corpus scale.** Inferred from smoke, now measured.
+- **No wrong answer was introduced** across 1783 runs by five checkpoints of
+  heap work. That is the claim the whole session rests on and it had only ever
+  been checked on 157 tasks.
+- **Timeouts did not regress** (37 vs 41), which was the live risk for C1's
+  arity and D1's quantified search. D1 is on by default; C1 remains off and now
+  has a corpus baseline to be measured against when it is revisited.
+
+### Do not extrapolate a category-ordered run mid-flight
+
+Asked for a running estimate three times, I produced 2065 at 789 runs, 1961 at
+1124, and 2131 at 1639 — three figures spanning 170 points, none within 70 of
+the actual 2058 until the run was 92% done.
+
+`bench.py` walks categories alphabetically and they differ enormously in
+difficulty and property mix: `autostub` and the float sets early,
+`jbmc-regression`/`jpf-regression` (easy, assert-shaped) and `securibench`
+(largely unproven) late. A partial score is not a fraction of the final one, and
+the running average is biased by whatever happens to be alphabetically first.
+
+The one thing that *was* reliable mid-run was reasoning about the mechanism
+rather than the arithmetic: valid-assert extrapolated 89 points low at halfway,
+and predicting that the outstanding assert-shaped categories would recover it
+proved correct. **Argue from what the remaining population is, not from the rate
+so far** — and when neither is available, say the estimate is not yet worth
+having.
+
 ## 2026-10-28 — correction: the three "lost" tasks were never lost, and how the misattribution was built
 
 Three entries below state that `argv-tasks/AbstractSerializationStreamReader_false`,
