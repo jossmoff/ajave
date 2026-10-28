@@ -73,6 +73,100 @@ pub fn body_uses_transcendental_math(body: &Body) -> bool {
 }
 
 /// Returns `true` if the body has any back-edges (loops).
+/// The blocks that can reach themselves — i.e. that sit inside some loop.
+///
+/// `body_has_loops` answers the same question for the *whole body*, and using
+/// it to decide whether an allocation site denotes one object is far too
+/// coarse: a loop anywhere disables site reasoning for every allocation in the
+/// method, **including allocations outside the loop that are perfectly
+/// unique**. That is what made B2's enabling condition
+/// (`!body_has_loops`) and its usefulness condition (a loop the BMC cannot
+/// unroll) nearly disjoint.
+///
+/// Computed by reachability rather than by the back-edge heuristic
+/// `body_has_loops` uses: `s.0 <= block.id.0` is a *sound* over-approximation
+/// of a back edge for sequentially numbered blocks, but it says nothing about
+/// which blocks are in the cycle, which is the question here.
+pub fn blocks_in_loops(body: &Body) -> std::collections::BTreeSet<BlockId> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let succs_of = |b: &ajave_ir::Block| -> Vec<BlockId> {
+        let mut v = match &b.term {
+            Terminator::Goto(t) => vec![*t],
+            Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+            Terminator::Switch { cases, default, .. } => {
+                let mut c: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
+                c.push(*default);
+                c
+            }
+            _ => vec![],
+        };
+        // Exceptional edges can close a cycle too: a handler that jumps back
+        // into the guarded region is a loop, and an allocation in it is not
+        // unique. Omitting them would be the unsound direction.
+        v.extend(b.exceptional.iter().map(|e| e.target));
+        v
+    };
+
+    let succs: BTreeMap<BlockId, Vec<BlockId>> =
+        body.blocks.iter().map(|b| (b.id, succs_of(b))).collect();
+
+    // Transitive closure of the successor relation, then a block is in a loop
+    // exactly when it reaches itself.
+    let mut reach: BTreeMap<BlockId, BTreeSet<BlockId>> = succs
+        .iter()
+        .map(|(b, ss)| (*b, ss.iter().copied().collect()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for b in body.blocks.iter().map(|b| b.id) {
+            let cur: Vec<BlockId> = reach[&b].iter().copied().collect();
+            let mut add: BTreeSet<BlockId> = BTreeSet::new();
+            for m in cur {
+                if let Some(r) = reach.get(&m) {
+                    add.extend(r.iter().copied());
+                }
+            }
+            let e = reach.get_mut(&b).unwrap();
+            let before = e.len();
+            e.extend(add);
+            if e.len() != before {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    body.blocks
+        .iter()
+        .map(|b| b.id)
+        .filter(|b| reach[b].contains(b))
+        .collect()
+}
+
+/// Allocation sites that denote **at most one object**, which is what permits a
+/// strong update to the site's cell.
+///
+/// A site qualifies when its allocating block is not inside a loop: a `new` on
+/// a back-edge runs once per iteration and the site summarises all of them, so
+/// replacing its cell would forget every object but the last.
+pub fn unique_alloc_sites(body: &Body) -> std::collections::BTreeSet<ajave_ir::AllocSite> {
+    let looping = blocks_in_loops(body);
+    let mut out = std::collections::BTreeSet::new();
+    for block in &body.blocks {
+        if looping.contains(&block.id) {
+            continue;
+        }
+        for st in &block.stmts {
+            if let Stmt::Assign(_, Rvalue::New { site, .. } | Rvalue::NewArray { site, .. }) = st {
+                out.insert(*site);
+            }
+        }
+    }
+    out
+}
+
 pub fn body_has_loops(body: &Body) -> bool {
     for block in &body.blocks {
         let succs = match &block.term {

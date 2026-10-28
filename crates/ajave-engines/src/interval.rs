@@ -1854,11 +1854,18 @@ pub struct SiteInfo {
     /// variable holds different objects at different points. See
     /// `body_analysis::ref_alloc_sites_at` and issue #104.
     pub at: BTreeMap<(ajave_ir::BlockId, u32), crate::body_analysis::RefSiteMap>,
-    /// Whether a site in this body denotes at most one object, which is what
-    /// permits a *strong* update to its cell. False when the body has a loop:
-    /// a `new` on a back-edge runs repeatedly, so the site summarises many
-    /// objects and replacing its cell would forget all but the last.
-    pub unique: bool,
+    /// The sites that denote **at most one object**, which is what permits a
+    /// strong update to a site's cell. A `new` inside a loop runs once per
+    /// iteration and summarises all of them, so replacing its cell would
+    /// forget every object but the last.
+    ///
+    /// Per site, not per body. The per-body version (`!body_has_loops`)
+    /// disabled site reasoning for *every* allocation in a method containing
+    /// any loop — including allocations outside it, which are perfectly
+    /// unique. Since a program that needs the AI at all has a loop the BMC
+    /// cannot unroll, that made B2's enabling condition and its usefulness
+    /// condition very nearly disjoint. See #104.
+    pub unique_sites: std::collections::BTreeSet<ajave_ir::AllocSite>,
 }
 
 impl FieldPrec {
@@ -1971,14 +1978,18 @@ impl AbstractDomain for IntervalCpa {
         };
         let site_of = |op: &Operand| -> Option<ajave_ir::AllocSite> {
             let si = site_info?;
-            if !si.unique || !site_fields_enabled() {
+            if !site_fields_enabled() {
                 return None;
             }
             let m = si.at.get(&here?)?;
-            match op {
-                Operand::Var(v) => m.get(v).copied(),
-                _ => None,
-            }
+            let site = match op {
+                Operand::Var(v) => m.get(v).copied()?,
+                _ => return None,
+            };
+            // A site inside a loop summarises many objects; refining its cell
+            // would forget all but the last. Reads through it fall back to the
+            // flat abstraction, which merges and is sound.
+            si.unique_sites.contains(&site).then_some(site)
         };
 
         match edge {
