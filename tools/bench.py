@@ -24,6 +24,7 @@ what a task *should* answer, which is the invariant that keeps a gate honest.
 """
 
 import argparse
+import datetime
 import atexit
 import shutil
 import tempfile
@@ -218,12 +219,40 @@ def baseline_path(set_name):
     return os.path.join(SETS, f"{os.path.basename(set_name)}.baseline")
 
 
+def git_head():
+    """The commit a baseline is being recorded at, or None outside a repo."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=ROOT, capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def read_baseline(set_name):
+    """Entries plus provenance.
+
+    Provenance exists because "regressed from correct" is an **unanchored**
+    claim without it. The baseline records what ajave achieved at some past
+    moment, and a reader comparing against it cannot tell whether a regression
+    happened in their own change or months ago — which is exactly the mistake
+    that cost four wrong artefacts on 2026-10-27, when three tasks flagged by
+    `--check` turned out to fail identically on the branch *and* on main.
+
+    The harness was not lying there; it reported a true fact about the baseline.
+    It just did not say *which* baseline, so the true fact was unusable.
+    """
     p = baseline_path(set_name)
+    meta = {"commit": None, "recorded": None, "path": p}
     if not os.path.exists(p):
-        return {}
+        return {}, meta
     out = {}
     for line in open(p):
+        raw = line.strip()
+        if raw.startswith("# commit:"):
+            meta["commit"] = raw.split(":", 1)[1].strip() or None
+        elif raw.startswith("# recorded:"):
+            meta["recorded"] = raw.split(":", 1)[1].strip() or None
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -231,7 +260,7 @@ def read_baseline(set_name):
         if len(f) >= 3:
             secs = float(f[4]) if len(f) >= 5 else None
             out[(f[0], f[1])] = (f[2], secs)
-    return out
+    return out, meta
 
 
 def write_baseline(set_name, results):
@@ -255,6 +284,14 @@ def write_baseline(set_name, results):
             "# handing the slow ones extra time would make our score stop\n"
             "# predicting competition performance.\n"
             "# Format: <task>\\t<property>\\t<outcome>\\t<verdict>\\t<seconds>\n"
+            "#\n"
+            "# The two fields below anchor every claim --check makes against\n"
+            "# this file. Without them \"regressed from correct\" does not say\n"
+            "# regressed *since when*, so a reader cannot tell their own change\n"
+            "# from one made months ago -- and on 2026-10-27 three tasks flagged\n"
+            "# here were found to fail identically on the branch and on main.\n"
+            f"# commit: {git_head() or 'unknown'}\n"
+            f"# recorded: {datetime.datetime.now().isoformat(timespec='seconds')}\n"
         )
         for r in sorted(results, key=lambda r: (r["yml"], r["property"])):
             fh.write(f"{rel(r['yml'])}\t{r['property']}\t"
@@ -603,7 +640,37 @@ def main():
     if not args.check:
         return 0
 
-    baseline = read_baseline(args.set)
+    baseline, bmeta = read_baseline(args.set)
+
+    # Anchor every claim below to the baseline it is made against.
+    #
+    # "regressed from correct" is unanchored on its own: it says a task is worse
+    # than the baseline, not *when* it got worse. On 2026-10-27 three tasks
+    # flagged here were attributed to the change under test and turned out to
+    # fail identically on that branch and on `main` -- the harness had reported
+    # a true fact about a baseline recorded long before, and the reader could
+    # not tell. Printing the provenance makes that distinguishable without
+    # anyone having to be suspicious.
+    if baseline:
+        at = bmeta["commit"] or "unknown commit"
+        when = f", {bmeta['recorded']}" if bmeta["recorded"] else ""
+        print(f"\nbaseline: {len(baseline)} entries from {at}{when}")
+        if bmeta["commit"] is None:
+            print("  this baseline predates provenance recording, so a regression")
+            print("  against it is NOT evidence that the current change caused it;")
+            print("  re-record with --update-baseline to anchor future comparisons")
+
+    # Coverage mismatch. A baseline that does not cover the run is comparing
+    # two different task sets, and the uncovered tasks are invisible to
+    # --check rather than reported as anything.
+    ran = {(rel(r["yml"]), r["property"]) for r in results}
+    uncovered = ran - set(baseline)
+    orphaned = set(baseline) - ran
+    if baseline and (uncovered or orphaned):
+        print(f"  coverage mismatch: {len(uncovered)} task(s) in this run have no")
+        print(f"  baseline entry, {len(orphaned)} baseline entr(ies) were not run")
+        print("  --check can say nothing about either group")
+
     regressed = [r for r in results
                  if outcome_of(r) != "correct"
                  and (baseline.get((rel(r["yml"]), r["property"])) or (None,))[0] == "correct"]
@@ -620,7 +687,10 @@ def main():
         if now > max(before * args.slow_factor, before + 5.0) and now > 2.0:
             slower.append((r, before, now))
     if regressed:
-        print(f"\n{len(regressed)} regressed from correct:")
+        since = bmeta["commit"] or "an unrecorded commit"
+        print(f"\n{len(regressed)} regressed from correct since {since}:")
+        print("  (since the baseline, NOT necessarily in the change under test —")
+        print("   run the same task on the base commit before concluding)")
         for r in regressed:
             print(f"  {rel(r['yml'])} [{r['property']}]: "
                   f"now {outcome_of(r)} ({r['verdict']})")

@@ -205,6 +205,37 @@ rebuild cannot affect a run in flight. The snapshot path travels in each work
 item rather than a module global, because worker processes are spawned and
 re-import the module. Do not reintroduce a global here.
 
+### A `--check` regression says "worse than the baseline", not "worse than before your change"
+
+These are different claims and the output used to make only the first while
+being read as the second. On 2026-10-27 three tasks flagged as `regressed from
+correct` were attributed to the change under test, filed as an issue, and
+written into `changes.md` and two memory files. They fail **identically on that
+branch and on `main`** — the baseline simply predated their regression, and
+nothing in the report said which baseline it was.
+
+The harness was not lying. It reported a true fact about a file, and the file
+had no provenance, so the true fact was unusable.
+
+- The baseline now records `# commit:` and `# recorded:`, and `--check` prints
+  them. A regression is reported as "regressed since `<sha>`" with an explicit
+  note that this is not evidence about the current change.
+- A baseline with no provenance says so and warns that regressions against it
+  prove nothing about the change under test. Re-record it.
+- A **coverage mismatch** is reported: tasks in the run with no baseline entry,
+  and baseline entries not run. `--check` is silent about both groups, and
+  silence was indistinguishable from agreement. Main's baseline held 134
+  entries against a 149-entry set for exactly this reason.
+
+**Before attributing a flagged regression to your change, run that task on the
+base commit.** Two commands. It is the only thing that distinguishes the two
+claims, and no amount of reading the diff substitutes for it.
+
+Note also what does *not* substitute: ruling out one cause is not establishing
+another. An ablation showing the losses were not caused by mechanism A says
+nothing whatever about mechanism B, and treating it as confirmation is what
+made a guess feel measured.
+
 ### A regression must be reproduced before it is explained
 **A score drop measured on a busy machine, or without a determinism check, is
 not a regression.** Reproduce it under the conditions above before looking for a
