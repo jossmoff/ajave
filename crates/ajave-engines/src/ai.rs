@@ -425,6 +425,14 @@ pub struct AiEngine {
     field_prec: crate::interval::FieldPrec,
 }
 
+/// Hints are per **block entry**: states whose `location().index != 0` are
+/// skipped below. A body with a single block therefore publishes nothing even
+/// though it converges trivially — its only block-entry state is the method
+/// entry, where nothing is known yet.
+///
+/// That is not a defect, but it does make a hand-built single-block fixture
+/// look like a counterexample to the completeness gate above. It is not one;
+/// see `docs/interval-ai-hint-path.md`.
 fn join_block_intervals(
     method: &MethodKey,
     reached: &[crate::interval::IState],
@@ -831,6 +839,24 @@ impl Engine for AiEngine {
             nonnull_statics: self.nonnull_statics.clone(),
             field_prec: self.field_prec.clone(),
         };
+        // `&Sep` below means **no widening**, so a loop whose trip count is
+        // not statically known enumerates states until `max_states` and
+        // returns `complete = false` — and then nothing is published at all,
+        // however precise the intervals were.
+        //
+        // Measured on three programs differing only in their loop: bounded 83
+        // hints applied, unbounded 0, no loop 32. That gate is why B2, B3 and
+        // #103 each measured exactly zero, and it is **correct** — an
+        // incomplete exploration has not visited every reachable state, and
+        // `smt-bmc` asserts a hint as a fact.
+        //
+        // Note the asymmetry with the float-loop branch above, which widens and
+        // therefore converges. Using a widening policy here is the single
+        // change most likely to make interval hints matter, and it is a
+        // measurement rather than an argument.
+        //
+        // See `docs/interval-ai-hint-path.md` before building anything that
+        // depends on these hints.
         info!("interval-ai: init — running abstract interpretation for hints");
         let start = ProgramPoint {
             method: entry.clone(),
