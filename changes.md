@@ -2,6 +2,65 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-28 — correction: the three "lost" tasks were never lost, and how the misattribution was built
+
+Three entries below state that `argv-tasks/AbstractSerializationStreamReader_false`,
+`jayhorn-recursive/SatAckermann01` and `SatFibonacci01` were lost to the #101
+interval-hint soundness fix, at a cost of 5 points. **That is wrong.** Measured
+on the identical 148-task set, both builds, back to back:
+
+| build | runs | correct | WRONG | score |
+|---|---|---|---|---|
+| `main` | 148 | 125 | 0 | **158** |
+| `heap-full` | 148 | 125 | 0 | **158** |
+
+`main`'s arm ran twice at exactly 158. And the three tasks directly, on both
+builds: `TIMEOUT`, `UNKNOWN`, `UNKNOWN` — identical. They were already failing
+before the heap work began.
+
+So **#101 cost nothing measurable**, and the session is net-neutral on existing
+score with +15 from new benchmarks.
+
+### How the misattribution was constructed, which is the part worth keeping
+
+Three compounding errors, each individually small.
+
+**1. A `--check` regression is relative to the baseline *file*, not to the
+previous commit.** Main's baseline held 134 entries recorded against older code
+while main's set has 149. Those three tasks were recorded correct in a baseline
+predating their own regression, so `--check` flagged them against *any* build,
+including main's. Nothing in the output distinguishes "this build broke it"
+from "the baseline is stale" — and `CLAUDE.md` already warns that a baseline
+recorded under different conditions misleads, just not in this direction.
+
+**2. Ruling out one cause was read as establishing another.** The
+`AJAVE_SITE_FIELDS=0` ablation showed the losses were not attributable to B2.
+That is true, and it says nothing about #101. Treating it as confirmation was
+the step that made a guess feel measured.
+
+**3. The answer was already in the task list.** "Bisect the three stale
+smoke-baseline failures" was an open task *before* this session, naming exactly
+these three. The explanation existed and was not consulted.
+
+The arithmetic coincidence that should have been the tell: smoke went 158 →
+173, nine benchmarks worth exactly +15 were added, and 158 + 15 = 173. For the
+pre-existing tasks to have lost 5 points, something would have had to gain 5
+elsewhere — and no candidate was ever identified. A number that only
+reconciles via an unexplained offset is not reconciled.
+
+### What this does not change
+
+The #101 fix itself stands on its own evidence: the discharge it removed was
+violated by a JVM-confirmed witness, and
+`benchmarks/ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths`
+reproduces it in six lines. Soundness fixes do not need a score justification.
+What changed is that this one turns out not to have needed a score *defence*
+either.
+
+The smoke re-baseline was still the right action — the baseline was genuinely
+stale — but the commit message justifies it as absorbing #101's cost, which is
+not why it was stale.
+
 ## 2026-10-27 — an interval hint that was true on one path, and site-indexed field cells
 
 Two things, found in that order, because the first was found by writing the
