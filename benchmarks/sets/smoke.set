@@ -254,3 +254,8 @@ ajave/heap/ArrayElementNonNullWithAConstantBound.yml valid-assert
 # loop and consumed in another. UNKNOWN without AJAVE_CHC_QGEN, TRUE with it —
 # the only task in this set that prices that flag (2026-10-27).
 ajave/heap/EveryElementNonNullAfterAFillLoop.yml valid-assert
+
+# C1's confirmed soundness defect (#106). FALSE by construction, JVM-validated.
+# With AJAVE_CHC_HEAP_SUMMARY=1 and the falsifiers disabled, CHC answers TRUE.
+# Canary so the fix is demonstrated and the defect cannot silently return.
+ajave/engine-chc/RecursiveFieldWriteIsNotForgotten.yml valid-assert
