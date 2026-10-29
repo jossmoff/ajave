@@ -1010,7 +1010,22 @@ fn encode_chc_interproc(
     // Reads need the pre half so the callee's constraint sees the caller's
     // value; writes need the post half so the caller sees the callee's. A
     // field in neither set is untouched by the call and is simply not passed.
-    let field_footprint: HashMap<MethodKey, BTreeSet<FieldKey>> = {
+    // `heap_opaque` is the condition the comment below used to claim and the
+    // code did not implement (gh #110): a method with a callee we have no body
+    // for. Its footprint is incomplete by construction, because the closure
+    // that folds callee fields in can only fold what it can see, so a summary
+    // built from it would assert that fields outside the footprint survive a
+    // call that may well have written them. That is an `Over` engine making a
+    // claim about every execution on the strength of a set it knows is partial.
+    //
+    // Tracked as a `BTreeSet`, and only ever queried with `contains`, but the
+    // ordered type is deliberate: this set decides whether a summary relation
+    // is emitted, and a collection that decides what the solver sees must not
+    // depend on hash order.
+    let (field_footprint, heap_opaque): (
+        HashMap<MethodKey, BTreeSet<FieldKey>>,
+        BTreeSet<MethodKey>,
+    ) = {
         let mut direct: HashMap<MethodKey, BTreeSet<FieldKey>> = HashMap::new();
         let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
         for (mk2, body2) in &prog.bodies {
@@ -1060,22 +1075,77 @@ fn encode_chc_interproc(
                 break;
             }
         }
-        direct
+        // A method is opaque if it calls something we have no body for, or
+        // calls something that is itself opaque. Same monotone closure shape as
+        // the footprint above, and for the same reason: opacity has to travel
+        // up the call graph or a summary one level above an unresolved call
+        // still claims a complete footprint.
+        let mut opaque: BTreeSet<MethodKey> = BTreeSet::new();
+        for (caller, cs) in &callees {
+            if cs.iter().any(|c| !direct.contains_key(c)) {
+                opaque.insert(caller.clone());
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                if opaque.contains(caller) {
+                    continue;
+                }
+                if cs.iter().any(|c| opaque.contains(c)) {
+                    opaque.insert(caller.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        (direct, opaque)
     };
 
     // Which methods may be summarised with their heap effect threaded through.
     //
     // `None` means "clobber at the call site", the pre-C1 behaviour, and is the
     // answer whenever the footprint is empty (nothing to thread), too large to
-    // be worth the arity, or the callee has an unresolved callee of its own.
+    // be worth the arity, or the method has an unresolved callee of its own.
+    //
+    // Every one of those four conditions is now tested here. The last was for a
+    // while asserted in this comment and absent from the code (gh #110), which
+    // is the defect class CLAUDE.md names: a comment stating a soundness
+    // argument with nothing maintaining it. `a_method_with_an_unresolved_callee_
+    // gets_no_summary` is the test named after this paragraph.
+    //
+    // Each refusal is logged rather than left to be inferred. C1 was measured
+    // inert across 107 heap-shaped tasks (gh #109) and the measurement could
+    // not say why, because "every method was refused a summary" and "summaries
+    // do not help these programs" produced identical output. They call for
+    // completely different work.
     let heap_summary_of = |mk: &MethodKey| -> Option<&BTreeSet<FieldKey>> {
         if !heap_summary {
             return None;
         }
-        let fp = field_footprint.get(mk)?;
-        if fp.is_empty() || fp.len() > MAX_SUMMARY_FIELDS {
+        if heap_opaque.contains(mk) {
+            debug!("chc-summary: {mk} refused — calls a method we have no body for");
             return None;
         }
+        let Some(fp) = field_footprint.get(mk) else {
+            debug!("chc-summary: {mk} refused — no footprint entry");
+            return None;
+        };
+        if fp.is_empty() {
+            debug!("chc-summary: {mk} refused — empty footprint, nothing to thread");
+            return None;
+        }
+        if fp.len() > MAX_SUMMARY_FIELDS {
+            debug!(
+                "chc-summary: {mk} refused — footprint of {} exceeds MAX_SUMMARY_FIELDS {}",
+                fp.len(),
+                MAX_SUMMARY_FIELDS
+            );
+            return None;
+        }
+        debug!("chc-summary: {mk} granted a summary over {} field(s)", fp.len());
         Some(fp)
     };
 
@@ -3641,6 +3711,89 @@ mod tests {
             method: mk("main", "()V"),
             id: ObligationId(0),
         }]
+    }
+
+    /// C1, and the test named after the soundness argument in
+    /// `heap_summary_of` (gh #110).
+    ///
+    /// A summary asserts that every field *outside* the summarised footprint
+    /// survives the call. That assertion is only as good as the footprint being
+    /// complete, and it cannot be complete for a method that calls something we
+    /// have no body for: the closure that folds callee fields in can only fold
+    /// what it can see. Such a method must therefore be refused a summary and
+    /// clobbered at the call site instead.
+    ///
+    /// The condition was asserted in that function's comment and absent from
+    /// its code for long enough to be worth a regression test. Note what is
+    /// being checked: not that the verdict is right -- an `Over` engine with an
+    /// incomplete footprint can easily reach a *correct* verdict on any one
+    /// program -- but that the unsound relation is never declared at all.
+    #[test]
+    fn a_method_with_an_unresolved_callee_gets_no_summary() {
+        let (mut prog, main) = setter_program();
+        let set = MethodKey {
+            class: "Box".into(),
+            name: "set".into(),
+            desc: "()V".into(),
+        };
+        let obs = setter_obs();
+
+        // Summary relations are named positionally (`m1_s`), so the method they
+        // belong to is only identifiable from the comment the encoder emits
+        // beside each declaration. Keying on the comment rather than on an
+        // index keeps the test readable and stops it passing for the wrong
+        // method if declaration order ever changes.
+        let summary_for = |t: &str, m: &str| -> Option<String> {
+            let marker = format!("; summary for {m}");
+            let mut lines = t.lines();
+            while let Some(l) = lines.next() {
+                if l.trim() == marker {
+                    return lines.next().map(|d| d.to_string());
+                }
+            }
+            None
+        };
+
+        // Control: as written, `Box.set` is summarised, with a pre-heap and a
+        // post-heap argument threaded through it.
+        let before = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        let decl = summary_for(&before, "Box.set()V")
+            .unwrap_or_else(|| panic!("precondition: the setter is summarised:\n{before}"));
+        assert_eq!(
+            decl.matches(ARR_SORT).count(),
+            2,
+            "precondition: the setter's summary threads a pre- and post-heap: {decl}"
+        );
+
+        // Now have it call something with no body in the program. Nothing else
+        // about the method changes -- it still writes exactly `Box.v`.
+        let unknown = MethodKey {
+            class: "java/lang/System".into(),
+            name: "nanoTime".into(),
+            desc: "()J".into(),
+        };
+        let body = prog.bodies.get_mut(&set).expect("setter body");
+        body.vars.push(VarInfo {
+            kind: VarKind::Local(1),
+            ty: Ty::Long,
+        });
+        body.blocks[0].stmts.push(Stmt::Assign(
+            VarId(1),
+            Rvalue::Call {
+                target: unknown,
+                args: vec![],
+                is_virtual: false,
+            },
+        ));
+
+        let after = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        assert_eq!(
+            summary_for(&after, "Box.set()V"),
+            None,
+            "a method with an unresolved callee must not be summarised: its \
+             footprint cannot be complete, so a summary would assert that \
+             fields outside it survive a call that may have written them:\n{after}"
+        );
     }
 
     /// C1. A void method with a heap footprint gets a summary. Before C1 it got
