@@ -49,15 +49,18 @@ Usage:
 """
 
 import argparse
+import atexit
 import concurrent.futures
 import os
 import re
-import subprocess
+import shutil
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
+from procguard import install_signal_handlers, run_guarded, sweep  # noqa: E402
 
 # Per-obligation refusal: `BLOCKER <reason> for ObligationRef { .. }`.
 BLOCKER_RE = re.compile(r"BLOCKER (\S+) for (?!every)")
@@ -107,10 +110,26 @@ def run_one(args):
     counts across runs is exactly the error this tool exists to avoid.
     """
     task, prop, timeout, binary = args
+    # Two things this shares with bench.py, and it had neither:
+    #
+    # `--timeout` tells ajave the budget it is under. Without it no engine
+    # knows a deadline exists, so none can yield, and the task is hard-killed
+    # at the wall clock instead of reporting what it established. For a census
+    # that is not merely a lost result: the task lands in the `timeout` bucket
+    # carrying no blocker, so every other bucket is starved by exactly the
+    # tasks that had something to say. The inner budget is 5s short of the
+    # outer one so the process finishes and reports first.
+    #
+    # `run_guarded` kills the whole process group. ajave spawns a solver and a
+    # JVM, and killing only the parent orphans both -- leaked solvers are what
+    # exhausted this machine's memory once before. Measured: a plain
+    # subprocess.run census leaked 4 z3 processes in its first 25 minutes.
+    inner = max(5, int(timeout) - 5)
     # --trace makes the certifier say *why* it refused each witness, which is
     # the other half of the triage: a refuted witness scores zero exactly like
     # an unproven obligation, and needs completely different work.
-    cmd = [binary, "--trace", "--property", bench.CLI_PROPERTY[prop]] + task["inputs"]
+    cmd = [binary, "--trace", "--property", bench.CLI_PROPERTY[prop],
+           "--timeout", str(inner)] + task["inputs"]
     env = dict(os.environ,
                RUST_LOG="ajave_engines::smt_bmc=debug,ajave_core::orchestrator=debug")
     rec = {"name": os.path.basename(task["yml"]).replace(".yml", ""),
@@ -119,14 +138,9 @@ def run_one(args):
            "verdict": "UNKNOWN", "blockers": [], "outer": None,
            "open_n": None, "open_kinds": "", "residuals": [],
            "downgraded": False, "replay": []}
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
+    r = run_guarded(cmd, timeout=timeout, env=env)
+    if r.timed_out:
         rec["verdict"] = "TIMEOUT"
-        return rec
-    except OSError as e:
-        rec["verdict"] = f"ERROR({e.errno})"
         return rec
     if r.returncode < 0:
         # A signal, not a verdict. CLAUDE.md: under load the harness's own
@@ -167,6 +181,18 @@ def main():
                     help="write one TSV row per unproven task-property pair")
     args = ap.parse_args()
     self_test()
+    install_signal_handlers()
+    sweep()
+
+    # Snapshot the binary, for the reason bench.py does: a census invokes it
+    # once per task over hours, and rebuilding mid-run swaps it underneath, so
+    # early tasks measure one build and later ones another. The snapshot path
+    # travels in each work item rather than a module global.
+    snap_dir = tempfile.mkdtemp(prefix="ajave-census-")
+    binary = os.path.join(snap_dir, "ajave")
+    shutil.copy2(bench.BINARY, binary)
+    os.chmod(binary, 0o755)
+    atexit.register(shutil.rmtree, snap_dir, True)
 
     tasks = []
     for task, override in bench.load_set(args.set):
@@ -177,7 +203,7 @@ def main():
         else:
             props = list(task["expected"])
         for prop in props:
-            tasks.append((task, prop, args.timeout, bench.BINARY))
+            tasks.append((task, prop, args.timeout, binary))
     if args.limit and args.limit < len(tasks):
         step = len(tasks) // args.limit
         tasks = tasks[::step][: args.limit]
