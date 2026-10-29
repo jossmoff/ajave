@@ -2,6 +2,89 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-29 — Triaging the unproven: two broken instruments and a three-way split
+
+Work towards a census of *why* obligations go unproven, rather than how many
+tasks fail. Two findings, and both arrived the same way: by demanding a control
+before believing a number, and by writing the benchmark before the fix.
+
+### The instrument reported zeros, which is not a finding
+
+`tools/blocker_census.py` bucketed tasks by the BMC's `BLOCKER` log lines.
+Three things were wrong with that as a measure of obligations.
+
+*The outer gate covers everything in one line.* When the BMC truncates before
+reaching its discharge loop it refuses every obligation with a single aggregate
+log line, so a regex over `BLOCKER` lines counted one refusal on a task with
+thirty open obligations. Obligation counts now come from the orchestrator's own
+open-set report, and the per-obligation pattern is anchored so it no longer
+claims the aggregate line.
+
+*A refuted witness is neither open nor scored.* `TCAS_prop1` reports `open=0`
+and still scores nothing: an engine closed its obligation with a violation the
+JVM declines to reproduce, so it is closed *wrongly*. The open-set alone is
+therefore the wrong denominator for unfinished work. The census now runs with
+`--trace`, reads the per-violation `CertResult`, and reports open obligations
+and refuted witnesses as the two disjoint populations they are. On the smoke
+set that is the single largest bucket — 8 of 23 unproven runs.
+
+*`$` is not end-of-line without `re.MULTILINE`.* So the open-set pattern
+matched nothing anywhere in any log, and the first control run printed a table
+whose every obligation column was zero — indistinguishable from the real
+finding "nothing is open". This is the failure mode CLAUDE.md warns about, and
+the only reason it was caught is that the control was run before the numbers
+were used. Two guards against recurrence: `self_test()` pins every pattern
+against a verbatim sample line and exits 2 when one stops matching, and
+`report()` refuses to print an obligation column when every run that reached
+the end of the orchestrator loop claims nothing is open.
+
+### "An assertion in a catch block" is three mechanisms, not one
+
+Six of smoke's 23 unproven runs landed in `no-candidate` — the BMC published
+nothing at all, not even a refusal. Two of them, `ClassCastException1` and
+`ArrayIndexOutOfBoundsException1`, have the same shape: the assertion is
+reachable *only* through an exception handler.
+
+The first hypothesis was that implicit exceptions never reach their handlers.
+Writing the minimal benchmark disproved it, which is precisely what the
+benchmark-before-fix rule is for. The reduction
+(`AssertionReachedOnlyByAnImplicitThrow`, integer division by a constant zero
+inside a try) **passes** — and the engine that gets it is the finding. Both BMC
+and CHC report `violated=0`; the *concrete* engine carries it, because the
+program is deterministic and the all-zero probe executes it exactly
+(`--interpret` prints `INTERPRET ESCAPED java.lang.AssertionError`).
+
+Separating the mechanism needed a third program. Guarding the violation away
+from the all-zero probe — `d != 0`, divisor `d - 7`, so the handler is reached
+only at `d == 7` — gives UNKNOWN against a ground truth of FALSE. The trio now
+reads:
+
+| benchmark | mechanism | decided by |
+|---|---|---|
+| `AssertionInCatchBlock` | explicit `throw` in a callee | BMC, `dispatch_exception` |
+| `AssertionReachedOnlyByAnImplicitThrow` | implicit throw, deterministic | concrete engine |
+| `ImplicitThrowReachesItsHandlerOnlyForSomeInputs` | implicit throw, input-dependent | **nothing** |
+
+The cause is in `explore.rs::handle_check`: it asks the solver whether an
+obligation's condition can fail, records a violation if so, and then continues
+*straight-line*. A failing check never forks control along the block's
+exceptional edge. The lifter is not at fault — it emits the edge, and the
+handler's obligation is seeded and reported open. `handle_throw` and
+`dispatch_exception` cover `athrow` and cross-method propagation, so the
+explicit case works and the implicit one does not.
+
+Why this stayed invisible: the BMC has no opinion to publish, because it never
+evaluated the obligation. No discharge, no violation, and no blocker naming a
+cause — so the task cannot appear under any nameable reason in a census built
+on refusals. That is what `no-candidate` was concealing.
+
+54 corpus task directories contain an assertion inside a catch block, including
+the whole `algorithms/*-Mem*` family. That is an upper bound on the population,
+not an estimate of it: the explicit-throw and deterministic routes already
+work, so how many are actually blocked this way needs the per-task census
+rather than a grep.
+
+
 ## 2026-10-28 — B2/B3 had never executed, and three wrong explanations for why
 
 `ref_alloc_sites` resolved **no real receiver on any program**, so B2's site
