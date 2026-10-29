@@ -50,7 +50,6 @@ Usage:
 
 import argparse
 import atexit
-import concurrent.futures
 import os
 import re
 import shutil
@@ -60,6 +59,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
+from concurrent.futures import ProcessPoolExecutor  # noqa: E402
 from procguard import install_signal_handlers, run_guarded, sweep  # noqa: E402
 
 # Per-obligation refusal: `BLOCKER <reason> for ObligationRef { .. }`.
@@ -137,8 +137,9 @@ def run_one(args):
            "expected": task["expected"].get(prop),
            "verdict": "UNKNOWN", "blockers": [], "outer": None,
            "open_n": None, "open_kinds": "", "residuals": [],
-           "downgraded": False, "replay": []}
+           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout}
     r = run_guarded(cmd, timeout=timeout, env=env)
+    rec["dur"] = r.elapsed
     if r.timed_out:
         rec["verdict"] = "TIMEOUT"
         return rec
@@ -213,7 +214,14 @@ def main():
 
     records = []
     if args.jobs > 1:
-        with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
+        # Processes, not threads. A thread pool deadlocks here: several threads
+        # each doing Popen + communicate(timeout=..) contend on CPython's
+        # internal waitpid bookkeeping, and a thread can block acquiring it
+        # rather than inside its timed wait -- so the timeout never fires.
+        # Measured: with a ThreadPoolExecutor one task ran 1700s against a
+        # 300s budget while its worker was lost for good and the pool drained
+        # from 6 to 5. bench.py uses ProcessPoolExecutor for the same reason.
+        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
             for i, rec in enumerate(ex.map(run_one, tasks), 1):
                 records.append(rec)
                 print(f"\r  {i}/{len(tasks)}", end="", file=sys.stderr)
@@ -358,6 +366,21 @@ def report(records, dump=None):
               "!! almost certainly a parse failure, not a corpus in which nothing\n"
               "!! is open -- the obligation columns below mean nothing. Check\n"
               "!! OPEN_RE against a real log before reading them.\n")
+
+    # A run that outlived its budget got more time than every other task, so
+    # its verdict is not comparable with theirs -- which is the overfitting
+    # CLAUDE.md warns about, moved from the engine into the harness. Report it
+    # rather than average it in.
+    overran = [r for r in records
+               if r.get("dur", 0) > r.get("budget", 1e9) * 1.25]
+    if overran:
+        print(f"!! {len(overran)} run(s) outlived the {records[0].get('budget')}s "
+              f"budget by >25%, so the process guard did not fire. Those runs "
+              f"had\n!! more time than every other task and their verdicts are "
+              f"not comparable. Worst:")
+        for r in sorted(overran, key=lambda x: -x["dur"])[:5]:
+            print(f"!!   {r['dur']:7.0f}s  {r['name']} ({r['prop']})")
+        print()
 
     RESPONDS = {
         "budget": "scheduling / more effort  <-- the scheduler's ceiling",
