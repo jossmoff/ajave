@@ -2,6 +2,86 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-29 — an implicit throw reaches its handler, and the wrong TRUE on the way
+
+`handle_check` asked the solver whether an obligation could fail, recorded a
+violation, and then carried straight on to the next statement. The JVM does not:
+it transfers control to whatever handler covers the throwing instruction. So an
+assertion reachable **only** through an implicitly thrown exception was
+unreachable to the BMC entirely, and such a task could not even appear under a
+nameable cause in the blocker census — the engine had no opinion to publish,
+because it never got there.
+
+### Measured on the blast radius, not the corpus
+
+The fork is a no-op unless a block has an exceptional edge whose handler catches
+what the obligation kind raises, so **the set of tasks that can change is
+decidable from the code**: those with a `catch` for a class one of the five
+implicit kinds can raise. 352 task-property pairs of 1,784. Measuring those
+rather than re-running everything is not sampling; it is the blast radius.
+
+Diffed per task against the pre-fix idle corpus run at `436ecd4`:
+
+| | |
+|---|---|
+| `ArrayIndexOutOfBoundsException1/2/3` | UNKNOWN → **FALSE** |
+| `ClassCastException1` | UNKNOWN → **FALSE** |
+| net | **+4 correct, 0 WRONG** |
+
+All four confirmed individually with the flag on and off, and all four are
+replay-confirmed FALSEs rather than guesses. Smoke 178 against 174.
+
+Two apparent losses — `CustomViewAbove` TRUE→UNKNOWN, `Sanitizers1`
+FALSE→UNKNOWN — are **not** the fix. Both are correct when run individually
+with the fork on, at times indistinguishable from the fork off (3.4s vs 3.1s;
+187.6s vs 187.3s). `Sanitizers1` at 187s against a 295s budget is exactly the
+coin-flip this file warns about. They appeared only in a contended
+`--allow-busy` run. Checking them was two commands, and it is the difference
+between "worse than the baseline" and "worse because of this change".
+
+### The first cut was a wrong TRUE, and the soundness argument was the wrong shape
+
+`securibench/Refl3` went to TRUE against an expected FALSE.
+
+Exploring the handler overwrites `current_block`, which is **not** part of
+`SavedState`. I restored everything that is and nothing that is not. The
+straight-line path then asked "is this call inside a try range" about the
+*handler's* block, so `has_unresolved_in_try` stopped being set — four
+`BLOCKER has_unresolved_in_try` with the fork off, none with it on — and an
+obligation was discharged as exhaustively proven.
+
+The argument written in the commit was: *additive to an under-approximating
+search, so it cannot create a wrong TRUE.* That is true of the exploration and
+false of the bookkeeping wrapped around it. **Adding states is safe; losing
+track of where you are is not.** A soundness argument about an engine has to
+cover the state the engine keeps, not only the states it visits.
+
+This is the second time a context-relative identifier escaped its context in
+this file; inlining once failed to restore `current_block` too. CLAUDE.md names
+the class. `Refl3` is now a canary annotated with the mechanism, because the
+honest answer there is UNKNOWN and a TRUE means the restore was dropped again.
+
+### Deliberately half-done, and saying so
+
+The fall-through continuation is left unconstrained rather than being given
+"the check held". Constraining it would be more faithful — the JVM really does
+not continue past a throwing instruction — but it *prunes*, and a prune
+justified by a constraint whose satisfiability has not been established is how
+`Pan_exceptionprone` became a wrong TRUE. That half needs its own measurement
+and does not get to ride along with this one.
+
+### A note on measuring under a flaky harness
+
+Five long background runs were terminated mid-flight by the environment, at
+18–49 minutes, including two full corpus attempts. Partial runs were discarded
+rather than combined, because a score assembled from fragments of different
+runs describes no configuration that ever existed. The working method was to
+shrink each measurement to fit a foreground call and to pick a target set small
+enough to be justified from the code — which produced a sharper result than the
+full corpus run would have, since the full run dilutes four verdict changes
+across 1,784 pairs.
+
+
 ## 2026-10-29 — the heap mechanisms are inert on the only population that could convert
 
 The corpus is flat at **2058** (VA 874 / NRE 1184, 1 WRONG, that being the
