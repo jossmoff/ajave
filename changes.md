@@ -126,6 +126,81 @@ proved correct. **Argue from what the remaining population is, not from the rate
 so far** — and when neither is available, say the estimate is not yet worth
 having.
 
+## 2026-10-29 — a Horn entry fact that was `P → P`, and the wrong TRUE it bought
+
+`AJAVE_CHC_HEAP_SUMMARY=1` (C1) proved a false program safe. Reduced to ten
+lines in `benchmarks/ajave/engine-chc/RecursiveFieldWriteIsNotForgotten`:
+
+```java
+static void bump(Box b, int n) { if (n <= 0) return; b.v = b.v + 1; bump(b, n-1); }
+b.v = 0; bump(b, 3); assert b.v == 0;     // FALSE: b.v is 3
+```
+
+CHC isolated answered **TRUE**.
+
+### The defect
+
+Each method's entry fact should be `side-conditions → m_b0(args)`. It was being
+built by taking `block_app_src`'s joined string — which is
+`(and <application> <conditions>…)` — and removing the application with
+`replacen`. C1 added the entry heap to the block relation, so the application
+`block_app_src` built used `fld_entry(f)` while the string being removed was
+rebuilt with `fld_src(f)`. **The two spellings diverged, `replacen` matched
+nothing, and the application stayed in its own antecedent.**
+
+The clause became `m1_b0(…) → m1_b0(…)` — a tautology that forces nothing. So
+`m1_b0 = false` satisfies it, and Spacer took it: the model has every block of
+`bump` and its summary interpreted as the **empty relation**. An empty summary
+makes the call site's `(m1_s …)` false, which makes every block after the call
+unreachable, which discharges every obligation past it **vacuously**. `sat` =
+"safe".
+
+`CLAUDE.md` already records this exact failure mode from attempt #95 — "the
+solver interprets such a predicate and may choose it empty, which makes
+`assume phi(..)` unsatisfiable and the read path vacuously safe" — with two
+smoke canaries from that occurrence. C1 reintroduced the same shape through a
+different door, and those canaries did not catch it: smoke passed at 173 with
+C1 on.
+
+### Why only recursion
+
+A non-recursive method's conclusion clause forces its summary non-empty
+wherever its return block is reachable. A recursive method's conclusion has its
+own summary in the *body*, so the empty relation satisfies both the conclusion
+and the call site vacuously. Measured: non-recursive field writes through a
+summary (constant write, and read-modify-write) both stay correctly UNKNOWN.
+
+### The fix, and why it is structural
+
+`block_parts_src` now returns `[application, condition…]`, and the entry fact
+takes the conditions and builds its head directly. There is no second spelling
+to drift and no string removal to fail.
+
+That shape matters because **this single clause has now had three
+well-formedness bugs**: a bare conjunction z3 rewrote into a rule with a
+negative predicate and refused outright; an argument list rebuilt from
+`live_at` that disagreed once array arguments arrived; and this one. All three
+presented as solver weakness — `unknown`, `unknown`, and a wrong TRUE — and all
+three were found by reading generated SMT-LIB rather than Rust. `CLAUDE.md`
+says "assert every replacement"; not constructing the string twice is better.
+
+### What it cost to believe
+
+C1 looked like +7 correct on `algorithms` with one wrong TRUE. After the fix,
+`BinaryTreeSearch-FunSat01` — which that +7 included, and which this file
+previously recorded as C1 solving the task Part E was built for — is **UNKNOWN
+again**. The gains were vacuous discharges. `Tsp-FunSat01`'s wrong TRUE is also
+gone.
+
+So the earlier entry claiming C1 solves `BinaryTreeSearch` is withdrawn. The
+*reasoning* in it stands — that task needs `∀o. value[o] ≥ 0` across a call,
+not shape reasoning — but C1 does not currently deliver it.
+
+The general lesson is one this file keeps relearning: **a gain from a mechanism
+whose soundness has not been separately established is not a gain.** +7 correct
+and one wrong answer is not "net −2"; it is an unmeasured mechanism, and the
+seven were the same bug as the one.
+
 ## 2026-10-28 — correction: the three "lost" tasks were never lost, and how the misattribution was built
 
 Three entries below state that `argv-tasks/AbstractSerializationStreamReader_false`,

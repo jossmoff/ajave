@@ -1538,7 +1538,28 @@ fn encode_chc_interproc(
                 format!("({}_b{} {})", mid, bid, args)
             }
         };
-        let block_app_src = |bid: u32| -> String {
+        // Returns `[application, side-condition, ...]`.
+        //
+        // Exposed as parts rather than a joined string because the entry fact
+        // needs the side conditions **without** the application: it must be a
+        // Horn *fact*, and including its own head in its antecedent makes it
+        // the tautology `P -> P`, which forces nothing. The empty relation
+        // then satisfies it, every block of the method is interpreted `false`,
+        // its summary is `false`, and every block after a call to it becomes
+        // unreachable — so obligations past the call are discharged
+        // vacuously. That is a wrong TRUE, and
+        // `benchmarks/ajave/engine-chc/RecursiveFieldWriteIsNotForgotten` is
+        // the ten-line program that exhibits it (#106).
+        //
+        // The previous version rebuilt the application separately and removed
+        // it from the joined string with `replacen`. When C1 added the entry
+        // heap, the two spellings diverged — `fld_entry(f)` here against
+        // `fld_src(f)` there — the `replacen` silently matched nothing, and
+        // the application stayed in the antecedent. `CLAUDE.md` already
+        // records that class of failure: "three `.replace` calls silently
+        // no-op'd ... now assert every replacement". Not constructing the
+        // string twice is better than asserting about it.
+        let block_parts_src = |bid: u32| -> Vec<String> {
             let mut arg_parts: Vec<String> = live_at(mk, bid)
                 .iter()
                 .map(|i| src_vars[*i].clone())
@@ -1597,11 +1618,7 @@ fn encode_chc_interproc(
             }
 
             let Some(bounds) = invariants.get(&(mk.clone(), BlockId(bid))) else {
-                return if parts.len() == 1 {
-                    parts.pop().unwrap()
-                } else {
-                    format!("(and {})", parts.join(" "))
-                };
+                return parts;
             };
             for (idx, lo, hi) in bounds {
                 if *idx >= n_vars {
@@ -1615,6 +1632,12 @@ fn encode_chc_interproc(
                 parts.push(format!("(<= {} v{})", lia_int(lo32), idx));
                 parts.push(format!("(<= v{} {})", idx, lia_int(hi32)));
             }
+            parts
+        };
+
+        // The joined form every clause body wants.
+        let block_app_src = |bid: u32| -> String {
+            let mut parts = block_parts_src(bid);
             if parts.len() == 1 {
                 parts.pop().unwrap()
             } else {
@@ -1658,17 +1681,33 @@ fn encode_chc_interproc(
         // weakness in this encoder, after the free constants. The side
         // conditions belong in the antecedent, where they constrain the entry
         // state instead of being asserted as global truths.
+        // The entry fact: any state satisfying the side conditions reaches the
+        // entry block.
+        //
+        // It must be a Horn **fact** — side conditions in the antecedent, the
+        // block application as the head, and *nothing else*. Three separate
+        // well-formedness bugs have lived in this one clause:
+        //
+        // 1. It was `(and (m_b0 ..) ranges)` — a bare conjunction with the
+        //    predicate inside, which z3 rewrites into a rule with a negative
+        //    predicate and then refuses the whole query as `unknown`.
+        // 2. The application was rebuilt from `live_at` alone, so when array
+        //    arguments arrived the two disagreed and z3 rejected the file.
+        // 3. The application was removed from the joined string by `replacen`.
+        //    C1 made the two spellings diverge (`fld_entry` against
+        //    `fld_src`), the removal silently matched nothing, and the clause
+        //    became `m_b0 -> m_b0` — a tautology forcing nothing. The empty
+        //    relation satisfied it, so every block and the summary of any
+        //    method reached only this way was interpreted `false`, and every
+        //    obligation after a call to it was discharged **vacuously**. A
+        //    wrong TRUE; see `RecursiveFieldWriteIsNotForgotten` and #106.
+        //
+        // Taking the side conditions from `block_parts_src` and building the
+        // head directly removes the class: there is no second spelling to
+        // drift and no string to fail to match.
         let entry_body = {
-            let full = block_app_src(body.entry.0);
-            // The same argument list `block_app_src` builds, arrays included.
-            //
-            // This rebuilt it from `live_at` alone, which was identical while
-            // the relation's arguments *were* the live set. Adding array
-            // arguments made the two disagree: the entry clause applied a
-            // 1-ary relation with no arguments, and z3 rejected the whole
-            // file — reported as `unknown`, which reads as the solver giving
-            // up rather than the query being malformed.
-            let app = app_of(&mid, body.entry.0, &{
+            let conds: Vec<String> = block_parts_src(body.entry.0).split_off(1);
+            let head = app_of(&mid, body.entry.0, &{
                 let mut parts: Vec<String> = live_at(mk, body.entry.0)
                     .iter()
                     .map(|i| src_vars[*i].clone())
@@ -1680,30 +1719,18 @@ fn encode_chc_interproc(
                     parts.push(fld_src(f));
                 }
                 // At the entry block the two coincide: nothing has run yet.
-                // Passing `fld_src` here rather than a separate binder is what
-                // *defines* `fld_entry` — it is the entry heap because the only
-                // fact that introduces it says so.
+                // Passing `fld_src` here rather than `fld_entry` is what
+                // *defines* the entry heap — this fact is the only thing that
+                // introduces it, so it is the entry heap because this says so.
                 for f in &entry_fp {
                     parts.push(fld_src(f));
                 }
                 parts.join(" ")
             });
-            if full == app {
-                app
+            if conds.is_empty() {
+                head
             } else {
-                // `block_app_src` returns `(and <app> <conds>..)`; the
-                // antecedent is everything except the application.
-                let inner = full
-                    .strip_prefix("(and ")
-                    .and_then(|t| t.strip_suffix(')'))
-                    .unwrap_or_default()
-                    .replacen(&app, "", 1);
-                let conds = inner.trim();
-                if conds.is_empty() {
-                    app
-                } else {
-                    format!("(=> (and {}) {})", conds, app)
-                }
+                format!("(=> (and {}) {})", conds.join(" "), head)
             }
         };
         out.push_str(&format!(
