@@ -29,6 +29,12 @@ sv-comp/jbmc-regression/StringValueOf07.yml valid-assert
 sv-comp/jbmc-regression/StringValueOf09.yml valid-assert
 sv-comp/securibench/Inter13.yml valid-assert
 sv-comp/securibench/Refl3.yml valid-assert
+# ^ also the canary for the wrong TRUE #108's first cut caused: exploring the
+# handler left `current_block` pointing at it, so the straight-line path asked
+# "is this call inside a try range" about the wrong block,
+# `has_unresolved_in_try` stopped being set, and an obligation was discharged as
+# exhaustively proven. UNKNOWN is the honest answer here; TRUE means the restore
+# was dropped again (2026-10-29).
 sv-comp/juliet-java/CWE369_Divide_by_Zero__float_connect_tcp_divide_01_bad.yml valid-assert
 sv-comp/securibench/Refl4.yml valid-assert
 sv-comp/securibench/StrongUpdates1.yml valid-assert
@@ -259,3 +265,11 @@ ajave/heap/EveryElementNonNullAfterAFillLoop.yml valid-assert
 # With AJAVE_CHC_HEAP_SUMMARY=1 and the falsifiers disabled, CHC answers TRUE.
 # Canary so the fix is demonstrated and the defect cannot silently return.
 ajave/engine-chc/RecursiveFieldWriteIsNotForgotten.yml valid-assert
+
+# #108: a failing check forks control into its exception handler, so an
+# assertion reachable only through an implicitly-thrown exception stops being
+# unreachable to the BMC. The trio separates three mechanisms that all look
+# alike -- explicit throw, implicit-and-deterministic, implicit-and-input-
+# dependent -- and only the last one needed the fix (2026-10-29).
+ajave/jvm-exceptions/AssertionReachedOnlyByAnImplicitThrow.yml valid-assert
+ajave/jvm-exceptions/ImplicitThrowReachesItsHandlerOnlyForSomeInputs.yml valid-assert

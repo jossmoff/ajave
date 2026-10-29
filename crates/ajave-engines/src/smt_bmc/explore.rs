@@ -1088,6 +1088,147 @@ impl<'a> ExploreCtx<'a> {
         if self.path_tainted {
             self.completeness.has_tainted_paths = true;
         }
+        // The JVM does not carry on past an instruction that throws: it
+        // transfers control to whatever handler covers it. Explored last, so
+        // the bookkeeping above describes the straight-line path, and only
+        // when the solver says the check can actually fail.
+        if res == SatResult::Sat {
+            self.fork_into_implicit_handler(ob_kind, violation_cond);
+        }
+    }
+
+    /// The handler on `block` that catches what `kind` raises, if any.
+    ///
+    /// Only a `Some(class)` entry counts, and a `finally` seen first aborts the
+    /// search. In the JVM exception table `catch_type == 0` is a `finally`: it
+    /// runs on the exceptional path but does **not** catch, so control keeps
+    /// propagating past it to a later handler. Entering that later handler
+    /// without having executed the `finally` body would hand it a state the JVM
+    /// never produces, and any witness built from that state is one replay
+    /// would refuse. Declining is a precision loss; approximating would be a
+    /// correctness one.
+    ///
+    /// `dispatch_exception` does treat `None` as matching. That is pre-existing
+    /// behaviour on the explicit-throw path and is deliberately not changed
+    /// here -- see `benchmarks/ajave/jvm-exceptions/FinallyDoesNotCatch`.
+    fn implicit_handler_for(&self, block: BlockId, thrown: &str) -> Option<BlockId> {
+        for edge in &self.body.block(block).exceptional {
+            match edge.class.as_deref() {
+                None => return None,
+                Some(h) if h == thrown || self.prog.is_subtype(thrown, h) => {
+                    return Some(edge.target)
+                }
+                Some(_) => continue,
+            }
+        }
+        None
+    }
+
+    /// Explore the handler reached when this check fails (gh #108).
+    ///
+    /// # Soundness
+    ///
+    /// The handler is explored under `violation_cond` -- *exactly* the
+    /// constraint that makes the check fail -- and not merely because a handler
+    /// exists. Taking the edge unconditionally would manufacture witnesses on
+    /// paths the JVM cannot reach, and replay would refuse them.
+    ///
+    /// This is additive to an under-approximating search: it can only add
+    /// reachable states, so it cannot turn a correct TRUE into a wrong TRUE.
+    /// For the over-approximating side it is conservative in the right
+    /// direction too -- more explored subtrees mean more opportunities to mark
+    /// exploration incomplete, never fewer.
+    ///
+    /// Note what is deliberately *not* done: the straight-line continuation is
+    /// left unconstrained rather than being given `cond`. Constraining it would
+    /// be more faithful -- the JVM really does not continue past a throwing
+    /// instruction -- but it *prunes*, and a prune justified by a constraint
+    /// whose satisfiability we have not established is how `Pan_exceptionprone`
+    /// became a wrong TRUE. That half needs its own measurement.
+    fn fork_into_implicit_handler(&mut self, kind: ObligationKind, violation_cond: Term) {
+        if !crate::body_analysis::implicit_handler_enabled() {
+            return;
+        }
+        // `ExplicitThrow` is already dispatched by `handle_throw` at the
+        // `athrow` terminator; forking here as well would enter the handler
+        // twice. `Assertion` and `Deadlock` map to no class at all.
+        if kind == ObligationKind::ExplicitThrow {
+            return;
+        }
+        let Some(block) = self.current_block else {
+            return;
+        };
+        let Some(thrown) = ajave_models::exception_class(kind) else {
+            return;
+        };
+        let Some(handler) = self.implicit_handler_for(block, thrown) else {
+            return;
+        };
+
+        self.fork_count += 1;
+        log::debug!(
+            "smt-bmc: implicit {thrown} from a failing {kind:?} in {} bb{} -> handler bb{}",
+            self.body.key,
+            block.0,
+            handler.0
+        );
+
+        let saved = self.save_state();
+        let ir_before = self.inline_return;
+        let irs_before = self.inline_return_str;
+        let irt_before = self.inline_return_tainted;
+        // `current_block` is **not** part of `SavedState`, and exploring the
+        // handler overwrites it. Leaving it overwritten is what made this a
+        // wrong TRUE on `securibench/Refl3`: the straight-line path continued
+        // with `current_block` pointing at the handler, so the test for
+        // "is this call inside a try range" was asked about the wrong block,
+        // an unresolved call stopped counting as unresolved-in-try, the
+        // blocker vanished and 1 obligation was discharged as exhaustively
+        // proven. Measured: 4 `BLOCKER has_unresolved_in_try` with the fork
+        // off, none with it on.
+        //
+        // CLAUDE.md names this defect class: a context-relative identifier
+        // used outside the context it indexes. It had already happened once
+        // here, where inlining did not restore `current_block` and
+        // `self.body.block(bid)` indexed the caller's blocks with a callee's
+        // id.
+        let block_before = self.current_block;
+
+        self.path_constraints.push(violation_cond);
+        let feas = self.check_sat_with_path();
+        // Same reasoning as `handle_branch_fork`: explore an undecided branch,
+        // because refusing would miss bugs, but do not let the subtree support
+        // a claim of having covered everything when the constraint it was
+        // explored under is not known to be satisfiable.
+        if feas == SatResult::Unknown {
+            self.mark_incomplete("fork_into_implicit_handler");
+        }
+        if feas != SatResult::Unsat {
+            // A handler is entered with just the exception object on the
+            // operand stack. Its identity is unconstrained -- nothing in the
+            // program can observe more than its type, which the handler
+            // selection above has already decided.
+            let stack0 = self
+                .body
+                .vars
+                .iter()
+                .enumerate()
+                .find(|(_, vi)| matches!(vi.kind, VarKind::Stack(0)))
+                .map(|(i, _)| VarId(i as u32));
+            if let Some(sv) = stack0 {
+                let w = self.width_of_ty(&Ty::Ref);
+                let exc = self.solver.fresh_bv("implicit_exc", w);
+                self.vars.insert(sv, exc);
+            }
+            // No `stop_at`: an exception does not rejoin the path it left.
+            self.explore_block_until(handler, 0, None);
+        }
+
+        self.restore_state(saved);
+        self.current_block = block_before;
+        self.inline_return = ir_before;
+        self.inline_return_str = irs_before;
+        self.inline_return_tainted = irt_before;
     }
 
     fn handle_put_static(&mut self, fk: &FieldKey, val: &Operand) {
