@@ -2,6 +2,89 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-29 — the heap mechanisms are inert on the only population that could convert
+
+The corpus is flat at **2058** (VA 874 / NRE 1184, 1 WRONG, that being the
+known `ReverseInterpolator_true` mislabel). The standing explanation for the
+heap work scoring nothing was that its gains land on shapes the corpus barely
+contains. That explanation is now measured rather than asserted, and it
+survives — but the mechanism underneath it is not what was assumed.
+
+### Building a denominator that means something
+
+Of the 449 unproven task-property pairs, most cannot be converted by heap
+reasoning *for reasons of principle rather than quality*:
+
+- **162 expect FALSE.** A heap invariant is an `Over` artifact: it discharges,
+  it cannot witness a violation. The entire `*-MemUnsat*` family — the most
+  heap-shaped thing in the corpus — is unreachable by better heap modelling.
+- **144 touch no heap at all**, by inspection of their own source.
+
+That leaves **107** expects-TRUE, array/field/linked-shaped pairs: a ceiling of
++214 on a 2058 base, concentrated in `algorithms` (38), `jbmc-regression` (20),
+`argv-tasks` (17), `jayhorn-recursive` (11). Saved as a reusable target list
+rather than re-derived each time.
+
+### Four arms, bit-identical
+
+| arm | TRUE | UNKNOWN | TIMEOUT | diffs vs control |
+|---|---|---|---|---|
+| default | 1 | 98 | 8 | — |
+| `AJAVE_CHC_HEAP_SUMMARY=1` (C1) | 1 | 98 | 8 | **0** |
+| `AJAVE_CHC_QGEN=0` (ablate D1) | 1 | 98 | 8 | **0** |
+| `AJAVE_SITE_FIELDS=0` (ablate B2/B3) | 1 | 98 | 8 | **0** |
+
+Not one task of 107 changed verdict under any arm, not even a timeout
+shuffling; runtimes within 2%. C1 matters most here: it is off by default,
+exists specifically to thread field writes across calls, `jayhorn-recursive`
+and `BinaryTreeSearch` are both in the set, and **the flat corpus result had
+been measured with C1 off**. Measured on its own target population it converts
+nothing.
+
+Also worth recording from the control arm: only **8 of the 107 are
+time-limited**, the other 98 being UNKNOWN verdicts the engines reached and
+declined. Within the heap-shaped population the scheduling prize is 8 tasks,
+not 107.
+
+### What the ablation does *not* establish, and the trap it would have been
+
+An inert ablation invites the conclusion "heap modelling does not help these
+programs". It does not support that, because it cannot distinguish that from
+"CHC never gets far enough to use the model". Ruling out one cause is not
+establishing another — the error that previously made a guess feel measured.
+
+So it was checked rather than inferred, and the first guess was wrong. CHC does
+**not** decline these bodies. On `BinaryTreeSearch-FunSat01` with C1 on it logs
+`chc: encoding 1 obligation(s) for Main...`, runs **75ms**, and returns
+`Unknown`. It encodes and gives up immediately. "Inter-procedural LIA encoding"
+is only a log label; `encode_chc_interproc` does thread array-sorted heap fields
+when `heap_summary` is set, so C1 was genuinely in the active path.
+
+Why the query returns `Unknown` in 75ms is open (gh #109). The lead is
+`chc-imprecision: Nondet/Havoc`, logged three times on that task. This project
+has hit vacuous Horn queries three separate times, and **an `unknown` proves
+nothing until the query is shown well-formed** — so no conclusion about heap
+modelling quality is supportable yet.
+
+### And C1 cannot be observed at all
+
+Attributing the inertness ran into the reason it was unattributable: there is
+**no diagnostic anywhere** for whether C1 produced a summary. `heap_summary_of`
+returning `None` for every method is indistinguishable from heap summaries not
+helping. Instrument the refusal; do not infer it.
+
+Reading that gate turned up gh #110: its comment says a method whose callee is
+unresolved gets no summary, and the code has no such condition —
+`"unresolved"` appears exactly once in the function, in the comment. The
+closure folding callee footprints silently skips a bodyless callee rather than
+poisoning its caller, so such a method still gets `Some(fp)` and its summary
+asserts that fields outside `fp` survive the call. Latent, since C1 is off by
+default, and reachability is unestablished; but it is the second independent
+soundness hole in C1 after #106, and it is precisely the defect class this file
+names — a comment asserting an invariant the code does not maintain, with no
+test named after the argument.
+
+
 ## 2026-10-29 — Triaging the unproven: two broken instruments and a three-way split
 
 Work towards a census of *why* obligations go unproven, rather than how many
