@@ -2,6 +2,143 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — Pentagons: a weakly relational domain, and the copy chains that decide whether it works
+
+`interval.rs` gains the Pentagons domain of Logozzo and Fähndrich (SAC 2008):
+`x ∈ [a, b] ∧ x < y`. Intervals exactly as they were, plus a symbolic strict
+upper-bound relation.
+
+### The score, stated before the mechanism
+
+| | |
+|---|---|
+| smoke | **182 against 178**, 141 correct, 0 WRONG |
+| of which | **all +4 is the two new benchmarks**, at +2 each |
+| `census/budget.set` (135 pairs) | **1 conversion**: `jbmc-regression/array1` NRE → TRUE, score 0 → 2 |
+
+So the honest corpus gain measured so far is **one real task**. The smoke delta
+is entirely the two programs written to exercise the domain, and the baseline
+diff confirms no existing smoke task changed verdict — an earlier reading that
+it had picked up two more was wrong.
+
+That is a capability which did not exist rather than a scoring win, and the next
+two extensions are sized against the same population below.
+
+### Why: the domain could not state the proof
+
+ajave could not prove no-runtime-exception for this:
+
+```java
+int n = Verifier.nondetInt(); Verifier.assume(n > 0);
+int[] a = new int[n];
+for (int i = 0; i < n; i++) { a[i] = i; }
+```
+
+Three measurements, each discriminating. `n < 4` makes the BMC unroll and
+answer TRUE, so the program is provable. The BMC truncates at the unroll bound,
+correctly, and five separate bound probes converted one task between them. And
+`IState` was `BTreeMap<VarId, Interval>` — **non-relational**, deriving `i >= 0`
+and `len >= 1` with no way to express `i < len`, which is the entire proof.
+
+`Rvalue::ArrayLength` already existed, the lifter already phrased the obligation
+as `idx >= 0 & idx < len`, and `interval-ai` already discharges obligations
+itself. So the consumer was already there — which is what made this different
+from B2/B3 and gh #103, where correct facts were produced and nobody read them.
+
+### The part that is specific to bytecode, not to the domain
+
+`a[j] = a[j] + 1` is a compound assignment, and javac routes it through copies:
+
+```
+v22 = v12[v15]
+v23 = v12   v25 = v15   v27 = v22
+v10 = v23   v24 = v25   v26 = v27
+v30 = v10.length
+v32 = v24 < v30      // the obligation's condition
+```
+
+The index at the store is **three copies removed** from the one the guard
+constrained. A relational domain that does not transfer facts across `x = y`
+learns `v15 < n` and has lost it before the obligation. That is exactly what
+happened: the single-loop benchmark passed and the nested one did not, until
+copies were handled. `x = y` makes the two equal, so every relation on either
+side of `y` transfers to `x` — sound because it is an equality, and necessary
+because stack-to-local copies are everywhere in JVM bytecode.
+
+Nothing in the Pentagons paper says this; it targets .NET IL, where the same
+shape arises. It is the first thing to check if a relation goes missing.
+
+### Three lattice bugs, all the same shape
+
+Each was found by trace and each now has a mutation-checked test.
+
+1. **Widening rebuilt `lt` empty**, wiping facts at precisely the loop header
+   that needs them. Widening may *drop* a fact, never add one, so it intersects.
+2. **`join` computed the intersection and threw it away** — the struct literal
+   still read `BTreeMap::new()`. Symptom worth remembering: the trace showed the
+   fact being learned *and* used to discharge a comparison while the obligation
+   stayed open, because discharge is a conjunction over all reached states and
+   one lacked it.
+3. **Bottom.** For a relational domain ⊥ means *every* fact holds — vacuously,
+   there being no execution to violate one — not *no* facts. Intersecting
+   against an empty map erased everything, and a loop's back edge starts
+   unreachable.
+
+### And one soundness hole, which is the one that mattered
+
+`Lattice::leq` ignored `lt`. That is what the fixpoint uses to decide a state is
+covered and can be discarded. More facts means more precise, so `self ⊑ other`
+requires `self.lt ⊇ other.lt`; without it a state carrying *fewer* facts was
+judged covered by one carrying more, the poorer path was dropped, and a relation
+that does not hold on it became available to discharge an obligation. A wrong
+TRUE by the same route as gh #101.
+
+### The join test passed against a mutant, which is why mutation-checking is in the suite
+
+All four domain-law tests were verified by inverting the rule each guards. That
+was not ceremony: `join_keeps_only_relations_both_branches_agree_on` **passed**
+against a deliberately-unioning mutant on its first version, because its fixture
+put the extra fact on one side only — and a subject absent from the other map is
+dropped by union and intersection alike. A lattice test that passes either way
+defends nothing.
+
+### Measured against JBMC
+
+On the six-line fill loop:
+
+| | result |
+|---|---|
+| JBMC, no unwind bound | does not terminate (>400s) |
+| JBMC `--unwind 10 --unwinding-assertions` | **VERIFICATION FAILED**, `unwinding assertion loop 0: FAILURE` |
+| JBMC `--unwind 10 --no-unwinding-assertions` | "SUCCESS", with its own warning that this is not sound |
+| ajave + Pentagons | **TRUE** |
+
+The middle row is the honest statement of a bounded model checker's frontier:
+JBMC proves the bounds checks for ten iterations and then refuses, correctly,
+because `n` is unbounded above. No value of `--unwind` fixes it. This is a
+structural difference rather than a tuning one — which is why Kani added loop
+contracts for Rust, and those are hand-written annotations SV-COMP tasks do not
+carry. Context: JBMC placed **first** in the SV-COMP 2026 Java track over 1,731
+tasks. The claim is narrow — on unbounded-length array traversal an inferred
+relational invariant decides what unwinding cannot — not broad.
+
+### Cost
+
+interval-ai measures 1–2ms on the largest bodies in the corpus. `kill_lt`'s
+per-assignment scan runs over maps of a handful of entries. Everything is
+`BTreeMap`/`BTreeSet`, so determinism holds by construction: 163 tasks × 3 runs,
+all verdicts stable. Engine ablation PASS, 297 runs, no verdict flipped.
+
+### Deliberately not done
+
+- **Publishing relational facts as blackboard artifacts.** The AI's `Invariant`
+  formula carries intervals only; adding `i < len` would let CHC and the BMC
+  consume them. That is the architecturally interesting move, and gh #103 and
+  B2/B3 both measured hint-publishing as worthless here, so it needs its own
+  measurement rather than riding along.
+- **Transitive closure** (`x<y, y<z ⟹ x<z`). Precision only, never soundness.
+
+
 ## 2026-10-30 — the gap is one level below the literature: a non-relational domain
 
 Four techniques were surveyed and filed as experiments (gh #115–#118). The one

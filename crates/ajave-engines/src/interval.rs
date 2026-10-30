@@ -735,6 +735,44 @@ pub struct IState {
     pub float_vars: BTreeMap<VarId, FloatInterval>,
     /// Nullness tracking for reference variables. Missing = Unknown.
     pub nullness: BTreeMap<VarId, Nullness>,
+    /// Pentagons. Symbolic strict upper bounds: `x` maps to the set of `y`
+    /// for which `x < y` is known. Missing = no bound known.
+    ///
+    /// # Why this exists
+    ///
+    /// `vars` above is `VarId -> Interval`, one interval per variable,
+    /// independently. That domain is **non-relational**: it can derive
+    /// `i >= 0` and `len >= 1` and has no way to express `i < len`, which is
+    /// the entire content of an array-bounds proof when the length is not a
+    /// constant. Measured: ajave could not prove no-runtime-exception for a
+    /// six-line fill loop over an array of unbounded length, and no budget,
+    /// unroll, depth or scheduling knob moved it (gh #119).
+    ///
+    /// This is the Pentagons domain of Logozzo and Fähndrich (SAC 2008):
+    /// `x ∈ [a, b] ∧ x < y`. Deliberately weaker than Octagons — it keeps the
+    /// intervals exactly as they are and adds only a symbolic less-than
+    /// relation, which is what makes it cheap enough to run on everything.
+    /// It was designed for validating array accesses in bytecode, which is
+    /// what we have.
+    ///
+    /// # Soundness
+    ///
+    /// Every fact here must hold on **every** execution reaching this point.
+    /// Three rules keep that true, and each has a test named after it:
+    ///
+    /// - **Join intersects.** A fact survives a merge only if both branches
+    ///   had it. Union would claim a bound that holds on one path only — the
+    ///   shape of the wrong discharge in gh #101.
+    /// - **Assignment kills.** Writing `x` invalidates every fact mentioning
+    ///   `x`, on either side. A stale `x < y` describes the old value.
+    /// - **Widening never invents.** Widening may only drop facts, never add,
+    ///   so the fixpoint stays an over-approximation.
+    pub lt: BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+    /// The variable an array's length came from, when it was an allocation
+    /// `new T[n]` with `n` a variable. Lets `len = a.length` inherit the
+    /// relational facts held about `n`, which is what connects a loop guard
+    /// `i < n` to the bounds check `i < a.length`.
+    pub array_len_var: BTreeMap<VarId, VarId>,
     /// Length of the array a reference variable points at. Missing = Top.
     ///
     /// Seeded at `NewArray` from the allocation length and propagated through
@@ -811,6 +849,8 @@ impl IState {
     /// state has no opinion to contribute".
     pub fn top_at(at: ProgramPoint) -> IState {
         IState {
+            lt: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at,
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -838,6 +878,81 @@ impl IState {
             self.vars.insert(v, i);
         }
     }
+    /// The relational facts two states agree on.
+    ///
+    /// Used by **both** join and widening. Join must intersect because a fact
+    /// holding on one branch only is not a fact at the merge. Widening must
+    /// intersect for a different reason: it is allowed to *drop* facts and
+    /// never to add them, or the fixpoint stops over-approximating. Keeping
+    /// them was the first version's bug — `lt` was rebuilt empty in both
+    /// widening functions, so every relational fact was erased at precisely
+    /// the loop header where it was needed, and the fill-loop benchmark stayed
+    /// UNKNOWN while the trace showed the fact being learned and used.
+    /// `a_bottom` / `b_bottom` say whether that side is unreachable.
+    ///
+    /// This parameter is the whole correctness of the operation, and omitting
+    /// it was the second bug in this domain. Intersection is right for two
+    /// reachable states. For an **unreachable** one, the relational component
+    /// of bottom is "every fact holds" — vacuously, since there is no
+    /// execution to violate one — not "no facts hold". Intersecting against an
+    /// empty map therefore erased everything, and at a loop header the back
+    /// edge *starts* unreachable, so the facts were wiped on the first
+    /// fixpoint iteration and never recovered.
+    ///
+    /// Symptom, for the next person: the fact is visibly learned and visibly
+    /// used in a trace, and the obligation still is not discharged, because
+    /// one state among those reached at the check lacks it and discharge is a
+    /// conjunction over all of them.
+    fn agree_lt(
+        a: &BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+        b: &BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+        a_bottom: bool,
+        b_bottom: bool,
+    ) -> BTreeMap<VarId, std::collections::BTreeSet<VarId>> {
+        if a_bottom {
+            return b.clone();
+        }
+        if b_bottom {
+            return a.clone();
+        }
+        let mut out: BTreeMap<VarId, std::collections::BTreeSet<VarId>> = BTreeMap::new();
+        for (k, mine) in a {
+            if let Some(theirs) = b.get(k) {
+                let both: std::collections::BTreeSet<VarId> =
+                    mine.intersection(theirs).copied().collect();
+                if !both.is_empty() {
+                    out.insert(*k, both);
+                }
+            }
+        }
+        out
+    }
+
+    /// Is `a < b` known?
+    pub fn knows_lt(&self, a: VarId, b: VarId) -> bool {
+        self.lt.get(&a).is_some_and(|s| s.contains(&b))
+    }
+
+    /// Record `a < b`.
+    fn add_lt(&mut self, a: VarId, b: VarId) {
+        if a != b {
+            self.lt.entry(a).or_default().insert(b);
+        }
+    }
+
+    /// Drop every fact mentioning `v`, on either side.
+    ///
+    /// Called whenever `v` is assigned. A fact recorded about the previous
+    /// value of a variable says nothing about its new one, and keeping it is
+    /// how a relational domain goes unsound at its very first store.
+    fn kill_lt(&mut self, v: VarId) {
+        self.lt.remove(&v);
+        for s in self.lt.values_mut() {
+            s.remove(&v);
+        }
+        self.array_len_var.retain(|k, src| *k != v && *src != v);
+    }
+
     pub fn get_array_len(&self, v: VarId) -> Interval {
         self.array_lens
             .get(&v)
@@ -1290,6 +1405,26 @@ impl IState {
                     BinOp::Sub => ia.sub(ib),
                     BinOp::Mul => ia.mul(ib),
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        // Pentagons is consulted *before* the interval truth
+                        // table, and only ever to prove a comparison true —
+                        // never false. `x < y` being absent means unknown, not
+                        // negated, so concluding anything from its absence
+                        // would turn a missing fact into a claim.
+                        if let (Operand::Var(av), Operand::Var(bv)) = (a, b) {
+                            let holds = match op {
+                                BinOp::Lt => self.knows_lt(*av, *bv),
+                                BinOp::Gt => self.knows_lt(*bv, *av),
+                                // `x < y` implies `x <= y` and `y >= x`.
+                                BinOp::Le => self.knows_lt(*av, *bv),
+                                BinOp::Ge => self.knows_lt(*bv, *av),
+                                // `x < y` implies `x != y`.
+                                BinOp::Ne => self.knows_lt(*av, *bv) || self.knows_lt(*bv, *av),
+                                _ => false,
+                            };
+                            if holds {
+                                return Interval::point(1);
+                            }
+                        }
                         eval_comparison(*op, ia, ib)
                     }
                     // javac compiles `a && b` over comparison results into a
@@ -1494,6 +1629,31 @@ impl IState {
 
 impl Lattice for IState {
     fn leq(&self, other: &Self) -> bool {
+        // Pentagons, and this clause is load-bearing for **soundness**, not
+        // precision.
+        //
+        // `leq` is what the fixpoint uses to decide a new state is already
+        // covered and can be discarded. In this domain more facts means more
+        // precise, so `self ⊑ other` requires `self.lt ⊇ other.lt`. Omit this
+        // and a state carrying *fewer* facts is judged covered by one carrying
+        // more; the fixpoint drops it, `reached` keeps only the richer state,
+        // and a relation that does not hold on the dropped path is then used
+        // to discharge an obligation. That is a wrong TRUE (-16), by the same
+        // route as gh #101.
+        //
+        // `a_state_with_fewer_relations_is_not_covered_by_one_with_more` is
+        // the test named after this paragraph.
+        for (x, ubs) in &other.lt {
+            match self.lt.get(x) {
+                Some(mine) if ubs.is_subset(mine) => {}
+                _ => return false,
+            }
+        }
+        for (arr, src) in &other.array_len_var {
+            if self.array_len_var.get(arr) != Some(src) {
+                return false;
+            }
+        }
         // Every variable known in `self` must be narrower-or-equal in
         // `other`; anything absent from `self` but present in `other` means
         // `self` (Top there) is not covered.
@@ -1679,6 +1839,29 @@ impl Lattice for IState {
                 nullness.insert(k, j);
             }
         }
+        // Pentagons joins by **intersection**: `x < y` survives only if both
+        // sides had it. Union would publish a bound holding on one branch
+        // only, which is precisely the defect gh #101 was.
+        let lt = IState::agree_lt(
+            &self.lt,
+            &other.lt,
+            ajave_core::fixpoint::Lattice::is_bottom(self),
+            ajave_core::fixpoint::Lattice::is_bottom(other),
+        );
+        // Same rule for the length-source map: keep it only where both agree.
+        // Same bottom rule as `agree_lt`: an unreachable side constrains
+        // nothing, so it must not veto the other side's association.
+        let array_len_var = if ajave_core::fixpoint::Lattice::is_bottom(self) {
+            other.array_len_var.clone()
+        } else if ajave_core::fixpoint::Lattice::is_bottom(other) {
+            self.array_len_var.clone()
+        } else {
+            self.array_len_var
+                .iter()
+                .filter(|(k, v)| other.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
         let mut array_lens = BTreeMap::new();
         let akeys: std::collections::BTreeSet<_> = self
             .array_lens
@@ -1719,6 +1902,8 @@ impl Lattice for IState {
             }
         }
         IState {
+            lt,
+            array_len_var,
             at: self.at.clone(),
             vars,
             float_vars,
@@ -1935,6 +2120,8 @@ impl AbstractDomain for IntervalCpa {
             }
         }
         IState {
+            lt: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at: at.clone(),
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -2106,6 +2293,85 @@ impl AbstractDomain for IntervalCpa {
                             _ => Interval::top(),
                         };
                         next.set_array_len(*v, len);
+                        // Pentagons. `v = src` makes the two equal, so every
+                        // relation either side of `src` transfers to `v`.
+                        // Captured *before* the kill below, because `v = v`
+                        // would otherwise erase the facts and then copy the
+                        // emptied set back.
+                        //
+                        // This matters far more than it looks. javac routes
+                        // almost everything through copies -- `a[j] = a[j] + 1`
+                        // compiles to a chain `v24 = v25 = v15` -- so without
+                        // it a relation is learned on the loop guard and then
+                        // immediately lost to the first copy, which is exactly
+                        // why the nested-loop case stayed UNKNOWN while the
+                        // single-loop one was proven.
+                        let copied: Option<(Vec<VarId>, Vec<VarId>)> = match rv {
+                            Rvalue::Use(Operand::Var(src)) => {
+                                let above: Vec<VarId> = next
+                                    .lt
+                                    .get(src)
+                                    .map(|s| s.iter().copied().collect())
+                                    .unwrap_or_default();
+                                let below: Vec<VarId> = next
+                                    .lt
+                                    .iter()
+                                    .filter(|(_, ubs)| ubs.contains(src))
+                                    .map(|(x, _)| *x)
+                                    .collect();
+                                Some((above, below))
+                            }
+                            _ => None,
+                        };
+                        // The assignment redefines `v`, so every relational
+                        // fact about its previous value is stale and must go
+                        // before anything new is recorded.
+                        next.kill_lt(*v);
+                        if let Some((above, below)) = copied {
+                            for b in above {
+                                next.add_lt(*v, b);
+                            }
+                            for a in below {
+                                next.add_lt(a, *v);
+                            }
+                        }
+                        match rv {
+                            // `new T[n]` with `n` a variable: remember which
+                            // variable the length came from. This is the link
+                            // that lets a loop guard `i < n` discharge a bounds
+                            // check against `a.length` further down.
+                            Rvalue::NewArray {
+                                len: Operand::Var(n),
+                                ..
+                            } => {
+                                next.array_len_var.insert(*v, *n);
+                            }
+                            // A copy carries the association along, exactly as
+                            // the interval length above does.
+                            Rvalue::Use(Operand::Var(src)) => {
+                                if let Some(n) = next.array_len_var.get(src).copied() {
+                                    next.array_len_var.insert(*v, n);
+                                }
+                            }
+                            // `len = a.length`: `len` *is* the allocation
+                            // length, so every strict bound held against that
+                            // variable holds against `len`. This is what turns
+                            // `i < n` into `i < len` without any new inference.
+                            Rvalue::ArrayLength(Operand::Var(arr)) => {
+                                if let Some(n) = next.array_len_var.get(arr).copied() {
+                                    let below: Vec<VarId> = next
+                                        .lt
+                                        .iter()
+                                        .filter(|(_, ub)| ub.contains(&n))
+                                        .map(|(x, _)| *x)
+                                        .collect();
+                                    for x in below {
+                                        next.add_lt(x, *v);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                         // B3. A fresh array is zero-filled (JVMS 6.5), so this
                         // is the one point at which the contents are known
                         // completely — which is what makes element tracking
@@ -2201,6 +2467,22 @@ impl AbstractDomain for IntervalCpa {
                             }
                             if let Operand::Var(bv) = b {
                                 next.set(*bv, nb);
+                            }
+                        }
+                        // Pentagons: the branch that proves `x < y` is the only
+                        // place a strict symbolic bound is created. `i < n` on
+                        // a loop guard is the fact the whole domain exists for.
+                        //
+                        // Only `Lt`/`Gt` produce a *strict* bound. `Le` gives
+                        // `x <= y`, which this domain does not represent, so it
+                        // is dropped rather than approximated — recording it as
+                        // `x < y` would be a claim one off the truth and wrong
+                        // exactly at `x == y`.
+                        if let (Operand::Var(av), Operand::Var(bv)) = (a, b) {
+                            match eff_op {
+                                BinOp::Lt => next.add_lt(*av, *bv),
+                                BinOp::Gt => next.add_lt(*bv, *av),
+                                _ => {}
                             }
                         }
                         // Nullness narrowing on null comparisons.
@@ -2538,6 +2820,19 @@ impl WidenAtLoopHeaders {
             }
         }
         IState {
+            // Widening may drop a relational fact, never add one.
+            lt: IState::agree_lt(
+                &old.lt,
+                &new.lt,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            array_len_var: old
+                .array_len_var
+                .iter()
+                .filter(|(k, v)| new.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             at: old.at.clone(),
             vars,
             float_vars,
@@ -2636,6 +2931,19 @@ impl WidenAtLoopHeaders {
             }
         }
         IState {
+            // Widening may drop a relational fact, never add one.
+            lt: IState::agree_lt(
+                &old.lt,
+                &new.lt,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            array_len_var: old
+                .array_len_var
+                .iter()
+                .filter(|(k, v)| new.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             at: old.at.clone(),
             vars,
             float_vars,
@@ -2836,6 +3144,8 @@ mod domain_law_tests {
 
     fn empty(block: u32) -> IState {
         IState {
+            lt: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at: pp(block),
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -3093,6 +3403,110 @@ mod domain_law_tests {
                 MergeResult::Sep
             ),
             "block 0 is not a loop header, so nothing is joined there"
+        );
+    }
+
+    // ---- Pentagons ------------------------------------------------------
+    //
+    // One test per rule in the `lt` doc comment, each named after the
+    // paragraph it defends.
+    //
+    // All four were mutation-checked: the rule each one guards was inverted in
+    // turn and the test confirmed to fail. That is not ceremony. The join test
+    // *passed* against a deliberately-unioning mutant on its first version,
+    // because its fixture put the extra fact on one side only and a subject
+    // absent from the other map is dropped by union and intersection alike.
+    // A lattice test that passes either way defends nothing.
+
+    fn with_lt(block: u32, facts: &[(u32, u32)]) -> IState {
+        let mut s = empty(block);
+        for (a, b) in facts {
+            s.lt.entry(VarId(*a)).or_default().insert(VarId(*b));
+        }
+        s
+    }
+
+    /// A fact holding on one branch only is not a fact at the merge.
+    ///
+    /// Union here would be the shape of gh #101: an interval hint published at
+    /// a join that held on one branch, which smt-bmc then discharged on.
+    #[test]
+    fn join_keeps_only_relations_both_branches_agree_on() {
+        // Both facts are about the *same* subject, which is what makes this
+        // discriminating. An earlier version used `3 < 4` present on one side
+        // only -- and a key absent from the other map is dropped whether the
+        // operation intersects or unions, so the test passed against a
+        // deliberately unioning mutant and defended nothing. Mutation-checked
+        // after that: swapping `intersection` for `union` now fails here.
+        let a = with_lt(0, &[(1, 2), (1, 3)]);
+        let b = with_lt(0, &[(1, 2)]);
+        let j = ajave_core::fixpoint::Lattice::join(&a, &b);
+        assert!(j.knows_lt(VarId(1), VarId(2)), "both sides had 1 < 2");
+        assert!(
+            !j.knows_lt(VarId(1), VarId(3)),
+            "only one side had 1 < 3, so it must not survive the join"
+        );
+        // And a subject present on one side only is dropped entirely.
+        let c = with_lt(0, &[(5, 6)]);
+        let j2 = ajave_core::fixpoint::Lattice::join(&c, &b);
+        assert!(!j2.knows_lt(VarId(5), VarId(6)));
+    }
+
+    /// An unreachable side constrains nothing, so it must not veto the other's
+    /// facts. Bottom's relational component is "every fact holds" -- vacuously,
+    /// there being no execution to violate one -- not "no facts hold".
+    ///
+    /// Getting this wrong wiped every fact at a loop header, because a back
+    /// edge starts unreachable.
+    #[test]
+    fn joining_with_an_unreachable_state_keeps_the_reachable_sides_relations() {
+        let a = with_lt(0, &[(1, 2)]);
+        let mut bot = empty(0);
+        bot.vars.insert(VarId(9), Interval::bottom());
+        assert!(ajave_core::fixpoint::Lattice::is_bottom(&bot));
+
+        let j = ajave_core::fixpoint::Lattice::join(&a, &bot);
+        assert!(
+            j.knows_lt(VarId(1), VarId(2)),
+            "bottom must not erase 1 < 2"
+        );
+        let j2 = ajave_core::fixpoint::Lattice::join(&bot, &a);
+        assert!(j2.knows_lt(VarId(1), VarId(2)), "join is symmetric here");
+    }
+
+    /// Widening may drop a relation, never invent one, or the fixpoint stops
+    /// over-approximating.
+    #[test]
+    fn widening_drops_relations_it_cannot_justify_and_invents_none() {
+        let old = with_lt(0, &[(1, 2), (3, 4)]);
+        let new = with_lt(0, &[(1, 2), (5, 6)]);
+        let w = WidenAtLoopHeaders::widen_state(&old, &new);
+        assert!(
+            w.knows_lt(VarId(1), VarId(2)),
+            "held on both, so it is kept"
+        );
+        assert!(!w.knows_lt(VarId(3), VarId(4)), "dropped: new lost it");
+        assert!(
+            !w.knows_lt(VarId(5), VarId(6)),
+            "never invented: widening may only lose facts"
+        );
+    }
+
+    /// `leq` decides whether the fixpoint may discard a state as covered.
+    /// More facts is more precise, so a state with fewer is **not** covered by
+    /// one with more -- discarding it would keep a relation that does not hold
+    /// on the discarded path.
+    #[test]
+    fn a_state_with_fewer_relations_is_not_covered_by_one_with_more() {
+        let fewer = with_lt(0, &[(1, 2)]);
+        let more = with_lt(0, &[(1, 2), (3, 4)]);
+        assert!(
+            !ajave_core::fixpoint::Lattice::leq(&fewer, &more),
+            "a state missing 3 < 4 is not below one that claims it"
+        );
+        assert!(
+            ajave_core::fixpoint::Lattice::leq(&more, &fewer),
+            "the richer state is below the poorer one"
         );
     }
 

@@ -289,3 +289,8 @@ ajave/heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored.yml valid-assert
 # a weakly relational domain landed, and is a real capability gain
 # (gh #119, 2026-10-30).
 ajave/jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds.yml no-runtime-exception
+# The copy-chain half of the same gap. `a[j] = a[j] + 1` reaches the store
+# three copies removed from the index the guard constrained, so a relational
+# domain that does not transfer facts across `x = y` loses them before the
+# obligation. Bytecode-specific, not domain-specific (gh #119, 2026-10-30).
+ajave/jvm-arrays/NestedFillLoopRelatesBothIndicesToTheLength.yml no-runtime-exception
