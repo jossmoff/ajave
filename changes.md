@@ -2,6 +2,79 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — the heap model was never the problem: a decided query, not a timeout
+
+The last open question about the heap work (gh #109) was whether CHC's Horn
+queries were well-formed or vacuously `unknown`. Settled by dumping one and
+running the solver by hand, and the answer retires the whole line of
+investigation.
+
+### The query is decided in 0.05 seconds
+
+`AJAVE_CHC_DUMP` on `algorithms/BinaryTreeSearch-FunSat01` gives 317KB, 68
+predicates, 82 rules. z3 answers **`unsat` in 0.05s** — and in this Horn
+convention `sat` is safe, so `unsat` says the abstraction admits a trace in
+which the assertion fails. The engine reporting `Unknown` after 75ms was never
+giving up for want of time: the query had already been **decided**, and decided
+the useless way. No budget, no better summary and no more solver power changes
+a decided query.
+
+### The encoding is exonerated, by ablation rather than by reading it
+
+There are exactly two error rules. Dropping the integer-overflow one leaves
+`unsat`; dropping the assertion's leaves **`sat`** in milliseconds. So every
+other part of the encoding — the Burstall field arrays, C1's threaded
+summaries, the interprocedural relations — is strong enough to be *proven
+safe*. The only thing CHC cannot establish is that the assertion's block is
+unreachable.
+
+Two hypotheses died before any code was written, which is the point of testing
+them first:
+
+- **The entry heap is unconstrained.** The entry fact is unconditional, so
+  every field map is an arbitrary array at entry to `main`, which looked fatal
+  given the JVM zero-initialises fields. Replacing all eight array arguments
+  with the all-zero array in the dumped query: still `unsat`. Not the cause.
+- **`Verifier.assume` is dropped.** It is not; `chc.rs` handles `Stmt::Assume`
+  in both encoders.
+
+### What is actually missing, and the pair of benchmarks that pins it
+
+Not a heap model — inference of a **quantified invariant over heap contents**.
+`AJAVE_CHC_QGEN` is exactly that mechanism, it is on by default, and the
+boundary is sharp:
+
+| the quantified fact is established by | and consumed by | qgen |
+|---|---|---|
+| a loop over an array, same method | the same method | **finds it** |
+| a guard in one method | a traversal in another | **does not** |
+
+`heap/EveryElementNonNullAfterAFillLoop` is the first row and is TRUE with qgen,
+UNKNOWN without. `heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored` is
+the second, added here: `BinaryTreeSearch-FunSat01` reduced from 120 lines to
+15, needing `forall n . value[n] >= 0` where `insert`'s early return for a
+negative argument establishes it and `search`'s traversal consumes it.
+
+Ground truth argued by construction and confirmed on a real JVM over 400,000
+trials with negative probes including `INT_MIN`. The reduction reproduces the
+original exactly: UNKNOWN, query `unsat`, and `sat` again once that one error
+rule is removed — so the header's claims are verified of the 15-line program
+and not merely inherited from the 120-line one.
+
+Keeping both is the contribution. They bracket a capability boundary in 15
+lines each, where previously the same fact was buried in a 120-line benchmark
+with four confounds.
+
+### Conclusion on the heap work
+
+Done, and now characterised rather than merely flat. What remains is
+cross-procedural quantified invariant inference, which is a research problem
+and not a bounded fix; it is worth +2 per success on at most the 28 field-only
+targets of the 107 (gh #111 covers the 37 array-only ones, where C1 cannot see
+`Stmt::ArrayStore` at all). The day's actual points came from a control-flow
+edge the BMC never took, which is the signal to follow.
+
+
 ## 2026-10-29 — an implicit throw reaches its handler, and the wrong TRUE on the way
 
 `handle_check` asked the solver whether an obligation could fail, recorded a
