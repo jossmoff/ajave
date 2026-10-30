@@ -294,3 +294,7 @@ ajave/jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds.yml no-runtime-exception
 # domain that does not transfer facts across `x = y` loses them before the
 # obligation. Bytecode-specific, not domain-specific (gh #119, 2026-10-30).
 ajave/jvm-arrays/NestedFillLoopRelatesBothIndicesToTheLength.yml no-runtime-exception
+# The non-strict guard shape, 24% of the budget population. `i <= n-1` needs
+# two relations composed -- `i <= t` and `t < n` -- because `i <= len` alone is
+# false exactly at the off-by-one (gh #119, 2026-10-30).
+ajave/jvm-arrays/NonStrictGuardBoundsTheIndexJustAsWell.yml no-runtime-exception

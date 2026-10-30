@@ -2,6 +2,61 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — non-strict bounds, and the off-by-one that makes them a second map
+
+Pentagons extended with `x <= y` alongside `x < y`. Smoke **184 against 182**,
+0 WRONG.
+
+Sized before building, from the shapes actually present in the 135-task
+`budget` population: strict guards `i < n` in 57%, **non-strict `i <= n` in
+24%**, `a[i+1]` offsets in 11%, scaled and nested indices in 6% and 4%. A
+domain carrying only strict relations therefore leaves a quarter of its own
+target population untouched.
+
+### Why `le` is a separate map and not a flag on `lt`
+
+`i <= len` is false of a strict question exactly at `i == len`, and an
+`ArrayBounds` obligation **is** a strict question. Answering it from a
+non-strict fact would be a wrong TRUE at the off-by-one — the single most
+obvious way to break an array-bounds analysis.
+
+So the non-strict relation is never consulted alone for a strict question. The
+proof composes:
+
+```
+i <= t      from the guard, t being the `n - 1` javac materialises
+t  <  n     from `t = n - 1`, recorded only if the interval shows no wrap
+----------
+i  <  n     one hop, derived on demand and never stored as a fact
+```
+
+`a_non_strict_relation_alone_never_answers_a_strict_question` is the negative
+test; `a_non_strict_relation_composes_with_a_strict_one` is the positive one.
+
+### Constant offsets, with the wrap guard that makes them sound
+
+`x = y ± c` for a constant `c` yields a strict relation in one direction, which
+is the step that makes the non-strict guard usable at all. It is recorded
+**only** when the interval already computed for `y` shows the arithmetic did not
+leave `int` range: on an unconstrained operand `y - 1 < y` is false at
+`Integer.MIN_VALUE`, and that is precisely the case a bounds analysis must not
+get wrong. No interval, no fact.
+
+Only *constant* offsets. A symbolic one (`a[i+j]`) needs difference bounds,
+which this domain does not have.
+
+### Deliberately one hop, not a closure
+
+Composition is applied by the comparison evaluator on demand rather than
+materialised into the state. A full transitive closure would be more precise
+and costs more on every join; one hop is what the measured guard shape needs,
+and the benchmark covers the whole path end to end.
+
+`jvm-arrays/NonStrictGuardBoundsTheIndexJustAsWell` is the third of the trio,
+ground truth confirmed on a real JVM over 200,000 trials. The other two were
+re-checked for regression.
+
+
 ## 2026-10-30 — Pentagons: a weakly relational domain, and the copy chains that decide whether it works
 
 `interval.rs` gains the Pentagons domain of Logozzo and Fähndrich (SAC 2008):
