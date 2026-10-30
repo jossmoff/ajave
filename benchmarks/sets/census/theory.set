@@ -1,0 +1,50 @@
+# The 44 declined task-property pairs the 2026-10-30 census
+# attributes to 'theory'. main at fdd9b6e, corpus 2058.
+#
+# A before/after population for work aimed at this bucket. See
+# docs/plans/the-outer-gate.md for the protocol: measure one phase
+# at a time against the bucket it targets, never two at once.
+sv-comp/jayhorn-recursive/Addition.yml valid-assert
+sv-comp/securibench/Basic33.yml valid-assert
+sv-comp/securibench/Basic34.yml valid-assert
+sv-comp/securibench/Basic37.yml valid-assert
+sv-comp/securibench/Basic38.yml valid-assert
+sv-comp/securibench/Basic39.yml valid-assert
+sv-comp/securibench/Basic8.yml valid-assert
+sv-comp/securibench/Collections12.yml no-runtime-exception
+sv-comp/autostub/Double_public_static_java_lang_String_java_lang_Double_toHexString_double.yml valid-assert
+sv-comp/jpf-regression/ExSymExeFNEG_true.yml valid-assert
+sv-comp/autostub/Float_public_static_java_lang_String_java_lang_Float_toHexString_float.yml valid-assert
+sv-comp/securibench/Refl2.yml valid-assert
+sv-comp/jbmc-regression/RegexSubstitution01.yml no-runtime-exception
+sv-comp/jbmc-regression/RegexSubstitution01.yml valid-assert
+sv-comp/jbmc-regression/RegexSubstitution02.yml no-runtime-exception
+sv-comp/jbmc-regression/RegexSubstitution03.yml no-runtime-exception
+sv-comp/jbmc-regression/RegexSubstitution03.yml valid-assert
+sv-comp/securibench/Sanitizers3.yml valid-assert
+sv-comp/securibench/Sanitizers5.yml valid-assert
+sv-comp/jayhorn-recursive/SatAddition01.yml valid-assert
+sv-comp/jayhorn-recursive/SatEvenOdd01.yml valid-assert
+sv-comp/jayhorn-recursive/SatMultCommutative01.yml valid-assert
+sv-comp/jbmc-regression/StaticCharMethods05.yml valid-assert
+sv-comp/jbmc-regression/StaticCharMethods06.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderCapLen01.yml valid-assert
+sv-comp/jbmc-regression/StringConstructors01.yml no-runtime-exception
+sv-comp/jbmc-regression/StringConstructors04.yml no-runtime-exception
+sv-comp/jbmc-regression/StringValueOf01.yml no-runtime-exception
+sv-comp/jbmc-regression/StringValueOf01.yml valid-assert
+sv-comp/jbmc-regression/StringValueOf02.yml valid-assert
+sv-comp/jbmc-regression/StringValueOf03.yml valid-assert
+sv-comp/java-ranger-regression/TCAS_prop1.yml valid-assert
+sv-comp/java-ranger-regression/TCAS_prop2.yml valid-assert
+sv-comp/java-ranger-regression/TCAS_prop3.yml valid-assert
+sv-comp/jayhorn-recursive/UnsatAddition02.yml valid-assert
+sv-comp/jbmc-regression/Validate01.yml valid-assert
+sv-comp/jbmc-regression/cast1.yml valid-assert
+sv-comp/jbmc-regression/charArray.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral43.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral71.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral73.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral75.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral91.yml valid-assert
+sv-comp/jbmc-regression/virtual_function_unwinding.yml valid-assert

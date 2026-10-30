@@ -1,0 +1,67 @@
+# The 61 declined task-property pairs the 2026-10-30 census
+# attributes to 'refuted'. main at fdd9b6e, corpus 2058.
+#
+# A before/after population for work aimed at this bucket. See
+# docs/plans/the-outer-gate.md for the protocol: measure one phase
+# at a time against the bucket it targets, never two at once.
+sv-comp/securibench/Arrays9.yml no-runtime-exception
+sv-comp/securibench/Basic15.yml no-runtime-exception
+sv-comp/securibench/Basic29.yml no-runtime-exception
+sv-comp/autostub/Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierPart_int.yml valid-assert
+sv-comp/autostub/Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierStart_char.yml valid-assert
+sv-comp/autostub/Character_public_static_boolean_java_lang_Character_isUnicodeIdentifierStart_int.yml valid-assert
+sv-comp/autostub/Character_public_static_byte_java_lang_Character_getDirectionality_int.yml valid-assert
+sv-comp/autostub/Character_public_static_int_java_lang_Character_getType_int.yml valid-assert
+sv-comp/securibench/Collections1.yml no-runtime-exception
+sv-comp/securibench/Collections12.yml valid-assert
+sv-comp/securibench/Collections2.yml no-runtime-exception
+sv-comp/securibench/Collections3.yml no-runtime-exception
+sv-comp/securibench/Collections6.yml no-runtime-exception
+sv-comp/securibench/Collections8.yml no-runtime-exception
+sv-comp/securibench/Collections9.yml no-runtime-exception
+sv-comp/autostub/Double_public_java_lang_String_java_lang_Double_toString.yml valid-assert
+sv-comp/autostub/Double_public_static_java_lang_String_java_lang_Double_toString_double.yml valid-assert
+sv-comp/autostub/Float_public_java_lang_String_java_lang_Float_toString.yml valid-assert
+sv-comp/autostub/Float_public_static_java_lang_String_java_lang_Float_toString_float.yml valid-assert
+sv-comp/argv-tasks/HttpTransport_false.yml valid-assert
+sv-comp/argv-tasks/HttpTransport_true.yml valid-assert
+sv-comp/autostub/Integer_public_static_java_lang_String_java_lang_Integer_toString_int_int.yml valid-assert
+sv-comp/autostub/Integer_public_static_java_lang_String_java_lang_Integer_toUnsignedString_int_int.yml valid-assert
+sv-comp/securibench/Inter12.yml no-runtime-exception
+sv-comp/autostub/Long_public_static_java_lang_String_java_lang_Long_toString_long_int.yml valid-assert
+sv-comp/autostub/Long_public_static_java_lang_String_java_lang_Long_toUnsignedString_long_int.yml valid-assert
+sv-comp/securibench/Session1.yml no-runtime-exception
+sv-comp/securibench/Session2.yml no-runtime-exception
+sv-comp/jbmc-regression/StaticCharMethods01.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderAppend01.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderChars01.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderChars03.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderChars05.yml valid-assert
+sv-comp/jbmc-regression/StringCompare01.yml valid-assert
+sv-comp/jbmc-regression/StringConstructors01.yml valid-assert
+sv-comp/jbmc-regression/StringMiscellaneous04.yml valid-assert
+sv-comp/autostub/String_public_boolean_java_lang_String_regionMatches_boolean_int_java_lang_String_int_int.yml valid-assert
+sv-comp/autostub/String_public_boolean_java_lang_String_regionMatches_int_java_lang_String_int_int.yml valid-assert
+sv-comp/autostub/String_public_int_java_lang_String_indexOf_int_int.yml valid-assert
+sv-comp/autostub/String_public_java_lang_String_java_lang_String_trim.yml valid-assert
+sv-comp/autostub/String_public_static_java_lang_String_java_lang_String_valueOf_double.yml valid-assert
+sv-comp/autostub/String_public_static_java_lang_String_java_lang_String_valueOf_float.yml valid-assert
+sv-comp/jbmc-regression/SubString02.yml valid-assert
+sv-comp/jbmc-regression/SubString03.yml valid-assert
+sv-comp/algorithms/Trie-MemUnsat01.yml no-runtime-exception
+sv-comp/jbmc-regression/calc.yml valid-assert
+sv-comp/jbmc-regression/java_append_char.yml valid-assert
+sv-comp/jbmc-regression/multinewarray.yml no-runtime-exception
+sv-comp/jbmc-regression/multinewarray.yml valid-assert
+sv-comp/objects/objects01.yml no-runtime-exception
+sv-comp/objects/objects02.yml no-runtime-exception
+sv-comp/objects/objects04.yml valid-assert
+sv-comp/objects/objects05.yml no-runtime-exception
+sv-comp/objects/objects06.yml no-runtime-exception
+sv-comp/objects/objects06.yml valid-assert
+sv-comp/objects/objects09.yml valid-assert
+sv-comp/objects/objects11.yml valid-assert
+sv-comp/objects/objects12.yml no-runtime-exception
+sv-comp/objects/objects13.yml no-runtime-exception
+sv-comp/objects/objects14.yml no-runtime-exception
+sv-comp/objects/objects14.yml valid-assert

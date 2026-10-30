@@ -2,6 +2,83 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — the unproven census, and two corrections it needed first
+
+`tools/blocker_census.py` over the 409 **declined** task-property pairs (the
+unproven population with the 37 known timeouts and the one SV-COMP mislabel held
+out). The result and the two wrong answers on the way are both worth recording;
+the plan is in `docs/plans/the-outer-gate.md`.
+
+| why not | tasks | % | expects TRUE | expects FALSE |
+|---|---|---|---|---|
+| **budget** (`all_paths_complete`) | 135 | 33% | 98 | 37 |
+| **float-escalation** | 76 | 19% | 48 | 28 |
+| refuted (`violated` stands) | 61 | 15% | 25 | 36 |
+| no-candidate (nothing published) | 60 | 15% | 53 | 7 |
+| theory | 44 | 11% | 26 | 18 |
+| model | 31 | 8% | 19 | 12 |
+| refuted-witness | 1 | 0% | 1 | 0 |
+
+### A bucket that pre-empted the cause, and read as a 52% finding
+
+The first run ordered `refuted-witness` ahead of the blocker case, with a
+comment asserting that "the witness is the proximate reason this task scores
+nothing". It reported **211 of 409 (52%)** and a claimed **+228** recoverable.
+Both were withdrawn.
+
+`BellmanFord-FunSat01` disproved the premise. It carries a refuted witness *and*
+`BLOCKER all_paths_complete`, with `discharged=0` from every engine. Remove the
+spurious violation and the obligation is merely open-and-unproven, so the
+verdict is UNKNOWN either way — the witness recovers nothing.
+
+And that is not a guess about the architecture; it is what the architecture
+already guarantees. `open_or_unconfirmed()` offers violated obligations to
+over-approximating engines, specifically so whichever engine published first
+cannot win outright. `verdict_excluding()` recovers TRUE when a refuted
+violation is the only obstacle and refuses to when the obligation has no
+independent proof. **Both mechanisms were built for this exact case and both
+work.** The corrected count is **1 task**.
+
+The lesson is narrow and reusable: the census's own `RESPONDS` text for that
+bucket said "feeding refutations back into the loop", which presupposes they are
+not fed back. Reading the consumer before sizing the opportunity would have
+caught it in one grep. The 358 refuted witnesses are real, and now travel as an
+annotation column that can never pre-empt a cause.
+
+### A nameable cause hiding behind the word "unclassified"
+
+`float_arith_approximated` — 76 tasks, 19% — sat in `other`. It now has its own
+bucket, because the work it responds to is unlike every other row: the theory
+exists and is implemented, and what is missing is the FPA escalation pass
+reaching the obligation. Coverage, not capability.
+
+The dumps carry the blocker per row, so both corrections were applied to the
+finished chunks **offline** rather than costing another hour of engine time.
+That is the whole reason the blocker is a column and not only a bucket.
+
+### The dominant cause, and the soundness problem in front of it
+
+33% is one gate. Task #20 already made the completeness test per-obligation, and
+the outer gate bypasses that work in one case: a cut was recorded and `at_risk`
+came back empty, whereupon nothing is discharged at all. Empty has two causes
+the code cannot distinguish — a cut whose method had no body and was silently
+dropped, versus a cut that provably reaches no obligation.
+
+Loosening it is blocked on a soundness gap found while planning:
+`obligations_at_risk` follows only the **static** target of a call, and nothing
+in the workspace enumerates overrides, so a cut-reachable virtual call omits
+obligations in any override. The safety net is therefore doing real work rather
+than merely being conservative, and the gap has to be closed before the gate
+can be trusted. `is_virtual` is recorded by the lifter and never consulted.
+
+### Six before/after populations
+
+`benchmarks/sets/census/{budget,float-escalation,refuted,no-candidate,theory,
+model}.set` — one per bucket, every one verified to load. The thing missing from
+previous attempts in this area was a population to measure against; each phase
+of the plan is measured alone against the bucket it targets.
+
+
 ## 2026-10-30 — the heap model was never the problem: a decided query, not a timeout
 
 The last open question about the heap work (gh #109) was whether CHC's Horn

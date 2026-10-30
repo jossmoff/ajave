@@ -98,6 +98,13 @@ KIND = {
     # after the engine loop, so nothing ever reconsidered it. This bucket is
     # the one that responds to feeding refutations back.
     "violated": "refuted",
+    # The bitvector pass refuses a float-arithmetic obligation because only the
+    # FPA pass may conclude there (gh #48). Its own bucket, because lumping it
+    # under "other" hid 50+ tasks behind the word "unclassified", and because
+    # the work it responds to is unlike every other bucket: the theory already
+    # exists and is implemented. What is missing is the escalation pass
+    # reaching this obligation — coverage, not a model and not an encoding.
+    "float_arith_approximated": "float-escalation",
 }
 
 
@@ -404,6 +411,7 @@ def report(records, dump=None):
         "refuted-witness": "witness construction / replay fidelity (#25)",
         "timeout": "anytime engines, partly",
         "killed": "nothing — contention artefact, re-run on an idle machine",
+        "float-escalation": "letting the FPA pass reach it (theory exists, gh #48)",
         "no-candidate": "unknown — nothing published at all",
         "other": "unclassified blocker",
     }

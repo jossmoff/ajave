@@ -1,0 +1,37 @@
+# The 31 declined task-property pairs the 2026-10-30 census
+# attributes to 'model'. main at fdd9b6e, corpus 2058.
+#
+# A before/after population for work aimed at this bucket. See
+# docs/plans/the-outer-gate.md for the protocol: measure one phase
+# at a time against the bucket it targets, never two at once.
+sv-comp/securibench/Basic28.yml valid-assert
+sv-comp/securibench/Basic7.yml no-runtime-exception
+sv-comp/securibench/Collections13.yml no-runtime-exception
+sv-comp/securibench/Inter13.yml valid-assert
+sv-comp/securibench/Inter6.yml valid-assert
+sv-comp/securibench/Refl1.yml valid-assert
+sv-comp/securibench/Refl2.yml no-runtime-exception
+sv-comp/securibench/Refl3.yml no-runtime-exception
+sv-comp/securibench/Refl3.yml valid-assert
+sv-comp/securibench/Sanitizers3.yml no-runtime-exception
+sv-comp/securibench/Sanitizers5.yml no-runtime-exception
+sv-comp/jbmc-regression/StaticCharMethods02.yml no-runtime-exception
+sv-comp/jbmc-regression/StaticCharMethods03.yml no-runtime-exception
+sv-comp/jbmc-regression/StaticCharMethods05.yml no-runtime-exception
+sv-comp/jbmc-regression/StaticCharMethods06.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderChars01.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderChars03.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderChars05.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderInsertDelete01.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderInsertDelete02.yml no-runtime-exception
+sv-comp/jbmc-regression/StringBuilderInsertDelete03.yml no-runtime-exception
+sv-comp/jbmc-regression/StringValueOf09.yml no-runtime-exception
+sv-comp/jbmc-regression/SubString01.yml no-runtime-exception
+sv-comp/jdart-regression/URLDecoder01.yml no-runtime-exception
+sv-comp/jdart-regression/URLDecoder01.yml valid-assert
+sv-comp/jdart-regression/URLDecoder02.yml no-runtime-exception
+sv-comp/jdart-regression/URLDecoder02.yml valid-assert
+sv-comp/jdart-regression/addition01.yml valid-assert
+sv-comp/jbmc-regression/charArray.yml no-runtime-exception
+sv-comp/jbmc-regression/enum1.yml no-runtime-exception
+sv-comp/rtems-lock-model/lock-00-01-10.yml no-runtime-exception
