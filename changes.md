@@ -2,6 +2,75 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — five probes, and the measured answer: ajave needs invariants, not search
+
+Follow-up to the census. The `budget` bucket is 135 of 409 declined pairs and
+its "responds to" column says *scheduling / more effort*. That column is
+**wrong**, and five probes say so.
+
+| probe | what it raises | converted |
+|---|---|---|
+| force the outer discharge gate open | the `cuts_accounted` safety net | 0 of 40 |
+| `AJAVE_BMC_SCALE=8` | solver calls, block visits, forks | 0 of 40 |
+| `AJAVE_MAX_UNROLL=20` | the loop unroll bound | 1 of 40 |
+| `AJAVE_MAX_DEPTH=4000` | the path-length bound | 0 of 6 |
+| `ROUND_SHARE=0.9`, `ENGINE_CAP=0.95` | the engine's share of the clock | 0 of 3 |
+
+One conversion across all five. **These tasks truncate, but no tunable bound
+controls the truncation.**
+
+Two of the probes were only trustworthy because they had controls.
+`AJAVE_MAX_UNROLL=1` loses 3 tasks on `benchmarks/sets/ajave` (398 against
+404), so the override is observable in both directions; without that, a null
+result is indistinguishable from a knob that does nothing.
+
+### Three problems wearing one bucket's name
+
+Counting which `mark_incomplete` call site fires — rather than reading the
+blocker string, which is the same for all of them — partitions the bucket
+cleanly by task family:
+
+| site | occurrences | tasks | family |
+|---|---|---|---|
+| `handle_goto` (unroll bound) | 569 | 6 | BellmanFord, Basic |
+| `handle_branch_fork` | 120 | 4 | AbstractChart, Basic5 |
+| `explore_block_until` | 27 | 6 | the whole `Alarm_prop*` family |
+
+`BellmanFord` is the clearest case and it explains the whole result. Its loop
+count is a function of input size, so no constant unroll bound reaches it —
+`unroll=20` converted `Basic18` and left BellmanFord exactly where it was.
+Raising the bound is not even a budget question: the comment on `budget_scale`
+is right that unroll depth is a **semantic** bound, because `Bounded { k }`
+tells k-induction the search covered an obligation to depth k.
+
+For the `Alarm` family every bound was eliminated in turn — depth, counters,
+and time slice — which incidentally confirms the claim written in the deepening
+comment that "`max_depth` is nowhere near". It was worth testing: two
+documented claims were already wrong today.
+
+### The synthesis, which arrives from two independent directions
+
+The heap investigation ended at *quantified invariant inference over heap
+contents*. This one ends at *loop summarisation for input-dependent loops*.
+Those are the same shape of problem: **inferring an inductive invariant instead
+of enumerating states.**
+
+So the measured answer to "what unlocks the remaining score" is not a bigger
+budget, a better scheduler, or a slicing pass that makes the same budget go
+further. Two independent routes say ajave's limit is invariant inference, and
+the corpus agrees: `NullDeref` (239) and `ArrayBounds` (195) are 78% of open
+obligations, and both are exactly the shape that an array/field-range invariant
+discharges and that unrolling never will.
+
+### Why this cost an afternoon instead of a week
+
+Every probe was an env flag or a deliberately unsound three-line patch,
+reverted after measuring. None touched committed behaviour. The alternative —
+and the thing the withdrawn plan would have done — was to build per-property
+slicing first and discover afterwards that the budget it economises was never
+the constraint.
+
+
 ## 2026-10-30 — three buckets probed, none converts: the unproven are hard, not blocked
 
 Follow-up to the census above. The plan written for its dominant bucket
