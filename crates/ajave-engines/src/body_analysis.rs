@@ -446,23 +446,6 @@ pub fn stmt_is_havoced_op(stmt: &Stmt) -> bool {
 
 /// B — a witness the producing engine knows cannot replay becomes a published
 /// fact rather than a silent withholding.
-/// Does a failing check fork control into its exception handler?
-///
-/// The JVM raises an implicit exception at the instruction that fails -- a
-/// zero divisor, a null receiver, an out-of-range index -- and transfers
-/// control to whatever handler covers it. `handle_check` asked the solver
-/// whether the obligation could fail, recorded a violation, and then carried
-/// straight on to the next statement, so an assertion reachable only through
-/// such a handler was unreachable to the BMC entirely (gh #108).
-///
-/// On by default. Turning it off restores the pre-#108 exploration exactly,
-/// which is the comparison any measurement of it needs.
-pub fn implicit_handler_enabled() -> bool {
-    std::env::var("AJAVE_IMPLICIT_HANDLER")
-        .map(|v| v != "0")
-        .unwrap_or(true)
-}
-
 pub fn refute_artifact_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("AJAVE_REFUTE_ARTIFACT").as_deref() == Ok("1"))

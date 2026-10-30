@@ -8,11 +8,12 @@ Run `python3 tools/bench.py --set smoke --check` after building (`cargo build
 --release`) and BEFORE any full scoring run. Exit code 0 = safe to score, 1 =
 regressions detected. Takes ~1 minute.
 
-(`tools/smoke_test.py` was the old harness and is superseded by `bench.py`; the
-canary list now lives in `benchmarks/sets/smoke.set`.)
+(The canary list lives in `benchmarks/sets/smoke.set`. `tools/smoke_test.py`
+was the old harness; it is deleted, not merely superseded, because this file
+declared it obsolete in one paragraph and told you to edit it in the next.)
 
 ### When to add a smoke test
-Add a new entry to the `TESTS` list in `tools/smoke_test.py` when:
+Add a line to `benchmarks/sets/smoke.set` when:
 1. **Fixing a wrong answer** — add the benchmark as a canary so it never regresses.
 2. **Adding/changing a discharge or soundness condition** — add TRUE and FALSE benchmarks that exercise the new condition.
 3. **Modeling a new instruction, method, or type** — add a benchmark that uses it.
@@ -33,9 +34,16 @@ wrong-answer fix needs no separate assertion: it scores WRONG if the bug
 returns, and unproven if the fix is honest but imprecise.
 
 ### Rules
-- Keep the suite under 80 tests (~5 min). Quality over quantity.
+- Keep the suite inside ~5 minutes. Quality over quantity. It is currently 161
+  entries at ~320s; the old "under 80 tests" cap was written when entries were
+  slower and is not the real constraint — wall clock is.
 - Every wrong-answer fix MUST add a canary test.
 - The smoke test must pass before full scoring. Do not skip it.
+- A canary may be *unproven*, and that is useful. `benchmarks/ajave/heap/
+  NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored` is UNKNOWN by design: it
+  pins a capability boundary, so a TRUE there is a real gain rather than a
+  regression. `--check` only fails on WRONG and on correct→unproven, so pinning
+  the boundary costs nothing.
 
 ## Modelling External Code (JDK) — MANDATORY
 

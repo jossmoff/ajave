@@ -189,9 +189,42 @@ default there because that is the claim that rots.
 
 | flag | default | what it does | measured |
 |---|---|---|---|
-| `AJAVE_SITE_FIELDS` | **on** (`=0` ablates) | B2/B3: site-indexed field cells and array element intervals in `interval` | smoke neutral; see below |
-| `AJAVE_CHC_HEAP_SUMMARY` | **off** (`=1` enables) | C1: field footprint threaded through CHC summary relations | smoke **neutral**, 171 vs 171, 0 WRONG |
-| `AJAVE_CHC_QGEN` | **on** (`=0` ablates) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | smoke **173 vs 171**, 134 correct vs 133, 0 WRONG either way, 319s vs 320s |
+| `AJAVE_SITE_FIELDS` | **on** (`=0` ablates) | B2/B3: site-indexed field cells and array element intervals in `interval` | **bit-identical** on all 107 convertible heap-shaped pairs (2026-10-29): zero verdict differences, runtimes within 2% |
+| `AJAVE_CHC_HEAP_SUMMARY` | **off** (`=1` enables) | C1: field footprint threaded through CHC summary relations | **bit-identical** on the same 107. Unfinished: gh #111 — the footprint ignores `Stmt::ArrayStore`, so array programs are refused a summary by construction |
+| `AJAVE_CHC_QGEN` | **on** (`=0` ablates) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | smoke **173 vs 171** when introduced. Also **bit-identical** on the 107 — it finds a quantified array fact established and consumed in one method, not one that crosses a call |
+| `AJAVE_WIDEN_HINTS` | **on** (`=0` ablates) | whether the interval-ai hint exploration widens at loop headers so it converges | `=0` publishes nothing on any program with an unbounded loop; see `docs/interval-ai-hint-path.md` |
+
+### The 2026-10-29 ablation, and why all three rows now read "bit-identical"
+
+All three heap mechanisms were measured on the **only population that could
+convert**: the 107 unproven task-property pairs that expect TRUE *and* write an
+array element, write a field, or use linked-structure naming. Expects-FALSE
+pairs are excluded on principle — a heap invariant is an `Over` artifact, so it
+discharges and cannot witness a violation, which rules out the whole
+`*-MemUnsat*` family in principle rather than in practice.
+
+Four arms (default, C1 on, qgen off, site-fields off) returned **1 TRUE / 98
+UNKNOWN / 8 TIMEOUT** with **zero verdict differences**. Do not read that as
+"heap modelling does not help these programs": gh #109 (closed) established by
+dumping the Horn query that CHC's query is **decided in 0.05s**, and that
+deleting the assertion's single error rule leaves z3 answering `sat`. The
+encoding is strong enough; what is missing is quantified-invariant inference
+over heap *contents*, which is a research problem.
+
+Keep these flags. They are ablation switches with recorded measurements, not
+tuning knobs, and `tools/engine_ablation.py` depends on mechanisms being
+separable this way. A flag whose measurement is recorded is cheap; a mechanism
+that cannot be isolated is what makes the next regression unattributable.
+
+### Flags deliberately *not* kept
+
+`AJAVE_IMPLICIT_HANDLER` governed whether a failing check forks control into its
+exception handler (gh #108). It was a development comparison lever, is now
+**removed**, and the behaviour is unconditional: measured +4 correct FALSE with
+0 WRONG, verdicts stable across `--repeat 3` over 161 tasks. The pre-#108
+exploration is not a configuration anyone wants back — it was simply missing an
+edge the JVM takes — and keeping it reachable was dead surface. The comparison
+remains reproducible by reverting `1f970aa`.
 
 ## What each is for, and what the measurement does and does not say
 

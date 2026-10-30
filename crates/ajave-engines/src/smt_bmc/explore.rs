@@ -1097,33 +1097,6 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
-    /// The handler on `block` that catches what `kind` raises, if any.
-    ///
-    /// Only a `Some(class)` entry counts, and a `finally` seen first aborts the
-    /// search. In the JVM exception table `catch_type == 0` is a `finally`: it
-    /// runs on the exceptional path but does **not** catch, so control keeps
-    /// propagating past it to a later handler. Entering that later handler
-    /// without having executed the `finally` body would hand it a state the JVM
-    /// never produces, and any witness built from that state is one replay
-    /// would refuse. Declining is a precision loss; approximating would be a
-    /// correctness one.
-    ///
-    /// `dispatch_exception` does treat `None` as matching. That is pre-existing
-    /// behaviour on the explicit-throw path and is deliberately not changed
-    /// here -- see `benchmarks/ajave/jvm-exceptions/FinallyDoesNotCatch`.
-    fn implicit_handler_for(&self, block: BlockId, thrown: &str) -> Option<BlockId> {
-        for edge in &self.body.block(block).exceptional {
-            match edge.class.as_deref() {
-                None => return None,
-                Some(h) if h == thrown || self.prog.is_subtype(thrown, h) => {
-                    return Some(edge.target)
-                }
-                Some(_) => continue,
-            }
-        }
-        None
-    }
-
     /// Explore the handler reached when this check fails (gh #108).
     ///
     /// # Soundness
@@ -1146,9 +1119,6 @@ impl<'a> ExploreCtx<'a> {
     /// whose satisfiability we have not established is how `Pan_exceptionprone`
     /// became a wrong TRUE. That half needs its own measurement.
     fn fork_into_implicit_handler(&mut self, kind: ObligationKind, violation_cond: Term) {
-        if !crate::body_analysis::implicit_handler_enabled() {
-            return;
-        }
         // `ExplicitThrow` is already dispatched by `handle_throw` at the
         // `athrow` terminator; forking here as well would enter the handler
         // twice. `Assertion` and `Deadlock` map to no class at all.
@@ -1161,7 +1131,7 @@ impl<'a> ExploreCtx<'a> {
         let Some(thrown) = ajave_models::exception_class(kind) else {
             return;
         };
-        let Some(handler) = self.implicit_handler_for(block, thrown) else {
+        let Some(handler) = implicit_handler_for(self.body, self.prog, block, thrown) else {
             return;
         };
 
@@ -1177,21 +1147,35 @@ impl<'a> ExploreCtx<'a> {
         let ir_before = self.inline_return;
         let irs_before = self.inline_return_str;
         let irt_before = self.inline_return_tainted;
-        // `current_block` is **not** part of `SavedState`, and exploring the
-        // handler overwrites it. Leaving it overwritten is what made this a
-        // wrong TRUE on `securibench/Refl3`: the straight-line path continued
-        // with `current_block` pointing at the handler, so the test for
-        // "is this call inside a try range" was asked about the wrong block,
-        // an unresolved call stopped counting as unresolved-in-try, the
-        // blocker vanished and 1 obligation was discharged as exhaustively
-        // proven. Measured: 4 `BLOCKER has_unresolved_in_try` with the fork
-        // off, none with it on.
+        // `current_block` is **not** part of `SavedState`, and
+        // `explore_block_until` overwrites it without restoring it. This fork
+        // must therefore restore it by hand, and the asymmetry with
+        // `handle_branch_fork` -- which explores two blocks and restores
+        // nothing -- is the part worth understanding before editing either.
         //
-        // CLAUDE.md names this defect class: a context-relative identifier
-        // used outside the context it indexes. It had already happened once
-        // here, where inlining did not restore `current_block` and
+        // `current_block` is only meaningful *while a block's own statements
+        // and terminator are being processed*. `handle_branch_fork` runs at the
+        // terminator, so the block is finished and a stale value is read by
+        // nobody. This fork runs mid-block, from `handle_stmts`, and the
+        // remaining statements and the terminator of the *original* block are
+        // processed after it returns. A stale value is live there.
+        //
+        // Leaving it stale is what made the first cut of gh #108 a wrong TRUE
+        // on `securibench/Refl3`: the straight-line path continued with
+        // `current_block` pointing at the handler, so "is this call inside a
+        // try range" was asked about the wrong block,
+        // `has_unresolved_in_try` stopped being set -- measured, 4 blockers
+        // with the fork off and none with it on -- and an obligation was
+        // discharged as exhaustively proven.
+        //
+        // CLAUDE.md names the class: a context-relative identifier used
+        // outside the context it indexes. It had already happened here once,
+        // where inlining failed to restore `current_block` and
         // `self.body.block(bid)` indexed the caller's blocks with a callee's
-        // id.
+        // id. There are now two instances and one rule, stated above.
+        //
+        // Every exit from this function below runs the restore; do not add an
+        // early return between here and it.
         let block_before = self.current_block;
 
         self.path_constraints.push(violation_cond);
@@ -2058,6 +2042,147 @@ impl<'a> ExploreCtx<'a> {
             }
         }
         self.depth -= 1;
+    }
+}
+
+/// The handler on `block` that catches what an implicit `thrown` exception
+/// raises, if any.
+///
+/// A free function rather than a method because it depends on nothing but the
+/// body, the program's subtype relation and the block -- which is what makes
+/// the rules below testable without standing up a solver.
+///
+/// # The two rules, and why each is the conservative direction
+///
+/// **Only a `Some(class)` entry counts.** In the JVM exception table
+/// `catch_type == 0` is a `finally`, not a catch-all: it runs on the
+/// exceptional path and then control keeps propagating. Treating it as a
+/// handler would claim the exception was caught when it was not.
+///
+/// **A `finally` seen before a matching handler aborts the search.** The JVM
+/// runs the `finally` body first and only then reaches the later handler.
+/// Entering that handler without having executed the `finally` body hands it a
+/// state the JVM never produces, and a witness built from that state is one
+/// replay would refuse. Declining to fork costs precision; forking into a
+/// state that cannot occur would cost correctness.
+///
+/// `dispatch_exception` does treat `None` as matching. That is pre-existing
+/// behaviour on the *explicit*-throw path and is deliberately not changed here;
+/// see `benchmarks/ajave/jvm-exceptions/FinallyDoesNotCatch`.
+fn implicit_handler_for(
+    body: &Body,
+    prog: &Program,
+    block: BlockId,
+    thrown: &str,
+) -> Option<BlockId> {
+    for edge in &body.block(block).exceptional {
+        match edge.class.as_deref() {
+            None => return None,
+            Some(h) if h == thrown || prog.is_subtype(thrown, h) => return Some(edge.target),
+            Some(_) => continue,
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod implicit_handler_tests {
+    use super::*;
+    use ajave_ir::{Block, Body, ExcEdge, Terminator};
+
+    fn body_with(edges: Vec<ExcEdge>) -> Body {
+        Body {
+            is_static: true,
+            key: MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            entry: BlockId(0),
+            vars: vec![],
+            obligations: vec![],
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![],
+                    term: Terminator::Goto(BlockId(1)),
+                    exceptional: edges,
+                },
+                Block {
+                    id: BlockId(1),
+                    bytecode_offset: 1,
+                    stmts: vec![],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                },
+            ],
+        }
+    }
+
+    fn edge(class: Option<&str>, target: u32) -> ExcEdge {
+        ExcEdge {
+            class: class.map(|c| c.to_string()),
+            target: BlockId(target),
+        }
+    }
+
+    const AE: &str = "java/lang/ArithmeticException";
+
+    /// A block outside any `try` has no exceptional edges, so there is nothing
+    /// to fork into. This is the common case by a wide margin -- it is what
+    /// keeps the fork from multiplying paths at every null check in the corpus.
+    #[test]
+    fn a_block_with_no_exceptional_edge_has_no_handler() {
+        let b = body_with(vec![]);
+        let p = Program::default();
+        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), None);
+    }
+
+    #[test]
+    fn an_exactly_matching_handler_is_found() {
+        let b = body_with(vec![edge(Some(AE), 1)]);
+        let p = Program::default();
+        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
+    }
+
+    /// A handler for an unrelated class is skipped, and the search continues
+    /// past it -- JVM exception-table order, where a non-matching entry does
+    /// not stop the scan.
+    #[test]
+    fn a_non_matching_handler_is_skipped_and_the_scan_continues() {
+        let b = body_with(vec![
+            edge(Some("java/lang/ClassCastException"), 1),
+            edge(Some(AE), 1),
+        ]);
+        let p = Program::default();
+        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
+    }
+
+    /// Named after the soundness argument on `implicit_handler_for`: a
+    /// `finally` runs on the exceptional path but does **not** catch, so a
+    /// later handler is only reached *after* its body has executed. Forking
+    /// straight into that handler would hand it a state the JVM never
+    /// produces, and a witness built from it is one replay would refuse. So
+    /// the scan declines rather than approximating.
+    #[test]
+    fn a_finally_before_a_matching_handler_declines_the_fork() {
+        let b = body_with(vec![edge(None, 1), edge(Some(AE), 1)]);
+        let p = Program::default();
+        assert_eq!(
+            implicit_handler_for(&b, &p, BlockId(0), AE),
+            None,
+            "a finally precedes the handler, so its body would be skipped"
+        );
+    }
+
+    /// And a `finally` *after* a matching handler is irrelevant: the handler is
+    /// reached first, so nothing is skipped.
+    #[test]
+    fn a_finally_after_a_matching_handler_does_not_block_it() {
+        let b = body_with(vec![edge(Some(AE), 1), edge(None, 1)]);
+        let p = Program::default();
+        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
     }
 }
 
