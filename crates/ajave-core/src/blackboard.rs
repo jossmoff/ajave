@@ -661,8 +661,31 @@ impl Blackboard {
             if v1 != v2 {
                 continue;
             }
-            out.insert((inv.at.block, *v1), (*lo, *hi));
+            // Two claims for one (block, variable) are **intersected**, not
+            // overwritten. The log is append-only and several engines may
+            // publish bounds for the same point; each `Over` invariant is a
+            // claim that holds there, so their conjunction holds too, and the
+            // meet is the strongest thing a consumer may conclude.
+            //
+            // This was a plain `insert`, so whichever claim the log happened
+            // to carry last won and the others vanished. That is not unsound
+            // given honest producers — every claim is true — but it made the
+            // answer depend on publication order, and it meant a producer bug
+            // could only ever be found by reading the producer. It took a
+            // JVM-confirmed contradiction to find exactly such a bug in
+            // `ai::join_block_intervals`.
+            out.entry((inv.at.block, *v1))
+                .and_modify(|(l, h): &mut (i64, i64)| {
+                    *l = (*l).max(*lo);
+                    *h = (*h).min(*hi);
+                })
+                .or_insert((*lo, *hi));
         }
+        // An empty range means two producers disagree, which can only happen
+        // if one of them is unsound. Dropping the key leaves the consumer with
+        // no hint rather than an unsatisfiable one, which would make every
+        // path look infeasible — the loudest possible version of the same bug.
+        out.retain(|_, (lo, hi)| lo <= hi);
         out
     }
 
@@ -852,6 +875,141 @@ mod tests {
         bb
     }
 
+    /// The consumer half of the hint seam. Each `Over` invariant is a claim
+    /// that holds at the point, so two of them hold together and the meet is
+    /// what a consumer may use. A plain `insert` made the answer depend on
+    /// publication order instead.
+    #[test]
+    fn two_bounds_for_one_point_are_intersected_not_overwritten() {
+        let mut bb = seeded();
+        let at = ProgramPoint {
+            method: oref().method,
+            block: ajave_ir::BlockId(0),
+            index: 0,
+        };
+        let bounds = |lo: i64, hi: i64| {
+            use crate::term::{Expr, Op};
+            let v = || Box::new(Expr::Var(ajave_ir::VarId(7)));
+            Expr::Bin(
+                Op::And,
+                Box::new(Expr::Bin(Op::Le, Box::new(Expr::Int(lo)), v())),
+                Box::new(Expr::Bin(Op::Le, v(), Box::new(Expr::Int(hi)))),
+            )
+        };
+        for (id, lo, hi) in [(1u32, 0i64, 100i64), (2, 5, 20)] {
+            bb.publish(
+                EngineId("interval-ai"),
+                Direction::Over,
+                Artifact::Invariant(Invariant {
+                    id,
+                    at: at.clone(),
+                    formula: bounds(lo, hi),
+                    status: InvStatus::Candidate,
+                    scope: Scope::Point(at.clone()),
+                }),
+            )
+            .unwrap();
+        }
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(
+            hints[&(ajave_ir::BlockId(0), ajave_ir::VarId(7))],
+            (5, 20),
+            "both claims hold, so the consumer gets their intersection"
+        );
+    }
+
+    /// Two producers whose claims do not overlap means one is unsound. The
+    /// consumer must hand back nothing rather than an unsatisfiable range,
+    /// which would make every path look infeasible and discharge everything.
+    #[test]
+    fn contradictory_bounds_yield_no_hint_rather_than_an_empty_range() {
+        let mut bb = seeded();
+        let at = ProgramPoint {
+            method: oref().method,
+            block: ajave_ir::BlockId(0),
+            index: 0,
+        };
+        let bounds = |lo: i64, hi: i64| {
+            use crate::term::{Expr, Op};
+            let v = || Box::new(Expr::Var(ajave_ir::VarId(7)));
+            Expr::Bin(
+                Op::And,
+                Box::new(Expr::Bin(Op::Le, Box::new(Expr::Int(lo)), v())),
+                Box::new(Expr::Bin(Op::Le, v(), Box::new(Expr::Int(hi)))),
+            )
+        };
+        for (id, lo, hi) in [(1u32, 0i64, 3i64), (2, 10, 20)] {
+            bb.publish(
+                EngineId("interval-ai"),
+                Direction::Over,
+                Artifact::Invariant(Invariant {
+                    id,
+                    at: at.clone(),
+                    formula: bounds(lo, hi),
+                    status: InvStatus::Candidate,
+                    scope: Scope::Point(at.clone()),
+                }),
+            )
+            .unwrap();
+        }
+        assert!(
+            bb.interval_hints_for_method(&at.method).is_empty(),
+            "an empty range is worse than no hint"
+        );
+    }
+
+    /// B1. A heap claim and a method-relative claim cannot share a scope: a
+    /// `VarId` indexes one `Body`, while `o.f` is the same cell everywhere.
+    /// Reading one as the other is the defect class that cost 32 points.
+    #[test]
+    fn a_heap_scoped_invariant_is_distinguishable_from_a_point_scoped_one() {
+        let mut bb = seeded();
+        let at = ProgramPoint {
+            method: oref().method,
+            block: ajave_ir::BlockId(0),
+            index: 0,
+        };
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id: 1,
+                at: at.clone(),
+                formula: crate::term::Expr::Int(1),
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id: 2,
+                at: at.clone(),
+                formula: crate::term::Expr::Int(1),
+                status: InvStatus::Candidate,
+                scope: Scope::Heap,
+            }),
+        )
+        .unwrap();
+
+        let heap: Vec<u32> = bb
+            .invariants_for(&at.method)
+            .iter()
+            .filter(|i| i.scope == Scope::Heap)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(heap, vec![2], "only the heap claim is heap-scoped");
+        let pointy: Vec<u32> = bb
+            .invariants_for(&at.method)
+            .iter()
+            .filter(|i| matches!(i.scope, Scope::Point(_)))
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(pointy, vec![1], "and only the other is point-scoped");
+    }
+
     /// H1 (#99). `HEAP_ALIASING` existed with a display name and no producer
     /// for its whole life, so `open_for` could never return anything closed
     /// under it. Now that `interval-ai` declares it, this pins the other half:
@@ -1025,6 +1183,7 @@ mod tests {
                 at: at.clone(),
                 formula: Expr::bin(Op::And, lo, hi),
                 status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
             }),
         )
         .unwrap();
@@ -1054,6 +1213,7 @@ mod tests {
                     Expr::Var(ajave_ir::VarId(1)),
                 ),
                 status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
             }),
         )
         .unwrap();
@@ -1259,6 +1419,11 @@ mod certification_tests {
             },
             formula: crate::term::Expr::Int(1),
             status,
+            scope: Scope::Point(ProgramPoint {
+                method: oref().method,
+                block: ajave_ir::BlockId(0),
+                index: 0,
+            }),
         }
     }
 

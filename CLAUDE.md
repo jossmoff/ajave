@@ -8,11 +8,12 @@ Run `python3 tools/bench.py --set smoke --check` after building (`cargo build
 --release`) and BEFORE any full scoring run. Exit code 0 = safe to score, 1 =
 regressions detected. Takes ~1 minute.
 
-(`tools/smoke_test.py` was the old harness and is superseded by `bench.py`; the
-canary list now lives in `benchmarks/sets/smoke.set`.)
+(The canary list lives in `benchmarks/sets/smoke.set`. `tools/smoke_test.py`
+was the old harness; it is deleted, not merely superseded, because this file
+declared it obsolete in one paragraph and told you to edit it in the next.)
 
 ### When to add a smoke test
-Add a new entry to the `TESTS` list in `tools/smoke_test.py` when:
+Add a line to `benchmarks/sets/smoke.set` when:
 1. **Fixing a wrong answer** — add the benchmark as a canary so it never regresses.
 2. **Adding/changing a discharge or soundness condition** — add TRUE and FALSE benchmarks that exercise the new condition.
 3. **Modeling a new instruction, method, or type** — add a benchmark that uses it.
@@ -33,9 +34,16 @@ wrong-answer fix needs no separate assertion: it scores WRONG if the bug
 returns, and unproven if the fix is honest but imprecise.
 
 ### Rules
-- Keep the suite under 80 tests (~5 min). Quality over quantity.
+- Keep the suite inside ~5 minutes. Quality over quantity. It is currently 161
+  entries at ~320s; the old "under 80 tests" cap was written when entries were
+  slower and is not the real constraint — wall clock is.
 - Every wrong-answer fix MUST add a canary test.
 - The smoke test must pass before full scoring. Do not skip it.
+- A canary may be *unproven*, and that is useful. `benchmarks/ajave/heap/
+  NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored` is UNKNOWN by design: it
+  pins a capability boundary, so a TRUE there is a real gain rather than a
+  regression. `--check` only fails on WRONG and on correct→unproven, so pinning
+  the boundary costs nothing.
 
 ## Modelling External Code (JDK) — MANDATORY
 
@@ -204,6 +212,37 @@ it cost three measurements in one day, including a full valid-assert run.
 rebuild cannot affect a run in flight. The snapshot path travels in each work
 item rather than a module global, because worker processes are spawned and
 re-import the module. Do not reintroduce a global here.
+
+### A `--check` regression says "worse than the baseline", not "worse than before your change"
+
+These are different claims and the output used to make only the first while
+being read as the second. On 2026-10-27 three tasks flagged as `regressed from
+correct` were attributed to the change under test, filed as an issue, and
+written into `changes.md` and two memory files. They fail **identically on that
+branch and on `main`** — the baseline simply predated their regression, and
+nothing in the report said which baseline it was.
+
+The harness was not lying. It reported a true fact about a file, and the file
+had no provenance, so the true fact was unusable.
+
+- The baseline now records `# commit:` and `# recorded:`, and `--check` prints
+  them. A regression is reported as "regressed since `<sha>`" with an explicit
+  note that this is not evidence about the current change.
+- A baseline with no provenance says so and warns that regressions against it
+  prove nothing about the change under test. Re-record it.
+- A **coverage mismatch** is reported: tasks in the run with no baseline entry,
+  and baseline entries not run. `--check` is silent about both groups, and
+  silence was indistinguishable from agreement. Main's baseline held 134
+  entries against a 149-entry set for exactly this reason.
+
+**Before attributing a flagged regression to your change, run that task on the
+base commit.** Two commands. It is the only thing that distinguishes the two
+claims, and no amount of reading the diff substitutes for it.
+
+Note also what does *not* substitute: ruling out one cause is not establishing
+another. An ablation showing the losses were not caused by mechanism A says
+nothing whatever about mechanism B, and treating it as confirmation is what
+made a guess feel measured.
 
 ### A regression must be reproduced before it is explained
 **A score drop measured on a busy machine, or without a determinism check, is

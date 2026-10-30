@@ -21,25 +21,63 @@ A task can fail to score for reasons that respond to completely different work:
                 is killed mid-thought — and partly not.
   no-candidate  Nothing published anything at all.
 
-Reads `smt-bmc: BLOCKER <reason> for <obligation>` at debug, which the engine
-already emits, plus the final verdict.
+Reads three things the engines already emit:
+
+  `smt-bmc: BLOCKER <reason> for <ObligationRef ..>`   per obligation, debug
+  `smt-bmc: BLOCKER all_paths_complete ... (outer gate)` one line for ALL of
+                                                         them, debug
+  `orchestrator: N obligation(s) still open — <kinds>`   the ground truth for
+                                                         how many are open, info
+
+The outer-gate line matters for counting. When the BMC truncates before it
+reaches the discharge loop, it refuses *every* obligation in one line, so a
+regex over BLOCKER lines sees one refusal where the task has thirty. Obligation
+counts therefore come from the orchestrator's own open-set, and the blockers
+only say *why*; the two are reconciled per task and disagreements are reported
+rather than averaged away.
+
+What this tool does NOT see: it attributes to the BMC's refusal, because the
+BMC is the engine that discharges most obligations. An obligation is open only
+if *every* Over engine failed on it, so "model" here means "the BMC wanted a
+model" — the AI or CHC may have declined the same obligation for a different
+reason. Read the buckets as "what would unblock the dominant discharger".
 
 Usage:
-    python3 tools/blocker_census.py --set sv-comp --property valid-assert --limit 120
+    python3 tools/blocker_census.py --set sv-comp --property valid-assert --jobs 6
     python3 tools/blocker_census.py --set smoke
+    python3 tools/blocker_census.py --set /path/to/subset.set --dump out.tsv
 """
 
 import argparse
+import atexit
 import os
 import re
-import subprocess
+import shutil
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
+from concurrent.futures import ProcessPoolExecutor  # noqa: E402
+from procguard import install_signal_handlers, run_guarded, sweep  # noqa: E402
 
-BLOCKER_RE = re.compile(r"BLOCKER (\S+) for")
+# Per-obligation refusal: `BLOCKER <reason> for ObligationRef { .. }`.
+BLOCKER_RE = re.compile(r"BLOCKER (\S+) for (?!every)")
+# The aggregate: one line covering every open obligation at once.
+OUTER_RE = re.compile(
+    r"BLOCKER all_paths_complete for every obligation \(outer gate\); "
+    r"open in (\d+) method\(s\), truncated in (\d+) method\(s\), (\d+) open")
+# The orchestrator's own count of what is still open, and of what kind.
+OPEN_RE = re.compile(r"(\d+) obligation\(s\) still open — (.*)$", re.M)
+RESIDUAL_RE = re.compile(r"residual from (\S+) \((\w+)\): (.*)$", re.M)
+# An obligation an engine *violated* is not open -- it is closed, wrongly. The
+# task still scores zero when replay refuses the witness, so the open-set alone
+# is the wrong denominator for "what is unproven". This was found by a control
+# run: TCAS_prop1 reported open=0 and still scored nothing.
+DOWNGRADE_RE = re.compile(r"downgrading FALSE to UNKNOWN")
+REPLAY_RE = re.compile(r"jvm-replay: (\w+) for ")
+SCHED_RE = re.compile(r"schedule-replay: (confirmed|could not reproduce)")
 
 # Which kind of work each blocker responds to. The whole point of the tool is
 # this mapping, so it is stated once, here, rather than inferred at the call
@@ -63,16 +101,66 @@ KIND = {
 }
 
 
-def run_one(task, prop, timeout, binary):
-    cmd = [binary, "--property", bench.CLI_PROPERTY[prop]] + task["inputs"]
-    env = dict(os.environ, RUST_LOG="ajave_engines::smt_bmc=debug")
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT", []
-    verdict = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "UNKNOWN"
-    return verdict, BLOCKER_RE.findall(r.stderr)
+def run_one(args):
+    """One task-property pair. Returns a record, never raises.
+
+    Runs with both log targets on: the BMC's blockers say *why*, the
+    orchestrator's open-set says *how many*. Asking one process for both keeps
+    them describing the same run -- two runs could disagree, and reconciling
+    counts across runs is exactly the error this tool exists to avoid.
+    """
+    task, prop, timeout, binary = args
+    # Two things this shares with bench.py, and it had neither:
+    #
+    # `--timeout` tells ajave the budget it is under. Without it no engine
+    # knows a deadline exists, so none can yield, and the task is hard-killed
+    # at the wall clock instead of reporting what it established. For a census
+    # that is not merely a lost result: the task lands in the `timeout` bucket
+    # carrying no blocker, so every other bucket is starved by exactly the
+    # tasks that had something to say. The inner budget is 5s short of the
+    # outer one so the process finishes and reports first.
+    #
+    # `run_guarded` kills the whole process group. ajave spawns a solver and a
+    # JVM, and killing only the parent orphans both -- leaked solvers are what
+    # exhausted this machine's memory once before. Measured: a plain
+    # subprocess.run census leaked 4 z3 processes in its first 25 minutes.
+    inner = max(5, int(timeout) - 5)
+    # --trace makes the certifier say *why* it refused each witness, which is
+    # the other half of the triage: a refuted witness scores zero exactly like
+    # an unproven obligation, and needs completely different work.
+    cmd = [binary, "--trace", "--property", bench.CLI_PROPERTY[prop],
+           "--timeout", str(inner)] + task["inputs"]
+    env = dict(os.environ,
+               RUST_LOG="ajave_engines::smt_bmc=debug,ajave_core::orchestrator=debug")
+    rec = {"name": os.path.basename(task["yml"]).replace(".yml", ""),
+           "yml": task["yml"], "prop": prop,
+           "expected": task["expected"].get(prop),
+           "verdict": "UNKNOWN", "blockers": [], "outer": None,
+           "open_n": None, "open_kinds": "", "residuals": [],
+           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout}
+    r = run_guarded(cmd, timeout=timeout, env=env)
+    rec["dur"] = r.elapsed
+    if r.timed_out:
+        rec["verdict"] = "TIMEOUT"
+        return rec
+    if r.returncode < 0:
+        # A signal, not a verdict. CLAUDE.md: under load the harness's own
+        # kills terminate tasks, and scoring that as a verdict change is how a
+        # contended run gets mistaken for a regression.
+        rec["verdict"] = f"KILLED({-r.returncode})"
+        return rec
+    out = r.stdout.strip().splitlines()
+    rec["verdict"] = out[-1] if out else "UNKNOWN"
+    rec["blockers"] = BLOCKER_RE.findall(r.stderr)
+    for m in OUTER_RE.finditer(r.stderr):
+        rec["outer"] = tuple(int(x) for x in m.groups())
+    for m in OPEN_RE.finditer(r.stderr):
+        rec["open_n"], rec["open_kinds"] = int(m.group(1)), m.group(2).strip()
+    rec["residuals"] = [m.group(3) for m in RESIDUAL_RE.finditer(r.stderr)]
+    rec["downgraded"] = bool(DOWNGRADE_RE.search(r.stderr))
+    rec["replay"] = REPLAY_RE.findall(r.stderr) + \
+        [("schedule-" + m) for m in SCHED_RE.findall(r.stderr) if m != "confirmed"]
+    return rec
 
 
 def main():
@@ -82,10 +170,30 @@ def main():
     ap.add_argument("--set", default="smoke")
     ap.add_argument("--property", default=None,
                     choices=list(bench.CLI_PROPERTY.keys()))
-    ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="parallel workers. Default 1: the timeout bucket is "
+                         "contention-sensitive, so a parallel census must "
+                         "either be read without that row or be run on a set "
+                         "whose tasks are already known not to time out")
     ap.add_argument("--limit", type=int, default=None,
                     help="sample N tasks spread across the set")
+    ap.add_argument("--dump", default=None,
+                    help="write one TSV row per unproven task-property pair")
     args = ap.parse_args()
+    self_test()
+    install_signal_handlers()
+    sweep()
+
+    # Snapshot the binary, for the reason bench.py does: a census invokes it
+    # once per task over hours, and rebuilding mid-run swaps it underneath, so
+    # early tasks measure one build and later ones another. The snapshot path
+    # travels in each work item rather than a module global.
+    snap_dir = tempfile.mkdtemp(prefix="ajave-census-")
+    binary = os.path.join(snap_dir, "ajave")
+    shutil.copy2(bench.BINARY, binary)
+    os.chmod(binary, 0o755)
+    atexit.register(shutil.rmtree, snap_dir, True)
 
     tasks = []
     for task, override in bench.load_set(args.set):
@@ -96,77 +204,239 @@ def main():
         else:
             props = list(task["expected"])
         for prop in props:
-            tasks.append((task, prop))
+            tasks.append((task, prop, args.timeout, binary))
     if args.limit and args.limit < len(tasks):
         step = len(tasks) // args.limit
         tasks = tasks[::step][: args.limit]
 
-    kinds = Counter()
-    reasons = Counter()
-    examples = defaultdict(list)
-    scored = 0
+    print(f"machine: load {os.getloadavg()[0]:.1f}, {args.jobs} worker(s), "
+          f"{len(tasks)} runs", file=sys.stderr)
 
-    for i, (task, prop) in enumerate(tasks, 1):
-        verdict, blockers = run_one(task, prop, args.timeout, bench.BINARY)
-        expected = task["expected"].get(prop)
-        # `expected` is a bool, not a string. Getting this wrong made the
-        # first run of this tool report "0 scored out of 150", which is how it
-        # was caught.
-        correct = (verdict == "TRUE" and expected is True) or \
-                  (verdict == "FALSE" and expected is False)
-        name = os.path.basename(task["yml"]).replace(".yml", "")
-        print(f"\r  {i}/{len(tasks)}", end="", file=sys.stderr)
-        if correct:
-            scored += 1
-            continue
-        if verdict == "TIMEOUT":
-            kinds["timeout"] += 1
-            examples["timeout"].append(name)
-            continue
-        if not blockers:
-            kinds["no-candidate"] += 1
-            examples["no-candidate"].append(name)
-            continue
-        # The dominant blocker is the one that appears most; a task needs every
-        # obligation decided, so the commonest refusal is what to attack first.
-        top = Counter(blockers).most_common(1)[0][0]
-        reasons[top] += 1
-        k = KIND.get(top, "other")
-        kinds[k] += 1
-        examples[k].append(name)
+    records = []
+    if args.jobs > 1:
+        # Processes, not threads. A thread pool deadlocks here: several threads
+        # each doing Popen + communicate(timeout=..) contend on CPython's
+        # internal waitpid bookkeeping, and a thread can block acquiring it
+        # rather than inside its timed wait -- so the timeout never fires.
+        # Measured: with a ThreadPoolExecutor one task ran 1700s against a
+        # 300s budget while its worker was lost for good and the pool drained
+        # from 6 to 5. bench.py uses ProcessPoolExecutor for the same reason.
+        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+            for i, rec in enumerate(ex.map(run_one, tasks), 1):
+                records.append(rec)
+                print(f"\r  {i}/{len(tasks)}", end="", file=sys.stderr)
+    else:
+        for i, t in enumerate(tasks, 1):
+            records.append(run_one(t))
+            print(f"\r  {i}/{len(tasks)}", end="", file=sys.stderr)
     print("\r" + " " * 30 + "\r", end="", file=sys.stderr)
 
-    total = len(tasks)
-    unproven = total - scored
-    print(f"\n{total} runs — {scored} scored, {unproven} not\n")
-    print(f"{'why not':<16} {'tasks':>6} {'% of unproven':>14}  responds to")
-    print("-" * 72)
+    report(records, args.dump)
+
+
+# Sample log lines, verbatim from a real run. The regexes above are the whole
+# instrument, and a regex that matches nothing reports a table of zeros rather
+# than an error -- which is indistinguishable from a real finding of "no
+# obligations are open". `$` without re.M did exactly that once, and the only
+# reason it was caught is that a control run was demanded before the numbers
+# were believed. So the patterns are pinned.
+SELF_TEST = [
+    (BLOCKER_RE, "smt-bmc: BLOCKER has_tainted_paths for ObligationRef "
+                 "{ method: Main.foo, id: ObligationId(3) }", ["has_tainted_paths"]),
+    (OUTER_RE, "smt-bmc: BLOCKER all_paths_complete for every obligation "
+               "(outer gate); open in 4 method(s), truncated in 2 method(s), "
+               "1 open method(s) were never truncated", [("4", "2", "1")]),
+    (OPEN_RE, "orchestrator: 2 obligation(s) still open \u2014 Assertion=2\n"
+              "orchestrator: done, verdict=Unknown", [("2", "Assertion=2")]),
+    (DOWNGRADE_RE, "downgrading FALSE to UNKNOWN: witness did not replay "
+                   "on a real JVM", None),
+    (REPLAY_RE, "jvm-replay: Refuted for Main.foo#3", ["Refuted"]),
+]
+
+
+def self_test():
+    """Refuse to run if any pattern has stopped matching what engines emit."""
+    bad = []
+    for rx, sample, expect in SELF_TEST:
+        if expect is None:
+            if not rx.search(sample):
+                bad.append(rx.pattern)
+            continue
+        got = rx.findall(sample)
+        if got != expect:
+            bad.append(f"{rx.pattern}  (got {got!r}, want {expect!r})")
+    # The outer-gate line also contains "BLOCKER ... for every obligation", and
+    # BLOCKER_RE must NOT claim it: counting it as a per-obligation refusal is
+    # how one line covering thirty obligations gets counted as one.
+    outer = ("smt-bmc: BLOCKER all_paths_complete for every obligation "
+             "(outer gate); open in 1 method(s), truncated in 1 method(s), 0 open")
+    if BLOCKER_RE.findall(outer):
+        bad.append("BLOCKER_RE matches the aggregate outer-gate line")
+    if bad:
+        print("blocker_census: the log format has changed; these patterns no "
+              "longer match what the engines emit:", file=sys.stderr)
+        for b in bad:
+            print(f"  {b}", file=sys.stderr)
+        sys.exit(2)
+
+
+def classify(rec):
+    """(bucket, dominant blocker, obligation count) for one unproven record.
+
+    The obligation count is the orchestrator's, not a count of BLOCKER lines:
+    the outer gate refuses every obligation in a single line, so counting
+    lines would report one where the task has thirty.
+    """
+    n = rec["open_n"]
+    if rec["verdict"] == "TIMEOUT":
+        return "timeout", "(killed at the wall clock)", n
+    if rec["verdict"].startswith("KILLED") or rec["verdict"].startswith("ERROR"):
+        return "killed", "(signal, not a verdict)", n
+    if rec["downgraded"]:
+        # Ordered before the blocker case deliberately. Such a task usually
+        # *also* has blockers -- the obligations nobody violated are still
+        # unproven -- but the witness is the proximate reason this task scores
+        # nothing, and it is the one that responds to different work.
+        why = Counter(rec["replay"]).most_common(1)
+        return "refuted-witness", \
+            f"replay {why[0][0]}" if why else "replay refused (reason not logged)", n
+    if rec["blockers"]:
+        top = Counter(rec["blockers"]).most_common(1)[0][0]
+        return KIND.get(top, "other"), top, n
+    if rec["outer"] is not None:
+        # The BMC never reached its discharge loop. Its own accounting of
+        # where the open obligations live is the finding: obligations open in
+        # a method that was never truncated cannot be explained by depth.
+        _open_m, _trunc_m, elsewhere = rec["outer"]
+        if elsewhere:
+            return "budget", "all_paths_complete (outer gate, but open elsewhere)", n
+        return "budget", "all_paths_complete (outer gate)", n
+    return "no-candidate", "(nothing published)", n
+
+
+def report(records, dump=None):
+    total = len(records)
+    scored = [r for r in records
+              if (r["verdict"] == "TRUE" and r["expected"] is True)
+              or (r["verdict"] == "FALSE" and r["expected"] is False)]
+    wrong = [r for r in records
+             if r["verdict"] in ("TRUE", "FALSE") and r not in scored]
+    unproven = [r for r in records if r not in scored and r not in wrong]
+
+    kinds, reasons = Counter(), Counter()
+    ob_kinds, ob_by_bucket = Counter(), Counter()
+    # Two disjoint populations of unfinished work, and reporting only the first
+    # understates the second to zero:
+    #   open      nobody closed the obligation
+    #   refuted   an engine closed it with a violation the JVM would not
+    #             reproduce, so it is closed *wrongly* and scores nothing
+    refuted_ob = Counter()
+    examples = defaultdict(list)
+    counted, uncounted = 0, 0
+    for r in unproven:
+        bucket, top, n = classify(r)
+        kinds[bucket] += 1
+        reasons[top] += 1
+        examples[bucket].append(r["name"])
+        if n:
+            ob_by_bucket[bucket] += n
+            counted += n
+            for part in r["open_kinds"].split():
+                if "=" in part:
+                    k, _, v = part.partition("=")
+                    ob_kinds[k] += int(v)
+        else:
+            uncounted += 1
+        refuted_ob[bucket] += len([x for x in r["replay"] if x != "Confirmed"])
+
+    print(f"\n{total} runs — {len(scored)} scored, {len(wrong)} WRONG, "
+          f"{len(unproven)} unproven")
+    refuted_total = sum(refuted_ob.values())
+    print(f"{counted} obligation(s) left open across them, and "
+          f"{refuted_total} closed by a witness replay would not reproduce "
+          f"({uncounted} run(s) reported no open-set)\n")
+    # A table of zeros is not a finding, it is a broken instrument. Distinguish
+    # the two: if runs that *did* reach the end of the orchestrator loop all
+    # report no open-set, the parse is wrong, not the corpus.
+    reached_end = [r for r in unproven
+                   if r["verdict"] not in ("TIMEOUT",)
+                   and not r["verdict"].startswith(("KILLED", "ERROR"))]
+    if reached_end and counted == 0:
+        print("!! every run that finished reported no open obligations. That is\n"
+              "!! almost certainly a parse failure, not a corpus in which nothing\n"
+              "!! is open -- the obligation columns below mean nothing. Check\n"
+              "!! OPEN_RE against a real log before reading them.\n")
+
+    # A run that outlived its budget got more time than every other task, so
+    # its verdict is not comparable with theirs -- which is the overfitting
+    # CLAUDE.md warns about, moved from the engine into the harness. Report it
+    # rather than average it in.
+    overran = [r for r in records
+               if r.get("dur", 0) > r.get("budget", 1e9) * 1.25]
+    if overran:
+        print(f"!! {len(overran)} run(s) outlived the {records[0].get('budget')}s "
+              f"budget by >25%, so the process guard did not fire. Those runs "
+              f"had\n!! more time than every other task and their verdicts are "
+              f"not comparable. Worst:")
+        for r in sorted(overran, key=lambda x: -x["dur"])[:5]:
+            print(f"!!   {r['dur']:7.0f}s  {r['name']} ({r['prop']})")
+        print()
+
     RESPONDS = {
         "budget": "scheduling / more effort  <-- the scheduler's ceiling",
         "model":  "modelling the callee (lift java.base)",
         "theory": "a different encoding",
         "refuted": "feeding refutations back into the loop",
+        "refuted-witness": "witness construction / replay fidelity (#25)",
         "timeout": "anytime engines, partly",
+        "killed": "nothing — contention artefact, re-run on an idle machine",
         "no-candidate": "unknown — nothing published at all",
         "other": "unclassified blocker",
     }
+    print(f"{'why not':<16} {'tasks':>6} {'% tasks':>8} {'open':>6} {'refuted':>8}"
+          f"  responds to")
+    print("-" * 94)
     for k, n in kinds.most_common():
-        pct = 100 * n / unproven if unproven else 0
-        print(f"{k:<16} {n:>6} {pct:>13.1f}%  {RESPONDS.get(k, '')}")
+        tp = 100 * n / len(unproven) if unproven else 0
+        print(f"{k:<16} {n:>6} {tp:>7.1f}% {ob_by_bucket[k]:>6} "
+              f"{refuted_ob[k]:>8}  {RESPONDS.get(k, '')}")
 
-    if reasons:
-        print(f"\n{'dominant blocker':<34} {'tasks':>6}")
-        print("-" * 42)
-        for r, n in reasons.most_common():
-            print(f"{r:<34} {n:>6}")
+    print(f"\n{'dominant blocker':<52} {'tasks':>6}")
+    print("-" * 60)
+    for r, n in reasons.most_common():
+        print(f"{r:<52} {n:>6}")
 
-    for k in ("budget", "theory"):
+    if ob_kinds:
+        print(f"\n{'open obligation kind':<32} {'count':>7}")
+        print("-" * 41)
+        for k, n in ob_kinds.most_common():
+            print(f"{k:<32} {n:>7}")
+
+    res = Counter(note for r in unproven for note in r["residuals"])
+    if res:
+        print(f"\n{'residual (found a path, could not use it)':<52} {'runs':>6}")
+        print("-" * 60)
+        for k, n in res.most_common(10):
+            print(f"{k[:52]:<52} {n:>6}")
+
+    for k in ("budget", "theory", "no-candidate", "refuted-witness"):
         if examples[k]:
-            print(f"\n{k} examples: " + ", ".join(examples[k][:8]))
+            print(f"\n{k} examples: " + ", ".join(sorted(set(examples[k]))[:8]))
 
-    print("\nThe 'budget' row is what a scheduler can convert. Everything below "
-          "it needs\na model or a theory, and will not move however the time is "
-          "spent.")
+    if dump:
+        with open(dump, "w") as f:
+            f.write("name\tproperty\texpected\tverdict\tbucket\tblocker"
+                    "\topen\tkinds\n")
+            for r in unproven:
+                bucket, top, n = classify(r)
+                f.write(f"{r['name']}\t{r['prop']}\t{r['expected']}\t"
+                        f"{r['verdict']}\t{bucket}\t{top}\t{n if n else ''}\t"
+                        f"{r['open_kinds']}\n")
+        print(f"\nwrote {len(unproven)} rows to {dump}")
+
+    print("\nThe 'budget' row is what a scheduler can convert. Everything "
+          "below it needs\na model or a theory, and will not move however the "
+          "time is spent.")
 
 
 if __name__ == "__main__":

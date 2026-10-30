@@ -2,6 +2,864 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — the heap model was never the problem: a decided query, not a timeout
+
+The last open question about the heap work (gh #109) was whether CHC's Horn
+queries were well-formed or vacuously `unknown`. Settled by dumping one and
+running the solver by hand, and the answer retires the whole line of
+investigation.
+
+### The query is decided in 0.05 seconds
+
+`AJAVE_CHC_DUMP` on `algorithms/BinaryTreeSearch-FunSat01` gives 317KB, 68
+predicates, 82 rules. z3 answers **`unsat` in 0.05s** — and in this Horn
+convention `sat` is safe, so `unsat` says the abstraction admits a trace in
+which the assertion fails. The engine reporting `Unknown` after 75ms was never
+giving up for want of time: the query had already been **decided**, and decided
+the useless way. No budget, no better summary and no more solver power changes
+a decided query.
+
+### The encoding is exonerated, by ablation rather than by reading it
+
+There are exactly two error rules. Dropping the integer-overflow one leaves
+`unsat`; dropping the assertion's leaves **`sat`** in milliseconds. So every
+other part of the encoding — the Burstall field arrays, C1's threaded
+summaries, the interprocedural relations — is strong enough to be *proven
+safe*. The only thing CHC cannot establish is that the assertion's block is
+unreachable.
+
+Two hypotheses died before any code was written, which is the point of testing
+them first:
+
+- **The entry heap is unconstrained.** The entry fact is unconditional, so
+  every field map is an arbitrary array at entry to `main`, which looked fatal
+  given the JVM zero-initialises fields. Replacing all eight array arguments
+  with the all-zero array in the dumped query: still `unsat`. Not the cause.
+- **`Verifier.assume` is dropped.** It is not; `chc.rs` handles `Stmt::Assume`
+  in both encoders.
+
+### What is actually missing, and the pair of benchmarks that pins it
+
+Not a heap model — inference of a **quantified invariant over heap contents**.
+`AJAVE_CHC_QGEN` is exactly that mechanism, it is on by default, and the
+boundary is sharp:
+
+| the quantified fact is established by | and consumed by | qgen |
+|---|---|---|
+| a loop over an array, same method | the same method | **finds it** |
+| a guard in one method | a traversal in another | **does not** |
+
+`heap/EveryElementNonNullAfterAFillLoop` is the first row and is TRUE with qgen,
+UNKNOWN without. `heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored` is
+the second, added here: `BinaryTreeSearch-FunSat01` reduced from 120 lines to
+15, needing `forall n . value[n] >= 0` where `insert`'s early return for a
+negative argument establishes it and `search`'s traversal consumes it.
+
+Ground truth argued by construction and confirmed on a real JVM over 400,000
+trials with negative probes including `INT_MIN`. The reduction reproduces the
+original exactly: UNKNOWN, query `unsat`, and `sat` again once that one error
+rule is removed — so the header's claims are verified of the 15-line program
+and not merely inherited from the 120-line one.
+
+Keeping both is the contribution. They bracket a capability boundary in 15
+lines each, where previously the same fact was buried in a 120-line benchmark
+with four confounds.
+
+### Conclusion on the heap work
+
+Done, and now characterised rather than merely flat. What remains is
+cross-procedural quantified invariant inference, which is a research problem
+and not a bounded fix; it is worth +2 per success on at most the 28 field-only
+targets of the 107 (gh #111 covers the 37 array-only ones, where C1 cannot see
+`Stmt::ArrayStore` at all). The day's actual points came from a control-flow
+edge the BMC never took, which is the signal to follow.
+
+
+## 2026-10-29 — an implicit throw reaches its handler, and the wrong TRUE on the way
+
+`handle_check` asked the solver whether an obligation could fail, recorded a
+violation, and then carried straight on to the next statement. The JVM does not:
+it transfers control to whatever handler covers the throwing instruction. So an
+assertion reachable **only** through an implicitly thrown exception was
+unreachable to the BMC entirely, and such a task could not even appear under a
+nameable cause in the blocker census — the engine had no opinion to publish,
+because it never got there.
+
+### Measured on the blast radius, not the corpus
+
+The fork is a no-op unless a block has an exceptional edge whose handler catches
+what the obligation kind raises, so **the set of tasks that can change is
+decidable from the code**: those with a `catch` for a class one of the five
+implicit kinds can raise. 352 task-property pairs of 1,784. Measuring those
+rather than re-running everything is not sampling; it is the blast radius.
+
+Diffed per task against the pre-fix idle corpus run at `436ecd4`:
+
+| | |
+|---|---|
+| `ArrayIndexOutOfBoundsException1/2/3` | UNKNOWN → **FALSE** |
+| `ClassCastException1` | UNKNOWN → **FALSE** |
+| net | **+4 correct, 0 WRONG** |
+
+All four confirmed individually with the flag on and off, and all four are
+replay-confirmed FALSEs rather than guesses. Smoke 178 against 174.
+
+Two apparent losses — `CustomViewAbove` TRUE→UNKNOWN, `Sanitizers1`
+FALSE→UNKNOWN — are **not** the fix. Both are correct when run individually
+with the fork on, at times indistinguishable from the fork off (3.4s vs 3.1s;
+187.6s vs 187.3s). `Sanitizers1` at 187s against a 295s budget is exactly the
+coin-flip this file warns about. They appeared only in a contended
+`--allow-busy` run. Checking them was two commands, and it is the difference
+between "worse than the baseline" and "worse because of this change".
+
+### The first cut was a wrong TRUE, and the soundness argument was the wrong shape
+
+`securibench/Refl3` went to TRUE against an expected FALSE.
+
+Exploring the handler overwrites `current_block`, which is **not** part of
+`SavedState`. I restored everything that is and nothing that is not. The
+straight-line path then asked "is this call inside a try range" about the
+*handler's* block, so `has_unresolved_in_try` stopped being set — four
+`BLOCKER has_unresolved_in_try` with the fork off, none with it on — and an
+obligation was discharged as exhaustively proven.
+
+The argument written in the commit was: *additive to an under-approximating
+search, so it cannot create a wrong TRUE.* That is true of the exploration and
+false of the bookkeeping wrapped around it. **Adding states is safe; losing
+track of where you are is not.** A soundness argument about an engine has to
+cover the state the engine keeps, not only the states it visits.
+
+This is the second time a context-relative identifier escaped its context in
+this file; inlining once failed to restore `current_block` too. CLAUDE.md names
+the class. `Refl3` is now a canary annotated with the mechanism, because the
+honest answer there is UNKNOWN and a TRUE means the restore was dropped again.
+
+### Deliberately half-done, and saying so
+
+The fall-through continuation is left unconstrained rather than being given
+"the check held". Constraining it would be more faithful — the JVM really does
+not continue past a throwing instruction — but it *prunes*, and a prune
+justified by a constraint whose satisfiability has not been established is how
+`Pan_exceptionprone` became a wrong TRUE. That half needs its own measurement
+and does not get to ride along with this one.
+
+### A note on measuring under a flaky harness
+
+Five long background runs were terminated mid-flight by the environment, at
+18–49 minutes, including two full corpus attempts. Partial runs were discarded
+rather than combined, because a score assembled from fragments of different
+runs describes no configuration that ever existed. The working method was to
+shrink each measurement to fit a foreground call and to pick a target set small
+enough to be justified from the code — which produced a sharper result than the
+full corpus run would have, since the full run dilutes four verdict changes
+across 1,784 pairs.
+
+
+## 2026-10-29 — the heap mechanisms are inert on the only population that could convert
+
+The corpus is flat at **2058** (VA 874 / NRE 1184, 1 WRONG, that being the
+known `ReverseInterpolator_true` mislabel). The standing explanation for the
+heap work scoring nothing was that its gains land on shapes the corpus barely
+contains. That explanation is now measured rather than asserted, and it
+survives — but the mechanism underneath it is not what was assumed.
+
+### Building a denominator that means something
+
+Of the 449 unproven task-property pairs, most cannot be converted by heap
+reasoning *for reasons of principle rather than quality*:
+
+- **162 expect FALSE.** A heap invariant is an `Over` artifact: it discharges,
+  it cannot witness a violation. The entire `*-MemUnsat*` family — the most
+  heap-shaped thing in the corpus — is unreachable by better heap modelling.
+- **144 touch no heap at all**, by inspection of their own source.
+
+That leaves **107** expects-TRUE, array/field/linked-shaped pairs: a ceiling of
++214 on a 2058 base, concentrated in `algorithms` (38), `jbmc-regression` (20),
+`argv-tasks` (17), `jayhorn-recursive` (11). Saved as a reusable target list
+rather than re-derived each time.
+
+### Four arms, bit-identical
+
+| arm | TRUE | UNKNOWN | TIMEOUT | diffs vs control |
+|---|---|---|---|---|
+| default | 1 | 98 | 8 | — |
+| `AJAVE_CHC_HEAP_SUMMARY=1` (C1) | 1 | 98 | 8 | **0** |
+| `AJAVE_CHC_QGEN=0` (ablate D1) | 1 | 98 | 8 | **0** |
+| `AJAVE_SITE_FIELDS=0` (ablate B2/B3) | 1 | 98 | 8 | **0** |
+
+Not one task of 107 changed verdict under any arm, not even a timeout
+shuffling; runtimes within 2%. C1 matters most here: it is off by default,
+exists specifically to thread field writes across calls, `jayhorn-recursive`
+and `BinaryTreeSearch` are both in the set, and **the flat corpus result had
+been measured with C1 off**. Measured on its own target population it converts
+nothing.
+
+Also worth recording from the control arm: only **8 of the 107 are
+time-limited**, the other 98 being UNKNOWN verdicts the engines reached and
+declined. Within the heap-shaped population the scheduling prize is 8 tasks,
+not 107.
+
+### What the ablation does *not* establish, and the trap it would have been
+
+An inert ablation invites the conclusion "heap modelling does not help these
+programs". It does not support that, because it cannot distinguish that from
+"CHC never gets far enough to use the model". Ruling out one cause is not
+establishing another — the error that previously made a guess feel measured.
+
+So it was checked rather than inferred, and the first guess was wrong. CHC does
+**not** decline these bodies. On `BinaryTreeSearch-FunSat01` with C1 on it logs
+`chc: encoding 1 obligation(s) for Main...`, runs **75ms**, and returns
+`Unknown`. It encodes and gives up immediately. "Inter-procedural LIA encoding"
+is only a log label; `encode_chc_interproc` does thread array-sorted heap fields
+when `heap_summary` is set, so C1 was genuinely in the active path.
+
+Why the query returns `Unknown` in 75ms is open (gh #109). The lead is
+`chc-imprecision: Nondet/Havoc`, logged three times on that task. This project
+has hit vacuous Horn queries three separate times, and **an `unknown` proves
+nothing until the query is shown well-formed** — so no conclusion about heap
+modelling quality is supportable yet.
+
+### And C1 cannot be observed at all
+
+Attributing the inertness ran into the reason it was unattributable: there is
+**no diagnostic anywhere** for whether C1 produced a summary. `heap_summary_of`
+returning `None` for every method is indistinguishable from heap summaries not
+helping. Instrument the refusal; do not infer it.
+
+Reading that gate turned up gh #110: its comment says a method whose callee is
+unresolved gets no summary, and the code has no such condition —
+`"unresolved"` appears exactly once in the function, in the comment. The
+closure folding callee footprints silently skips a bodyless callee rather than
+poisoning its caller, so such a method still gets `Some(fp)` and its summary
+asserts that fields outside `fp` survive the call. Latent, since C1 is off by
+default, and reachability is unestablished; but it is the second independent
+soundness hole in C1 after #106, and it is precisely the defect class this file
+names — a comment asserting an invariant the code does not maintain, with no
+test named after the argument.
+
+
+## 2026-10-29 — Triaging the unproven: two broken instruments and a three-way split
+
+Work towards a census of *why* obligations go unproven, rather than how many
+tasks fail. Two findings, and both arrived the same way: by demanding a control
+before believing a number, and by writing the benchmark before the fix.
+
+### The instrument reported zeros, which is not a finding
+
+`tools/blocker_census.py` bucketed tasks by the BMC's `BLOCKER` log lines.
+Three things were wrong with that as a measure of obligations.
+
+*The outer gate covers everything in one line.* When the BMC truncates before
+reaching its discharge loop it refuses every obligation with a single aggregate
+log line, so a regex over `BLOCKER` lines counted one refusal on a task with
+thirty open obligations. Obligation counts now come from the orchestrator's own
+open-set report, and the per-obligation pattern is anchored so it no longer
+claims the aggregate line.
+
+*A refuted witness is neither open nor scored.* `TCAS_prop1` reports `open=0`
+and still scores nothing: an engine closed its obligation with a violation the
+JVM declines to reproduce, so it is closed *wrongly*. The open-set alone is
+therefore the wrong denominator for unfinished work. The census now runs with
+`--trace`, reads the per-violation `CertResult`, and reports open obligations
+and refuted witnesses as the two disjoint populations they are. On the smoke
+set that is the single largest bucket — 8 of 23 unproven runs.
+
+*`$` is not end-of-line without `re.MULTILINE`.* So the open-set pattern
+matched nothing anywhere in any log, and the first control run printed a table
+whose every obligation column was zero — indistinguishable from the real
+finding "nothing is open". This is the failure mode CLAUDE.md warns about, and
+the only reason it was caught is that the control was run before the numbers
+were used. Two guards against recurrence: `self_test()` pins every pattern
+against a verbatim sample line and exits 2 when one stops matching, and
+`report()` refuses to print an obligation column when every run that reached
+the end of the orchestrator loop claims nothing is open.
+
+### "An assertion in a catch block" is three mechanisms, not one
+
+Six of smoke's 23 unproven runs landed in `no-candidate` — the BMC published
+nothing at all, not even a refusal. Two of them, `ClassCastException1` and
+`ArrayIndexOutOfBoundsException1`, have the same shape: the assertion is
+reachable *only* through an exception handler.
+
+The first hypothesis was that implicit exceptions never reach their handlers.
+Writing the minimal benchmark disproved it, which is precisely what the
+benchmark-before-fix rule is for. The reduction
+(`AssertionReachedOnlyByAnImplicitThrow`, integer division by a constant zero
+inside a try) **passes** — and the engine that gets it is the finding. Both BMC
+and CHC report `violated=0`; the *concrete* engine carries it, because the
+program is deterministic and the all-zero probe executes it exactly
+(`--interpret` prints `INTERPRET ESCAPED java.lang.AssertionError`).
+
+Separating the mechanism needed a third program. Guarding the violation away
+from the all-zero probe — `d != 0`, divisor `d - 7`, so the handler is reached
+only at `d == 7` — gives UNKNOWN against a ground truth of FALSE. The trio now
+reads:
+
+| benchmark | mechanism | decided by |
+|---|---|---|
+| `AssertionInCatchBlock` | explicit `throw` in a callee | BMC, `dispatch_exception` |
+| `AssertionReachedOnlyByAnImplicitThrow` | implicit throw, deterministic | concrete engine |
+| `ImplicitThrowReachesItsHandlerOnlyForSomeInputs` | implicit throw, input-dependent | **nothing** |
+
+The cause is in `explore.rs::handle_check`: it asks the solver whether an
+obligation's condition can fail, records a violation if so, and then continues
+*straight-line*. A failing check never forks control along the block's
+exceptional edge. The lifter is not at fault — it emits the edge, and the
+handler's obligation is seeded and reported open. `handle_throw` and
+`dispatch_exception` cover `athrow` and cross-method propagation, so the
+explicit case works and the implicit one does not.
+
+Why this stayed invisible: the BMC has no opinion to publish, because it never
+evaluated the obligation. No discharge, no violation, and no blocker naming a
+cause — so the task cannot appear under any nameable reason in a census built
+on refusals. That is what `no-candidate` was concealing.
+
+54 corpus task directories contain an assertion inside a catch block, including
+the whole `algorithms/*-Mem*` family. That is an upper bound on the population,
+not an estimate of it: the explicit-throw and deterministic routes already
+work, so how many are actually blocked this way needs the per-task census
+rather than a grep.
+
+
+## 2026-10-28 — B2/B3 had never executed, and three wrong explanations for why
+
+`ref_alloc_sites` resolved **no real receiver on any program**, so B2's site
+cells and B3's array cells were dead code from the day they were written.
+Smoke: **173 with them on, 173 with `AJAVE_SITE_FIELDS=0`** — identical in
+runs, correct, unproven, WRONG and score. The corpus is flat too.
+
+### The defect
+
+Two independent causes, both visible in any lifter dump.
+
+*No copy propagation.* It matched `Rvalue::New` directly, but the lifter never
+names the receiver — for `Box a = new Box(); a.v = 1;` it emits
+`v0 = new Box; v2 = v0; v1 = v2; v5 = v1; v5.v = 1`. Every real receiver
+resolved to `None`, so every `PutField` took the unknown-receiver branch and
+every read fell back to the flat cell.
+
+*Flow insensitivity.* javac reuses slots: in a two-object program `v1` holds
+**both** allocations at different points, so a per-variable map must drop it as
+ambiguous — correctly, which is why per-point resolution is required rather
+than merely nicer.
+
+Fixed with `ref_alloc_sites_at`, a per-program-point forward dataflow with
+join-by-agreement. Kept separate from `array_sites_at_block_entry` rather than
+generalised: the CHC encoders index sites by `NewArray` only, and an object site
+arriving there hits the silent-drop path that cost a day earlier.
+
+**This is the same bug class, in the same session, fixed once.**
+`array_sites_at_block_entry` was written hours earlier *specifically because*
+flow-insensitive per-variable resolution dies on slot reuse, diagnosed from a
+dump showing this exact pattern. The function with both flaws was written
+earlier the same day and never revisited. Having the general lesson available
+did not produce the second application of it.
+
+### Three explanations for the null result, two of them wrong
+
+Worth recording in full, because the second is a trap the setup invites.
+
+**"The corpus lacks the shape."** Asserted before checking whether the feature
+ran. It had not.
+
+**"There is a third blocker."** Asserted from an isolated-AI experiment —
+disable everything but `interval-ai`, compare B2 on and off, observe UNKNOWN
+either way. The control that settles it:
+with the AI isolated, `int x = 1; assert x == 1;` is **also UNKNOWN**. The
+harness cannot observe a discharge at all, so it could never show B2 working,
+and "still UNKNOWN with B2 on" carried no information. **An experiment whose
+negative result is guaranteed by its setup is not evidence.** Run the control
+that proves the apparatus can detect a positive.
+
+**The benchmarks were incapable of the job.** On
+`heap/TwoObjectsDistinctFieldValues`, written to demonstrate B2, the trace is
+`timing step smt-bmc 6ms discharged=2` — `interval-ai` never runs. The BMC
+closes both obligations first. The B3 commit message had already said "a
+benchmark that passes either way is not evidence for the change"; the
+observation was recorded and then not acted on, and both benchmarks kept being
+cited as capability evidence.
+
+**A capability benchmark must be run with the capability disabled, and the
+engine that implements it must be shown to have run.** Passing proves nothing.
+
+### Still open
+
+Whether site-indexed cells can help is **unmeasured in both directions**.
+`SiteInfo.unique = !body_has_loops(body)` is computed per *body*, not per site,
+so a loop anywhere disables site-indexing for every allocation in the method —
+while a program that needs the AI at all requires a loop the BMC cannot unroll.
+Whether those conditions are disjoint is the next check, offered as a
+hypothesis rather than a finding, since this entry already contains two
+confident explanations that were not. Reverting B2/B3 remains on the table and
+needs that answer first. See #104.
+
+## 2026-10-28 — the corpus measurement: flat, and what a flat result is evidence of
+
+Full corpus at `0030a62`, idle, nothing else running. 1785 runs in 5298s.
+
+| property | runs | correct | WRONG | score | previous | delta |
+|---|---|---|---|---|---|---|
+| valid-assert | 1012 | 734 | 1 | 874 | 877 | −3 |
+| no-runtime-exception | 771 | 600 | 0 | 1184 | 1182 | +2 |
+| | 1783 | 1334 | 1 | **2058** | 2059 | **−1** |
+
+37 timeouts against 41. The single WRONG is `ReverseInterpolator_true`, the
+known SV-COMP mislabel, so **zero wrong answers of ajave's own making** after a
+branch touching the interval domain, both CHC encoders, the hint seam and the
+artifact contract.
+
+### Flat is the predicted result, and it is still worth having measured
+
+The heap work's capability gains are real and invisible here. The array-store
+fix and D1's qgen each turn UNKNOWN into TRUE with CHC isolated; the corpus
+contains a handful of array-fill-shaped tasks. **A fix that unblocks a
+capability nothing in the corpus exercises scores zero on the corpus**, and that
+is a fact about the corpus rather than about the fix.
+
+What the run does establish, which nothing cheaper could:
+
+- **#101 cost nothing at corpus scale.** Inferred from smoke, now measured.
+- **No wrong answer was introduced** across 1783 runs by five checkpoints of
+  heap work. That is the claim the whole session rests on and it had only ever
+  been checked on 157 tasks.
+- **Timeouts did not regress** (37 vs 41), which was the live risk for C1's
+  arity and D1's quantified search. D1 is on by default; C1 remains off and now
+  has a corpus baseline to be measured against when it is revisited.
+
+### Do not extrapolate a category-ordered run mid-flight
+
+Asked for a running estimate three times, I produced 2065 at 789 runs, 1961 at
+1124, and 2131 at 1639 — three figures spanning 170 points, none within 70 of
+the actual 2058 until the run was 92% done.
+
+`bench.py` walks categories alphabetically and they differ enormously in
+difficulty and property mix: `autostub` and the float sets early,
+`jbmc-regression`/`jpf-regression` (easy, assert-shaped) and `securibench`
+(largely unproven) late. A partial score is not a fraction of the final one, and
+the running average is biased by whatever happens to be alphabetically first.
+
+The one thing that *was* reliable mid-run was reasoning about the mechanism
+rather than the arithmetic: valid-assert extrapolated 89 points low at halfway,
+and predicting that the outstanding assert-shaped categories would recover it
+proved correct. **Argue from what the remaining population is, not from the rate
+so far** — and when neither is available, say the estimate is not yet worth
+having.
+
+## 2026-10-29 — a Horn entry fact that was `P → P`, and the wrong TRUE it bought
+
+`AJAVE_CHC_HEAP_SUMMARY=1` (C1) proved a false program safe. Reduced to ten
+lines in `benchmarks/ajave/engine-chc/RecursiveFieldWriteIsNotForgotten`:
+
+```java
+static void bump(Box b, int n) { if (n <= 0) return; b.v = b.v + 1; bump(b, n-1); }
+b.v = 0; bump(b, 3); assert b.v == 0;     // FALSE: b.v is 3
+```
+
+CHC isolated answered **TRUE**.
+
+### The defect
+
+Each method's entry fact should be `side-conditions → m_b0(args)`. It was being
+built by taking `block_app_src`'s joined string — which is
+`(and <application> <conditions>…)` — and removing the application with
+`replacen`. C1 added the entry heap to the block relation, so the application
+`block_app_src` built used `fld_entry(f)` while the string being removed was
+rebuilt with `fld_src(f)`. **The two spellings diverged, `replacen` matched
+nothing, and the application stayed in its own antecedent.**
+
+The clause became `m1_b0(…) → m1_b0(…)` — a tautology that forces nothing. So
+`m1_b0 = false` satisfies it, and Spacer took it: the model has every block of
+`bump` and its summary interpreted as the **empty relation**. An empty summary
+makes the call site's `(m1_s …)` false, which makes every block after the call
+unreachable, which discharges every obligation past it **vacuously**. `sat` =
+"safe".
+
+`CLAUDE.md` already records this exact failure mode from attempt #95 — "the
+solver interprets such a predicate and may choose it empty, which makes
+`assume phi(..)` unsatisfiable and the read path vacuously safe" — with two
+smoke canaries from that occurrence. C1 reintroduced the same shape through a
+different door, and those canaries did not catch it: smoke passed at 173 with
+C1 on.
+
+### Why only recursion
+
+A non-recursive method's conclusion clause forces its summary non-empty
+wherever its return block is reachable. A recursive method's conclusion has its
+own summary in the *body*, so the empty relation satisfies both the conclusion
+and the call site vacuously. Measured: non-recursive field writes through a
+summary (constant write, and read-modify-write) both stay correctly UNKNOWN.
+
+### The fix, and why it is structural
+
+`block_parts_src` now returns `[application, condition…]`, and the entry fact
+takes the conditions and builds its head directly. There is no second spelling
+to drift and no string removal to fail.
+
+That shape matters because **this single clause has now had three
+well-formedness bugs**: a bare conjunction z3 rewrote into a rule with a
+negative predicate and refused outright; an argument list rebuilt from
+`live_at` that disagreed once array arguments arrived; and this one. All three
+presented as solver weakness — `unknown`, `unknown`, and a wrong TRUE — and all
+three were found by reading generated SMT-LIB rather than Rust. `CLAUDE.md`
+says "assert every replacement"; not constructing the string twice is better.
+
+### What it cost to believe
+
+C1 looked like +7 correct on `algorithms` with one wrong TRUE. After the fix,
+`BinaryTreeSearch-FunSat01` — which that +7 included, and which this file
+previously recorded as C1 solving the task Part E was built for — is **UNKNOWN
+again**. The gains were vacuous discharges. `Tsp-FunSat01`'s wrong TRUE is also
+gone.
+
+So the earlier entry claiming C1 solves `BinaryTreeSearch` is withdrawn. The
+*reasoning* in it stands — that task needs `∀o. value[o] ≥ 0` across a call,
+not shape reasoning — but C1 does not currently deliver it.
+
+The general lesson is one this file keeps relearning: **a gain from a mechanism
+whose soundness has not been separately established is not a gain.** +7 correct
+and one wrong answer is not "net −2"; it is an unmeasured mechanism, and the
+seven were the same bug as the one.
+
+## 2026-10-28 — correction: the three "lost" tasks were never lost, and how the misattribution was built
+
+Three entries below state that `argv-tasks/AbstractSerializationStreamReader_false`,
+`jayhorn-recursive/SatAckermann01` and `SatFibonacci01` were lost to the #101
+interval-hint soundness fix, at a cost of 5 points. **That is wrong.** Measured
+on the identical 148-task set, both builds, back to back:
+
+| build | runs | correct | WRONG | score |
+|---|---|---|---|---|
+| `main` | 148 | 125 | 0 | **158** |
+| `heap-full` | 148 | 125 | 0 | **158** |
+
+`main`'s arm ran twice at exactly 158. And the three tasks directly, on both
+builds: `TIMEOUT`, `UNKNOWN`, `UNKNOWN` — identical. They were already failing
+before the heap work began.
+
+So **#101 cost nothing measurable**, and the session is net-neutral on existing
+score with +15 from new benchmarks.
+
+### How the misattribution was constructed, which is the part worth keeping
+
+Three compounding errors, each individually small.
+
+**1. A `--check` regression is relative to the baseline *file*, not to the
+previous commit.** Main's baseline held 134 entries recorded against older code
+while main's set has 149. Those three tasks were recorded correct in a baseline
+predating their own regression, so `--check` flagged them against *any* build,
+including main's. Nothing in the output distinguishes "this build broke it"
+from "the baseline is stale" — and `CLAUDE.md` already warns that a baseline
+recorded under different conditions misleads, just not in this direction.
+
+**2. Ruling out one cause was read as establishing another.** The
+`AJAVE_SITE_FIELDS=0` ablation showed the losses were not attributable to B2.
+That is true, and it says nothing about #101. Treating it as confirmation was
+the step that made a guess feel measured.
+
+**3. The answer was already in the task list.** "Bisect the three stale
+smoke-baseline failures" was an open task *before* this session, naming exactly
+these three. The explanation existed and was not consulted.
+
+The arithmetic coincidence that should have been the tell: smoke went 158 →
+173, nine benchmarks worth exactly +15 were added, and 158 + 15 = 173. For the
+pre-existing tasks to have lost 5 points, something would have had to gain 5
+elsewhere — and no candidate was ever identified. A number that only
+reconciles via an unexplained offset is not reconciled.
+
+### What this does not change
+
+The #101 fix itself stands on its own evidence: the discharge it removed was
+violated by a JVM-confirmed witness, and
+`benchmarks/ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths`
+reproduces it in six lines. Soundness fixes do not need a score justification.
+What changed is that this one turns out not to have needed a score *defence*
+either.
+
+The smoke re-baseline was still the right action — the baseline was genuinely
+stale — but the commit message justifies it as absorbing #101's cost, which is
+not why it was stale.
+
+## 2026-10-27 — an interval hint that was true on one path, and site-indexed field cells
+
+Two things, found in that order, because the first was found by writing the
+benchmark for the second.
+
+### The sparse-map fault: a hint published at a join that holds on one branch
+
+`interval-ai` publishes `Artifact::Invariant` per `(block, variable)`, and
+`smt-bmc` asserts those into its path formula as facts true at that block **on
+every path**. `join_block_intervals` built them by iterating `state.vars` over
+the reached states and joining.
+
+`IState` stores intervals sparsely, and `IState::set` *removes* an entry rather
+than storing Top — deliberately, with a comment saying so, because absence
+already means Top. So a state that knew nothing about a variable had no entry
+for it, and **contributed nothing to the join instead of widening it to Top**.
+
+A bound narrowed on one branch was therefore published as holding at the join of
+that branch with one that knew nothing. The BMC asserted it, found the violating
+path infeasible, reported `all_paths_complete`, and discharged the obligation.
+That is a wrong TRUE at −16, and it needs six lines of Java to trigger:
+
+```java
+int n = Verifier.nondetInt();
+if (n == 0) { sink = 10; } else { sink = 20; }
+assert n == 0;              // discharged; a JVM-confirmed witness violates it
+```
+
+Two things are worth drawing out.
+
+**The comment was right and the consumer was wrong.** Nothing here contradicted
+itself: `IState`'s doc says absence is Top, `set` maintains exactly that, and
+`join_block_intervals` was the only reader that treated absence as "no opinion".
+No test could catch it from inside either engine, because each is correct on its
+own terms. This is the artifact-contract discipline in `CLAUDE.md` applied to a
+*representation* rather than a type: a sparse encoding is a claim about what
+absence means, and every consumer has to honour it.
+
+**Only `Blackboard::contested()` saw it.** The verdict stayed FALSE throughout,
+because `concolic` independently found the violation and JVM replay confirmed
+it. The wrong discharge was recorded in `proved_safe` and reported as a
+contradiction — which is what that mechanism exists for, and the first time it
+has caught a live defect rather than a legitimate candidate. On a task where no
+under-approximating engine reaches the violation, nothing would have reported
+anything.
+
+The consumer half was tightened too. `interval_hints_for_method` resolved two
+claims for one `(block, var)` with a plain `insert`, so publication order decided
+which survived. Each `Over` invariant is a claim that holds at the point, so
+their conjunction holds: it now takes the **meet**, and drops the key entirely
+if the meet is empty — two producers that disagree means one is unsound, and an
+unsatisfiable hint would make every path look infeasible, discharging everything.
+
+### B2: site-indexed field cells, and the rule that keeps them sound
+
+The flat field abstraction keeps one cell per `(class, name, desc)` with the
+receiver ignored, and is safe *because* it merges: every write to `Box.v` lands
+in one cell, so no read is narrower than the truth. It is also exact only when a
+class has one live instance, which is why `FieldPrec::may_update_strongly`
+requires a single allocation site for the whole class — two `new Box()` in a
+program and the analysis gives up on both.
+
+Site-indexed cells key on the receiver's allocation site, as a *refinement*
+layered over the flat cell rather than a replacement: the effective value of
+`o.f` for a receiver at site `s` is `flat(f) ⊓ cell(s, f)`. Both conjuncts hold
+of the object, so the meet does.
+
+The soundness rests on one rule. A write whose receiver's site is not known
+marks the field **escaped**, after which its cells are void and every read falls
+back to the flat cell — exactly the pre-B2 behaviour. Escape is monotone, which
+is also what bounds the fixpoint. `body_analysis::ref_alloc_sites` supplies the
+receiver map and maps a variable only when *every* definition of it is the same
+allocation; a variable two allocations reach is "unknown", because a strong
+update through it would be a lie about one of the objects.
+
+`benchmarks/ajave/heap/UnknownReceiverReadsTheMergedCell` is the program named
+after that rule, written before the change and wrong-TRUE without it — and it is
+the benchmark that turned up the hint bug above.
+
+`AJAVE_SITE_FIELDS=0` restores the flat abstraction exactly, so the refinement
+is measurable as an ablation rather than argued.
+
+## 2026-10-27 — C1: a heap effect crossing a call, and the binder that made the first attempt a lie
+
+CHC summary relations had arity `params + 1`, so they could say nothing about a
+heap effect. A call to a method that might write a field therefore **clobbered**
+it: the caller's knowledge was replaced by an unconstrained array. Worse, a
+*void* method got no summary at all — and a void method is exactly the one that
+exists for its heap effect, so a constructor or setter could never be described.
+
+C1 threads a **field footprint** through the summary: `m_s(params, pre-heap...,
+ret?, post-heap...)`, with a summary now declared for a void method whenever its
+footprint is non-empty.
+
+Measured in isolation with every other engine disabled, both benchmarks go
+UNKNOWN → TRUE:
+
+- `engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller` — the effect crosses.
+- `engine-chc/ACalleeThatWritesNothingInvalidatesNothing` — the frame holds. A
+  two-state summary can lose a fact as easily as carry one, and a C1 that
+  carried the write but dropped the frame would look like a success on the first
+  benchmark and cost points everywhere else.
+
+### Why the footprint, and not the program's fields
+
+Every summary argument costs Spacer, sharply, and this file already records a
+five-line program that times out with 14-ary block predicates and is `sat` in
+0.01s over its two live variables. A field array is `(Array Int Int)`, harder to
+synthesise an interpretation over than an `Int`, and C1 adds *two* per field.
+Threading the program's whole field set would make every summary unusable;
+threading a setter's own field costs two arguments. `MAX_SUMMARY_FIELDS = 6` is
+an upper bound on damage rather than a tuning target, and
+`c1_does_not_change_the_encoding_of_a_method_with_no_fields` pins that a
+field-free program encodes byte-identically either way.
+
+### The first version shipped a false claim, and the SMT text is what showed it
+
+A summary is a relation between two heaps. The conclusion at a `return` has the
+heap *at the return block* in scope, and the first version used that binder for
+both halves:
+
+```
+(=> (m1_b1 v0 fld_Box_v) (m1_s v0 fld_Box_v fld_Box_v))
+```
+
+`m_s(params, H, H)` — "this method changes nothing". A caller reading it
+concludes the field still holds its pre-call value. It is false about the
+method, and it happened to not produce a wrong answer only because CHC is an
+`Over` engine that cannot publish FALSE: the companion program asserting the
+*wrong* value answered UNKNOWN rather than TRUE.
+
+The fix is a distinct binder for the entry heap, threaded unchanged through
+every block relation so that it still means "on entry" once control reaches a
+return. Note what the threading costs: it is one extra array argument per
+footprint field on the block relations of summarised methods only, which is why
+the footprint restriction had to come first.
+
+Two things are worth recording about how this was caught. The structural check
+`a_summary_relates_the_entry_heap_to_the_exit_heap_not_one_to_itself` exists now
+and fails on the first version — but it was written *after* reading the
+generated SMT-LIB, not before. And the benchmark passed with the defect present:
+a program can be TRUE for the wrong reason, so **a capability benchmark going
+UNKNOWN → TRUE is evidence that something changed, not that the encoding is
+right.** Reading the clauses is what distinguishes those.
+
+The mechanism is **off by default** (`AJAVE_CHC_HEAP_SUMMARY=1`), and per
+`CLAUDE.md` that makes it unfinished: the encoding is complete and tested, what
+it lacks is a corpus measurement showing the capability outweighs the arity.
+
+## 2026-10-27 — the CHC encoders read arrays they never wrote, and what that says about where the heap gate was
+
+The most consequential finding of the heap work, and it is not a theory gap.
+
+### The symptom
+
+`docs/proposals/heap-full-implementation.md` places the array-fill shape under
+Part D, "quantified invariants", on the reasoning that `aastore_aaload1` needs
+`∀j. 0 ≤ j < size → a[j] ≠ null`. Checking that claim against a **constant**
+bound — where three unrollings suffice and no quantified invariant is needed at
+all — the CHC encoding still reported the assertion reachable.
+
+The encoding of that three-element program contained **twenty** uses of the
+array havoc destination and **zero** `store`s. The encoder read an array it
+never wrote. Every element was therefore unconstrained, including null, so the
+assertion was trivially reachable.
+
+### The cause
+
+`array_sites_of` answers one allocation site per variable **for the whole
+body**, and marks a variable ambiguous as soon as it is assigned from anything
+that is not a known array. That is a correct whole-body statement and useless
+as a resolution for a particular use, because **javac reuses local slots**. The
+lifted body for
+
+```java
+A[] a = new A[3];
+for (int i = 0; i < 3; i++) { a[i] = new A(); }
+for (int i = 0; i < 3; i++) { assert a[i] != null; }
+```
+
+assigns one slot the array, then an *element* of it, then an `AssertionError`.
+The store's receiver is that slot, so it resolved to nothing and took the "may
+land in any array, so havoc every site" branch — while the reads happened to go
+through a different, non-reused variable and resolved fine. Reads worked,
+writes did not, and the asymmetry is why nothing looked obviously broken.
+
+There was a second instance of the same root cause one level up: the *site set*
+was derived from the same map's image, so a body whose only array variable was
+a reused slot got an **empty** site set and no array state threaded at all —
+each load compiling to a fresh unconstrained constant. Which sites a body has
+is syntactic; whether a use resolves to one is a flow question. Using one map
+for both let an ambiguity at a use delete the state every other use needed.
+
+### The fix
+
+`array_sites_at_block_entry` — a forward dataflow over `VarId -> AllocSite`
+with join by agreement — plus `update_sites_for`, which both encoders apply
+statement by statement as they already traverse. `array_sites_in` answers the
+set syntactically. Both CHC encoders got it: `CLAUDE.md` records that a fix to
+one silently leaves the other exposed.
+
+### What it changes
+
+- The constant-bound fill loop is now **TRUE** under CHC alone, having been
+  unprovable.
+- **D1 (`fp.spacer.q3.use_qgen`) starts working.** Before the fix, qgen made no
+  difference to the nondet-bound fixture — Spacer reported the error
+  *reachable* (`unsat` in Horn's inverted convention), and quantified
+  generalisation cannot help when the abstraction genuinely admits a
+  counterexample. After it, `EveryElementNonNullAfterAFillLoop` goes UNKNOWN →
+  TRUE with qgen and stays UNKNOWN without, in both CHC-only and
+  full-portfolio.
+
+So the capability the plan predicted does exist; the plan was wrong about what
+stood in front of it.
+
+### The methodological point
+
+A1–A3 and B2/B3 made array and field contents *expressible* and returned zero
+points, which was read as "expressibility is not the gate, quantified inference
+is". That conclusion was right about expressibility and wrong about the cause,
+and the thing that separated them was **testing the easy case**. A quantified
+benchmark failing is consistent with both a missing quantified invariant and a
+missing `store`; a *constant-bound* benchmark failing is consistent with only
+one of them. The cheaper test was the discriminating one, and it was not run
+until the expensive explanation had already been adopted.
+
+## 2026-10-27 — D1 measured, and a flag that was first measured as neutral because nothing exercised it
+
+`AJAVE_CHC_QGEN` (`fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false`,
+which upstream documents as having to be set together) is **on by default**:
+
+| | runs | correct | WRONG | score | wall |
+|---|---|---|---|---|---|
+| off | 157 | 133 | 0 | 171 | 320s |
+| on | 157 | **134** | 0 | **173** | 319s |
+
+The expected cost was timeouts — a quantified search is a different and usually
+slower search — and on this set there is none: same wall clock, same timeout
+count, no task moved except the one that needs a quantified array invariant.
+
+Two things about this measurement are worth more than the number.
+
+### A flag measured against a set that does not exercise it produces no information
+
+The first three-arm run reported qgen as exactly neutral: 171 against 171, with
+identical correct counts. That looked like a clean negative result. It was not
+a result at all — **qgen's only demonstrated beneficiary was not in the smoke
+set.** The run measured the flag's cost on 156 tasks that do not use it and its
+gain on none.
+
+Adding `heap/EveryElementNonNullAfterAFillLoop` as a canary changed the answer
+from "neutral" to "+2". Nothing about the flag changed.
+
+`CLAUDE.md` already requires that a change be measured on both properties,
+because they consume different obligation kinds. This is the same failure one
+level down: a measurement is only evidence about the mechanism if the set
+contains something the mechanism acts on. Worth checking for any flag whose
+population is narrow — and narrowness is exactly why these flags exist.
+
+### The flag's value is not separable from the fix it shipped with
+
+qgen did nothing before the array-store fix. Spacer was reporting the error
+*reachable* on the array-fill shape, and quantified generalisation cannot help
+when the abstraction genuinely admits a counterexample — there was a real
+counterexample to find, because the encoding read an array it never wrote.
+
+So `AJAVE_CHC_QGEN=0` does not measure "the portfolio without D1" on any build
+that has the store fix. It measures the last step of a two-step change. Said
+here because the ablation switch looks like it isolates one decision and does
+not.
+
+### Gate hygiene, incidentally
+
+With qgen off, the new canary burns the full solver budget before answering
+UNKNOWN — a 300s tax on every smoke run. With it on by default the same task
+answers TRUE in 3s, so the suite stays near its five-minute budget and the
+expensive path is only taken when someone deliberately ablates. A canary whose
+cost depends on the default it is testing is worth noticing before it is
+committed.
+
 ## 2026-09-09 — the round loop and cursor deltas, measured
 
 Implemented. Full corpus at a 60s budget, idle-gated, against the 866/1181

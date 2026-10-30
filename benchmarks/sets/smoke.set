@@ -29,6 +29,12 @@ sv-comp/jbmc-regression/StringValueOf07.yml valid-assert
 sv-comp/jbmc-regression/StringValueOf09.yml valid-assert
 sv-comp/securibench/Inter13.yml valid-assert
 sv-comp/securibench/Refl3.yml valid-assert
+# ^ also the canary for the wrong TRUE #108's first cut caused: exploring the
+# handler left `current_block` pointing at it, so the straight-line path asked
+# "is this call inside a try range" about the wrong block,
+# `has_unresolved_in_try` stopped being set, and an obligation was discharged as
+# exhaustively proven. UNKNOWN is the honest answer here; TRUE means the restore
+# was dropped again (2026-10-29).
 sv-comp/juliet-java/CWE369_Divide_by_Zero__float_connect_tcp_divide_01_bad.yml valid-assert
 sv-comp/securibench/Refl4.yml valid-assert
 sv-comp/securibench/StrongUpdates1.yml valid-assert
@@ -225,3 +231,54 @@ sv-comp/java-ranger-regression/TCAS_prop1.yml valid-assert
 # exactly 1.0f. A confirmed wrong TRUE, caught only because float-search found
 # the violation and replay certified it.
 ajave/jvm-floats/FloatIsNotDouble.yml valid-assert
+
+# Engine seams: an interval hint published at a join must hold on both paths.
+# Without the join fix, smt-bmc discharges the assertion and Blackboard::contested
+# reports a JVM-confirmed contradiction (2026-10-27).
+ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths.yml valid-assert
+
+# Heap: the site-indexed field refinement, and the escape rule it rests on.
+ajave/heap/TwoObjectsDistinctFieldValues.yml valid-assert
+ajave/heap/UnknownReceiverReadsTheMergedCell.yml valid-assert
+
+# B3: array element values, and the rule that a store at an index the domain
+# cannot evaluate must weaken every element (2026-10-27).
+ajave/heap/ArrayElementWrittenThenRead.yml valid-assert
+ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement.yml valid-assert
+
+# C1: a heap effect crossing a call through the summary relation, and the frame
+# condition that keeps a non-writing callee from invalidating anything (2026-10-27).
+ajave/engine-chc/FieldWrittenInACalleeIsVisibleToTheCaller.yml valid-assert
+ajave/engine-chc/ACalleeThatWritesNothingInvalidatesNothing.yml valid-assert
+
+# The CHC encoders read arrays they never wrote: a reused local slot made the
+# store's receiver ambiguous and havoced every array. Constant bound, so no
+# quantified invariant is involved (2026-10-27).
+ajave/heap/ArrayElementNonNullWithAConstantBound.yml valid-assert
+
+# D1's beneficiary: a universally quantified array invariant inferred from one
+# loop and consumed in another. UNKNOWN without AJAVE_CHC_QGEN, TRUE with it —
+# the only task in this set that prices that flag (2026-10-27).
+ajave/heap/EveryElementNonNullAfterAFillLoop.yml valid-assert
+
+# C1's confirmed soundness defect (#106). FALSE by construction, JVM-validated.
+# With AJAVE_CHC_HEAP_SUMMARY=1 and the falsifiers disabled, CHC answers TRUE.
+# Canary so the fix is demonstrated and the defect cannot silently return.
+ajave/engine-chc/RecursiveFieldWriteIsNotForgotten.yml valid-assert
+
+# #108: a failing check forks control into its exception handler, so an
+# assertion reachable only through an implicitly-thrown exception stops being
+# unreachable to the BMC. The trio separates three mechanisms that all look
+# alike -- explicit throw, implicit-and-deterministic, implicit-and-input-
+# dependent -- and only the last one needed the fix (2026-10-29).
+ajave/jvm-exceptions/AssertionReachedOnlyByAnImplicitThrow.yml valid-assert
+ajave/jvm-exceptions/ImplicitThrowReachesItsHandlerOnlyForSomeInputs.yml valid-assert
+
+# The boundary of what quantified generalisation reaches, as a pair. The
+# fill-loop benchmark above is TRUE with AJAVE_CHC_QGEN and UNKNOWN without.
+# This one needs the same kind of fact -- forall n . value[n] >= 0 -- but
+# established by a *guard* in one method and consumed by a *traversal* in
+# another, and qgen does not find it. UNKNOWN is the honest answer today;
+# a TRUE here is a real capability gain and should be celebrated, not
+# suppressed (2026-10-29).
+ajave/heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored.yml valid-assert

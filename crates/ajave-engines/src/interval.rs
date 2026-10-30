@@ -111,6 +111,19 @@ impl Interval {
     fn leq(self, o: Interval) -> bool {
         self.is_bottom() || (!o.is_bottom() && o.lo <= self.lo && self.hi <= o.hi)
     }
+    /// The single value this interval admits, if it admits exactly one.
+    ///
+    /// `None` covers both "more than one value" and bottom. B3's element cells
+    /// are keyed by a concrete index, so this is the test for whether an index
+    /// expression can be used as a key at all.
+    pub fn as_const(self) -> Option<i64> {
+        if !self.is_bottom() && self.lo == self.hi {
+            Some(self.lo)
+        } else {
+            None
+        }
+    }
+
     /// Greatest lower bound: the tightest interval contained in both. Yields
     /// a bottom interval (`lo > hi`) when the two do not overlap.
     pub fn meet(self, o: Interval) -> Interval {
@@ -680,6 +693,35 @@ impl Nullness {
     fn leq(self, other: Self) -> bool {
         self == other || other == Nullness::Unknown
     }
+    /// Greatest lower bound, with one caveat: this lattice has no bottom, so
+    /// two *conflicting* definite answers fall back to `Unknown` rather than
+    /// picking one. That only arises on an infeasible state — the flat cell and
+    /// the site cell describe the same object — and `Unknown` is above both, so
+    /// it is sound whether or not the state is reachable. Picking either side
+    /// would not be.
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Nullness::Unknown, o) => o,
+            (s, Nullness::Unknown) => s,
+            (s, o) if s == o => s,
+            _ => Nullness::Unknown,
+        }
+    }
+}
+
+/// Everything `IState::combine_heap` returns: the B2 field cells and their
+/// nullness, the escaped-field set, and the B3 array element cells and
+/// per-site defaults.
+///
+/// A struct rather than a tuple because `join` and both `widen`s all build it,
+/// and a positional five-tuple is exactly how two of those three would come to
+/// disagree about which half is which.
+struct CombinedHeap {
+    field_cells: BTreeMap<(ajave_ir::AllocSite, FieldKey), Interval>,
+    field_cell_null: BTreeMap<(ajave_ir::AllocSite, FieldKey), Nullness>,
+    escaped_fields: std::collections::BTreeSet<FieldKey>,
+    array_cells: BTreeMap<(ajave_ir::AllocSite, i64), Interval>,
+    array_default: BTreeMap<ajave_ir::AllocSite, Interval>,
 }
 
 /// `VarId -> Interval`. A variable missing from the map is implicitly Top:
@@ -713,9 +755,77 @@ pub struct IState {
     pub fields: BTreeMap<FieldKey, Interval>,
     /// Nullness of the same flat field cells. Missing = Unknown.
     pub field_null: BTreeMap<FieldKey, Nullness>,
+    /// B2. A *refinement* of the flat cell, keyed by the allocation site of the
+    /// receiver. Missing = Top, so this map only ever narrows a read.
+    ///
+    /// **Soundness.** The flat abstraction above is safe because it merges:
+    /// every write to `Box.v` lands in one cell, so no read can be narrower
+    /// than the truth. Site-indexing breaks that, and is recovered by one rule:
+    /// a write whose receiver's site is *not* known marks the field escaped,
+    /// after which its cells are void and every read falls back to the flat
+    /// cell — exactly the pre-B2 behaviour. The effective value of `o.f` for a
+    /// receiver at site `s` is therefore `flat(f)` meet `cell(s, f)` when `f`
+    /// has not escaped, and `flat(f)` otherwise. Both conjuncts hold of the
+    /// object, so their meet does too.
+    ///
+    /// `benchmarks/ajave/heap/UnknownReceiverReadsTheMergedCell` is the program
+    /// named after that rule, and it is wrong-TRUE without it.
+    ///
+    /// Keyed by a bare `AllocSite`, which is **body-scoped**: an `IState`
+    /// belongs to one `Body`'s fixpoint and never outlives it, and `interval`
+    /// does not inline. `CLAUDE.md`'s rule about context-relative identifiers
+    /// applies the moment either of those changes.
+    pub field_cells: BTreeMap<(ajave_ir::AllocSite, FieldKey), Interval>,
+    /// Nullness of the same site-indexed cells. Missing = Unknown.
+    pub field_cell_null: BTreeMap<(ajave_ir::AllocSite, FieldKey), Nullness>,
+    /// Fields written through a receiver whose allocation site is unknown.
+    /// Their cells carry no information. Grows monotonically, which is what
+    /// keeps the fixpoint terminating.
+    pub escaped_fields: std::collections::BTreeSet<FieldKey>,
+    /// B3. Element value per `(AllocSite, constant index)`. Missing is **not**
+    /// Top here — see `array_default` — because an array's contents are known
+    /// completely from its allocation.
+    pub array_cells: BTreeMap<(ajave_ir::AllocSite, i64), Interval>,
+    /// The value of every element of a site's array that `array_cells` does
+    /// not name, for sites this state is tracking.
+    ///
+    /// This is what makes element tracking possible at all without a
+    /// points-to analysis: `newarray` zero-fills (JVMS 6.5), so at the
+    /// allocation *every* element is known to be 0 and the default starts at
+    /// `[0,0]`. A store at an index the domain cannot evaluate joins into the
+    /// default **and** weakens every named cell, because it might have
+    /// targeted any of them — the soundness rule, and the direct analogue of
+    /// `escaped_fields` one level down. See
+    /// `benchmarks/ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement`.
+    ///
+    /// A site absent from this map is *not* tracked: its array came from a
+    /// parameter, a call, or a site the domain gave up on, and every element
+    /// reads Top.
+    pub array_default: BTreeMap<ajave_ir::AllocSite, Interval>,
 }
 
 impl IState {
+    /// The state that knows nothing: every variable Top, no field cells, no
+    /// field escaped. Every map is empty because absence *is* Top throughout
+    /// this domain — the property `join_block_intervals` once read as "this
+    /// state has no opinion to contribute".
+    pub fn top_at(at: ProgramPoint) -> IState {
+        IState {
+            at,
+            vars: BTreeMap::new(),
+            float_vars: BTreeMap::new(),
+            nullness: BTreeMap::new(),
+            array_lens: BTreeMap::new(),
+            fields: BTreeMap::new(),
+            field_null: BTreeMap::new(),
+            field_cells: BTreeMap::new(),
+            field_cell_null: BTreeMap::new(),
+            escaped_fields: std::collections::BTreeSet::new(),
+            array_cells: BTreeMap::new(),
+            array_default: BTreeMap::new(),
+        }
+    }
+
     pub fn get(&self, v: VarId) -> Interval {
         self.vars.get(&v).copied().unwrap_or_else(Interval::top)
     }
@@ -770,7 +880,259 @@ impl IState {
             self.fields.remove(f);
             self.field_null.remove(f);
         }
+        if !self.field_cells.is_empty() || !self.field_cell_null.is_empty() {
+            self.field_cells.retain(|(_, f), _| !fs.contains(f));
+            self.field_cell_null.retain(|(_, f), _| !fs.contains(f));
+        }
     }
+
+    /// The value of `f` read through a receiver at `site`, or through an
+    /// unknown receiver when `site` is `None`. See `field_cells` for why this
+    /// is a meet and when the refinement is dropped.
+    pub fn eff_field(&self, site: Option<ajave_ir::AllocSite>, f: &FieldKey) -> Interval {
+        let flat = self.get_field(f);
+        match site {
+            Some(s) if !self.escaped_fields.contains(f) => {
+                match self.field_cells.get(&(s, f.clone())) {
+                    Some(c) => flat.meet(*c),
+                    None => flat,
+                }
+            }
+            _ => flat,
+        }
+    }
+
+    /// Nullness counterpart of `eff_field`. `Nullness::meet` is the refinement.
+    pub fn eff_field_null(&self, site: Option<ajave_ir::AllocSite>, f: &FieldKey) -> Nullness {
+        let flat = self.get_field_null(f);
+        match site {
+            Some(s) if !self.escaped_fields.contains(f) => {
+                match self.field_cell_null.get(&(s, f.clone())) {
+                    Some(c) => flat.meet(*c),
+                    None => flat,
+                }
+            }
+            _ => flat,
+        }
+    }
+
+    /// Write through a receiver at a known site, where that site denotes at
+    /// most one object. Replaces the cell, and *joins* the flat cell, which
+    /// stays a sound summary for every other reader.
+    fn set_field_cell(
+        &mut self,
+        site: ajave_ir::AllocSite,
+        f: &FieldKey,
+        i: Interval,
+        n: Nullness,
+    ) {
+        self.set_field(f, i, false);
+        self.set_field_null(f, n, false);
+        if self.escaped_fields.contains(f) {
+            return;
+        }
+        if i == Interval::top() {
+            self.field_cells.remove(&(site, f.clone()));
+        } else {
+            self.field_cells.insert((site, f.clone()), i);
+        }
+        if n == Nullness::Unknown {
+            self.field_cell_null.remove(&(site, f.clone()));
+        } else {
+            self.field_cell_null.insert((site, f.clone()), n);
+        }
+    }
+
+    /// Begin tracking a freshly allocated array. `newarray` zero-fills, so
+    /// every element is `[0, 0]` and there are no exceptions to that yet.
+    fn track_new_array(&mut self, site: ajave_ir::AllocSite) {
+        self.array_cells.retain(|(s, _), _| *s != site);
+        self.array_default.insert(site, Interval { lo: 0, hi: 0 });
+    }
+
+    /// The value of `arr[idx]` where `arr` is at `site`. `idx` is `None` when
+    /// the index is not a constant.
+    pub fn eff_elem(&self, site: Option<ajave_ir::AllocSite>, idx: Option<i64>) -> Interval {
+        let Some(site) = site else {
+            return Interval::top();
+        };
+        // Not tracking this site: we do not know its contents, so Top.
+        let Some(&dflt) = self.array_default.get(&site) else {
+            return Interval::top();
+        };
+        match idx {
+            Some(i) => self.array_cells.get(&(site, i)).copied().unwrap_or(dflt),
+            // An unevaluable index may land anywhere, so the answer is the
+            // join of every element: the default plus each named cell.
+            None => self
+                .array_cells
+                .range((site, i64::MIN)..=(site, i64::MAX))
+                .fold(dflt, |acc, (_, v)| acc.join(*v)),
+        }
+    }
+
+    /// `arr[idx] = v` where `arr` is at `site` and `idx` is a constant.
+    fn set_elem(&mut self, site: ajave_ir::AllocSite, idx: i64, v: Interval, strong: bool) {
+        if !self.array_default.contains_key(&site) {
+            return; // not tracking: nothing to refine
+        }
+        let v = if strong {
+            v
+        } else {
+            self.eff_elem(Some(site), Some(idx)).join(v)
+        };
+        self.array_cells.insert((site, idx), v);
+    }
+
+    /// `arr[?] = v` — a store at an index the domain cannot evaluate. It may
+    /// have targeted any element, so the default **and** every named cell take
+    /// the value. This is the rule B3's soundness is; weakening is the only
+    /// safe response to not knowing where a write went.
+    fn set_elem_unknown_index(&mut self, site: ajave_ir::AllocSite, v: Interval) {
+        let Some(dflt) = self.array_default.get_mut(&site) else {
+            return;
+        };
+        *dflt = dflt.join(v);
+        let keys: Vec<_> = self
+            .array_cells
+            .range((site, i64::MIN)..=(site, i64::MAX))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys {
+            if let Some(c) = self.array_cells.get_mut(&k) {
+                *c = c.join(v);
+            }
+        }
+    }
+
+    /// Stop tracking a site's contents entirely. Used when a store goes to an
+    /// array whose site is unknown — that write could have hit *any* array, so
+    /// no site's contents survive it — and when a call may have written one.
+    fn untrack_arrays(&mut self) {
+        self.array_cells.clear();
+        self.array_default.clear();
+    }
+
+    /// A write we cannot attribute to a site. Every cell for `f` becomes void
+    /// and stays void: this is the rule the site abstraction's soundness is.
+    fn escape_field(&mut self, f: &FieldKey) {
+        if self.escaped_fields.insert(f.clone()) {
+            self.field_cells.retain(|(_, k), _| k != f);
+            self.field_cell_null.retain(|(_, k), _| k != f);
+        }
+    }
+    /// Combine the B2 site cells of two states under `f`, which is `Interval::join`
+    /// for a merge and `Interval::widen` for a widening step.
+    ///
+    /// Shared by `join` and both `widen` variants so the three cannot drift —
+    /// the defect class `CLAUDE.md` records as producer and consumer
+    /// disagreeing about an artifact, here between the three places that have
+    /// to agree about one map.
+    fn combine_heap(
+        &self,
+        other: &Self,
+        f: impl Fn(Interval, Interval) -> Interval,
+    ) -> CombinedHeap {
+        // Escape is monotone: a field either side could not attribute to a site
+        // has no usable cell in the result either. This is also what bounds the
+        // fixpoint, since the set only grows and is finite.
+        let escaped: std::collections::BTreeSet<FieldKey> = self
+            .escaped_fields
+            .union(&other.escaped_fields)
+            .cloned()
+            .collect();
+        let mut cells = BTreeMap::new();
+        if !self.field_cells.is_empty() || !other.field_cells.is_empty() {
+            let keys: std::collections::BTreeSet<_> = self
+                .field_cells
+                .keys()
+                .chain(other.field_cells.keys())
+                .cloned()
+                .collect();
+            for (site, fk) in keys {
+                if escaped.contains(&fk) {
+                    continue;
+                }
+                let j = f(
+                    self.eff_field(Some(site), &fk),
+                    other.eff_field(Some(site), &fk),
+                );
+                // Only worth storing when it actually refines the flat cell;
+                // otherwise the entry costs a key and says nothing.
+                if j != Interval::top() {
+                    cells.insert((site, fk), j);
+                }
+            }
+        }
+        let mut cell_null = BTreeMap::new();
+        if !self.field_cell_null.is_empty() || !other.field_cell_null.is_empty() {
+            let keys: std::collections::BTreeSet<_> = self
+                .field_cell_null
+                .keys()
+                .chain(other.field_cell_null.keys())
+                .cloned()
+                .collect();
+            for (site, fk) in keys {
+                if escaped.contains(&fk) {
+                    continue;
+                }
+                let j = self
+                    .eff_field_null(Some(site), &fk)
+                    .join(other.eff_field_null(Some(site), &fk));
+                if j != Nullness::Unknown {
+                    cell_null.insert((site, fk), j);
+                }
+            }
+        }
+        // ── B3 array elements ──────────────────────────────────────────
+        // A site is tracked in the result only if **both** states track it: a
+        // state that is not tracking a site says its elements are Top, and a
+        // join cannot be narrower than either operand. That is also why
+        // `untrack_arrays` is a safe response to not knowing where a store
+        // went — the ignorance propagates through every subsequent merge.
+        let mut array_default = BTreeMap::new();
+        let mut array_cells = BTreeMap::new();
+        if !self.array_default.is_empty() && !other.array_default.is_empty() {
+            for (site, a) in &self.array_default {
+                let Some(b) = other.array_default.get(site) else {
+                    continue;
+                };
+                array_default.insert(*site, f(*a, *b));
+            }
+            let keys: std::collections::BTreeSet<_> = self
+                .array_cells
+                .keys()
+                .chain(other.array_cells.keys())
+                .copied()
+                .collect();
+            for (site, idx) in keys {
+                if !array_default.contains_key(&site) {
+                    continue;
+                }
+                // `eff_elem` falls back to each side's own default, which is
+                // what makes an element named on one side and not the other
+                // combine correctly instead of silently taking one side.
+                let j = f(
+                    self.eff_elem(Some(site), Some(idx)),
+                    other.eff_elem(Some(site), Some(idx)),
+                );
+                // An entry equal to the default says nothing; dropping it keeps
+                // the map to the elements that actually differ.
+                if Some(&j) != array_default.get(&site) {
+                    array_cells.insert((site, idx), j);
+                }
+            }
+        }
+
+        CombinedHeap {
+            field_cells: cells,
+            field_cell_null: cell_null,
+            escaped_fields: escaped,
+            array_cells,
+            array_default,
+        }
+    }
+
     fn set_array_len(&mut self, v: VarId, i: Interval) {
         if i == Interval::top() {
             self.array_lens.remove(&v);
@@ -871,6 +1233,9 @@ impl IState {
             },
             // Flat field cells. Absent reads as Top, so this is sound even
             // when field tracking is disabled or the cell was invalidated.
+            // The receiver-aware read lives in `transfer`, which has the
+            // site map; this fallback is the flat cell, which is what every
+            // other caller of `eval_rvalue` should see.
             Rvalue::GetField { field, .. } => self.get_field(field),
             Rvalue::GetStatic(fk) => self.get_field(fk),
             Rvalue::Cmp(kind, a, b) => match kind {
@@ -1203,9 +1568,82 @@ impl Lattice for IState {
                 return false;
             }
         }
+        // B2 site cells. Comparing the *effective* value — flat meet cell, with
+        // the cell dropped once the field has escaped — is what makes this
+        // consistent with `escaped_fields` growing: a state that has escaped a
+        // field is simply not refined there, and the flat comparison above
+        // already covers it. Comparing the raw cells instead would call a state
+        // with a stale cell narrower than one that correctly discarded it.
+        if !self.field_cells.is_empty()
+            || !other.field_cells.is_empty()
+            || !self.field_cell_null.is_empty()
+            || !other.field_cell_null.is_empty()
+        {
+            let keys: std::collections::BTreeSet<_> = self
+                .field_cells
+                .keys()
+                .chain(other.field_cells.keys())
+                .cloned()
+                .collect();
+            for (site, f) in keys {
+                if !self
+                    .eff_field(Some(site), &f)
+                    .leq(other.eff_field(Some(site), &f))
+                {
+                    return false;
+                }
+            }
+            let nkeys: std::collections::BTreeSet<_> = self
+                .field_cell_null
+                .keys()
+                .chain(other.field_cell_null.keys())
+                .cloned()
+                .collect();
+            for (site, f) in nkeys {
+                if !self
+                    .eff_field_null(Some(site), &f)
+                    .leq(other.eff_field_null(Some(site), &f))
+                {
+                    return false;
+                }
+            }
+        }
+        // B3 array elements, compared through `eff_elem`. The direction that
+        // matters: a state *not* tracking a site claims Top for its elements,
+        // so it sits above one that does, and tracking must never be required
+        // of `other`.
+        if !other.array_default.is_empty() {
+            for (site, b_dflt) in &other.array_default {
+                match self.array_default.get(site) {
+                    Some(a_dflt) if a_dflt.leq(*b_dflt) => {}
+                    // Either we do not track the site — we claim Top, which is
+                    // not below a real bound — or our default is wider.
+                    _ => return false,
+                }
+            }
+            let keys: std::collections::BTreeSet<_> = self
+                .array_cells
+                .keys()
+                .chain(other.array_cells.keys())
+                .copied()
+                .collect();
+            for (site, idx) in keys {
+                if !other.array_default.contains_key(&site) {
+                    continue; // `other` claims Top for this whole site
+                }
+                if !self
+                    .eff_elem(Some(site), Some(idx))
+                    .leq(other.eff_elem(Some(site), Some(idx)))
+                {
+                    return false;
+                }
+            }
+        }
         true
     }
+
     fn join(&self, other: &Self) -> Self {
+        let h = self.combine_heap(other, Interval::join);
         let mut vars = BTreeMap::new();
         let keys: std::collections::BTreeSet<_> =
             self.vars.keys().chain(other.vars.keys()).copied().collect();
@@ -1288,6 +1726,11 @@ impl Lattice for IState {
             array_lens,
             fields,
             field_null,
+            field_cells: h.field_cells,
+            field_cell_null: h.field_cell_null,
+            escaped_fields: h.escaped_fields,
+            array_cells: h.array_cells,
+            array_default: h.array_default,
         }
     }
     fn is_bottom(&self) -> bool {
@@ -1389,6 +1832,40 @@ pub struct FieldPrec {
     pub all_written: std::collections::HashSet<FieldKey>,
     /// Empty set, returned for calls proven to write nothing.
     pub nothing: std::collections::HashSet<FieldKey>,
+    /// B2. Per method: which variables provably hold which allocation site,
+    /// and whether a site in that method denotes at most one object.
+    ///
+    /// Computed once in `analyze_field_precision` rather than per transfer:
+    /// `transfer` runs once per edge per fixpoint iteration, and recomputing a
+    /// whole-body scan there would make the refinement cost more than it buys.
+    /// Lookup is a single hash probe; the inner map is a `BTreeMap` because the
+    /// domain's `leq`/`join` walk it.
+    pub sites: std::collections::HashMap<ajave_ir::MethodKey, SiteInfo>,
+}
+
+/// Where a method's allocations are, and whether they are unique.
+#[derive(Default, Clone)]
+pub struct SiteInfo {
+    /// Which object each reference holds, **before each statement**.
+    ///
+    /// Per program point, not per variable. The per-variable version was dead
+    /// code on every real program: the lifter always inserts copies between a
+    /// `new` and the receiver it is used as, and javac reuses slots so one
+    /// variable holds different objects at different points. See
+    /// `body_analysis::ref_alloc_sites_at` and issue #104.
+    pub at: BTreeMap<(ajave_ir::BlockId, u32), crate::body_analysis::RefSiteMap>,
+    /// The sites that denote **at most one object**, which is what permits a
+    /// strong update to a site's cell. A `new` inside a loop runs once per
+    /// iteration and summarises all of them, so replacing its cell would
+    /// forget every object but the last.
+    ///
+    /// Per site, not per body. The per-body version (`!body_has_loops`)
+    /// disabled site reasoning for *every* allocation in a method containing
+    /// any loop — including allocations outside it, which are perfectly
+    /// unique. Since a program that needs the AI at all has a loop the BMC
+    /// cannot unroll, that made B2's enabling condition and its usefulness
+    /// condition very nearly disjoint. See #104.
+    pub unique_sites: std::collections::BTreeSet<ajave_ir::AllocSite>,
 }
 
 impl FieldPrec {
@@ -1465,6 +1942,11 @@ impl AbstractDomain for IntervalCpa {
             array_lens: BTreeMap::new(),
             fields: BTreeMap::new(),
             field_null: BTreeMap::new(),
+            field_cells: BTreeMap::new(),
+            field_cell_null: BTreeMap::new(),
+            escaped_fields: std::collections::BTreeSet::new(),
+            array_cells: BTreeMap::new(),
+            array_default: BTreeMap::new(),
         }
     }
 
@@ -1481,6 +1963,34 @@ impl AbstractDomain for IntervalCpa {
         };
         let mut next = state.clone();
         next.at = to.clone();
+
+        // B2. Resolve a receiver operand to the allocation site it provably
+        // holds. `None` — a parameter, a field load, a merge of two `new`s, a
+        // body with a loop, or site tracking switched off — means "unknown
+        // receiver", which is what every caller must treat conservatively.
+        let site_info = self.field_prec.sites.get(&to.method);
+        // The point this edge's statement runs at, which is what the site map
+        // is keyed by. A terminator edge has no statement index and resolves
+        // nothing, which costs precision on branch conditions and is correct.
+        let here: Option<(ajave_ir::BlockId, u32)> = match edge {
+            Edge::Stmt(block, idx) => Some((*block, *idx as u32)),
+            _ => None,
+        };
+        let site_of = |op: &Operand| -> Option<ajave_ir::AllocSite> {
+            let si = site_info?;
+            if !site_fields_enabled() {
+                return None;
+            }
+            let m = si.at.get(&here?)?;
+            let site = match op {
+                Operand::Var(v) => m.get(v).copied()?,
+                _ => return None,
+            };
+            // A site inside a loop summarises many objects; refining its cell
+            // would forget all but the last. Reads through it fall back to the
+            // flat abstraction, which merges and is sound.
+            si.unique_sites.contains(&site).then_some(site)
+        };
 
         match edge {
             Edge::Stmt(block, idx) => {
@@ -1519,7 +2029,22 @@ impl AbstractDomain for IntervalCpa {
                             next.set_float(*v, fval);
                             next.vars.remove(v);
                         } else {
-                            let val = next.eval_rvalue_typed(rv, &body.vars);
+                            let mut val = next.eval_rvalue_typed(rv, &body.vars);
+                            // B2. `eval_rvalue` answers from the flat cell
+                            // because it has no site map. Here we do, so a load
+                            // through a pinned receiver may use the refinement.
+                            if let Rvalue::GetField { obj, field } = rv {
+                                if let Some(site) = site_of(obj) {
+                                    val = val.meet(next.eff_field(Some(site), field));
+                                }
+                            }
+                            // B3. An element read. `None` for the index means
+                            // the index is not a constant, which `eff_elem`
+                            // answers with the join of every element.
+                            if let Rvalue::ArrayLoad { arr, idx } = rv {
+                                let i = next.eval_operand(idx).as_const();
+                                val = val.meet(next.eff_elem(site_of(arr), i));
+                            }
                             next.set(*v, val);
                             next.float_vars.remove(v);
                         }
@@ -1541,13 +2066,18 @@ impl AbstractDomain for IntervalCpa {
                         if n == Nullness::Unknown {
                             match rv {
                                 Rvalue::GetField {
-                                    obj: Operand::Var(ov),
+                                    obj: obj @ Operand::Var(ov),
                                     field,
                                 } => {
                                     if next.get_nullness(*ov) == Nullness::NonNull
                                         && self.nonnull_fields.contains(field)
                                     {
                                         n = Nullness::NonNull;
+                                    }
+                                    if n == Nullness::Unknown {
+                                        if let Some(site) = site_of(obj) {
+                                            n = next.eff_field_null(Some(site), field);
+                                        }
                                     }
                                 }
                                 Rvalue::Call { target, .. }
@@ -1576,6 +2106,15 @@ impl AbstractDomain for IntervalCpa {
                             _ => Interval::top(),
                         };
                         next.set_array_len(*v, len);
+                        // B3. A fresh array is zero-filled (JVMS 6.5), so this
+                        // is the one point at which the contents are known
+                        // completely — which is what makes element tracking
+                        // possible without a points-to analysis.
+                        if let Rvalue::NewArray { site, .. } = rv {
+                            if site_fields_enabled() {
+                                next.track_new_array(*site);
+                            }
+                        }
 
                         // A call may write fields, so anything it can reach has
                         // to drop back to Top before we continue.
@@ -1598,14 +2137,48 @@ impl AbstractDomain for IntervalCpa {
                         let n = next.operand_nullness(val);
                         next.set_field_null(fk, n, true);
                     }
-                    Stmt::PutField { field, val, .. } => {
-                        let strong = self.field_prec.may_update_strongly(field, false);
+                    Stmt::PutField { obj, field, val } => {
                         let iv = next.eval_operand(val);
-                        next.set_field(field, iv, strong);
                         let n = next.operand_nullness(val);
-                        next.set_field_null(field, n, strong);
+                        match site_of(obj) {
+                            // Receiver pinned to a site that denotes at most
+                            // one object: refine that cell, and keep the flat
+                            // cell a sound summary by joining into it.
+                            Some(site) => next.set_field_cell(site, field, iv, n),
+                            // Receiver unknown. This write may have landed on
+                            // any object of the class, so every cell for the
+                            // field is void from here on and reads fall back to
+                            // the flat abstraction. The whole B2 soundness
+                            // argument is this arm.
+                            None => {
+                                let strong = self.field_prec.may_update_strongly(field, false);
+                                next.escape_field(field);
+                                next.set_field(field, iv, strong);
+                                next.set_field_null(field, n, strong);
+                            }
+                        }
                     }
-                    // ArrayStore: element values are not modelled (only lengths).
+                    Stmt::ArrayStore { arr, idx, val } => {
+                        let v = next.eval_operand(val);
+                        match site_of(arr) {
+                            Some(site) => match next.eval_operand(idx).as_const() {
+                                // A constant index into a site that denotes one
+                                // array: replace exactly that element.
+                                Some(i) => next.set_elem(site, i, v, true),
+                                // An index we cannot evaluate may hit any
+                                // element of *this* array, so every element of
+                                // it takes the value. See
+                                // `ArrayStoreAtUnknownIndexWeakensEveryElement`.
+                                None => next.set_elem_unknown_index(site, v),
+                            },
+                            // A store through an array whose site is unknown
+                            // could have hit any array at all, so no site's
+                            // contents survive it. The array analogue of
+                            // `escape_field`, except that there is no per-array
+                            // key to escape — the receiver is the unknown.
+                            None => next.untrack_arrays(),
+                        }
+                    }
                     _ => {}
                 }
                 vec![next]
@@ -1881,6 +2454,7 @@ impl WidenAtLoopHeaders {
         float_thresh: &[f64],
         int_thresh: &[i64],
     ) -> IState {
+        let h = old.combine_heap(new, |a, b| Interval::widen_thresholded(a, b, int_thresh));
         let mut vars = BTreeMap::new();
         let keys: std::collections::BTreeSet<_> =
             old.vars.keys().chain(new.vars.keys()).copied().collect();
@@ -1971,12 +2545,18 @@ impl WidenAtLoopHeaders {
             array_lens,
             fields,
             field_null,
+            field_cells: h.field_cells,
+            field_cell_null: h.field_cell_null,
+            escaped_fields: h.escaped_fields,
+            array_cells: h.array_cells,
+            array_default: h.array_default,
         }
     }
 
     /// Widen an IState: for each variable, apply the standard widening operator.
     #[allow(dead_code)]
     fn widen_state(old: &IState, new: &IState) -> IState {
+        let h = old.combine_heap(new, Interval::widen);
         let mut vars = BTreeMap::new();
         let keys: std::collections::BTreeSet<_> =
             old.vars.keys().chain(new.vars.keys()).copied().collect();
@@ -2063,6 +2643,11 @@ impl WidenAtLoopHeaders {
             array_lens,
             fields,
             field_null,
+            field_cells: h.field_cells,
+            field_cell_null: h.field_cell_null,
+            escaped_fields: h.escaped_fields,
+            array_cells: h.array_cells,
+            array_default: h.array_default,
         }
     }
 }
@@ -2212,6 +2797,17 @@ impl MergePolicy<IntervalCpa> for WidenAtLoopHeaders {
     }
 }
 
+/// Whether the B2 site-indexed field refinement is active.
+///
+/// An ablation switch, not a tuning knob. `AJAVE_SITE_FIELDS=0` returns the
+/// analysis to the flat abstraction exactly, which is how the refinement's
+/// cost and gain are measured rather than argued — and how a regression in it
+/// can be separated from a regression anywhere else in the interval domain.
+pub fn site_fields_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_SITE_FIELDS").as_deref() != Ok("0"))
+}
+
 #[cfg(test)]
 mod domain_law_tests {
     //! The laws the interval domain must satisfy, and the two clauses its
@@ -2247,6 +2843,11 @@ mod domain_law_tests {
             array_lens: BTreeMap::new(),
             fields: BTreeMap::new(),
             field_null: BTreeMap::new(),
+            field_cells: BTreeMap::new(),
+            field_cell_null: BTreeMap::new(),
+            escaped_fields: std::collections::BTreeSet::new(),
+            array_cells: BTreeMap::new(),
+            array_default: BTreeMap::new(),
         }
     }
 
@@ -2580,5 +3181,262 @@ mod domain_law_tests {
             at <= policy.widen_delay as i64 + 4,
             "stabilised only after {at} steps, which is slower than the delay explains"
         );
+    }
+}
+
+/// B2. The site-indexed field refinement, and the one rule it rests on.
+///
+/// These assert on `IState` directly rather than through the engine, because
+/// the question is what the *domain* guarantees. A test that drove the whole
+/// portfolio would also pass if some other engine happened to cover the case.
+#[cfg(test)]
+mod site_field_tests {
+    use super::*;
+    use ajave_ir::{AllocSite, BlockId, FieldKey, MethodKey};
+
+    fn pp() -> ProgramPoint {
+        ProgramPoint {
+            method: MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            block: BlockId(0),
+            index: 0,
+        }
+    }
+
+    fn fk() -> FieldKey {
+        FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        }
+    }
+
+    fn site(i: u32) -> AllocSite {
+        AllocSite {
+            block: BlockId(0),
+            index: i,
+        }
+    }
+
+    fn iv(lo: i64, hi: i64) -> Interval {
+        Interval { lo, hi }
+    }
+
+    /// The capability. `benchmarks/ajave/heap/TwoObjectsDistinctFieldValues`.
+    #[test]
+    fn two_sites_hold_distinct_field_values() {
+        let mut st = IState::top_at(pp());
+        st.set_field_cell(site(0), &fk(), iv(1, 1), Nullness::Unknown);
+        st.set_field_cell(site(1), &fk(), iv(2, 2), Nullness::Unknown);
+        assert_eq!(st.eff_field(Some(site(0)), &fk()), iv(1, 1));
+        assert_eq!(st.eff_field(Some(site(1)), &fk()), iv(2, 2));
+        // The flat cell an unknown receiver reads is Top, and that is the
+        // whole point of the refinement rather than a defect. A weak update
+        // joins into the existing cell, an absent cell *is* Top, and Top joined
+        // with anything is Top — so for a class with two allocation sites the
+        // flat abstraction learns nothing at all. That is exactly the pre-B2
+        // behaviour, and it is what the site cells above recover.
+        assert_eq!(st.eff_field(None, &fk()), Interval::top());
+    }
+
+    /// **The soundness rule.** A write through a receiver whose site is not
+    /// known may have landed on any object of the class, so every cell for the
+    /// field becomes void and reads fall back to the flat abstraction.
+    ///
+    /// Named after
+    /// `benchmarks/ajave/heap/UnknownReceiverReadsTheMergedCell`, which is a
+    /// wrong TRUE without this.
+    #[test]
+    fn a_write_through_an_unknown_receiver_voids_every_cell_for_the_field() {
+        let mut st = IState::top_at(pp());
+        st.set_field_cell(site(0), &fk(), iv(1, 1), Nullness::Unknown);
+        st.set_field_cell(site(1), &fk(), iv(2, 2), Nullness::Unknown);
+
+        // `c.v = 7` where `c` may be either object.
+        st.escape_field(&fk());
+        st.set_field(&fk(), iv(7, 7), false);
+
+        assert!(
+            st.eff_field(Some(site(0)), &fk()).lo <= 7
+                && st.eff_field(Some(site(0)), &fk()).hi >= 7,
+            "site 0 must admit the value written through the unknown receiver, \
+             got {:?}",
+            st.eff_field(Some(site(0)), &fk())
+        );
+        assert!(
+            st.field_cells.is_empty(),
+            "the cells are void, not merely overridden"
+        );
+    }
+
+    /// Escape must be sticky. A cell re-established after the field escaped
+    /// would restore exactly the unsound read the rule above prevents.
+    #[test]
+    fn a_cell_written_after_escape_is_not_recorded() {
+        let mut st = IState::top_at(pp());
+        st.escape_field(&fk());
+        st.set_field_cell(site(0), &fk(), iv(5, 5), Nullness::Unknown);
+        assert!(st.field_cells.is_empty());
+        assert_eq!(
+            st.eff_field(Some(site(0)), &fk()),
+            st.get_field(&fk()),
+            "a read through a known site is the flat cell once the field escaped"
+        );
+    }
+
+    /// Escape is monotone across a merge, which is both the soundness
+    /// requirement (one branch could not attribute the write) and what bounds
+    /// the fixpoint, since the set only grows over a finite field set.
+    #[test]
+    fn escape_survives_a_join_from_either_side() {
+        let mut a = IState::top_at(pp());
+        a.set_field_cell(site(0), &fk(), iv(1, 1), Nullness::Unknown);
+        let mut b = IState::top_at(pp());
+        b.escape_field(&fk());
+        b.set_field(&fk(), iv(9, 9), false);
+
+        for (l, r) in [(&a, &b), (&b, &a)] {
+            let j = l.join(r);
+            assert!(
+                j.escaped_fields.contains(&fk()),
+                "escape from either side must survive the join"
+            );
+            assert!(j.field_cells.is_empty(), "and void its cells");
+        }
+    }
+
+    /// A join must be above both operands. Without this the refinement could
+    /// make a merged state claim something neither branch did.
+    #[test]
+    fn a_join_of_two_site_states_is_above_both() {
+        let mut a = IState::top_at(pp());
+        a.set_field_cell(site(0), &fk(), iv(1, 1), Nullness::Unknown);
+        let mut b = IState::top_at(pp());
+        b.set_field_cell(site(0), &fk(), iv(4, 4), Nullness::Unknown);
+        let j = a.join(&b);
+        assert!(a.leq(&j), "left operand is below the join");
+        assert!(b.leq(&j), "right operand is below the join");
+        assert_eq!(j.eff_field(Some(site(0)), &fk()), iv(1, 4));
+    }
+
+    /// B3. The one point at which an array's contents are fully known: a
+    /// fresh array is zero-filled (JVMS 6.5), so every element is `[0,0]` and
+    /// an element nobody wrote still reads 0. Without modelling the zero-fill
+    /// there is nothing to track *from*.
+    #[test]
+    fn a_fresh_array_reads_zero_at_every_index() {
+        let mut st = IState::top_at(pp());
+        st.track_new_array(site(0));
+        for i in [0, 1, 7, 1_000_000] {
+            assert_eq!(st.eff_elem(Some(site(0)), Some(i)), iv(0, 0));
+        }
+        assert_eq!(st.eff_elem(Some(site(0)), None), iv(0, 0));
+    }
+
+    /// The capability. Constant-index stores are exact, and an element nobody
+    /// wrote keeps the default.
+    #[test]
+    fn constant_index_stores_are_exact_and_leave_other_elements_alone() {
+        let mut st = IState::top_at(pp());
+        st.track_new_array(site(0));
+        st.set_elem(site(0), 0, iv(7, 7), true);
+        st.set_elem(site(0), 1, iv(9, 9), true);
+        assert_eq!(st.eff_elem(Some(site(0)), Some(0)), iv(7, 7));
+        assert_eq!(st.eff_elem(Some(site(0)), Some(1)), iv(9, 9));
+        assert_eq!(
+            st.eff_elem(Some(site(0)), Some(2)),
+            iv(0, 0),
+            "an element nobody wrote keeps the zero-fill"
+        );
+    }
+
+    /// **The soundness rule.** A store at an index the domain cannot evaluate
+    /// may have hit any element, so every element must admit the value.
+    ///
+    /// Named after
+    /// `benchmarks/ajave/heap/ArrayStoreAtUnknownIndexWeakensEveryElement`.
+    #[test]
+    fn a_store_at_an_unknown_index_weakens_every_element() {
+        let mut st = IState::top_at(pp());
+        st.track_new_array(site(0));
+        st.set_elem(site(0), 0, iv(7, 7), true);
+        st.set_elem_unknown_index(site(0), iv(99, 99));
+        assert_eq!(
+            st.eff_elem(Some(site(0)), Some(0)),
+            iv(7, 99),
+            "the named element must admit the value the unknown store may have written"
+        );
+        assert_eq!(
+            st.eff_elem(Some(site(0)), Some(5)),
+            iv(0, 99),
+            "and so must every element covered by the default"
+        );
+    }
+
+    /// A store through an array whose site is unknown could have hit *any*
+    /// array, so no site's contents survive it. There is no per-array key to
+    /// escape here — the receiver itself is the unknown.
+    #[test]
+    fn a_store_through_an_unknown_array_untracks_every_site() {
+        let mut st = IState::top_at(pp());
+        st.track_new_array(site(0));
+        st.track_new_array(site(1));
+        st.set_elem(site(0), 0, iv(7, 7), true);
+        st.untrack_arrays();
+        assert_eq!(st.eff_elem(Some(site(0)), Some(0)), Interval::top());
+        assert_eq!(st.eff_elem(Some(site(1)), Some(0)), Interval::top());
+    }
+
+    /// An untracked site reads Top, which makes a state not tracking it sit
+    /// *above* one that does — so a join keeps only the sites both track.
+    #[test]
+    fn a_join_keeps_only_the_sites_both_states_track() {
+        let mut a = IState::top_at(pp());
+        a.track_new_array(site(0));
+        a.set_elem(site(0), 0, iv(1, 1), true);
+        let b = IState::top_at(pp()); // tracks nothing: every element Top
+
+        for (l, r) in [(&a, &b), (&b, &a)] {
+            let j = l.join(r);
+            assert_eq!(
+                j.eff_elem(Some(site(0)), Some(0)),
+                Interval::top(),
+                "one side knows nothing, so the join knows nothing"
+            );
+            assert!(l.leq(&j) && r.leq(&j), "and is above both operands");
+        }
+    }
+
+    /// Two states that both track a site join elementwise, including where one
+    /// names an element the other leaves at its default.
+    #[test]
+    fn a_join_of_two_tracked_sites_combines_elementwise() {
+        let mut a = IState::top_at(pp());
+        a.track_new_array(site(0));
+        a.set_elem(site(0), 0, iv(5, 5), true);
+        let mut b = IState::top_at(pp());
+        b.track_new_array(site(0));
+        // b leaves element 0 at the zero-fill default.
+        b.set_elem(site(0), 1, iv(3, 3), true);
+
+        let j = a.join(&b);
+        assert_eq!(j.eff_elem(Some(site(0)), Some(0)), iv(0, 5));
+        assert_eq!(j.eff_elem(Some(site(0)), Some(1)), iv(0, 3));
+        assert!(a.leq(&j) && b.leq(&j));
+    }
+
+    /// Dropping cells on a call is sound because an absent cell is Top, and a
+    /// call may have written the field through a receiver we never saw.
+    #[test]
+    fn a_call_that_may_write_the_field_drops_its_cells() {
+        let mut st = IState::top_at(pp());
+        st.set_field_cell(site(0), &fk(), iv(1, 1), Nullness::Unknown);
+        let mut clobbered = std::collections::HashSet::new();
+        clobbered.insert(fk());
+        st.invalidate_fields(&clobbered);
+        assert_eq!(st.eff_field(Some(site(0)), &fk()), Interval::top());
     }
 }

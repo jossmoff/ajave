@@ -62,6 +62,37 @@ use log::debug;
 
 use crate::interpolation::{encode_body_lia, run_solver_batch_pub};
 
+/// The SMT array a field's cells live in.
+///
+/// Shared by the checker and `interpolation`'s encoder so the two cannot spell
+/// it differently. Non-identifier characters in a class name are mapped, since
+/// The SMT name of the ghost depth array for a reference field.
+///
+/// E1. Distinct from `field_array_name` because the two arrays hold different
+/// things about the same field: `fld_C_f` maps a receiver to the reference it
+/// stores, `depth_C_f` maps it to the number of `f` links from it to null.
+/// Sharing a name would make a depth claim read as a value claim, which is the
+/// producer-and-consumer-disagree fault `CLAUDE.md` names.
+pub fn depth_array_name(f: &ajave_ir::FieldKey) -> String {
+    format!("depth_{}_{}", f.class.replace('/', "_"), f.name)
+}
+
+/// `java/lang/Object` is not an SMT-LIB symbol.
+pub fn field_array_name(f: &ajave_ir::FieldKey) -> String {
+    let sanitise = |t: &str| {
+        t.chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    format!("fld_{}_{}", sanitise(&f.class), sanitise(&f.name))
+}
+
 /// Which program variables an invariant mentions.
 fn mentioned_vars(e: &Expr, out: &mut Vec<VarId>) {
     match e {
@@ -82,9 +113,14 @@ fn mentioned_vars(e: &Expr, out: &mut Vec<VarId>) {
 /// library application, a division (whose JVM semantics is truncating and not
 /// SMT-LIB's `div`). Declining is the safe direction: the caller turns `None`
 /// into `Inconclusive`, which refuses the discharge.
-fn render(e: &Expr, prefix: &str) -> Option<String> {
+fn render(e: &Expr, post: bool) -> Option<String> {
     Some(match e {
-        Expr::Var(v) => format!("{prefix}v{}", v.0),
+        // `v{i}p` directly, not a separate `post_v{i}` bound to it. The
+        // indirection hid a bug: only *variables* were being prefixed, so a
+        // heap term rendered its pre-state array in the post-state formula and
+        // preservation degenerated to `inv ∧ T ∧ ¬inv` over the same state —
+        // trivially UNSAT, so it confirmed whatever it was given.
+        Expr::Var(v) => format!("v{}{}", v.0, if post { "p" } else { "" }),
         Expr::Int(n) => {
             if *n < 0 {
                 format!("(- {})", -n)
@@ -93,9 +129,9 @@ fn render(e: &Expr, prefix: &str) -> Option<String> {
             }
         }
         Expr::Bool(b) => b.to_string(),
-        Expr::Not(a) => format!("(not {})", render(a, prefix)?),
+        Expr::Not(a) => format!("(not {})", render(a, post)?),
         Expr::Bin(op, a, b) => {
-            let (l, r) = (render(a, prefix)?, render(b, prefix)?);
+            let (l, r) = (render(a, post)?, render(b, post)?);
             let sym = match op {
                 Op::Add => "+",
                 Op::Sub => "-",
@@ -122,10 +158,49 @@ fn render(e: &Expr, prefix: &str) -> Option<String> {
         // is worse than no artifact.
         Expr::Select { site, index } => {
             format!(
-                "(select arr{}_{} {})",
+                "(select arr{}_{}{} {})",
                 site.block.0,
                 site.index,
-                render(index, prefix)?
+                if post { "p" } else { "" },
+                render(index, post)?
+            )
+        }
+        // A field of a particular object, Burstall-style: one array per field
+        // name, indexed by the receiver. The naming must match the encoder's
+        // `fld_name` exactly, for the same reason `Select` must — a checker
+        // reading a different array from the one the transition relation
+        // writes confirms invariants about nothing.
+        //
+        // A `double`- or `float`-typed field is declined: the array is
+        // `(Array Int Int)` and a float cell could not be stated in it.
+        Expr::Field { field, obj } => {
+            if field.desc == "D" || field.desc == "F" {
+                return None;
+            }
+            format!(
+                "(select {}{} {})",
+                field_array_name(field),
+                if post { "p" } else { "" },
+                render(obj, post)?
+            )
+        }
+        // The ghost depth array for a reference field, named to match the
+        // encoder for the same reason `Select` and `Field` must.
+        //
+        // Declining a float-typed field is not a concern here — depth is only
+        // defined along a *reference* field — but a non-reference descriptor
+        // means the producer published a claim it had no business making, and
+        // the safe reading of a claim we cannot interpret is to refuse the
+        // discharge rather than to guess at it.
+        Expr::Depth { field, obj } => {
+            if !(field.desc.starts_with('L') || field.desc.starts_with('[')) {
+                return None;
+            }
+            format!(
+                "(select {}{} {})",
+                depth_array_name(field),
+                if post { "p" } else { "" },
+                render(obj, post)?
             )
         }
         // A double is held as a bit pattern and means nothing in LIA; an
@@ -191,7 +266,7 @@ pub fn check_inductive(
         return CertResult::Inconclusive;
     }
 
-    let Some(pre) = render(&inv.formula, "") else {
+    let Some(pre) = render(&inv.formula, false) else {
         debug!("invariant-check: {} is not expressible in LIA", inv.id);
         return CertResult::Inconclusive;
     };
@@ -239,24 +314,22 @@ pub fn check_inductive(
     }
 
     // 2. Preservation: the invariant survives one step of the transition.
-    let Some(post) = render(&inv.formula, "post_") else {
+    let Some(post) = render(&inv.formula, true) else {
         return CertResult::Inconclusive;
     };
-    // `encode_body_lia` names the post-state `v{i}p`; rebind those to the
-    // `post_v{i}` the renderer produced, rather than teaching the renderer the
-    // other convention and having two spellings of the same thing.
-    let mut binds = String::new();
-    for i in 0..enc.n_vars {
-        binds.push_str(&format!("(assert (= post_v{i} v{i}p))\n"));
-    }
-    let mut decls = enc.declarations.clone();
-    for i in 0..enc.n_vars {
-        decls.push_str(&format!("(declare-fun post_v{i} () Int)\n"));
-    }
+    let decls = enc.declarations.clone();
     let preservation = format!(
-        "{decls}\n(assert {pre})\n(assert {})\n{binds}(assert (not {post}))\n(check-sat)\n",
+        "{decls}\n(assert {pre})\n(assert {})\n(assert (not {post}))\n(check-sat)\n",
         enc.transition
     );
+    if std::env::var("AJAVE_DUMP_PRESERVATION").is_ok() {
+        // Kept. Every bug in this function so far has been found by reading
+        // the script z3 was actually given, and all three were invisible from
+        // the Rust side: an undeclared binder, a post-state that was secretly
+        // the pre-state, and a path condition added after the formula that
+        // needed it.
+        eprintln!("--- PRESERVATION ---\n{preservation}\n--- END ---");
+    }
     match is_unsat(solver, &preservation) {
         Some(true) => CertResult::Confirmed,
         Some(false) => {
@@ -360,6 +433,11 @@ mod tests {
             },
             formula,
             status: ajave_core::artifact::InvStatus::Candidate,
+            scope: ajave_core::artifact::Scope::Point(ProgramPoint {
+                method: mk(),
+                block: BlockId(0),
+                index: 0,
+            }),
         }
     }
 
@@ -510,6 +588,176 @@ mod tests {
             },
             Expr::Int(n),
         )
+    }
+
+    /// `o.f = stored; e = o.f; c = (e == asserted); check(c)` with `o` from a
+    /// fresh allocation. Two receivers when `two` is set, so the aliasing case
+    /// can be stated.
+    fn field_body(stored: i32, asserted: i32, two: bool) -> Body {
+        let site = ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: 0,
+        };
+        let site2 = ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: 3,
+        };
+        let f = ajave_ir::FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let mut stmts = vec![
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site,
+                },
+            ),
+            Stmt::PutField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+                val: Operand::Const(Const::Int(stored)),
+            },
+        ];
+        if two {
+            // A second, distinct object whose field holds something else. The
+            // flat abstraction would merge these; field-as-array must not.
+            stmts.push(Stmt::Assign(
+                VarId(3),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site: site2,
+                },
+            ));
+            stmts.push(Stmt::PutField {
+                obj: Operand::Var(VarId(3)),
+                field: f.clone(),
+                val: Operand::Const(Const::Int(99)),
+            });
+        }
+        stmts.push(Stmt::Assign(
+            VarId(1),
+            Rvalue::GetField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+            },
+        ));
+        stmts.push(Stmt::Assign(
+            VarId(2),
+            Rvalue::Bin(
+                ajave_ir::BinOp::Eq,
+                Operand::Var(VarId(1)),
+                Operand::Const(Const::Int(asserted)),
+            ),
+        ));
+        stmts.push(Stmt::Check(ObligationId(0)));
+        // Fix the site indices to where the statements actually sit.
+        if two {
+            if let Stmt::Assign(_, Rvalue::New { site, .. }) = &mut stmts[2] {
+                site.index = 2;
+            }
+        }
+        Body {
+            is_static: true,
+            key: mk(),
+            entry: BlockId(0),
+            vars: vec![
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Ref,
+                },
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(1),
+                    ty: Ty::Int,
+                },
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(2),
+                    ty: Ty::Int,
+                },
+                ajave_ir::VarInfo {
+                    kind: VarKind::Local(3),
+                    ty: Ty::Ref,
+                },
+            ],
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(VarId(2)),
+                guarded: false,
+                bytecode_offset: 0,
+                line: None,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                bytecode_offset: 0,
+                stmts,
+                term: Terminator::Return(None),
+                exceptional: vec![],
+            }],
+        }
+    }
+
+    fn fld_eq(n: i64) -> Expr {
+        Expr::Bin(
+            Op::Eq,
+            Box::new(Expr::Field {
+                field: ajave_ir::FieldKey {
+                    class: "Box".into(),
+                    name: "v".into(),
+                    desc: "I".into(),
+                },
+                obj: Box::new(Expr::Var(VarId(0))),
+            }),
+            Box::new(Expr::Int(n)),
+        )
+    }
+
+    /// A1/A2 control. Before field-as-array, `GetField` fell through to a
+    /// fresh constant and no invariant could mention a field at all.
+    #[test]
+    fn a_field_invariant_can_be_confirmed() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(
+            &field_body(7, 7, false),
+            &inv(fld_eq(7)),
+            ObligationId(0),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "the store writes 7, so `o.v == 7` is sufficient and preserved"
+        );
+    }
+
+    #[test]
+    fn a_field_invariant_contradicted_by_the_store_is_refuted() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(
+            &field_body(0, 7, false),
+            &inv(fld_eq(7)),
+            ObligationId(0),
+            s,
+        );
+        assert_ne!(r, CertResult::Confirmed, "the store writes 0");
+    }
+
+    /// The reason the Burstall model was chosen. A second object's field write
+    /// must not disturb the first's — which the flat abstraction in
+    /// `interval.rs` cannot express, and which this gets from the solver for
+    /// free because `o` and `p` are distinct references.
+    #[test]
+    fn a_second_receivers_write_does_not_disturb_the_first() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(&field_body(7, 7, true), &inv(fld_eq(7)), ObligationId(0), s);
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "p.v = 99 must not make o.v == 7 unprovable; if this fails the \
+             field cells are merged rather than indexed by receiver"
+        );
     }
 
     /// The control for the array path. If this cannot confirm, every negative

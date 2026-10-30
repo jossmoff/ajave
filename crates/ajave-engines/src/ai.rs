@@ -384,8 +384,29 @@ fn analyze_field_precision(prog: &Program) -> crate::interval::FieldPrec {
         }
     }
 
+    // ── B2: per-method allocation sites ─────────────────────────────────
+    // `unique` is false for a body with a loop, where a `new` on the back-edge
+    // produces one object per iteration and the site summarises all of them.
+    // The same conservatism `singleton_classes` applies per class, applied per
+    // site — which is the whole gain, since two sites of one class are now
+    // distinguishable where the class-level test gave up on both.
+    let sites: HashMap<MethodKey, crate::interval::SiteInfo> = prog
+        .bodies
+        .iter()
+        .map(|(mk, body)| {
+            (
+                mk.clone(),
+                crate::interval::SiteInfo {
+                    at: crate::body_analysis::ref_alloc_sites_at(body),
+                    unique_sites: crate::body_analysis::unique_alloc_sites(body),
+                },
+            )
+        })
+        .collect();
+
     crate::interval::FieldPrec {
         singleton_classes,
+        sites,
         writes,
         all_written,
         nothing: HashSet::new(),
@@ -404,27 +425,72 @@ pub struct AiEngine {
     field_prec: crate::interval::FieldPrec,
 }
 
+/// Hints are per **block entry**: states whose `location().index != 0` are
+/// skipped below. A body with a single block therefore publishes nothing even
+/// though it converges trivially — its only block-entry state is the method
+/// entry, where nothing is known yet.
+///
+/// That is not a defect, but it does make a hand-built single-block fixture
+/// look like a counterexample to the completeness gate above. It is not one;
+/// see `docs/interval-ai-hint-path.md`.
 fn join_block_intervals(
     method: &MethodKey,
     reached: &[crate::interval::IState],
     body: &ajave_ir::Body,
 ) -> HashMap<(BlockId, VarId), Interval> {
-    let mut out: HashMap<(BlockId, VarId), Interval> = HashMap::new();
+    // Group the reached states by block first. The join below must range over
+    // *every* state at a block, including the ones that say nothing about a
+    // variable, and that cannot be done in a single pass over `reached`.
+    //
+    // This is where the published hints were unsound. `IState` stores
+    // intervals sparsely — `IState::set` deliberately *removes* an entry
+    // rather than storing Top, because an absent entry already means Top —
+    // and the previous version iterated `state.vars`. A state in which a
+    // variable was Top therefore contributed nothing to the join instead of
+    // widening it to Top, so a bound narrowed on one branch was published as
+    // holding at the join of that branch with one that knew nothing.
+    //
+    // `smt-bmc` asserts these as facts true at the block on every path, so the
+    // result was a discharged obligation that a JVM-confirmed witness
+    // violates. See
+    // `benchmarks/ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths`.
+    let mut by_block: std::collections::BTreeMap<BlockId, Vec<&crate::interval::IState>> =
+        std::collections::BTreeMap::new();
     for state in reached {
         let loc = state.location();
         if loc.method != *method || loc.index != 0 {
             continue;
         }
-        for (&vid, &iv) in &state.vars {
-            if iv.is_bottom() {
-                continue;
-            }
+        by_block.entry(loc.block).or_default().push(state);
+    }
+
+    let mut out: HashMap<(BlockId, VarId), Interval> = HashMap::new();
+    for (block, states) in by_block {
+        // Every variable any state at this block has an opinion about. A
+        // variable no state mentions is Top everywhere and is not worth a key.
+        let vids: std::collections::BTreeSet<VarId> =
+            states.iter().flat_map(|s| s.vars.keys().copied()).collect();
+        for vid in vids {
             let var_ty = body.vars.get(vid.0 as usize).map(|v| &v.ty);
             if matches!(var_ty, Some(ajave_ir::Ty::Long | ajave_ir::Ty::Double)) {
                 continue;
             }
-            let joined = out.entry((loc.block, vid)).or_insert_with(Interval::bottom);
-            *joined = joined.join(iv);
+            // `IState::get` returns Top for an absent entry, which is the
+            // whole point: the join is over all states at the block, not over
+            // the states that happened to record a bound.
+            let mut joined = Interval::bottom();
+            for s in &states {
+                let iv = s.get(vid);
+                // A bottom state is infeasible and describes no execution, so
+                // it cannot weaken a claim about the ones that are.
+                if iv.is_bottom() {
+                    continue;
+                }
+                joined = joined.join(iv);
+            }
+            if !joined.is_bottom() {
+                out.insert((block, vid), joined);
+            }
         }
     }
     out
@@ -446,6 +512,16 @@ impl Default for AiEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether the hint exploration widens at loop headers so it can converge.
+///
+/// `AJAVE_WIDEN_HINTS=0` restores the pure-`Sep` exploration, which publishes
+/// nothing on any program with an unbounded loop. See
+/// `docs/interval-ai-hint-path.md` for the measurement that motivated this.
+pub fn widened_hints_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_WIDEN_HINTS").as_deref() != Ok("0"))
 }
 
 impl AiEngine {
@@ -487,9 +563,10 @@ impl AiEngine {
                     Direction::Over,
                     Artifact::Invariant(Invariant {
                         id,
-                        at,
+                        at: at.clone(),
                         formula: Expr::bin(Op::And, lo, hi),
                         status: InvStatus::Candidate,
+                        scope: Scope::Point(at.clone()),
                     }),
                 );
                 hint_count += 1;
@@ -604,6 +681,7 @@ impl AiEngine {
                             at: at.clone(),
                             formula,
                             status: InvStatus::Candidate,
+                            scope: Scope::Point(at.clone()),
                         }),
                     );
                 }
@@ -771,6 +849,24 @@ impl Engine for AiEngine {
             nonnull_statics: self.nonnull_statics.clone(),
             field_prec: self.field_prec.clone(),
         };
+        // `&Sep` below means **no widening**, so a loop whose trip count is
+        // not statically known enumerates states until `max_states` and
+        // returns `complete = false` — and then nothing is published at all,
+        // however precise the intervals were.
+        //
+        // Measured on three programs differing only in their loop: bounded 83
+        // hints applied, unbounded 0, no loop 32. That gate is why B2, B3 and
+        // #103 each measured exactly zero, and it is **correct** — an
+        // incomplete exploration has not visited every reachable state, and
+        // `smt-bmc` asserts a hint as a fact.
+        //
+        // Note the asymmetry with the float-loop branch above, which widens and
+        // therefore converges. Using a widening policy here is the single
+        // change most likely to make interval hints matter, and it is a
+        // measurement rather than an argument.
+        //
+        // See `docs/interval-ai-hint-path.md` before building anything that
+        // depends on these hints.
         info!("interval-ai: init — running abstract interpretation for hints");
         let start = ProgramPoint {
             method: entry.clone(),
@@ -778,7 +874,34 @@ impl Engine for AiEngine {
             index: 0,
         };
         let max_states = 1000usize;
-        let (reached, complete) = explore(&cpa, &Sep, prog, &start, (), max_states);
+        // Widen at loop headers so the exploration can actually converge.
+        //
+        // `&Sep` is pure path sensitivity: a loop whose trip count is not
+        // statically known enumerates states until `max_states`, returns
+        // `complete = false`, and then **nothing is published at all** —
+        // measured as 83 hints on a bounded loop against 0 on the same program
+        // with an unbounded one. Since `publish` is gated on completeness (it
+        // must be: an unfinished search has not visited every state, and
+        // `smt-bmc` asserts a hint as a fact), the engine was silent on exactly
+        // the programs where the BMC cannot unroll and needs help.
+        //
+        // Soundness is unchanged. Both join and widen are upper bounds on the
+        // states they replace, so a converged widening analysis still
+        // over-approximates every reachable state — which is all a published
+        // `Over` interval claims. This is the same argument the float-loop
+        // branch above already relies on, with the same policy.
+        //
+        // The cost is precision at loop headers: a hint may be weaker than the
+        // path-sensitive one would have been. Weaker is not wrong, and a weaker
+        // hint that exists beats a sharper one that is never published.
+        //
+        // See `docs/interval-ai-hint-path.md`.
+        let (reached, complete) = if widened_hints_enabled() {
+            let policy = WidenAtLoopHeaders::from_body(body);
+            explore(&cpa, &policy, prog, &start, (), max_states)
+        } else {
+            explore(&cpa, &Sep, prog, &start, (), max_states)
+        };
 
         if complete {
             self.publish_interval_hints(entry, &reached, bb, body);
@@ -913,5 +1036,117 @@ impl Engine for AiEngine {
         } else {
             Progress::Blocked
         }
+    }
+}
+
+#[cfg(test)]
+mod join_hint_tests {
+    use super::*;
+    use crate::interval::{IState, Interval};
+    use ajave_core::artifact::ProgramPoint;
+
+    fn mk() -> MethodKey {
+        MethodKey {
+            class: "Main".into(),
+            name: "main".into(),
+            desc: "()V".into(),
+        }
+    }
+
+    fn body_with_int_vars(n: usize) -> ajave_ir::Body {
+        ajave_ir::Body {
+            key: mk(),
+            entry: BlockId(0),
+            blocks: vec![ajave_ir::Block {
+                id: BlockId(0),
+                stmts: Vec::new(),
+                term: ajave_ir::Terminator::Return(None),
+                bytecode_offset: 0,
+                exceptional: Vec::new(),
+            }],
+            vars: (0..n)
+                .map(|i| ajave_ir::VarInfo {
+                    ty: ajave_ir::Ty::Int,
+                    kind: ajave_ir::VarKind::Local(i as u16),
+                })
+                .collect(),
+            obligations: Vec::new(),
+            is_static: true,
+        }
+    }
+
+    fn state_at(block: u32, bounds: &[(u32, i64, i64)]) -> IState {
+        let mut st = IState::top_at(ProgramPoint {
+            method: mk(),
+            block: BlockId(block),
+            index: 0,
+        });
+        for &(v, lo, hi) in bounds {
+            st.vars.insert(VarId(v), Interval { lo, hi });
+        }
+        st
+    }
+
+    /// The defect that produced a JVM-confirmed wrong discharge.
+    ///
+    /// `IState` stores intervals sparsely and `IState::set` *removes* a Top
+    /// entry by design, so a state that knows nothing about `v0` has no entry
+    /// for it. Joining only over present entries published the one branch's
+    /// bound as a fact true at the join, and `smt-bmc` asserts these as facts
+    /// true on every path reaching the block.
+    ///
+    /// Named after
+    /// `benchmarks/ajave/engine-cooperation/IntervalHintAtAJoinMustHoldOnBothPaths`.
+    #[test]
+    fn a_variable_top_in_one_state_is_not_published_as_bounded_at_the_join() {
+        let body = body_with_int_vars(2);
+        let reached = vec![
+            // The then-branch narrowed v0 to exactly 0.
+            state_at(3, &[(0, 0, 0), (1, 5, 5)]),
+            // The else-branch knows nothing about v0 — hence no entry — but
+            // does bound v1.
+            state_at(3, &[(1, 7, 7)]),
+        ];
+        let out = join_block_intervals(&mk(), &reached, &body);
+        assert!(
+            !out.contains_key(&(BlockId(3), VarId(0)))
+                || out[&(BlockId(3), VarId(0))] == Interval::top(),
+            "v0 is Top on one path, so no bound may be published for it: got {:?}",
+            out.get(&(BlockId(3), VarId(0)))
+        );
+        assert_eq!(
+            out[&(BlockId(3), VarId(1))],
+            Interval { lo: 5, hi: 7 },
+            "v1 is bounded on both paths, so the join of the two is publishable"
+        );
+    }
+
+    /// The precision this must not give up: when every state at a block agrees
+    /// on a bound, the bound is still published. A fix that simply stopped
+    /// publishing at join points would pass the test above and be worthless.
+    #[test]
+    fn a_bound_every_state_agrees_on_is_still_published() {
+        let body = body_with_int_vars(1);
+        let reached = vec![
+            state_at(3, &[(0, 1, 1)]),
+            state_at(3, &[(0, 2, 4)]),
+            state_at(3, &[(0, 3, 3)]),
+        ];
+        let out = join_block_intervals(&mk(), &reached, &body);
+        assert_eq!(out[&(BlockId(3), VarId(0))], Interval { lo: 1, hi: 4 });
+    }
+
+    /// A bottom state is infeasible: it describes no execution, so it must not
+    /// widen a claim about the states that do. Without this the fix above would
+    /// cost every bound at any block an infeasible path also reaches.
+    #[test]
+    fn an_infeasible_state_does_not_weaken_the_join() {
+        let body = body_with_int_vars(1);
+        let reached = vec![
+            state_at(3, &[(0, 2, 2)]),
+            state_at(3, &[(0, 1, 0)]), // lo > hi: bottom
+        ];
+        let out = join_block_intervals(&mk(), &reached, &body);
+        assert_eq!(out[&(BlockId(3), VarId(0))], Interval { lo: 2, hi: 2 });
     }
 }

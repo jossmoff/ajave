@@ -73,6 +73,100 @@ pub fn body_uses_transcendental_math(body: &Body) -> bool {
 }
 
 /// Returns `true` if the body has any back-edges (loops).
+/// The blocks that can reach themselves — i.e. that sit inside some loop.
+///
+/// `body_has_loops` answers the same question for the *whole body*, and using
+/// it to decide whether an allocation site denotes one object is far too
+/// coarse: a loop anywhere disables site reasoning for every allocation in the
+/// method, **including allocations outside the loop that are perfectly
+/// unique**. That is what made B2's enabling condition
+/// (`!body_has_loops`) and its usefulness condition (a loop the BMC cannot
+/// unroll) nearly disjoint.
+///
+/// Computed by reachability rather than by the back-edge heuristic
+/// `body_has_loops` uses: `s.0 <= block.id.0` is a *sound* over-approximation
+/// of a back edge for sequentially numbered blocks, but it says nothing about
+/// which blocks are in the cycle, which is the question here.
+pub fn blocks_in_loops(body: &Body) -> std::collections::BTreeSet<BlockId> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let succs_of = |b: &ajave_ir::Block| -> Vec<BlockId> {
+        let mut v = match &b.term {
+            Terminator::Goto(t) => vec![*t],
+            Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+            Terminator::Switch { cases, default, .. } => {
+                let mut c: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
+                c.push(*default);
+                c
+            }
+            _ => vec![],
+        };
+        // Exceptional edges can close a cycle too: a handler that jumps back
+        // into the guarded region is a loop, and an allocation in it is not
+        // unique. Omitting them would be the unsound direction.
+        v.extend(b.exceptional.iter().map(|e| e.target));
+        v
+    };
+
+    let succs: BTreeMap<BlockId, Vec<BlockId>> =
+        body.blocks.iter().map(|b| (b.id, succs_of(b))).collect();
+
+    // Transitive closure of the successor relation, then a block is in a loop
+    // exactly when it reaches itself.
+    let mut reach: BTreeMap<BlockId, BTreeSet<BlockId>> = succs
+        .iter()
+        .map(|(b, ss)| (*b, ss.iter().copied().collect()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for b in body.blocks.iter().map(|b| b.id) {
+            let cur: Vec<BlockId> = reach[&b].iter().copied().collect();
+            let mut add: BTreeSet<BlockId> = BTreeSet::new();
+            for m in cur {
+                if let Some(r) = reach.get(&m) {
+                    add.extend(r.iter().copied());
+                }
+            }
+            let e = reach.get_mut(&b).unwrap();
+            let before = e.len();
+            e.extend(add);
+            if e.len() != before {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    body.blocks
+        .iter()
+        .map(|b| b.id)
+        .filter(|b| reach[b].contains(b))
+        .collect()
+}
+
+/// Allocation sites that denote **at most one object**, which is what permits a
+/// strong update to the site's cell.
+///
+/// A site qualifies when its allocating block is not inside a loop: a `new` on
+/// a back-edge runs once per iteration and the site summarises all of them, so
+/// replacing its cell would forget every object but the last.
+pub fn unique_alloc_sites(body: &Body) -> std::collections::BTreeSet<ajave_ir::AllocSite> {
+    let looping = blocks_in_loops(body);
+    let mut out = std::collections::BTreeSet::new();
+    for block in &body.blocks {
+        if looping.contains(&block.id) {
+            continue;
+        }
+        for st in &block.stmts {
+            if let Stmt::Assign(_, Rvalue::New { site, .. } | Rvalue::NewArray { site, .. }) = st {
+                out.insert(*site);
+            }
+        }
+    }
+    out
+}
+
 pub fn body_has_loops(body: &Body) -> bool {
     for block in &body.blocks {
         let succs = match &block.term {
@@ -361,4 +455,348 @@ pub fn refute_artifact_enabled() -> bool {
 pub fn residual_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("AJAVE_RESIDUAL").as_deref() == Ok("1"))
+}
+
+/// Which allocation each reference variable holds, **at every program point**.
+///
+/// Returned as the map in effect *before* statement `idx` of each block, keyed
+/// `(BlockId, idx)`, because `interval.rs`'s `transfer` is handed one statement
+/// at a time and needs the state that statement runs in.
+///
+/// # Why this is a dataflow and not a per-variable map
+///
+/// The first version answered one site per variable for the whole body, matched
+/// `Rvalue::New` directly, and was **dead code on every real program**. Two
+/// independent reasons, both visible in any lifter dump:
+///
+/// *The lifter never names the receiver directly.* For `Box a = new Box();
+/// a.v = 1;` it emits
+///
+/// ```text
+/// v0 = new Main$Box
+/// v2 = v0
+/// v1 = v2
+/// v5 = v1          <- v5 is the receiver
+/// v5.v = 1
+/// ```
+///
+/// so without copy propagation every real receiver resolves to nothing.
+///
+/// *javac reuses local slots.* In a two-object program `v1` is assigned from
+/// **both** allocations, so a flow-insensitive map must drop it as ambiguous —
+/// correctly, which is why per-point resolution is required rather than merely
+/// nicer.
+///
+/// Kept separate from `interpolation::array_sites_at_block_entry` rather than
+/// generalised over both: the CHC encoders look sites up in a map keyed only by
+/// `NewArray` sites, and an object site arriving there hits the silent-drop
+/// path that issue #18 was about.
+pub fn ref_alloc_sites_at(body: &Body) -> std::collections::BTreeMap<(BlockId, u32), RefSiteMap> {
+    use std::collections::BTreeMap;
+
+    let succs = |b: &ajave_ir::Block| -> Vec<BlockId> {
+        use ajave_ir::Terminator::*;
+        let mut v = match &b.term {
+            Goto(t) => vec![*t],
+            Branch { then_, else_, .. } => vec![*then_, *else_],
+            Switch { cases, default, .. } => {
+                let mut c: Vec<_> = cases.iter().map(|(_, t)| *t).collect();
+                c.push(*default);
+                c
+            }
+            Return(_) | Throw(_) | Halt | Diverge(_) => vec![],
+        };
+        v.extend(b.exceptional.iter().map(|e| e.target));
+        v
+    };
+
+    let mut entry: BTreeMap<BlockId, RefSiteMap> = body
+        .blocks
+        .iter()
+        .map(|b| (b.id, RefSiteMap::new()))
+        .collect();
+    // `reached` distinguishes "not yet visited" from "visited, knows nothing".
+    // Without it the entry block's empty map looks like a predecessor that
+    // disagrees with everything and no site ever propagates.
+    let mut reached: BTreeMap<BlockId, bool> = body.blocks.iter().map(|b| (b.id, false)).collect();
+    reached.insert(body.entry, true);
+
+    for _ in 0..=body.blocks.len() {
+        let mut changed = false;
+        for b in &body.blocks {
+            if !reached[&b.id] {
+                continue;
+            }
+            let mut cur = entry[&b.id].clone();
+            for st in &b.stmts {
+                update_ref_sites(&mut cur, st);
+            }
+            for s in succs(b) {
+                // Join by agreement: a variable survives only if every
+                // predecessor says it holds the *same* site. A disagreement
+                // means it names different objects on different paths, so it
+                // names none — which is what makes a strong update to the
+                // surviving cells sound.
+                let merged: RefSiteMap = if reached[&s] {
+                    cur.iter()
+                        .filter(|(v, site)| entry[&s].get(v) == Some(*site))
+                        .map(|(v, site)| (*v, *site))
+                        .collect()
+                } else {
+                    cur.clone()
+                };
+                if !reached[&s] || merged != entry[&s] {
+                    entry.insert(s, merged);
+                    reached.insert(s, true);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Expand block entries to per-statement maps.
+    let mut out = BTreeMap::new();
+    for b in &body.blocks {
+        let mut cur = entry[&b.id].clone();
+        for (i, st) in b.stmts.iter().enumerate() {
+            out.insert((b.id, i as u32), cur.clone());
+            update_ref_sites(&mut cur, st);
+        }
+    }
+    out
+}
+
+/// `VarId -> AllocSite` for object references at one program point. Absence
+/// means "may hold any object", never "holds none".
+pub type RefSiteMap = std::collections::BTreeMap<VarId, ajave_ir::AllocSite>;
+
+/// One statement's effect on which object each reference holds.
+///
+/// Every assignment must be handled, including those that destroy knowledge: a
+/// slot reassigned from a field load, a call, or an allocation of a different
+/// class no longer holds what it did, and leaving the stale entry is the
+/// unsound direction — it would attribute a write to an object the variable no
+/// longer points at.
+pub fn update_ref_sites(map: &mut RefSiteMap, st: &Stmt) {
+    let Stmt::Assign(v, rv) = st else { return };
+    match rv {
+        Rvalue::New { site, .. } | Rvalue::NewArray { site, .. } => {
+            map.insert(*v, *site);
+        }
+        Rvalue::Use(Operand::Var(w)) => match map.get(w).copied() {
+            Some(site) => {
+                map.insert(*v, site);
+            }
+            None => {
+                map.remove(v);
+            }
+        },
+        _ => {
+            map.remove(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod alloc_site_tests {
+    use super::*;
+    use ajave_ir::{
+        AllocSite, Block, BlockId, Body, Const, Operand, Rvalue, Stmt, Terminator, VarId,
+    };
+
+    fn body_blocks(blocks: Vec<Block>) -> Body {
+        Body {
+            key: ajave_ir::MethodKey {
+                class: "Main".into(),
+                name: "main".into(),
+                desc: "()V".into(),
+            },
+            entry: BlockId(0),
+            blocks,
+            vars: Vec::new(),
+            obligations: Vec::new(),
+            is_static: true,
+        }
+    }
+
+    fn blk(id: u32, stmts: Vec<Stmt>, term: Terminator) -> Block {
+        Block {
+            id: BlockId(id),
+            stmts,
+            term,
+            bytecode_offset: 0,
+            exceptional: Vec::new(),
+        }
+    }
+
+    fn body_with(stmts: Vec<Stmt>) -> Body {
+        body_blocks(vec![blk(0, stmts, Terminator::Return(None))])
+    }
+
+    fn new_at(idx: u32) -> Rvalue {
+        Rvalue::New {
+            class: "Box".into(),
+            site: AllocSite {
+                block: BlockId(0),
+                index: idx,
+            },
+        }
+    }
+
+    fn copy(from: u32) -> Rvalue {
+        Rvalue::Use(Operand::Var(VarId(from)))
+    }
+
+    /// Resolve `v` at the point just before statement `idx` of block 0.
+    fn at(body: &Body, idx: u32, v: u32) -> Option<u32> {
+        ref_alloc_sites_at(body)
+            .get(&(BlockId(0), idx))
+            .and_then(|m| m.get(&VarId(v)))
+            .map(|s| s.index)
+    }
+
+    /// **The defect that made B2 and B3 dead code (#104).**
+    ///
+    /// The lifter never names the receiver directly — it emits
+    /// `v0 = new Box; v2 = v0; v1 = v2; v5 = v1; v5.f = ...`. Without copy
+    /// propagation every real receiver resolves to nothing, so `site_of`
+    /// returned `None` everywhere and the site cells were never populated.
+    /// Smoke measured 173 with the feature on and 173 ablated.
+    #[test]
+    fn a_receiver_reached_through_copies_resolves_to_its_site() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), new_at(0)),
+            Stmt::Assign(VarId(2), copy(0)),
+            Stmt::Assign(VarId(1), copy(2)),
+            Stmt::Assign(VarId(5), copy(1)),
+            Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0))),
+        ]);
+        // Before statement 4, the whole copy chain has run.
+        assert_eq!(at(&b, 4, 5), Some(0), "the receiver must carry the site");
+        assert_eq!(at(&b, 4, 0), Some(0), "and so must the original");
+    }
+
+    /// A site is known only *after* its allocation runs. Resolving it earlier
+    /// would attribute a write to an object that does not exist yet.
+    #[test]
+    fn a_site_is_not_known_before_its_allocation() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0))),
+            Stmt::Assign(VarId(0), new_at(1)),
+            Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(1))),
+        ]);
+        assert_eq!(at(&b, 0, 0), None, "not allocated yet");
+        assert_eq!(at(&b, 2, 0), Some(1), "allocated by now");
+    }
+
+    /// **Flow sensitivity, the second half of #104.** javac reuses slots, so a
+    /// two-object program assigns one variable both allocations. The old
+    /// per-variable map had to drop it as ambiguous; per-point resolution keeps
+    /// both, which is the whole capability B2 exists for.
+    #[test]
+    fn a_reused_slot_holds_each_object_at_the_point_it_holds_it() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(1), new_at(0)), // v1 = a
+            Stmt::Assign(VarId(5), copy(1)),   // v5 = a   (kept)
+            Stmt::Assign(VarId(1), new_at(2)), // v1 = b   (slot reused)
+            Stmt::Assign(VarId(10), copy(1)),  // v10 = b
+            Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0))),
+        ]);
+        assert_eq!(at(&b, 4, 5), Some(0), "v5 still holds the first object");
+        assert_eq!(at(&b, 4, 10), Some(2), "v10 holds the second");
+        assert_eq!(
+            at(&b, 4, 1),
+            Some(2),
+            "and the reused slot holds the latest"
+        );
+    }
+
+    /// A variable reaching a point from two different allocations names
+    /// neither: a strong update through it would be a lie about one of them.
+    /// This is the soundness condition the join enforces.
+    #[test]
+    fn a_variable_reaching_a_point_from_two_sites_resolves_to_nothing() {
+        let b = body_blocks(vec![
+            blk(
+                0,
+                vec![],
+                Terminator::Branch {
+                    cond: Operand::int(1),
+                    then_: BlockId(1),
+                    else_: BlockId(2),
+                },
+            ),
+            blk(
+                1,
+                vec![Stmt::Assign(VarId(1), new_at(10))],
+                Terminator::Goto(BlockId(3)),
+            ),
+            blk(
+                2,
+                vec![Stmt::Assign(VarId(1), new_at(20))],
+                Terminator::Goto(BlockId(3)),
+            ),
+            blk(
+                3,
+                vec![Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0)))],
+                Terminator::Return(None),
+            ),
+        ]);
+        let m = ref_alloc_sites_at(&b);
+        assert!(
+            m.get(&(BlockId(3), 0))
+                .and_then(|m| m.get(&VarId(1)))
+                .is_none(),
+            "two allocations reach this point, so the variable names neither"
+        );
+    }
+
+    /// Both predecessors agreeing is the case that must still resolve — a join
+    /// that dropped everything would be sound and useless.
+    #[test]
+    fn a_variable_both_predecessors_agree_on_still_resolves() {
+        let b = body_blocks(vec![
+            blk(
+                0,
+                vec![Stmt::Assign(VarId(1), new_at(7))],
+                Terminator::Branch {
+                    cond: Operand::int(1),
+                    then_: BlockId(1),
+                    else_: BlockId(2),
+                },
+            ),
+            blk(1, vec![], Terminator::Goto(BlockId(3))),
+            blk(2, vec![], Terminator::Goto(BlockId(3))),
+            blk(
+                3,
+                vec![Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0)))],
+                Terminator::Return(None),
+            ),
+        ]);
+        let m = ref_alloc_sites_at(&b);
+        assert_eq!(
+            m.get(&(BlockId(3), 0))
+                .and_then(|m| m.get(&VarId(1)))
+                .map(|s| s.index),
+            Some(7),
+            "both paths agree, so the site survives the join"
+        );
+    }
+
+    /// A slot reassigned from something that is not an allocation must lose the
+    /// site. Keeping it is the unsound direction: a later write through that
+    /// slot would be attributed to an object it no longer points at.
+    #[test]
+    fn a_slot_reassigned_from_a_non_allocation_loses_its_site() {
+        let b = body_with(vec![
+            Stmt::Assign(VarId(0), new_at(0)),
+            Stmt::Assign(VarId(0), Rvalue::Use(Operand::Const(Const::Null))),
+            Stmt::Assign(VarId(9), Rvalue::Use(Operand::int(0))),
+        ]);
+        assert_eq!(at(&b, 1, 0), Some(0));
+        assert_eq!(at(&b, 2, 0), None, "null is not that object");
+    }
 }

@@ -30,7 +30,7 @@ report_and_kill() {
 # would kill the user's own work.
 report_and_kill "ajave JVM replays" "ajave-shadow|ajave-build"
 report_and_kill "ajave processes"   "target/release/ajave"
-report_and_kill "benchmark runners" "tools/bench.py|smoke_test.py|score_full.py"
+report_and_kill "benchmark runners" "tools/bench.py|blocker_census.py"
 
 # Orphaned solvers and JVMs: parent gone (ppid 1), so nothing owns them.
 #

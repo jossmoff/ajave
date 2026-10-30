@@ -13,6 +13,69 @@
 //! BV for the single-method encoding when there are no inter-procedural calls.
 
 use crate::body_analysis::{body_uses_float_types, obligation_scoping_enabled};
+
+/// C1. How many fields a summary relation may carry before the encoding gives
+/// up and the call site clobbers instead.
+///
+/// A fitted constant, and recorded as such per `CLAUDE.md`. Each footprint
+/// field adds two `(Array Int Int)` arguments to the summary, and this file
+/// records a five-line program that times out with 14-ary block predicates and
+/// is `sat` in 0.01s over two live variables. Six fields means twelve array
+/// arguments on top of the parameters, which is already past where that
+/// measurement says Spacer struggles — so this is an upper bound on damage,
+/// not a tuning target. The score must not be sensitive to its exact value;
+/// if it is, the mechanism is not earning its keep.
+const MAX_SUMMARY_FIELDS: usize = 6;
+
+/// The SMT sort of a field array or an array site's contents in the LIA
+/// encoding. Hoisted to module scope because C1's summary declarations, which
+/// run before the per-body encoder, need it too.
+const ARR_SORT: &str = "(Array Int Int)";
+
+/// D1. Whether Spacer is asked to generalise its lemmas with quantifiers.
+///
+/// `fp.spacer.q3.use_qgen` turns on quantified generalisation over array
+/// indices, and `fp.spacer.ground_pobs=false` stops Spacer grounding its proof
+/// obligations before trying — the two are documented upstream as having to be
+/// set together, and setting only the first does nothing observable.
+///
+/// This is the capability the heap work runs into rather than another encoding
+/// change: `benchmarks/ajave/heap/EveryElementNonNullAfterAFillLoop` needs
+/// `∀j. 0 ≤ j < i → a[j] ≠ null` inferred from one loop and used in another.
+/// Contents modelling made that property expressible; nothing in the portfolio
+/// infers it.
+///
+/// **On by default**, measured. `AJAVE_CHC_QGEN=0` ablates it.
+///
+/// The expected cost was timeouts: a quantified search is a different and
+/// usually slower search. Measured on smoke it is not: **173 against 171, 134
+/// correct against 133, 0 wrong either way, 319s against 320s and the same
+/// timeout count**. The gain is the one task that needs a quantified array
+/// invariant, and nothing else moved.
+///
+/// Two caveats on that number, because it is a small set. The flag was
+/// *first* measured as neutral, on a set that contained nothing exercising it
+/// — a number with no information in it. And it does nothing at all without
+/// the array-store fix it shipped alongside: before that, Spacer reported the
+/// error reachable on the array-fill shape, and quantified generalisation
+/// cannot help when the abstraction genuinely admits a counterexample.
+pub fn chc_qgen_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_CHC_QGEN").as_deref() != Ok("0"))
+}
+
+/// Whether C1's heap-carrying summary relations are used.
+///
+/// **Off by default, and that is a statement about evidence rather than a
+/// default to be flipped later.** `CLAUDE.md` is explicit that a producer which
+/// is off by default is not finished, and the condition for leaving a mechanism
+/// there is saying so. The encoding is complete and tested; what it is missing
+/// is a measurement showing it gains more than the arity costs, and this file's
+/// own recorded Spacer arity results are reason to expect it may not.
+pub fn chc_heap_summary_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AJAVE_CHC_HEAP_SUMMARY").as_deref() == Ok("1"))
+}
 use crate::smt_text::{self, LiaTheory, SmtTheory};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as IoWrite;
@@ -318,7 +381,13 @@ impl Engine for ChcEngine {
 
         let smt2 = if has_interproc_calls {
             info!("chc: using inter-procedural LIA encoding");
-            drop_empty_quantifiers(&encode_chc_interproc(prog, entry, &obs, &invariants))
+            drop_empty_quantifiers(&encode_chc_interproc(
+                prog,
+                entry,
+                &obs,
+                &invariants,
+                chc_heap_summary_enabled(),
+            ))
         } else {
             info!("chc: using single-method BV encoding");
             drop_empty_quantifiers(&encode_chc_single(body, &obs_ids))
@@ -620,6 +689,19 @@ impl FreshGen {
         name
     }
 
+    /// A fresh array-sorted binder, for C1's post-call heap names.
+    ///
+    /// Separate from `fresh` because the sort is part of the binder and an
+    /// `Int` binder standing for a field array makes the clause ill-sorted —
+    /// z3 then drops the whole assert and answers `sat`, which this file
+    /// records as having been read once as "the property is not preserved".
+    fn fresh_arr(&mut self) -> String {
+        let name = format!("_h{}", self.counter);
+        self.counter += 1;
+        self.extra_forall.push(format!("({} {})", name, ARR_SORT));
+        name
+    }
+
     /// Record a binder for a fresh value the shared theory produced.
     ///
     /// `LiaTheory::encode_fresh` names unconstrained values from a
@@ -866,6 +948,13 @@ fn encode_chc_interproc(
     // wrong TRUE at -16, which is why only bounds from an over-approximating
     // producer that approximated nothing are accepted; see the caller.
     invariants: &BlockInvariants,
+    // C1. Whether summary relations carry a heap footprint.
+    //
+    // A parameter rather than a read of `chc_heap_summary_enabled()` inside
+    // the encoder: an encoder that consults the environment cannot be tested
+    // both ways in one process, because the flag is cached in a `OnceLock`.
+    // The conformance tests below need exactly that.
+    heap_summary: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str("(set-logic HORN)\n\n");
@@ -902,18 +991,214 @@ fn encode_chc_interproc(
         })
         .collect();
 
-    // Declare summary relations for non-void methods.
-    for mk in &all_methods {
-        let mid = &method_ids[mk];
+    // ── C1: the field footprint of each method ──────────────────────────
+    //
+    // The fields a method, or anything it transitively calls, reads or writes.
+    // This is what a summary relation has to carry for a heap effect to cross a
+    // call instead of being havoced at the call site.
+    //
+    // **It is a footprint, not the whole program's field set, and that is the
+    // entire engineering question here.** Every summary argument costs Spacer,
+    // and sharply: this file already records a five-line program that times out
+    // with 14-ary block predicates and is `sat` in 0.01s over two live
+    // variables. A field array is `(Array Int Int)`, which is harder for
+    // Spacer to synthesise an interpretation over than an `Int`, and C1 adds
+    // *two* per footprint field — pre and post. Threading the program's whole
+    // field set would make every summary unusable; threading a constructor's
+    // own class's fields costs two arguments.
+    //
+    // Reads need the pre half so the callee's constraint sees the caller's
+    // value; writes need the post half so the caller sees the callee's. A
+    // field in neither set is untouched by the call and is simply not passed.
+    // `heap_opaque` is the condition the comment below used to claim and the
+    // code did not implement (gh #110): a method with a callee we have no body
+    // for. Its footprint is incomplete by construction, because the closure
+    // that folds callee fields in can only fold what it can see, so a summary
+    // built from it would assert that fields outside the footprint survive a
+    // call that may well have written them. That is an `Over` engine making a
+    // claim about every execution on the strength of a set it knows is partial.
+    //
+    // Tracked as a `BTreeSet`, and only ever queried with `contains`, but the
+    // ordered type is deliberate: this set decides whether a summary relation
+    // is emitted, and a collection that decides what the solver sees must not
+    // depend on hash order.
+    let (field_footprint, heap_opaque): (
+        HashMap<MethodKey, BTreeSet<FieldKey>>,
+        BTreeSet<MethodKey>,
+    ) = {
+        let mut direct: HashMap<MethodKey, BTreeSet<FieldKey>> = HashMap::new();
+        let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
+        for (mk2, body2) in &prog.bodies {
+            let mut fs: BTreeSet<FieldKey> = BTreeSet::new();
+            let mut cs = Vec::new();
+            for block in &body2.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            fs.insert(field.clone());
+                        }
+                        Stmt::Assign(_, rv) => {
+                            if let Rvalue::GetField { field, .. } = rv {
+                                fs.insert(field.clone());
+                            }
+                            if let Rvalue::Call { target, .. } = rv {
+                                cs.push(target.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            direct.insert(mk2.clone(), fs);
+            callees.insert(mk2.clone(), cs);
+        }
+        // Transitive closure. A callee without a body could touch anything, so
+        // its caller gets no summary-threaded heap at all — `heap_summary_of`
+        // returns `None` for those and the call site falls back to clobbering.
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                let mut add: BTreeSet<FieldKey> = BTreeSet::new();
+                for c in cs {
+                    if let Some(f) = direct.get(c) {
+                        add.extend(f.iter().cloned());
+                    }
+                }
+                let e = direct.entry(caller.clone()).or_default();
+                let before = e.len();
+                e.extend(add);
+                if e.len() != before {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // A method is opaque if it calls something we have no body for, or
+        // calls something that is itself opaque. Same monotone closure shape as
+        // the footprint above, and for the same reason: opacity has to travel
+        // up the call graph or a summary one level above an unresolved call
+        // still claims a complete footprint.
+        let mut opaque: BTreeSet<MethodKey> = BTreeSet::new();
+        for (caller, cs) in &callees {
+            if cs.iter().any(|c| !direct.contains_key(c)) {
+                opaque.insert(caller.clone());
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                if opaque.contains(caller) {
+                    continue;
+                }
+                if cs.iter().any(|c| opaque.contains(c)) {
+                    opaque.insert(caller.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        (direct, opaque)
+    };
+
+    // Which methods may be summarised with their heap effect threaded through.
+    //
+    // `None` means "clobber at the call site", the pre-C1 behaviour, and is the
+    // answer whenever the footprint is empty (nothing to thread), too large to
+    // be worth the arity, or the method has an unresolved callee of its own.
+    //
+    // Every one of those four conditions is now tested here. The last was for a
+    // while asserted in this comment and absent from the code (gh #110), which
+    // is the defect class CLAUDE.md names: a comment stating a soundness
+    // argument with nothing maintaining it. `a_method_with_an_unresolved_callee_
+    // gets_no_summary` is the test named after this paragraph.
+    //
+    // Each refusal is logged rather than left to be inferred. C1 was measured
+    // inert across 107 heap-shaped tasks (gh #109) and the measurement could
+    // not say why, because "every method was refused a summary" and "summaries
+    // do not help these programs" produced identical output. They call for
+    // completely different work.
+    let heap_summary_of = |mk: &MethodKey| -> Option<&BTreeSet<FieldKey>> {
+        if !heap_summary {
+            return None;
+        }
+        if heap_opaque.contains(mk) {
+            debug!("chc-summary: {mk} refused — calls a method we have no body for");
+            return None;
+        }
+        let Some(fp) = field_footprint.get(mk) else {
+            debug!("chc-summary: {mk} refused — no footprint entry");
+            return None;
+        };
+        if fp.is_empty() {
+            debug!("chc-summary: {mk} refused — empty footprint, nothing to thread");
+            return None;
+        }
+        if fp.len() > MAX_SUMMARY_FIELDS {
+            debug!(
+                "chc-summary: {mk} refused — footprint of {} exceeds MAX_SUMMARY_FIELDS {}",
+                fp.len(),
+                MAX_SUMMARY_FIELDS
+            );
+            return None;
+        }
+        debug!(
+            "chc-summary: {mk} granted a summary over {} field(s)",
+            fp.len()
+        );
+        Some(fp)
+    };
+
+    // Declare summary relations.
+    //
+    // Shape: `(params..., pre-heap..., ret?, post-heap...)`. The pre-heap and
+    // post-heap blocks are present only for a method `heap_summary_of` accepts,
+    // and `ret` only for a non-void one.
+    //
+    // A **void** method gets a summary whenever it has a heap footprint, which
+    // it never did before C1. That is the whole point: a constructor or a setter
+    // returns nothing and exists entirely for its heap effect, so a summary
+    // keyed on the return value cannot describe it, and the call site had no
+    // choice but to clobber.
+    //
+    // The argument order is fixed here and consumed in two other places — the
+    // conclusion at each `return` and the application at each call site. All
+    // three are built from `summary_sig` so they cannot drift; a positional
+    // signature agreed by eye across three sites is how a producer and a
+    // consumer come to disagree about an artifact.
+    let summary_sig = |mk: &MethodKey| -> Option<(usize, bool, Vec<FieldKey>)> {
         let ret_ch = return_type_char(&mk.desc);
-        if ret_ch == 'V' {
-            continue;
+        let fp: Vec<FieldKey> = heap_summary_of(mk)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        // Nothing to say about a void method with no heap footprint.
+        if ret_ch == 'V' && fp.is_empty() {
+            return None;
         }
         let params = method_params.get(mk).map(|v| v.len()).unwrap_or(0);
-        let sig = (0..params + 1).map(|_| "Int").collect::<Vec<_>>().join(" ");
+        Some((params, ret_ch != 'V', fp))
+    };
+    for mk in &all_methods {
+        let Some((params, has_ret, fp)) = summary_sig(mk) else {
+            continue;
+        };
+        let mut sig: Vec<&str> = (0..params).map(|_| "Int").collect();
+        // Pre-heap, then the return value if there is one, then post-heap.
+        // `summary_sig` is the single definition of this order; the conclusion
+        // at each return and the application at each call site read it too.
+        sig.extend(std::iter::repeat_n(ARR_SORT, fp.len()));
+        if has_ret {
+            sig.push("Int");
+        }
+        sig.extend(std::iter::repeat_n(ARR_SORT, fp.len()));
         out.push_str(&format!(
             "; summary for {}\n(declare-fun {}_s ({}) Bool)\n",
-            mk, mid, sig
+            mk,
+            method_ids[mk],
+            sig.join(" ")
         ));
     }
 
@@ -1073,6 +1358,91 @@ fn encode_chc_interproc(
     // fields a method may write so a call invalidates those cells rather than
     // the whole map. An unresolved callee still clobbers everything, because
     // nothing is known about it.
+    // One array per field name, indexed by the receiver (Burstall), shared
+    // across all methods: a field cell is global, unlike an array site, which
+    // is body-relative. So the field arrays are declared once and appended to
+    // every method's relations.
+    let all_fields: std::collections::BTreeSet<FieldKey> = {
+        let mut out: std::collections::BTreeSet<FieldKey> = Default::default();
+        for mk2 in &all_methods {
+            let Some(b) = prog.body(mk2) else { continue };
+            for block in &b.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            out.insert(field.clone());
+                        }
+                        Stmt::Assign(_, Rvalue::GetField { field, .. }) => {
+                            out.insert(field.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // A float-valued field cannot live in an (Array Int Int), and the LIA
+        // theory has nothing to say about one anyway.
+        out.retain(|f| f.desc != "D" && f.desc != "F");
+        out
+    };
+    let fld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
+    let fld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
+    // C1. The field array as it was on **method entry**, threaded unchanged
+    // through every block relation of a summarised method.
+    //
+    // A summary is a relation between two heaps, and without a name for the
+    // entry heap the conclusion at a `return` can only use the binder it
+    // already has — the heap *at the return block*. The clause then reads
+    // `m_s(params, H, H)`: the method changes nothing. That is a false claim
+    // about the method, and the first version of C1 emitted exactly it.
+    let fld_entry = |f: &FieldKey| format!("{}_e", crate::invariant_check::field_array_name(f));
+
+    // Which methods may write each field, transitively.
+    //
+    // Per-field rather than all-or-nothing, because field writes are
+    // per-field: a constructor that sets `this.v` says nothing about `other.w`.
+    // That is what lets `for (..) a[i] = new A();` keep an invariant about a
+    // *different* field across the constructor call.
+    let field_writers: HashMap<FieldKey, std::collections::HashSet<MethodKey>> = {
+        let mut direct: HashMap<FieldKey, std::collections::HashSet<MethodKey>> = HashMap::new();
+        let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
+        for (mk2, body2) in &prog.bodies {
+            let mut cs = Vec::new();
+            for block in &body2.blocks {
+                for st in &block.stmts {
+                    match st {
+                        Stmt::PutField { field, .. } => {
+                            direct.entry(field.clone()).or_default().insert(mk2.clone());
+                        }
+                        Stmt::Assign(_, Rvalue::Call { target, .. }) => cs.push(target.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            callees.insert(mk2.clone(), cs);
+        }
+        // A caller of a writer is a writer, per field.
+        loop {
+            let mut changed = false;
+            for (caller, cs) in &callees {
+                for (f, ws) in direct.iter_mut() {
+                    let _ = f;
+                    if ws.contains(caller) {
+                        continue;
+                    }
+                    if cs.iter().any(|c| ws.contains(c)) {
+                        ws.insert(caller.clone());
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        direct
+    };
+
     let array_writers: std::collections::HashSet<MethodKey> = {
         let mut direct: std::collections::HashSet<MethodKey> = Default::default();
         let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
@@ -1131,23 +1501,25 @@ fn encode_chc_interproc(
         .iter()
         .filter_map(|mk| {
             let body = prog.body(mk)?;
-            let mut v: Vec<_> = crate::interpolation::array_sites_of(body)
-                .values()
-                .copied()
-                .collect();
-            v.sort();
-            v.dedup();
-            Some((mk.clone(), v))
+            // Which sites exist is syntactic; which *use* resolves to one is
+            // not. Deriving the set from the resolution map meant an ambiguous
+            // variable deleted the array state every other use needed.
+            Some((mk.clone(), crate::interpolation::array_sites_in(body)))
         })
         .collect();
     let arr_src = |st: &ajave_ir::AllocSite| format!("a{}_{}", st.block.0, st.index);
     let arr_dst = |st: &ajave_ir::AllocSite| format!("b{}_{}", st.block.0, st.index);
-    const ARR_SORT: &str = "(Array Int Int)";
 
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = &method_ids[mk];
         let sites = method_arrays.get(mk).cloned().unwrap_or_default();
+        // C1. The fields whose *entry* value this method's block relations
+        // carry. Empty unless the method has a summary with a heap footprint,
+        // so an unsummarised method's predicates keep exactly their pre-C1
+        // arity — which matters, because the cost of this mechanism is arity
+        // and nothing else.
+        let entry_fp: Vec<FieldKey> = summary_sig(mk).map(|(_, _, fp)| fp).unwrap_or_default();
 
         out.push_str(&format!("; blocks for {}\n", mk));
         for block in &body.blocks {
@@ -1156,6 +1528,12 @@ fn encode_chc_interproc(
                 .map(|_| "Int".to_string())
                 .collect();
             for _ in &sites {
+                parts.push(ARR_SORT.to_string());
+            }
+            for _ in &all_fields {
+                parts.push(ARR_SORT.to_string());
+            }
+            for _ in &entry_fp {
                 parts.push(ARR_SORT.to_string());
             }
             let sig = parts.join(" ");
@@ -1180,9 +1558,12 @@ fn encode_chc_interproc(
     for mk in &all_methods {
         let Some(body) = prog.body(mk) else { continue };
         let mid = method_ids[mk].clone();
+        // C1. Must agree exactly with the declaration loop above, which
+        // computes the same list from the same function. See `fld_entry`.
+        let entry_fp: Vec<FieldKey> = summary_sig(mk).map(|(_, _, fp)| fp).unwrap_or_default();
         let n_vars = body.vars.len();
         let param_indices = method_params.get(mk).cloned().unwrap_or_default();
-        let ret_ch = return_type_char(&mk.desc);
+        let _ret_ch = return_type_char(&mk.desc);
         // Obligations are no longer entry-only, so this is kept only for the
         // summary/return clauses that still distinguish the entry method.
         let _is_entry = mk == entry;
@@ -1195,12 +1576,26 @@ fn encode_chc_interproc(
         let src_vars: Vec<String> = (0..total_slots).map(|i| format!("v{}", i)).collect();
         let dst_vars: Vec<String> = (0..total_slots).map(|i| format!("w{}", i)).collect();
         let sites = method_arrays.get(mk).cloned().unwrap_or_default();
-        let array_sites = crate::interpolation::array_sites_of(body);
+        // Flow-sensitive: which array each reference names *at each point*.
+        //
+        // The whole-body version of this question answered "none" for any slot
+        // javac reused, which is most of them — and the consequence was an
+        // encoding with twenty uses of the array havoc destination and zero
+        // `store`s. It read an array it never wrote, so every element was
+        // unconstrained, and even a three-element constant-bound fill loop
+        // could not be proved. See `array_sites_at_block_entry`.
+        let site_entry = crate::interpolation::array_sites_at_block_entry(body);
 
         let forall_src: String = {
             let mut v: Vec<String> = src_vars.iter().map(|x| format!("({} Int)", x)).collect();
             for st in &sites {
                 v.push(format!("({} {})", arr_src(st), ARR_SORT));
+            }
+            for f in &all_fields {
+                v.push(format!("({} {})", fld_src(f), ARR_SORT));
+            }
+            for f in &entry_fp {
+                v.push(format!("({} {})", fld_entry(f), ARR_SORT));
             }
             v.join(" ")
         };
@@ -1216,13 +1611,42 @@ fn encode_chc_interproc(
                 format!("({}_b{} {})", mid, bid, args)
             }
         };
-        let block_app_src = |bid: u32| -> String {
+        // Returns `[application, side-condition, ...]`.
+        //
+        // Exposed as parts rather than a joined string because the entry fact
+        // needs the side conditions **without** the application: it must be a
+        // Horn *fact*, and including its own head in its antecedent makes it
+        // the tautology `P -> P`, which forces nothing. The empty relation
+        // then satisfies it, every block of the method is interpreted `false`,
+        // its summary is `false`, and every block after a call to it becomes
+        // unreachable — so obligations past the call are discharged
+        // vacuously. That is a wrong TRUE, and
+        // `benchmarks/ajave/engine-chc/RecursiveFieldWriteIsNotForgotten` is
+        // the ten-line program that exhibits it (#106).
+        //
+        // The previous version rebuilt the application separately and removed
+        // it from the joined string with `replacen`. When C1 added the entry
+        // heap, the two spellings diverged — `fld_entry(f)` here against
+        // `fld_src(f)` there — the `replacen` silently matched nothing, and
+        // the application stayed in the antecedent. `CLAUDE.md` already
+        // records that class of failure: "three `.replace` calls silently
+        // no-op'd ... now assert every replacement". Not constructing the
+        // string twice is better than asserting about it.
+        let block_parts_src = |bid: u32| -> Vec<String> {
             let mut arg_parts: Vec<String> = live_at(mk, bid)
                 .iter()
                 .map(|i| src_vars[*i].clone())
                 .collect();
             for st in &sites {
                 arg_parts.push(arr_src(st));
+            }
+            for f in &all_fields {
+                arg_parts.push(fld_src(f));
+            }
+            // Threaded unchanged: this is the heap on method entry, and no
+            // statement in the body may alter it.
+            for f in &entry_fp {
+                arg_parts.push(fld_entry(f));
             }
             let args = arg_parts.join(" ");
             let app = app_of(&mid, bid, &args);
@@ -1267,11 +1691,7 @@ fn encode_chc_interproc(
             }
 
             let Some(bounds) = invariants.get(&(mk.clone(), BlockId(bid))) else {
-                return if parts.len() == 1 {
-                    parts.pop().unwrap()
-                } else {
-                    format!("(and {})", parts.join(" "))
-                };
+                return parts;
             };
             for (idx, lo, hi) in bounds {
                 if *idx >= n_vars {
@@ -1285,6 +1705,12 @@ fn encode_chc_interproc(
                 parts.push(format!("(<= {} v{})", lia_int(lo32), idx));
                 parts.push(format!("(<= v{} {})", idx, lia_int(hi32)));
             }
+            parts
+        };
+
+        // The joined form every clause body wants.
+        let block_app_src = |bid: u32| -> String {
+            let mut parts = block_parts_src(bid);
             if parts.len() == 1 {
                 parts.pop().unwrap()
             } else {
@@ -1298,6 +1724,14 @@ fn encode_chc_interproc(
                 .collect();
             for st in &sites {
                 arg_parts.push(arr_dst(st));
+            }
+            for f in &all_fields {
+                arg_parts.push(fld_dst(f));
+            }
+            // The entry heap passes through a transition unchanged, which is
+            // what makes it still mean "on entry" at the return block.
+            for f in &entry_fp {
+                arg_parts.push(fld_entry(f));
             }
             let args = arg_parts.join(" ");
             app_of(&mid, bid, &args)
@@ -1320,17 +1754,33 @@ fn encode_chc_interproc(
         // weakness in this encoder, after the free constants. The side
         // conditions belong in the antecedent, where they constrain the entry
         // state instead of being asserted as global truths.
+        // The entry fact: any state satisfying the side conditions reaches the
+        // entry block.
+        //
+        // It must be a Horn **fact** — side conditions in the antecedent, the
+        // block application as the head, and *nothing else*. Three separate
+        // well-formedness bugs have lived in this one clause:
+        //
+        // 1. It was `(and (m_b0 ..) ranges)` — a bare conjunction with the
+        //    predicate inside, which z3 rewrites into a rule with a negative
+        //    predicate and then refuses the whole query as `unknown`.
+        // 2. The application was rebuilt from `live_at` alone, so when array
+        //    arguments arrived the two disagreed and z3 rejected the file.
+        // 3. The application was removed from the joined string by `replacen`.
+        //    C1 made the two spellings diverge (`fld_entry` against
+        //    `fld_src`), the removal silently matched nothing, and the clause
+        //    became `m_b0 -> m_b0` — a tautology forcing nothing. The empty
+        //    relation satisfied it, so every block and the summary of any
+        //    method reached only this way was interpreted `false`, and every
+        //    obligation after a call to it was discharged **vacuously**. A
+        //    wrong TRUE; see `RecursiveFieldWriteIsNotForgotten` and #106.
+        //
+        // Taking the side conditions from `block_parts_src` and building the
+        // head directly removes the class: there is no second spelling to
+        // drift and no string to fail to match.
         let entry_body = {
-            let full = block_app_src(body.entry.0);
-            // The same argument list `block_app_src` builds, arrays included.
-            //
-            // This rebuilt it from `live_at` alone, which was identical while
-            // the relation's arguments *were* the live set. Adding array
-            // arguments made the two disagree: the entry clause applied a
-            // 1-ary relation with no arguments, and z3 rejected the whole
-            // file — reported as `unknown`, which reads as the solver giving
-            // up rather than the query being malformed.
-            let app = app_of(&mid, body.entry.0, &{
+            let conds: Vec<String> = block_parts_src(body.entry.0).split_off(1);
+            let head = app_of(&mid, body.entry.0, &{
                 let mut parts: Vec<String> = live_at(mk, body.entry.0)
                     .iter()
                     .map(|i| src_vars[*i].clone())
@@ -1338,24 +1788,22 @@ fn encode_chc_interproc(
                 for st in &sites {
                     parts.push(arr_src(st));
                 }
+                for f in &all_fields {
+                    parts.push(fld_src(f));
+                }
+                // At the entry block the two coincide: nothing has run yet.
+                // Passing `fld_src` here rather than `fld_entry` is what
+                // *defines* the entry heap — this fact is the only thing that
+                // introduces it, so it is the entry heap because this says so.
+                for f in &entry_fp {
+                    parts.push(fld_src(f));
+                }
                 parts.join(" ")
             });
-            if full == app {
-                app
+            if conds.is_empty() {
+                head
             } else {
-                // `block_app_src` returns `(and <app> <conds>..)`; the
-                // antecedent is everything except the application.
-                let inner = full
-                    .strip_prefix("(and ")
-                    .and_then(|t| t.strip_suffix(')'))
-                    .unwrap_or_default()
-                    .replacen(&app, "", 1);
-                let conds = inner.trim();
-                if conds.is_empty() {
-                    app
-                } else {
-                    format!("(=> (and {}) {})", conds, app)
-                }
+                format!("(=> (and {}) {})", conds.join(" "), head)
             }
         };
         out.push_str(&format!(
@@ -1364,8 +1812,23 @@ fn encode_chc_interproc(
         ));
 
         for block in &body.blocks {
+            // This block's view of which reference names which array, updated
+            // statement by statement below as the encoder walks them.
+            let mut array_sites = site_entry.get(&block.id).cloned().unwrap_or_default();
             let mut fresh = FreshGen::new();
             let mut constraints: Vec<String> = Vec::new();
+            // Allocation identity, not just storage (JLS 12.5): a `new`
+            // yields a reference distinct from every live one and from null.
+            // Nothing said so, so the solver could decide two separate
+            // allocations were the same object — which with field cells
+            // indexed by receiver immediately permits `o.f = 7; p.f = 99` to
+            // prove `o.f == 99`.
+            //
+            // Two objects from the *same* allocation may still coincide: a
+            // `new` in a loop produces many, and conflating them is the site
+            // abstraction and the sound direction.
+            let mut fresh_refs: Vec<String> = Vec::new();
+
             // Overflow conditions from this block's arithmetic; any one of them
             // makes `error` reachable.
             let mut overflow: Vec<String> = Vec::new();
@@ -1397,12 +1860,27 @@ fn encode_chc_interproc(
             // Current symbolic value of each site's array, rewritten by stores.
             let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
                 sites.iter().map(|st| (*st, arr_src(st))).collect();
+            let mut fld_map: std::collections::BTreeMap<FieldKey, String> =
+                all_fields.iter().map(|f| (f.clone(), fld_src(f))).collect();
 
             for i in 0..total_slots {
                 var_map.insert(i, format!("v{}", i));
             }
 
             for stmt in &block.stmts {
+                // Flow-sensitive site tracking, updated *before* the arms so
+                // that `array_sites` describes the state the statement runs in.
+                //
+                // Order matters and the direction is not symmetric. For a
+                // store `a[i] = v` the receiver `a` is read in the pre-state,
+                // so updating first would be wrong — except that
+                // `update_sites_for` only ever changes the *assigned*
+                // variable, and a store assigns none. For `a = new A[n]` the
+                // site must be visible to every later statement in the block,
+                // which is what updating here achieves.
+                let pre_sites = array_sites.clone();
+                crate::interpolation::update_sites_for(&mut array_sites, stmt);
+                let array_sites = &pre_sites;
                 match stmt {
                     Stmt::Assign(vid, rv) => {
                         // Assigning a reference invalidates its ghost length.
@@ -1475,8 +1953,82 @@ fn encode_chc_interproc(
                                         arr_map.insert(*st, arr_dst(st));
                                     }
                                 }
+                                // C1. Which fields this call relates through
+                                // the callee's summary rather than havocing.
+                                //
+                                // `summary_sig` is the single source of the
+                                // argument order; the declaration and the
+                                // conclusion at each `return` read the same
+                                // function, so the three cannot drift.
+                                let callee_sig = method_ids
+                                    .get(target)
+                                    .and_then(|_| summary_sig(target))
+                                    .filter(|(_, _, fp)| !fp.is_empty());
+                                let threaded: BTreeSet<FieldKey> = callee_sig
+                                    .as_ref()
+                                    .map(|(_, _, fp)| fp.iter().cloned().collect())
+                                    .unwrap_or_default();
+
+                                // Field writes are per-field, so only the
+                                // fields the callee may write are clobbered —
+                                // which for a constructor is usually its own
+                                // class's, leaving everything else provable.
+                                // A field carried by the summary is *related*
+                                // instead, which is strictly more information.
+                                for f in all_fields.iter() {
+                                    if threaded.contains(f) {
+                                        continue;
+                                    }
+                                    if field_writers.get(f).is_some_and(|ws| ws.contains(target))
+                                        || !prog.bodies.contains_key(target)
+                                    {
+                                        fld_map.insert(f.clone(), fld_dst(f));
+                                    }
+                                }
                                 let callee_ret_ch = return_type_char(&target.desc);
-                                if let Some(callee_mid) = method_ids.get(target) {
+                                if let (Some(callee_mid), Some((_, has_ret, fp))) =
+                                    (method_ids.get(target), callee_sig)
+                                {
+                                    let callee_params =
+                                        method_params.get(target).cloned().unwrap_or_default();
+                                    let mut call_args: Vec<String> = Vec::new();
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if i < callee_params.len() {
+                                            call_args.push(lia_operand(arg, &var_map));
+                                        }
+                                    }
+                                    while call_args.len() < callee_params.len() {
+                                        call_args.push("0".to_string());
+                                    }
+                                    // Pre-heap: the caller's current value for
+                                    // each threaded field.
+                                    for f in &fp {
+                                        call_args.push(
+                                            fld_map.get(f).cloned().unwrap_or_else(|| fld_src(f)),
+                                        );
+                                    }
+                                    if has_ret {
+                                        let ret_var = fresh.fresh();
+                                        call_args.push(ret_var.clone());
+                                        var_map.insert(vid.0 as usize, ret_var);
+                                    }
+                                    // Post-heap: a fresh name per field, which
+                                    // the summary constrains and which the
+                                    // caller reads from here on. This is the
+                                    // whole gain — the field is no longer
+                                    // unconstrained after the call.
+                                    for f in &fp {
+                                        let post = fresh.fresh_arr();
+                                        call_args.push(post.clone());
+                                        fld_map.insert(f.clone(), post);
+                                    }
+                                    call_constraints.push(format!(
+                                        "({}_s {})",
+                                        callee_mid,
+                                        call_args.join(" ")
+                                    ));
+                                } else if let Some(callee_mid) = method_ids.get(target) {
+                                    // No threaded heap: the pre-C1 shape.
                                     if callee_ret_ch != 'V' {
                                         let callee_params =
                                             method_params.get(target).cloned().unwrap_or_default();
@@ -1489,7 +2041,6 @@ fn encode_chc_interproc(
                                         while call_args.len() < callee_params.len() {
                                             call_args.push("0".to_string());
                                         }
-
                                         let ret_var = fresh.fresh();
                                         call_args.push(ret_var.clone());
                                         call_constraints.push(format!(
@@ -1499,11 +2050,9 @@ fn encode_chc_interproc(
                                         ));
                                         var_map.insert(vid.0 as usize, ret_var);
                                     }
-                                } else {
-                                    if callee_ret_ch != 'V' {
-                                        let v = fresh.fresh();
-                                        var_map.insert(vid.0 as usize, v);
-                                    }
+                                } else if callee_ret_ch != 'V' {
+                                    let v = fresh.fresh();
+                                    var_map.insert(vid.0 as usize, v);
                                 }
                             }
                             // Allocation yields a non-null reference.
@@ -1525,6 +2074,21 @@ fn encode_chc_interproc(
                             Rvalue::New { .. } | Rvalue::NewArray { .. } => {
                                 let r = fresh.fresh();
                                 constraints.push(format!("(> {} 0)", r));
+                                // And distinct from every earlier allocation
+                                // in this block (JLS 12.5). Non-nullness alone
+                                // left the solver free to decide two separate
+                                // `new`s were the same object, which with
+                                // field cells indexed by receiver lets
+                                // `o.f = 7; p.f = 99` prove `o.f == 99`.
+                                //
+                                // Two objects from the *same* allocation may
+                                // still coincide — a `new` in a loop produces
+                                // many — and conflating those is the sound
+                                // direction.
+                                for prev in &fresh_refs {
+                                    constraints.push(format!("(not (= {} {}))", r, prev));
+                                }
+                                fresh_refs.push(r.clone());
                                 if let Rvalue::NewArray { len, .. } = rv {
                                     // JLS 15.10.1: a negative dimension throws
                                     // `NegativeArraySizeException`, so a *created*
@@ -1582,12 +2146,20 @@ fn encode_chc_interproc(
                             // site (#95). Otherwise it falls through below to a
                             // fresh constant, which is what every array read
                             // did before.
+                            // `o.f` as a select at the receiver. Aliasing is
+                            // the solver's: two names for one object give the
+                            // same cell without any points-to analysis.
+                            Rvalue::GetField { field, obj } if fld_map.contains_key(field) => {
+                                let cur = fld_map[field].clone();
+                                let o = lia_operand(obj, &var_map);
+                                var_map.insert(vid.0 as usize, format!("(select {cur} {o})"));
+                            }
                             Rvalue::ArrayLoad { arr, idx }
-                                if crate::interpolation::operand_site(arr, &array_sites)
+                                if crate::interpolation::operand_site(arr, array_sites)
                                     .and_then(|st| arr_map.get(&st))
                                     .is_some() =>
                             {
-                                let st = crate::interpolation::operand_site(arr, &array_sites)
+                                let st = crate::interpolation::operand_site(arr, array_sites)
                                     .expect("guarded above");
                                 let cur = arr_map[&st].clone();
                                 let i = lia_operand(idx, &var_map);
@@ -1626,6 +2198,17 @@ fn encode_chc_interproc(
                             }
                         }
                     }
+                    Stmt::PutField { obj, field, val } => {
+                        // This loop had no arm for field writes either, so a
+                        // `PutField` was dropped outright. Only this field's
+                        // array changes: a write to `o.f` cannot alter `o.g`.
+                        if fld_map.contains_key(field) {
+                            let o = lia_operand(obj, &var_map);
+                            let v = lia_operand(val, &var_map);
+                            let cur = fld_map[field].clone();
+                            fld_map.insert(field.clone(), format!("(store {cur} {o} {v})"));
+                        }
+                    }
                     Stmt::ArrayStore { arr, idx, val } => {
                         // This loop had no arm for stores at all, so an
                         // `ArrayStore` was dropped outright — which is why
@@ -1633,7 +2216,7 @@ fn encode_chc_interproc(
                         // reads became fresh constants.
                         let i = lia_operand(idx, &var_map);
                         let v = lia_operand(val, &var_map);
-                        match crate::interpolation::operand_site(arr, &array_sites) {
+                        match crate::interpolation::operand_site(arr, array_sites) {
                             Some(st) => {
                                 if let Some(cur) = arr_map.get(&st).cloned() {
                                     arr_map.insert(st, format!("(store {cur} {i} {v})"));
@@ -1834,6 +2417,14 @@ fn encode_chc_interproc(
                     }
                 }
             }
+            for f in &all_fields {
+                let dst = fld_dst(f);
+                if let Some(cur) = fld_map.get(f) {
+                    if *cur != dst {
+                        assign_conds.push(format!("(= {} {})", dst, cur));
+                    }
+                }
+            }
 
             let forall_both: String = {
                 let mut v: Vec<String> = src_vars
@@ -1844,6 +2435,13 @@ fn encode_chc_interproc(
                 for st in &sites {
                     v.push(format!("({} {})", arr_src(st), ARR_SORT));
                     v.push(format!("({} {})", arr_dst(st), ARR_SORT));
+                }
+                for f in &all_fields {
+                    v.push(format!("({} {})", fld_src(f), ARR_SORT));
+                    v.push(format!("({} {})", fld_dst(f), ARR_SORT));
+                }
+                for f in &entry_fp {
+                    v.push(format!("({} {})", fld_entry(f), ARR_SORT));
                 }
                 v.join(" ")
             };
@@ -1938,8 +2536,11 @@ fn encode_chc_interproc(
                     }
                     mk_trans(default.0, &neg, &mut out);
                 }
-                Terminator::Return(Some(op)) if ret_ch != 'V' => {
-                    let ret_expr = lia_operand(op, &var_map);
+                Terminator::Return(ret_op)
+                    if summary_sig(mk).is_some()
+                        && (ret_op.is_some() || return_type_char(&mk.desc) == 'V') =>
+                {
+                    let (_, has_ret, ref fp) = summary_sig(mk).unwrap();
                     let mut summary_args: Vec<String> = param_indices
                         .iter()
                         .map(|&pi| {
@@ -1949,7 +2550,28 @@ fn encode_chc_interproc(
                                 .unwrap_or_else(|| format!("v{}", pi))
                         })
                         .collect();
-                    summary_args.push(ret_expr);
+                    // C1. Pre-heap: the field array as it was on entry. These
+                    // are the universally quantified `fld_src` binders, so the
+                    // summary relates *this* method's effect rather than
+                    // asserting anything about the caller's heap.
+                    for f in fp {
+                        summary_args.push(fld_entry(f));
+                    }
+                    if has_ret {
+                        let Some(op) = ret_op else {
+                            // A non-void method whose `return` carries no
+                            // operand cannot happen in verified bytecode, but
+                            // emitting a malformed clause would be worse than
+                            // emitting none: it would report `unknown` and
+                            // look like an inconclusive proof.
+                            continue;
+                        };
+                        summary_args.push(lia_operand(op, &var_map));
+                    }
+                    // Post-heap: the field array as this path left it.
+                    for f in fp {
+                        summary_args.push(fld_map.get(f).cloned().unwrap_or_else(|| fld_src(f)));
+                    }
 
                     let mut all = constraints.clone();
                     // The binding equalities, without which the returned value
@@ -2270,9 +2892,36 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
     // As an argument there is no such escape: the solver must find an
     // interpretation of the relation that holds for *all* values of that
     // argument, exactly as for the integer state.
-    let array_sites = crate::interpolation::array_sites_of(body);
+    // Field arrays, same Burstall model as the interprocedural encoder.
+    let bv_fields: std::collections::BTreeSet<FieldKey> = {
+        let mut out: std::collections::BTreeSet<FieldKey> = Default::default();
+        for block in &body.blocks {
+            for st in &block.stmts {
+                match st {
+                    Stmt::PutField { field, .. } => {
+                        out.insert(field.clone());
+                    }
+                    Stmt::Assign(_, Rvalue::GetField { field, .. }) => {
+                        out.insert(field.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.retain(|f| f.desc != "D" && f.desc != "F");
+        out
+    };
+    let bvfld_src = |f: &FieldKey| crate::invariant_check::field_array_name(f);
+    let bvfld_dst = |f: &FieldKey| format!("{}_w", crate::invariant_check::field_array_name(f));
+
+    // `array_sites_of` is still the right question for the *set* of sites a
+    // body has — that is a whole-body fact. Resolving a particular use is not,
+    // and `site_entry_bv` is what answers it. This file has two encoders and
+    // `CLAUDE.md` records that a fix to one silently leaves the other exposed,
+    // which is why both get this.
+    let site_entry_bv = crate::interpolation::array_sites_at_block_entry(body);
     let sites: Vec<ajave_ir::AllocSite> = {
-        let mut v: Vec<_> = array_sites.values().copied().collect();
+        let mut v: Vec<_> = crate::interpolation::array_sites_in(body);
         v.sort();
         v.dedup();
         v
@@ -2298,6 +2947,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             sig.push(' ');
             sig.push_str(arr_sort);
         }
+        for _ in &bv_fields {
+            sig.push(' ');
+            sig.push_str(arr_sort);
+        }
         out.push_str(&format!(
             "(declare-fun block_{} ({}) Bool)\n",
             block.id.0, sig
@@ -2314,6 +2967,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         src_vars.push(arr_name(st, false));
         dst_vars.push(arr_name(st, true));
     }
+    for f in &bv_fields {
+        src_vars.push(bvfld_src(f));
+        dst_vars.push(bvfld_dst(f));
+    }
     let src_vars = src_vars;
     let dst_vars = dst_vars;
 
@@ -2328,6 +2985,9 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             v.push(format!("({} {})", arr_name(st, false), arr_sort));
         }
+        for f in &bv_fields {
+            v.push(format!("({} {})", bvfld_src(f), arr_sort));
+        }
         v.join(" ")
     };
     let forall_both: String = {
@@ -2341,6 +3001,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             v.push(format!("({} {})", arr_name(st, false), arr_sort));
             v.push(format!("({} {})", arr_name(st, true), arr_sort));
+        }
+        for f in &bv_fields {
+            v.push(format!("({} {})", bvfld_src(f), arr_sort));
+            v.push(format!("({} {})", bvfld_dst(f), arr_sort));
         }
         v.join(" ")
     };
@@ -2362,6 +3026,8 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
 
     for block in &body.blocks {
         let mut constraints: Vec<String> = Vec::new();
+        // Allocation identity, as in the interprocedural encoder.
+        let mut bv_fresh_refs: Vec<String> = Vec::new();
         // Dense, indexed by slot id, not a hash map.
         //
         // `smt_text::encode_operand` is generic over `VarLookup` and already
@@ -2381,6 +3047,10 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         // Current symbolic value of each site's array, rewritten by stores.
         let mut arr_map: std::collections::BTreeMap<ajave_ir::AllocSite, String> =
             sites.iter().map(|st| (*st, arr_name(st, false))).collect();
+        let mut bvfld_map: std::collections::BTreeMap<FieldKey, String> = bv_fields
+            .iter()
+            .map(|f| (f.clone(), bvfld_src(f)))
+            .collect();
         let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
         let is_wide = |op: &Operand| -> bool {
             match op {
@@ -2405,7 +3075,11 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             }
         };
 
+        let mut bv_array_sites = site_entry_bv.get(&block.id).cloned().unwrap_or_default();
         for stmt in &block.stmts {
+            let pre_sites = bv_array_sites.clone();
+            crate::interpolation::update_sites_for(&mut bv_array_sites, stmt);
+            let array_sites = &pre_sites;
             match stmt {
                 Stmt::Assign(vid, rv) => {
                     // Ghost length maintenance, mirroring the LIA encoder.
@@ -2481,8 +3155,13 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     // valid-assert 867 -> 860, where the victims were `unsat`
                     // answers that stopped going through rather than timeouts.
                     let select_expr = match rv {
+                        Rvalue::GetField { field, obj } if bvfld_map.contains_key(field) => {
+                            let cur = bvfld_map[field].clone();
+                            let o = smt_text::encode_operand(&BitvectorTheory, obj, &var_map);
+                            Some(format!("(select {cur} {o})"))
+                        }
                         Rvalue::ArrayLoad { arr, idx } => {
-                            crate::interpolation::operand_site(arr, &array_sites)
+                            crate::interpolation::operand_site(arr, array_sites)
                                 .and_then(|st| arr_map.get(&st).cloned())
                                 .map(|cur| {
                                     let i =
@@ -2512,12 +3191,27 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                             fresh_decls.push((name, w));
                         }
                     }
+                    if matches!(rv, Rvalue::New { .. } | Rvalue::NewArray { .. }) {
+                        constraints.push(format!("(not (= {expr} (_ bv0 32)))"));
+                        for prev in &bv_fresh_refs {
+                            constraints.push(format!("(not (= {expr} {prev}))"));
+                        }
+                        bv_fresh_refs.push(expr.clone());
+                    }
                     var_map[vid.0 as usize] = expr;
+                }
+                Stmt::PutField { obj, field, val } => {
+                    if bvfld_map.contains_key(field) {
+                        let o = smt_text::encode_operand(&BitvectorTheory, obj, &var_map);
+                        let v = smt_text::encode_operand(&BitvectorTheory, val, &var_map);
+                        let cur = bvfld_map[field].clone();
+                        bvfld_map.insert(field.clone(), format!("(store {cur} {o} {v})"));
+                    }
                 }
                 Stmt::ArrayStore { arr, idx, val } => {
                     let i = smt_text::encode_operand(&BitvectorTheory, idx, &var_map);
                     let v = smt_text::encode_operand(&BitvectorTheory, val, &var_map);
-                    match crate::interpolation::operand_site(arr, &array_sites) {
+                    match crate::interpolation::operand_site(arr, array_sites) {
                         Some(st) => {
                             if let Some(cur) = arr_map.get(&st).cloned() {
                                 arr_map.insert(st, format!("(store {cur} {i} {v})"));
@@ -2597,6 +3291,14 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
         for st in &sites {
             let post = arr_name(st, true);
             if let Some(cur) = arr_map.get(st) {
+                if *cur != post {
+                    assign_constraints.push(format!("(= {post} {cur})"));
+                }
+            }
+        }
+        for f in &bv_fields {
+            let post = bvfld_dst(f);
+            if let Some(cur) = bvfld_map.get(f) {
                 if *cur != post {
                     assign_constraints.push(format!("(= {post} {cur})"));
                 }
@@ -2752,10 +3454,16 @@ fn run_chc_solver(
     obligations: &[ObligationRef],
     timeout_secs: u32,
 ) -> Result<(Vec<(ObligationRef, bool)>, ChcOutcome), String> {
+    let mut args: Vec<String> = vec!["-in".into(), "-smt2".into()];
+    if chc_qgen_enabled() {
+        // D1. Must be set together: grounding the proof obligations defeats
+        // quantified generalisation, so `use_qgen` alone changes nothing.
+        args.push("fp.spacer.q3.use_qgen=true".into());
+        args.push("fp.spacer.ground_pobs=false".into());
+    }
     let mut child = Command::new(binary)
+        .args(&args)
         .args([
-            "-in",
-            "-smt2",
             // A wall-clock bound on the solver, which had none at all.
             //
             // Nothing exposed that while the heap guard held, because CHC never
@@ -2895,6 +3603,429 @@ mod tests {
         (prog, main)
     }
 
+    /// ```text
+    /// class Box { int v; void set() { this.v = 5; } }
+    /// void main() { Box b = new Box(); b.set(); assert b.v == 5; }
+    /// ```
+    ///
+    /// A **void** callee whose only effect is a field write: the exact shape a
+    /// summary keyed on a return value cannot describe.
+    fn setter_program() -> (Program, MethodKey) {
+        use ajave_ir::FieldKey;
+        let mut prog = Program::default();
+        let main = mk("main", "()V");
+        let set = MethodKey {
+            class: "Box".into(),
+            name: "set".into(),
+            desc: "()V".into(),
+        };
+        let fv = FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let ref_var = |slot: u16| VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Ref,
+        };
+
+        // void set() { this.v = 5; }
+        prog.bodies.insert(
+            set.clone(),
+            Body {
+                is_static: false,
+                key: set.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0)],
+                obligations: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![Stmt::PutField {
+                        obj: Operand::Var(VarId(0)),
+                        field: fv.clone(),
+                        val: Operand::int(5),
+                    }],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+
+        let (b, r, c) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0), int_var(1), int_var(2)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(c),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            b,
+                            Rvalue::New {
+                                class: "Box".into(),
+                                site: ajave_ir::AllocSite {
+                                    block: BlockId(0),
+                                    index: 0,
+                                },
+                            },
+                        ),
+                        Stmt::Assign(
+                            VarId(3),
+                            Rvalue::Call {
+                                target: set.clone(),
+                                args: vec![Operand::Var(b)],
+                                is_virtual: false,
+                            },
+                        ),
+                        Stmt::Assign(
+                            r,
+                            Rvalue::GetField {
+                                obj: Operand::Var(b),
+                                field: fv.clone(),
+                            },
+                        ),
+                        Stmt::Assign(c, Rvalue::Bin(BinOp::Eq, Operand::Var(r), Operand::int(5))),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+        (prog, main)
+    }
+
+    fn setter_obs() -> Vec<ObligationRef> {
+        vec![ObligationRef {
+            method: mk("main", "()V"),
+            id: ObligationId(0),
+        }]
+    }
+
+    /// C1, and the test named after the soundness argument in
+    /// `heap_summary_of` (gh #110).
+    ///
+    /// A summary asserts that every field *outside* the summarised footprint
+    /// survives the call. That assertion is only as good as the footprint being
+    /// complete, and it cannot be complete for a method that calls something we
+    /// have no body for: the closure that folds callee fields in can only fold
+    /// what it can see. Such a method must therefore be refused a summary and
+    /// clobbered at the call site instead.
+    ///
+    /// The condition was asserted in that function's comment and absent from
+    /// its code for long enough to be worth a regression test. Note what is
+    /// being checked: not that the verdict is right -- an `Over` engine with an
+    /// incomplete footprint can easily reach a *correct* verdict on any one
+    /// program -- but that the unsound relation is never declared at all.
+    #[test]
+    fn a_method_with_an_unresolved_callee_gets_no_summary() {
+        let (mut prog, main) = setter_program();
+        let set = MethodKey {
+            class: "Box".into(),
+            name: "set".into(),
+            desc: "()V".into(),
+        };
+        let obs = setter_obs();
+
+        // Summary relations are named positionally (`m1_s`), so the method they
+        // belong to is only identifiable from the comment the encoder emits
+        // beside each declaration. Keying on the comment rather than on an
+        // index keeps the test readable and stops it passing for the wrong
+        // method if declaration order ever changes.
+        let summary_for = |t: &str, m: &str| -> Option<String> {
+            let marker = format!("; summary for {m}");
+            let mut lines = t.lines();
+            while let Some(l) = lines.next() {
+                if l.trim() == marker {
+                    return lines.next().map(|d| d.to_string());
+                }
+            }
+            None
+        };
+
+        // Control: as written, `Box.set` is summarised, with a pre-heap and a
+        // post-heap argument threaded through it.
+        let before = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        let decl = summary_for(&before, "Box.set()V")
+            .unwrap_or_else(|| panic!("precondition: the setter is summarised:\n{before}"));
+        assert_eq!(
+            decl.matches(ARR_SORT).count(),
+            2,
+            "precondition: the setter's summary threads a pre- and post-heap: {decl}"
+        );
+
+        // Now have it call something with no body in the program. Nothing else
+        // about the method changes -- it still writes exactly `Box.v`.
+        let unknown = MethodKey {
+            class: "java/lang/System".into(),
+            name: "nanoTime".into(),
+            desc: "()J".into(),
+        };
+        let body = prog.bodies.get_mut(&set).expect("setter body");
+        body.vars.push(VarInfo {
+            kind: VarKind::Local(1),
+            ty: Ty::Long,
+        });
+        body.blocks[0].stmts.push(Stmt::Assign(
+            VarId(1),
+            Rvalue::Call {
+                target: unknown,
+                args: vec![],
+                is_virtual: false,
+            },
+        ));
+
+        let after = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        assert_eq!(
+            summary_for(&after, "Box.set()V"),
+            None,
+            "a method with an unresolved callee must not be summarised: its \
+             footprint cannot be complete, so a summary would assert that \
+             fields outside it survive a call that may have written them:\n{after}"
+        );
+    }
+
+    /// C1. A void method with a heap footprint gets a summary. Before C1 it got
+    /// none at all, which is why a call to it could only be answered by
+    /// clobbering every field it might write.
+    #[test]
+    fn a_void_method_with_a_field_footprint_gets_a_summary() {
+        let (prog, main) = setter_program();
+        let obs = setter_obs();
+        let off = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        let on = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+
+        let summaries = |t: &str| {
+            t.lines()
+                .filter(|l| l.contains("declare-fun") && l.contains("_s ("))
+                .count()
+        };
+        assert_eq!(
+            summaries(&off),
+            0,
+            "without C1 there is no summary for a void method:\n{off}"
+        );
+        assert!(
+            summaries(&on) >= 1,
+            "with C1 the void setter is summarised:\n{on}"
+        );
+    }
+
+    /// **The defect the first version of C1 shipped.**
+    ///
+    /// A summary is a relation between two heaps. The conclusion at a `return`
+    /// has the heap *at the return block* in scope, and using that binder for
+    /// both halves produces `m_s(params, H, H)` — "this method changes
+    /// nothing". That is a false claim about the method, and a caller reading
+    /// it concludes the field still holds its pre-call value.
+    ///
+    /// The fix is `fld_entry`: a distinct binder for the entry heap, threaded
+    /// unchanged through every block relation so it still means "on entry" by
+    /// the time control reaches a return.
+    #[test]
+    fn a_summary_relates_the_entry_heap_to_the_exit_heap_not_one_to_itself() {
+        let (prog, main) = setter_program();
+        let on = encode_chc_interproc(&prog, &main, &setter_obs(), &HashMap::new(), true);
+
+        // Every application of a summary in a *head* position — the conclusion
+        // at a return — must name two different arrays.
+        let mut checked = 0;
+        for line in on.lines() {
+            // The conclusion is the final application in the implication.
+            let Some(idx) = line.rfind("_s ") else {
+                continue;
+            };
+            if !line.contains("=>") {
+                continue;
+            }
+            let rest = &line[idx + 3..];
+            let Some(end) = rest.find(')') else { continue };
+            let args: Vec<&str> = rest[..end].split_whitespace().collect();
+            let arrays: Vec<&&str> = args.iter().filter(|a| a.contains("fld_")).collect();
+            if arrays.len() < 2 {
+                continue;
+            }
+            checked += 1;
+            assert_ne!(
+                arrays[0],
+                arrays[arrays.len() - 1],
+                "summary conclusion relates a heap to itself, so it claims the \
+                 method has no effect:\n{line}"
+            );
+            assert!(
+                arrays[0].ends_with("_e"),
+                "the pre half must be the entry heap, not the heap at the \
+                 return block:\n{line}"
+            );
+        }
+        assert!(checked > 0, "no summary conclusion found to check:\n{on}");
+    }
+
+    /// The arity bound is the whole cost of C1, so it must be bounded by the
+    /// *footprint* and not by the program's field set. A method that touches no
+    /// field must keep exactly its pre-C1 predicate arity.
+    #[test]
+    fn c1_does_not_change_the_encoding_of_a_method_with_no_fields() {
+        let (prog, main) = overflow_program();
+        let obs = vec![ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let off = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        let on = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), true);
+        assert_eq!(
+            off, on,
+            "a program with no field access must encode identically either way"
+        );
+    }
+
+    /// ```text
+    /// A[] a = new A[2];
+    /// a[0] = x;              // the array variable's slot is then reused
+    /// a = somethingElse;     // ... for something that is not an array
+    /// ```
+    ///
+    /// **An array store must appear in the encoding as a `store`.**
+    ///
+    /// `array_sites_of` answers one site per variable for the whole body and
+    /// marks a variable ambiguous as soon as it is assigned from anything that
+    /// is not a known array. javac reuses local slots, so in a real method the
+    /// array variable is also used for something else, the site resolves to
+    /// nothing, and the store falls into the "may land in any array" branch
+    /// that havocs every site.
+    ///
+    /// The observed consequence on a three-element constant-bound fill loop:
+    /// **twenty** uses of the array havoc destination and **zero** `store`s.
+    /// The encoder read an array it never wrote, so every element was
+    /// unconstrained — including null — and the program was unprovable with no
+    /// quantified invariant needed anywhere. That is what made modelling array
+    /// contents worth nothing in this engine.
+    fn slot_reuse_program() -> (Program, MethodKey) {
+        let mut prog = Program::default();
+        let main = mk("main", "()V");
+        let ref_var = |slot: u16| VarInfo {
+            kind: VarKind::Local(slot),
+            ty: Ty::Ref,
+        };
+        // v0: the array, in a slot later reused. v1: index. v2: read-back.
+        let (a, i, r) = (VarId(0), VarId(1), VarId(2));
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![ref_var(0), int_var(1), int_var(2), int_var(3)],
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(VarId(3)),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            a,
+                            Rvalue::NewArray {
+                                elem: "I".to_string(),
+                                len: Operand::int(2),
+                                site: ajave_ir::AllocSite {
+                                    block: BlockId(0),
+                                    index: 0,
+                                },
+                            },
+                        ),
+                        Stmt::Assign(i, Rvalue::Use(Operand::int(0))),
+                        Stmt::ArrayStore {
+                            arr: Operand::Var(a),
+                            idx: Operand::Var(i),
+                            val: Operand::int(7),
+                        },
+                        Stmt::Assign(
+                            r,
+                            Rvalue::ArrayLoad {
+                                arr: Operand::Var(a),
+                                idx: Operand::Var(i),
+                            },
+                        ),
+                        // The slot reuse: `a` now holds something that is not
+                        // an array. Flow-insensitively this poisons the store
+                        // above, which already happened.
+                        Stmt::Assign(a, Rvalue::Use(Operand::Const(Const::Null))),
+                        Stmt::Assign(
+                            VarId(3),
+                            Rvalue::Bin(BinOp::Eq, Operand::Var(r), Operand::int(7)),
+                        ),
+                        Stmt::Check(ObligationId(0)),
+                    ],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(main.clone());
+        (prog, main)
+    }
+
+    /// The encoding of a body whose array slot is reused must still contain the
+    /// store. Without it the matching read is unconstrained and no property of
+    /// an element is provable — see `slot_reuse_program`.
+    #[test]
+    fn an_array_store_survives_the_array_slot_being_reused() {
+        let (prog, main) = slot_reuse_program();
+        let obs = vec![ObligationRef {
+            method: main.clone(),
+            id: ObligationId(0),
+        }];
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
+        assert!(
+            smt2.contains("(store "),
+            "the array store was dropped, so the encoder reads an array it \
+             never writes:\n{smt2}"
+        );
+    }
+
+    /// The flow-sensitive map must still *lose* a site when the variable stops
+    /// naming that array. Keeping it is the unsound direction: a later store
+    /// through the reused slot would be attributed to an array the variable no
+    /// longer points at, which is a write landing on the wrong object.
+    #[test]
+    fn a_reassigned_slot_stops_naming_the_array_it_held() {
+        let (prog, _) = slot_reuse_program();
+        let body = prog.bodies.values().next().unwrap();
+        let mut map = crate::interpolation::array_sites_at_block_entry(body)
+            .remove(&BlockId(0))
+            .unwrap_or_default();
+        let stmts = &body.blocks[0].stmts;
+        // After the NewArray, v0 names the site.
+        crate::interpolation::update_sites_for(&mut map, &stmts[0]);
+        assert!(map.contains_key(&VarId(0)), "the allocation establishes it");
+        // After `v0 = null`, it names nothing.
+        crate::interpolation::update_sites_for(&mut map, &stmts[4]);
+        assert!(
+            !map.contains_key(&VarId(0)),
+            "a slot reassigned from a non-array must not keep the site"
+        );
+    }
+
     pub(super) fn z3_available() -> bool {
         Command::new("which")
             .arg("z3")
@@ -2992,7 +4123,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let interproc = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let interproc = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
         assert!(
             derives_handler(&interproc, "m0_b0", "m0_b1"),
             "LIA encoder has no clause deriving the handler:\n{interproc}"
@@ -3020,7 +4151,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         // `main`'s obligation is `c`, defined by `c = inc(n) > n`. The clause
         // whose head is `error` must therefore constrain whatever name `c` is
@@ -3115,7 +4246,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         let guards: Vec<&str> = smt2
             .lines()
@@ -3156,7 +4287,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         for line in smt2.lines().filter(|l| l.starts_with("(assert")) {
             // An entry fact is the only assertion with no implication in it.
@@ -3214,7 +4345,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new());
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &HashMap::new(), false);
 
         // Isolate the callee's clauses -- the entry method legitimately
         // carries assumptions, so a whole-file search would not discriminate.
@@ -3255,7 +4386,7 @@ mod tests {
             method: main.clone(),
             id: ObligationId(0),
         }];
-        let smt2 = encode_chc_interproc(&prog, &main, &obs, &no_invariants);
+        let smt2 = encode_chc_interproc(&prog, &main, &obs, &no_invariants, false);
         assert!(
             smt2.contains("; overflow"),
             "the inter-procedural encoding must route 32-bit overflow to \
@@ -3545,7 +4676,10 @@ mod encoder_conformance {
             id: ObligationId(0),
         }];
         let body = prog.body(m).expect("body");
-        let lia = asks_safe(encode_chc_interproc(prog, m, &obs, &HashMap::new()), m);
+        let lia = asks_safe(
+            encode_chc_interproc(prog, m, &obs, &HashMap::new(), false),
+            m,
+        );
         let bv = asks_safe(encode_chc_single(body, &[ObligationId(0)]), m);
         (lia, bv)
     }
@@ -3771,6 +4905,165 @@ mod encoder_conformance {
         (prog, m)
     }
 
+    /// `o = new Box(); o.v = stored; e = o.v; c = (e == asserted); check(c)`,
+    /// with a second distinct object when `two` is set.
+    fn field_fixture(stored: i32, asserted: i32, two: bool) -> (Program, MethodKey) {
+        let m = mk("main");
+        let f = FieldKey {
+            class: "Box".into(),
+            name: "v".into(),
+            desc: "I".into(),
+        };
+        let site = |i: u32| ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: i,
+        };
+        let mut stmts = vec![
+            Stmt::Assign(
+                VarId(0),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site: site(0),
+                },
+            ),
+            Stmt::PutField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+                val: Operand::Const(Const::Int(stored)),
+            },
+        ];
+        if two {
+            stmts.push(Stmt::Assign(
+                VarId(3),
+                Rvalue::New {
+                    class: "Box".into(),
+                    site: site(2),
+                },
+            ));
+            stmts.push(Stmt::PutField {
+                obj: Operand::Var(VarId(3)),
+                field: f.clone(),
+                val: Operand::int(99),
+            });
+        }
+        stmts.push(Stmt::Assign(
+            VarId(1),
+            Rvalue::GetField {
+                obj: Operand::Var(VarId(0)),
+                field: f.clone(),
+            },
+        ));
+        stmts.push(Stmt::Assign(
+            VarId(2),
+            Rvalue::Bin(
+                BinOp::Eq,
+                Operand::Var(VarId(1)),
+                Operand::Const(Const::Int(asserted)),
+            ),
+        ));
+        stmts.push(Stmt::Check(ObligationId(0)));
+
+        let mut vars: Vec<ajave_ir::VarInfo> = (0..4).map(ivar).collect();
+        vars[0].ty = Ty::Ref;
+        vars[3].ty = Ty::Ref;
+        let mut prog = Program::default();
+        prog.bodies.insert(
+            m.clone(),
+            Body {
+                is_static: true,
+                key: m.clone(),
+                entry: BlockId(0),
+                vars,
+                obligations: vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::Var(VarId(2)),
+                    bytecode_offset: 0,
+                    line: None,
+                    guarded: false,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts,
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                }],
+            },
+        );
+        prog.entry = Some(m.clone());
+        (prog, m)
+    }
+
+    fn safe_field_value() -> (Program, MethodKey) {
+        field_fixture(5, 5, false)
+    }
+    fn unsafe_field_value() -> (Program, MethodKey) {
+        field_fixture(5, 7, false)
+    }
+
+    /// A3 capability, interprocedural encoder. `PutField` had no arm in either
+    /// encoder — field writes were dropped outright — so this was unprovable.
+    #[test]
+    fn the_interproc_encoder_proves_a_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_field_value();
+        let (lia, _) = both(&prog, &m);
+        assert_eq!(lia, ChcOutcome::Safe, "LIA could not prove `o.v == 5`");
+    }
+
+    /// The same for the bitvector encoder, asserted separately because a fix
+    /// to one silently leaves the other exposed.
+    #[test]
+    fn the_bitvector_encoder_proves_a_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = safe_field_value();
+        let (_, bv) = both(&prog, &m);
+        assert_eq!(bv, ChcOutcome::Safe, "BV could not prove `o.v == 5`");
+    }
+
+    #[test]
+    fn neither_encoder_proves_a_false_field_property() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = unsafe_field_value();
+        let (lia, bv) = both(&prog, &m);
+        assert_ne!(lia, ChcOutcome::Safe, "LIA called a false field claim safe");
+        assert_ne!(bv, ChcOutcome::Safe, "BV called a false field claim safe");
+    }
+
+    /// The reason for the Burstall model. A second receiver's write must not
+    /// disturb the first's cell — which the flat abstraction cannot express and
+    /// which this gets from the solver, provided allocations are known
+    /// distinct.
+    #[test]
+    fn neither_encoder_confuses_two_receivers_of_one_field() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        let (prog, m) = field_fixture(5, 5, true);
+        let (lia, bv) = both(&prog, &m);
+        assert_eq!(
+            lia,
+            ChcOutcome::Safe,
+            "LIA: p.v = 99 must not make o.v == 5 unprovable"
+        );
+        assert_eq!(
+            bv,
+            ChcOutcome::Safe,
+            "BV: p.v = 99 must not make o.v == 5 unprovable"
+        );
+    }
+
     fn corpus() -> Vec<(&'static str, bool, (Program, MethodKey))> {
         vec![
             ("safe_constant", true, safe_constant()),
@@ -3781,6 +5074,8 @@ mod encoder_conformance {
             ("unsafe_float_result", false, unsafe_float_result()),
             ("safe_array_element", true, safe_array_element()),
             ("unsafe_array_element", false, unsafe_array_element()),
+            ("safe_field_value", true, safe_field_value()),
+            ("unsafe_field_value", false, unsafe_field_value()),
         ]
     }
 
