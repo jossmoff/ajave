@@ -406,6 +406,53 @@ fn obligations_at_risk(
     // into them may not have happened.
     let mut tainted_methods: BTreeSet<MethodKey> = BTreeSet::new();
 
+    // Every loaded method, indexed by the signature a virtual call names
+    // (gh #114).
+    //
+    // A `Rvalue::Call` carries the **static** target. For `is_virtual` the
+    // runtime target may be any override, so following only the static one
+    // leaves obligations in the override out of `at_risk` — and an obligation
+    // *missing* from `at_risk` is not refused, so it can be discharged as
+    // exhaustively proven on an exploration that never covered it. That is a
+    // wrong TRUE of the same shape as #101 and #106.
+    //
+    // Built once rather than per call site: the first version of this function
+    // was O(bodies) per cut-reachable call, and `at_risk` is computed on every
+    // truncating run, which is most of the corpus.
+    //
+    // `BTreeMap` so the traversal order is reproducible in logs. The result is
+    // a set that is only membership-tested, so order cannot change the answer —
+    // but a collection whose iteration order varies has no business near a
+    // discharge decision (CLAUDE.md).
+    let mut by_sig: std::collections::BTreeMap<(&str, &str), Vec<&MethodKey>> =
+        std::collections::BTreeMap::new();
+    for mk in prog.bodies.keys() {
+        by_sig
+            .entry((mk.name.as_str(), mk.desc.as_str()))
+            .or_default()
+            .push(mk);
+    }
+    // Every loaded method that could be the runtime target of this call.
+    //
+    // `is_subtype` answers `true` for a class it does not know, because "not
+    // knowing must not let us rule an exceptional edge out". That is the safe
+    // direction here too: an unknown class is treated as a possible override,
+    // which only enlarges `at_risk`.
+    let runtime_targets = |target: &MethodKey, is_virtual: bool| -> Vec<MethodKey> {
+        if !is_virtual {
+            return vec![target.clone()];
+        }
+        let mut out = vec![target.clone()];
+        if let Some(cands) = by_sig.get(&(target.name.as_str(), target.desc.as_str())) {
+            for mk in cands {
+                if mk.class != target.class && prog.is_subtype(&mk.class, &target.class) {
+                    out.push((*mk).clone());
+                }
+            }
+        }
+        out
+    };
+
     for (mk, start) in cut_points {
         let Some(body) = prog.body(mk) else {
             continue;
@@ -436,8 +483,15 @@ fn obligations_at_risk(
                     Stmt::Check(oid) => {
                         at_risk.insert((mk.clone(), *oid));
                     }
-                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
-                        tainted_methods.insert(target.clone());
+                    Stmt::Assign(
+                        _,
+                        Rvalue::Call {
+                            target, is_virtual, ..
+                        },
+                    ) => {
+                        for mk in runtime_targets(target, *is_virtual) {
+                            tainted_methods.insert(mk);
+                        }
                     }
                     _ => {}
                 }
@@ -459,8 +513,13 @@ fn obligations_at_risk(
                     Stmt::Check(oid) => {
                         at_risk.insert((mk.clone(), *oid));
                     }
-                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
-                        work.push(target.clone());
+                    Stmt::Assign(
+                        _,
+                        Rvalue::Call {
+                            target, is_virtual, ..
+                        },
+                    ) => {
+                        work.extend(runtime_targets(target, *is_virtual));
                     }
                     _ => {}
                 }
@@ -2260,6 +2319,114 @@ mod bounded_publish_tests {
         assert!(
             at_risk.contains(&(mk.clone(), ObligationId(0))),
             "exploration stopped at bb0, which reaches the obligation in bb1"
+        );
+    }
+
+    /// Named after the soundness argument on `obligations_at_risk` (gh #114).
+    ///
+    /// `at_risk` gates discharge in the safe direction only if it is a
+    /// **superset** of the obligations a truncation could have hidden: an
+    /// obligation missing from it is not refused, so it can be discharged as
+    /// exhaustively proven on an exploration that never covered it.
+    ///
+    /// A `Rvalue::Call` carries the *static* target. For a virtual call the
+    /// runtime target may be any override, so following only the static one
+    /// omits obligations in the override and breaks that superset property.
+    /// This is the -16 shape of #101 and #106, reached by a different route.
+    #[test]
+    fn a_cut_reaching_a_virtual_call_puts_every_override_at_risk() {
+        use ajave_ir::{Obligation, Ty};
+
+        // main() { bb0: r = base.run()  } with Sub <: Base, both defining run().
+        // The obligation lives in Sub.run, which only a virtual dispatch
+        // reaches -- the static target is Base.run.
+        let main = key("main");
+        let base = MethodKey {
+            class: "Base".into(),
+            name: "run".into(),
+            desc: "()V".into(),
+        };
+        let sub = MethodKey {
+            class: "Sub".into(),
+            name: "run".into(),
+            desc: "()V".into(),
+        };
+
+        let mut prog = Program::default();
+        prog.supers.insert("Sub".into(), "Base".into());
+
+        let caller_block = Block {
+            id: BlockId(0),
+            bytecode_offset: 0,
+            stmts: vec![Stmt::Assign(
+                VarId(0),
+                Rvalue::Call {
+                    target: base.clone(),
+                    args: vec![],
+                    is_virtual: true,
+                },
+            )],
+            term: Terminator::Return(None),
+            exceptional: vec![],
+        };
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Int,
+                }],
+                obligations: vec![],
+                blocks: vec![caller_block],
+            },
+        );
+        // Base.run is empty. Sub.run carries the obligation.
+        for (mk, obs, stmts) in [
+            (base.clone(), vec![], vec![]),
+            (
+                sub.clone(),
+                vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::int(0),
+                    line: None,
+                    bytecode_offset: 0,
+                    guarded: false,
+                }],
+                vec![Stmt::Check(ObligationId(0))],
+            ),
+        ] {
+            prog.bodies.insert(
+                mk.clone(),
+                Body {
+                    is_static: false,
+                    key: mk.clone(),
+                    entry: BlockId(0),
+                    vars: vec![],
+                    obligations: obs,
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        bytecode_offset: 0,
+                        stmts,
+                        term: Terminator::Return(None),
+                        exceptional: vec![],
+                    }],
+                },
+            );
+        }
+
+        let mut cuts = BTreeSet::new();
+        cuts.insert((main.clone(), BlockId(0)));
+        let at_risk = obligations_at_risk(&prog, &cuts);
+
+        assert!(
+            at_risk.contains(&(sub.clone(), ObligationId(0))),
+            "a cut reaching a virtual call to Base.run must put Sub.run's \
+             obligation at risk; following only the static target omits it, \
+             and an omitted obligation is discharged rather than refused"
         );
     }
 
