@@ -282,3 +282,10 @@ ajave/jvm-exceptions/ImplicitThrowReachesItsHandlerOnlyForSomeInputs.yml valid-a
 # a TRUE here is a real capability gain and should be celebrated, not
 # suppressed (2026-10-29).
 ajave/heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored.yml valid-assert
+
+# The relational-bounds gap, in six lines. UNKNOWN by design today: the
+# interval domain is `BTreeMap<VarId, Interval>` and cannot express
+# `i < a.length`, which is the entire content of the proof. A TRUE here means
+# a weakly relational domain landed, and is a real capability gain
+# (gh #119, 2026-10-30).
+ajave/jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds.yml no-runtime-exception

@@ -2,6 +2,71 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — the gap is one level below the literature: a non-relational domain
+
+Four techniques were surveyed and filed as experiments (gh #115–#118). The one
+chosen — FunArray array segmentation — specified a prerequisite probe. The
+probe redirected it, by the falsification criterion written into the issue when
+it was filed.
+
+### Six lines ajave cannot prove
+
+```java
+int n = Verifier.nondetInt();
+Verifier.assume(n > 0);
+int[] a = new int[n];
+for (int i = 0; i < n; i++) { a[i] = i; }   // no-runtime-exception: UNKNOWN
+```
+
+Three measurements, each discriminating:
+
+1. **It is provable.** `n < 4` makes the BMC unroll and answer **TRUE**. The
+   program and its shape are fine.
+2. **It is not a budget problem.** The BMC truncates at `handle_goto`, correct
+   for an unbounded loop, and the five probes above convert one task between
+   them. No constant reaches an unbounded loop.
+3. **The interval AI structurally cannot do it.** `IState` is
+   `BTreeMap<VarId, Interval>` — one interval per variable, independently. The
+   domain is **non-relational**. It derives `i >= 0` and `a.length >= 1`, and
+   has no way to express `i < a.length`, which is the whole proof.
+
+### Why this matters more than the survey did
+
+The literature search was aimed at array *content* invariants, because that is
+where the heap work ended (`∀n. value[n] >= 0`, gh #109). That is a real gap.
+But it is not the first one: **we cannot reason about the index, let alone the
+elements.** Segmentation reasons about contents and is therefore downstream of
+a relational domain, which is what gh #115's own "what would make it fail"
+section predicted and what the probe confirmed.
+
+The answer is Pentagons (Logozzo & Fähndrich): intervals plus symbolic strict
+upper bounds `x < y`, deliberately weaker than Octagons to stay near-linear,
+and designed for array-bounds checking specifically. It extends `interval.rs`
+rather than replacing it — the interval half already exists. Filed as gh #119.
+
+Size: `ArrayBounds` 195 and `NullDeref` 239 are 78% of open obligations, and
+the `budget` bucket is 135 of 409 declined pairs with 98 expecting TRUE.
+
+### The hazard named up front
+
+gh #104, and B2/B3 measuring bit-identical across all 107 convertible pairs,
+both record interval-engine artifacts failing to reach a consumer. A new domain
+inferring correct facts nobody reads repeats that exactly. #119 says to name the
+consumer before building the producer, and
+`jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds` is the check — in
+`smoke.set` as a capability boundary, UNKNOWN by design, where a TRUE is a gain
+rather than a regression.
+
+### Method note
+
+Every step today was a probe before a plan: five bound probes, then a
+hand-written six-line control. The control is what found this — a real corpus
+task would have had four confounds, and `InsertionSort-FunSat01` in fact does
+(its assertion needs *sortedness*, not bounds). Reducing to the smallest program
+that still exhibits the behaviour is what CLAUDE.md asks for, and it worked
+exactly as advertised.
+
+
 ## 2026-10-30 — five probes, and the measured answer: ajave needs invariants, not search
 
 Follow-up to the census. The `budget` bucket is 135 of 409 declined pairs and
