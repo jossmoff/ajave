@@ -2143,7 +2143,10 @@ mod implicit_handler_tests {
     fn an_exactly_matching_handler_is_found() {
         let b = body_with(vec![edge(Some(AE), 1)]);
         let p = Program::default();
-        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
+        assert_eq!(
+            implicit_handler_for(&b, &p, BlockId(0), AE),
+            Some(BlockId(1))
+        );
     }
 
     /// A handler for an unrelated class is skipped, and the search continues
@@ -2156,7 +2159,10 @@ mod implicit_handler_tests {
             edge(Some(AE), 1),
         ]);
         let p = Program::default();
-        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
+        assert_eq!(
+            implicit_handler_for(&b, &p, BlockId(0), AE),
+            Some(BlockId(1))
+        );
     }
 
     /// Named after the soundness argument on `implicit_handler_for`: a
@@ -2182,7 +2188,10 @@ mod implicit_handler_tests {
     fn a_finally_after_a_matching_handler_does_not_block_it() {
         let b = body_with(vec![edge(Some(AE), 1), edge(None, 1)]);
         let p = Program::default();
-        assert_eq!(implicit_handler_for(&b, &p, BlockId(0), AE), Some(BlockId(1)));
+        assert_eq!(
+            implicit_handler_for(&b, &p, BlockId(0), AE),
+            Some(BlockId(1))
+        );
     }
 }
 

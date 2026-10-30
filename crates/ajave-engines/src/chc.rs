@@ -1145,7 +1145,10 @@ fn encode_chc_interproc(
             );
             return None;
         }
-        debug!("chc-summary: {mk} granted a summary over {} field(s)", fp.len());
+        debug!(
+            "chc-summary: {mk} granted a summary over {} field(s)",
+            fp.len()
+        );
         Some(fp)
     };
 
