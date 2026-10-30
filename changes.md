@@ -2,6 +2,76 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-30 — three buckets probed, none converts: the unproven are hard, not blocked
+
+Follow-up to the census above. The plan written for its dominant bucket
+(`docs/plans/the-outer-gate.md`) was **withdrawn the same day by the
+falsification check it specified**, and two more buckets were probed the same
+way. The negative result is the contribution.
+
+| bucket | tasks | lever probed | converted |
+|---|---|---|---|
+| budget (`all_paths_complete`) | 135 | force the outer gate open | **0** |
+| float-escalation | 76 | `AJAVE_FP_ARITH=1` | 1 of 40 |
+| no-candidate | 60 | discharge past the budget | **0** |
+
+271 of 409 declined pairs, 66% of the population. Nothing is behind the
+plumbing.
+
+### What each probe established
+
+**The outer gate never fires.** The plan assumed the 135 were refused by the
+`cuts_accounted` safety net. It fired **zero times across all 409 tasks** —
+and `classify()` distinguishes its log line, so the absence is a measurement.
+All 135 carry the *per-obligation* blocker: the obligation genuinely lies
+downstream of a truncation, and `at_risk` is doing its job
+(`BellmanFord-FunSat01`: `at_risk=30`). An unsound probe that opened the gate
+unconditionally produced an identical 0 correct / 40 unproven.
+
+**The FPA escalation converts ~1 in 40.** The bucket was the plan's "cheap"
+phase because the theory is implemented. It is, and it still does not fire for
+these obligations.
+
+**`no-candidate` is the BMC exiting before it decides anything.** The discharge
+gate shows `budget_left=false`, so neither the decision nor its own refusal log
+runs — which is exactly why these tasks have no blocker. The decision makes no
+solver calls, so letting it run past the budget is nearly free; it refuses
+anyway, 0 conversions on all 60. Two tasks moved TIMEOUT → UNKNOWN, which is
+anytime behaviour rather than score.
+
+### The methodological point, which is the reusable part
+
+Four opportunity sizings were wrong in one day: `refuted-witness` 211 → 1,
+`budget` 135 → 0, `float-escalation` 76 → ~2, and the no-candidate plan before
+it was written. Every time, a **bucket count** was read as an **opportunity
+size**.
+
+A bucket counts tasks sharing a *symptom*. The opportunity is the subset whose
+cause that symptom names **and** for which a lever exists. Three different sets,
+and only the last is worth points.
+
+So the rule: **probe the lever on a sample before planning the work.** An env
+flag or a deliberately unsound probe costs ten minutes and invalidates a day of
+planning. Writing the falsification check into the plan *before* implementing
+is what caught the largest of these — the check was pre-registered, and running
+it first saved the whole of Phase 0.
+
+### Where the capability question actually sits
+
+`NullDeref` (239) and `ArrayBounds` (195) are 78% of open obligations in the
+chunk that counted them, against `Assertion` at 102. The remaining ground is
+dominated by runtime-exception obligations on genuinely truncated explorations.
+That is capability work, not plumbing, and it is where the next attempt should
+start.
+
+Also filed: gh #114. `obligations_at_risk` follows only the **static** call
+target and nothing in the workspace enumerates overrides, so `at_risk`
+under-approximates and an obligation inside an override can be discharged as
+exhaustively proven. Found while planning rather than while implementing. It
+survives the plan's withdrawal and is a latent unsoundness of the same shape as
+#101 and #106 — not demonstrated on any task, and stated that way on the issue.
+
+
 ## 2026-10-30 — the unproven census, and two corrections it needed first
 
 `tools/blocker_census.py` over the 409 **declined** task-property pairs (the

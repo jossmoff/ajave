@@ -1,7 +1,116 @@
 # The outer discharge gate, and the 135 tasks behind it
 
-**Status:** plan, not implemented. Written 2026-10-30 against `main` at `fdd9b6e`
-(corpus 2058).
+**Status: WITHDRAWN.** Written 2026-10-30, falsified the same day by the check
+it specifies under "What would falsify this plan". Kept because the census it
+records is sound and the two measurements below are worth not repeating.
+
+## Why it is withdrawn
+
+Its central premise is false. The plan assumed the 135 `budget` tasks were
+refused by the **outer** gate — the `cuts_accounted` safety net that fires when
+a cut is recorded and `at_risk` comes back empty.
+
+The outer gate **fired zero times across all 409 censused tasks.**
+`classify()` distinguishes the outer-gate log line from the per-obligation one,
+so that absence is a measurement rather than a blind spot. All 135 carry the
+*per-obligation* blocker: the obligation genuinely lies downstream of a
+truncation, and `at_risk` is doing its job. On `BellmanFord-FunSat01`,
+`at_risk=30` — far from empty.
+
+Confirmed directly. `AJAVE_FORCE_DISCHARGE=1`, an unsound probe that opens the
+gate unconditionally, on a 40-task sample of the bucket:
+
+| | correct | unproven | score |
+|---|---|---|---|
+| gate as-is | 0 | 40 | 0 |
+| gate forced open | 0 | 40 | 0 |
+
+Identical. Nothing is behind the gate. Phase 0's virtual-dispatch work — hours
+of it — would have bought nothing, and the only reason that was not discovered
+after writing the code is that the falsification check was written down first
+and run first.
+
+The virtual-dispatch gap in `obligations_at_risk` is **still real** and is now
+gh-worthy on its own terms: it follows only the static call target, so
+`at_risk` under-approximates. That makes it a latent *unsoundness* in the
+per-obligation test, not an obstacle to loosening a gate that never fires.
+
+## And the second bucket, probed the same way
+
+`float-escalation`, 76 tasks, was the plan's cheap Phase 3 because the FPA
+theory exists and is implemented. `AJAVE_FP_ARITH=1` on a 40-task sample:
+**1 conversion** (+2), 6 new timeouts, 371s against 231s. The bucket size
+promised 76 tasks; the lever delivers roughly 1 in 40.
+
+Caveat on that arm: it ran at load 8.2 while its baseline did not, so the
+timeout count is unreliable. The conversion rate is not.
+
+## And the third bucket: `no-candidate`, 60 tasks
+
+Mechanism identified rather than guessed. The discharge gate reports
+`budget_left=false`, so the whole block is skipped:
+
+```rust
+if !ctx.exhausted && ctx.budget_left() { /* decide */ } else if .. { /* log */ }
+```
+
+Neither branch runs. That is why these tasks carry **no blocker at all** — the
+engine exits before reaching the point where it would refuse, discarding the
+conclusions of exploration it already paid for. `budget_left()` is false when
+the wall-clock slice expires or `MAX_SOLVER_CALLS` trips. `REPORT_RESERVE` is
+3s reserved at the CLI for printing a verdict, not for the engine's decision.
+
+The decision itself makes no solver calls — it tests `at_risk` membership,
+completeness flags and the skipped/violated sets. So `AJAVE_DISCHARGE_PAST_BUDGET=1`
+lets it run anyway, on all 60:
+
+| | correct | unproven | verdicts |
+|---|---|---|---|
+| baseline | 0 | 60 | 58 UNKNOWN, 2 TIMEOUT |
+| decision allowed past budget | 0 | 60 | 60 UNKNOWN |
+
+**Zero conversions.** The per-obligation conditions refuse anyway — consistent
+with `ActiveCheck`, which shows `all_paths_complete=false` alongside its three
+open assertions.
+
+One non-scoring effect worth noting without overselling: two tasks moved
+TIMEOUT → UNKNOWN, i.e. finished instead of being killed. That is anytime
+behaviour, is related to gh #113, and is two tasks — possibly noise.
+
+## Three buckets, 271 of 409 tasks, probed. None converts.
+
+| bucket | tasks | lever | converted |
+|---|---|---|---|
+| budget | 135 | force the outer gate open | 0 |
+| float-escalation | 76 | `AJAVE_FP_ARITH=1` | 1 of 40 |
+| no-candidate | 60 | discharge past the budget | 0 |
+
+**The conclusion is that the remaining unproven population is genuinely hard,
+not blocked by plumbing.** Each bucket names a symptom accurately; none of them
+names a cheap lever. That is a more useful result than another plan would have
+been, and it cost three ten-minute probes instead of three days.
+
+Where the capability question actually sits: `NullDeref` (239) and `ArrayBounds`
+(195) are 78% of open obligations in the chunk that counted them. The next
+move is proving those, not unblocking a gate.
+
+## What generalises from three wrong sizings in one day
+
+`refuted-witness` (211 → 1), `budget` (135 → 0 convertible by the gate),
+`float-escalation` (76 → ~2). Each time the bucket *count* was read as an
+opportunity size, and each time the lever converted a small fraction or none.
+
+A bucket counts tasks that share a **symptom**. The opportunity is the subset
+whose cause that symptom names *and* for which a lever exists. Those are three
+different sets, and only the last one is worth points. So: **probe the lever on
+a sample before planning the work, not after.** A flag flip or an unsound probe
+costs ten minutes; the plan it invalidates costs a day.
+
+---
+
+_Original plan follows, unchanged, as the record of what was proposed._
+
+
 
 ## The measurement
 
