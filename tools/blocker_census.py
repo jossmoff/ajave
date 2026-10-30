@@ -292,25 +292,39 @@ def classify(rec):
         return "timeout", "(killed at the wall clock)", n
     if rec["verdict"].startswith("KILLED") or rec["verdict"].startswith("ERROR"):
         return "killed", "(signal, not a verdict)", n
-    if rec["downgraded"]:
-        # Ordered before the blocker case deliberately. Such a task usually
-        # *also* has blockers -- the obligations nobody violated are still
-        # unproven -- but the witness is the proximate reason this task scores
-        # nothing, and it is the one that responds to different work.
-        why = Counter(rec["replay"]).most_common(1)
-        return "refuted-witness", \
-            f"replay {why[0][0]}" if why else "replay refused (reason not logged)", n
+    # A blocker outranks a refuted witness, and getting this order wrong once
+    # produced a 52%-of-population "finding" that was an artefact.
+    #
+    # The earlier version returned `refuted-witness` first, on the reasoning
+    # that the witness is "the proximate reason this task scores nothing".
+    # That is false whenever the task also has a blocker.
+    # `BellmanFord-FunSat01` is the case that disproved it: it carries a
+    # refuted witness *and* `BLOCKER all_paths_complete`, and no engine
+    # discharges anything. Remove the spurious violation and the obligation is
+    # merely open-and-unproven, so the verdict is UNKNOWN either way -- the
+    # witness recovers nothing.
+    #
+    # That is not a guess about the architecture. `open_or_unconfirmed()`
+    # already offers violated obligations to over-approximating engines, and
+    # `verdict_excluding()` already recovers TRUE when a refuted violation is
+    # the *only* thing standing in the way. Both exist for this, so a task that
+    # is still UNKNOWN after a refutation is one where nothing could discharge
+    # the obligation regardless.
+    #
+    # So `refuted-witness` is reported only when there is no blocker to
+    # explain the task, and the refutation count travels as an annotation on
+    # every row.
     if rec["blockers"]:
         top = Counter(rec["blockers"]).most_common(1)[0][0]
         return KIND.get(top, "other"), top, n
     if rec["outer"] is not None:
-        # The BMC never reached its discharge loop. Its own accounting of
-        # where the open obligations live is the finding: obligations open in
-        # a method that was never truncated cannot be explained by depth.
-        _open_m, _trunc_m, elsewhere = rec["outer"]
-        if elsewhere:
-            return "budget", "all_paths_complete (outer gate, but open elsewhere)", n
-        return "budget", "all_paths_complete (outer gate)", n
+        _o, _t, elsewhere = rec["outer"]
+        return "budget", ("all_paths_complete (outer gate, but open elsewhere)"
+                          if elsewhere else "all_paths_complete (outer gate)"), n
+    if rec["downgraded"]:
+        why = Counter(rec["replay"]).most_common(1)
+        return "refuted-witness", \
+            f"replay {why[0][0]}" if why else "replay refused (reason not logged)", n
     return "no-candidate", "(nothing published)", n
 
 
@@ -426,12 +440,13 @@ def report(records, dump=None):
     if dump:
         with open(dump, "w") as f:
             f.write("name\tproperty\texpected\tverdict\tbucket\tblocker"
-                    "\topen\tkinds\n")
+                    "\topen\trefuted\tkinds\n")
             for r in unproven:
                 bucket, top, n = classify(r)
+                nref = len([x for x in r["replay"] if x != "Confirmed"])
                 f.write(f"{r['name']}\t{r['prop']}\t{r['expected']}\t"
                         f"{r['verdict']}\t{bucket}\t{top}\t{n if n else ''}\t"
-                        f"{r['open_kinds']}\n")
+                        f"{nref}\t{r['open_kinds']}\n")
         print(f"\nwrote {len(unproven)} rows to {dump}")
 
     print("\nThe 'budget' row is what a scheduler can convert. Everything "
