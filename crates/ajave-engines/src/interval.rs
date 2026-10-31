@@ -1101,9 +1101,18 @@ impl IState {
                 self.mul_of.get(src).copied()
             })
         else {
+            // Say whether the *index* has the flattened shape too. This premise
+            // is checked first, so without that every decline in the program
+            // lands in this bucket regardless of whether the task was ever a
+            // candidate -- and the bucket then measures premise order rather
+            // than a population.
+            let idx_is_flattened = self
+                .add_of
+                .get(&idx)
+                .is_some_and(|(p, _)| self.mul_of.contains_key(p));
             decline!(format!(
-                "len has no product provenance (len_prod={:?} len_alias={:?})",
-                self.len_prod, self.len_alias
+                "len has no product provenance (index is {}a flattened shape)",
+                if idx_is_flattened { "" } else { "not " }
             ))
         };
         let Some((p, j)) = self.add_of.get(&idx).copied() else {

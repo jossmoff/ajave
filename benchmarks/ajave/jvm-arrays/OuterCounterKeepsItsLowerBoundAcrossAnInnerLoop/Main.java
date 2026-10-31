@@ -27,8 +27,13 @@
 //
 // The portfolio answers this task either way — the BMC unrolls it. The
 // mechanism is visible only with the other engines removed:
-//   AJAVE_DISABLE=smt_bmc,kinduction,chc,imc,cegar,concrete,nra,presolve
-// which is UNKNOWN without the reduction step and TRUE with it. The guard that
+//   AJAVE_DISABLE=smt-bmc,smt-bmc-fpa,concolic,kinduction,chc,imc,cegar,concrete,nra,presolve,exhaustive
+// Under that, valid-assert is UNKNOWN without the reduction step and TRUE with
+// it. (no-runtime-exception is TRUE either way: nothing in it needs the bound.)
+// Note the engine ids are hyphenated and AJAVE_DISABLE matches them exactly --
+// `smt_bmc` with an underscore silently disables nothing, which made a first
+// version of this note describe a run that still had the BMC in it.
+// The guard that
 // actually holds the mechanism is therefore the domain law test
 // `refinement_lets_a_widened_counter_be_incremented_without_overflow`; this
 // file is here so the next reader can see the shape that provokes it.

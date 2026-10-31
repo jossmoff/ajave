@@ -2,6 +2,99 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — measuring the flattened-matrix ceiling, which refuted the next two plans
+
+Two planned pieces of work were cancelled by one measurement. Recording it in
+full, because the measurement cost minutes and each plan would have cost hours.
+
+### The probe
+
+`AJAVE_TRACE_FLAT=1` makes the lemma name the premise that declined. Running
+it over all 1033 corpus tasks with every other engine disabled — the abstract
+interpreter runs in milliseconds, so this is a six-minute sweep, not a scoring
+run — answers "which premise actually blocks, and on how many tasks".
+
+### First reading was an artefact, and it was the same artefact as last time
+
+The first run said **198 of 1033** tasks declined on "length is not a known
+product" and **1** on the overflow premise. Read naively that is a 198-task
+population for the length work.
+
+It is not. The length premise is checked **first**, so every decline in every
+program lands in that bucket whether or not the task was ever a candidate.
+This is precisely the bucket-precedence error that made `refuted-witness` look
+like 211 tasks earlier in the same session, and it reappeared within hours in a
+different harness.
+
+The fix is to make the first premise's message also report whether the *index*
+has the flattened shape, which is order-independent. Re-measured:
+
+| premise | tasks |
+|---|---|
+| index is not a flattened shape (not a candidate) | 198 |
+| **index is `i*s+j` but the length is not a known product** | **4** |
+| overflow: a factor's upper bound is unknown | 1 |
+| **blocked *only* on the overflow premise** | **0** |
+
+The four are `BellmanFord-{FunSat01,FunUnsat01,MemSat01,MemUnsat01}`. That is
+the entire flattened-matrix population of the corpus.
+
+### What this cancels
+
+**Two-phase parameter-interval propagation: cancelled.** Zero tasks are blocked
+solely on the overflow premise, so the whole design — harvesting argument
+intervals at call sites, gating on caller completeness and acyclicity, a second
+analysis round — would have unblocked nothing. It was the next item on the
+plan and had a written soundness argument before this was measured.
+
+`BellmanFord-MemUnsat01` is the one task reaching that premise, and it declines
+**correctly**: its `assume` bounds the dimension by 999999, so `n*n` is about
+1e12 and genuinely does not fit in an `int`. Nothing to fix.
+
+**A syntactic fix to the length matcher: attempted, reverted.** `BellmanFord`
+has exactly the shape `analyze_array_len_preconditions` was written for, and
+established no precondition. The cause is the javac copy chain again:
+
+```
+bb6:   v8  = v3 * v3          bb22:  v36 = call runBellmanFord(v3, v13, 0)
+       v10 = new int[v8]             v37 = v36
+       v12 = v10                     v11 = v37     <-- v11 assigned a second time
+       v11 = v12
+bb7:   v13 = v11
+```
+
+`v11` holds `D` at `bb6` and the call's own **return value** at `bb22`, so it
+is assigned twice and the whole-body single-definition test refuses to follow
+`v13` back to the allocation. Refusing is sound. But the precondition *is* true
+at that call site, and no whole-body definition count can see it: the fact is
+flow-sensitive and the matcher is not.
+
+Normalising both sides to a copy-chain root was tried and **regressed**: it
+rejects any chain passing through a later-reassigned variable, which also
+describes the synthetic benchmark (the lifter reuses the `assume` flag's
+variable), so it broke the one case that worked and fixed nothing. Reverted.
+
+### Where the fix actually belongs
+
+The abstract interpreter already computes this fact, flow-sensitively, and
+already propagates it through exactly those copies: at `bb22` its state holds
+`array_len_prod[v13] = (v3, v3)` and `v3` is argument 0. The precondition
+should be **harvested from the analysis state at the call edge**, not
+re-derived syntactically. That subsumes the syntactic pass rather than
+patching it.
+
+Ceiling for that work, measured rather than assumed: 4 tasks. Two are expected
+TRUE, and `BellmanFord-FunSat01` separately carries a refuted witness and an
+`all_paths_complete` blocker, so even a working lemma may not flip it. Filed
+with that number attached so the next person does not rediscover the estimate.
+
+### One incidental finding
+
+The matcher's middle arm is dead code. `resolve` loops *while* the rvalue is
+`Use(Var(_))`, so it can never return one, and
+`matches!(resolve(..), Some(Rvalue::Use(Operand::Var(z))) if z == w)` is
+unreachable. Harmless, and left alone pending the rewrite above.
+
 ## 2026-10-31 — the reduction step, and a probe that lied because two things were broken
 
 ### What the probe said, and why it was wrong
@@ -80,7 +173,14 @@ a benchmark that passed and demonstrated nothing:
   intervals alone. The finding requires `n` unbounded above.
 - The second version still proved with the full portfolio, because the BMC
   unrolls it. The mechanism is visible only under `AJAVE_DISABLE` of the other
-  engines. So the guard that actually holds it is the domain law
+  engines — and the first attempt at *that* was wrong too: `AJAVE_DISABLE`
+  matches engine ids exactly, the ids are hyphenated (`smt-bmc`,
+  `smt-bmc-fpa`, `concolic`), and an underscored `smt_bmc` disables nothing
+  while looking like it worked. Two runs labelled "AI only" in this session
+  still had the BMC active. The corrected configuration is
+  `AJAVE_DISABLE=smt-bmc,smt-bmc-fpa,concolic,kinduction,chc,imc,cegar,concrete,nra,presolve,exhaustive`,
+  under which valid-assert is UNKNOWN before the reduction step and TRUE after.
+  So the guard that actually holds it is the domain law
   `refinement_lets_a_widened_counter_be_incremented_without_overflow`, which
   is mutation-checked against both the obvious mutants; the benchmark is there
   for the shape.
