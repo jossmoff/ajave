@@ -2,6 +2,67 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the one locally-corrected benchmark label, and what it costs us
+
+`argv-tasks/ReverseInterpolator_true.yml`'s valid-assert verdict is corrected
+from `true` to `false` locally. It is the **only** divergence from upstream
+sv-benchmarks in the corpus, and it should stay the only one.
+
+### Why it is a defect and not a gap in our analysis
+
+There is a legal `nondetFloat()` value for which a stock JVM throws
+`AssertionError`. Stub `nondetFloat` to return
+`Float.intBitsToFloat(1099087158)` — about 16.38, an ordinary finite float —
+compile the task's own sources against it, and run with `-ea`: exit 1,
+`AssertionError`. With the usual zero-returning stub: exit 0. That second line
+is why the mislabel survives casual checking, since merely running the
+benchmark suggests it is safe.
+
+ajave reports FALSE and its `jvm-replay` certifier confirms it by *executing*
+the program with that witness. So this was a correct FALSE being scored as
+wrong.
+
+### What it is worth, and the catch
+
+A wrong FALSE is -32 and a correct FALSE is +1, so the correction is a
+**33-point swing** on a single task — about 3.7% of the valid-assert score, and
+the largest single lever in that run. It was also the sole entry in our
+"wrong" column, so the corpus now has **zero** wrong answers on both
+properties.
+
+The catch, which matters more than the points: **our valid-assert score is now
++33 against what SV-COMP's own labels would award.** Any comparison with
+competition results, or with another tool scored on stock sv-benchmarks, must
+apply the same correction or subtract it back out. The memory note
+`ajave-vs-svcomp-field` records a 1,837-vs-1,561 comparison against JBMC; that
+figure predates this change and needs the adjustment stated when it is next
+used.
+
+### The rule this needs
+
+Editing an expected verdict is the most direct form of the benchmark
+overfitting this file warns about on every other page. The bar is therefore
+not "we disagree with the label" but **a JVM-reproducible witness**, as above:
+a concrete input, the exact stub, and an observed non-zero exit. Anything short
+of that is tuning the measurement rather than fixing it.
+
+The correction lives in a comment header in the task file itself rather than
+only in `changes.md`, because the file is what a future run reads, and a
+divergence recorded somewhere else is a divergence nobody sees. Deleting the
+header is all that is needed if upstream fixes the label.
+
+The no-runtime-exception verdict is **not** corrected: `AssertionError` is an
+`Error`, not a `RuntimeException`, so it falls outside that property, and the
+NRE run already scores this task correctly.
+
+### Deferred
+
+A stored `sv-comp` baseline. Its absence is why the move from 876 to 878 could
+not be attributed to anything — there is no per-task record to diff, only
+`smoke`, `ajave` and `concurrency` baselines. Deliberately deferred until after
+the next scoring improvement so it is recorded once, on a matched build, rather
+than twice.
+
 ## 2026-10-31 — gh #88: the premise was wrong, and the real instance was somewhere else
 
 ### #88's two proposed fixes were already implemented
