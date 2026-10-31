@@ -303,3 +303,9 @@ ajave/jvm-arrays/NonStrictGuardBoundsTheIndexJustAsWell.yml no-runtime-exception
 # halves of the obligation need it -- the abstract interval for the index
 # overflows, so even `idx >= 0` is otherwise unprovable (gh #119, 2026-10-31).
 ajave/jvm-arrays/FlattenedMatrixIndexStaysInBounds.yml no-runtime-exception
+
+# Pentagons reduction: a relation must tighten the interval, not only answer
+# comparisons. The second is deliberately unproven -- it names the one fact
+# (a parameter's upper bound crossing a call) that is still missing.
+ajave/jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop.yml valid-assert
+ajave/jvm-arrays/FlattenedMatrixIndexAcrossACall.yml no-runtime-exception

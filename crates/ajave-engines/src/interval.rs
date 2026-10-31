@@ -1003,6 +1003,61 @@ impl IState {
         a == b || self.knows_lt(a, b) || self.le.get(&a).is_some_and(|s| s.contains(&b))
     }
 
+    /// `v`'s interval, intersected with what the relations already say.
+    ///
+    /// This is the **reduction** step of a reduced product — the operation
+    /// that makes Pentagons more than two domains kept side by side. `v < y`
+    /// together with `y <= y.hi` gives `v <= y.hi - 1`, which the interval
+    /// component cannot derive on its own.
+    ///
+    /// It is needed for more than sharper answers. A loop header widens a
+    /// counter's upper bound to `i32::MAX`, after which `i + 1` can genuinely
+    /// overflow, so the interval transfer must return Top — and that destroys
+    /// the counter's *lower* bound as well, which no narrowing on a later
+    /// branch restores, because a guard bounds a counter only from above.
+    /// Refining the operand first means the increment is computed against the
+    /// guard's bound and never looks like an overflow.
+    ///
+    /// Sound because it only intersects with facts the state already holds.
+    /// Monotone in the lattice order, so the fixpoint still converges: `leq`
+    /// requires a superset of relations, so a state lower in the order refines
+    /// at least as tightly.
+    ///
+    /// Only the upper direction is derived, and only one hop. The symmetric
+    /// lower bound (`x < v` gives `v >= x.lo + 1`) would need a reverse index,
+    /// and without one, reading it would mean scanning every relation in the
+    /// state on every operand evaluation.
+    fn refined(&self, v: VarId) -> Interval {
+        let iv = self.get(v);
+        if self.lt.is_empty() && self.le.is_empty() {
+            return iv;
+        }
+        let mut hi = iv.hi;
+        if let Some(ys) = self.lt.get(&v) {
+            for y in ys {
+                let h = self.get(*y).hi;
+                if h > i64::from(i32::MIN) && h - 1 < hi {
+                    hi = h - 1;
+                }
+            }
+        }
+        if let Some(ys) = self.le.get(&v) {
+            for y in ys {
+                let h = self.get(*y).hi;
+                if h < hi {
+                    hi = h;
+                }
+            }
+        }
+        // A contradiction means the state is unreachable. Say nothing rather
+        // than hand back an inverted interval that the rest of the domain
+        // would misread as a range.
+        if hi < iv.lo {
+            return iv;
+        }
+        Interval { lo: iv.lo, hi }
+    }
+
     /// The flattened-matrix lemma: is `idx < len` provable because `idx` is
     /// `i*s + j` and `len` is the length of an array allocated as `m*s`, with
     /// `i < m` and `j < s`?
@@ -1020,7 +1075,22 @@ impl IState {
     /// to Java's. Given it, `i*stride + j <= m*stride - 1` cannot overflow
     /// either, since it is strictly smaller than a value already shown to fit.
     fn flattened_premises(&self, idx: VarId, len: VarId) -> Option<(VarId, VarId, VarId, VarId)> {
-        let (am, asx) = self
+        // Six premises, any one of which turns the lemma into a silent
+        // `None`. `AJAVE_TRACE_FLAT=1` names the one that declined -- it is
+        // what found both blockers on `FlattenedMatrixIndexAcrossACall`, where
+        // the symptom was identical in each case. Cached so the hot path is an
+        // atomic load rather than a `getenv` per evaluation.
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var_os("AJAVE_TRACE_FLAT").is_some());
+        macro_rules! decline {
+            ($why:expr) => {{
+                if trace {
+                    log::debug!("flat-lemma idx=v{} len=v{}: {}", idx.0, len.0, $why);
+                }
+                return None;
+            }};
+        }
+        let Some((am, asx)) = self
             .len_prod
             .get(&len)
             .copied()
@@ -1029,29 +1099,60 @@ impl IState {
             .or_else(|| {
                 let src = self.len_alias.get(&len)?;
                 self.mul_of.get(src).copied()
-            })?;
-        let (p, j) = self.add_of.get(&idx).copied()?;
-        let (i, stride) = match self.mul_of.get(&p).copied()? {
+            })
+        else {
+            decline!(format!(
+                "len has no product provenance (len_prod={:?} len_alias={:?})",
+                self.len_prod, self.len_alias
+            ))
+        };
+        let Some((p, j)) = self.add_of.get(&idx).copied() else {
+            decline!("idx is not a sum")
+        };
+        let Some(prod) = self.mul_of.get(&p).copied() else {
+            decline!("the sum's left operand is not a product")
+        };
+        let (i, stride) = match prod {
             (x, y) if y == asx => (x, y),
             // `stride * i` is the same product written the other way round.
             (x, y) if x == asx => (y, x),
-            _ => return None,
+            _ => decline!(format!(
+                "product v{}*v{} shares no factor with the length's stride v{}",
+                prod.0 .0, prod.1 .0, asx.0
+            )),
         };
         if !(self.knows_lt(i, am) || (am == stride && self.knows_lt(i, stride))) {
-            return None;
+            decline!(format!("no v{} < v{}", i.0, am.0))
         }
         if !self.knows_lt(j, stride) {
-            return None;
+            decline!(format!("no v{} < v{}", j.0, stride.0))
         }
         if self.get(i).lo < 0 || self.get(j).lo < 0 || self.get(stride).lo < 0 {
-            return None;
+            decline!(format!(
+                "an operand may be negative: i=v{}{:?} j=v{}{:?} stride=v{}{:?}",
+                i.0,
+                self.get(i),
+                j.0,
+                self.get(j),
+                stride.0,
+                self.get(stride)
+            ))
         }
         let fits = self
             .get(am)
             .hi
             .checked_mul(self.get(stride).hi)
             .is_some_and(|hi| hi <= i32::MAX as i64);
-        fits.then_some((i, j, am, stride))
+        if !fits {
+            decline!(format!(
+                "v{}*v{} may overflow int ({:?} * {:?})",
+                am.0,
+                stride.0,
+                self.get(am),
+                self.get(stride)
+            ))
+        }
+        Some((i, j, am, stride))
     }
 
     /// `i*stride + j < m*stride`, the upper half of the lemma.
@@ -1466,7 +1567,8 @@ impl IState {
     /// Evaluate an operand under this state.
     pub fn eval_operand(&self, op: &Operand) -> Interval {
         match op {
-            Operand::Var(v) => self.get(*v),
+            // Reduced-product reduction, not a plain lookup. See `refined`.
+            Operand::Var(v) => self.refined(*v),
             Operand::Const(Const::Int(n)) => Interval::point(*n as i64),
             Operand::Const(Const::Long(n)) => {
                 // Long arithmetic isn't modelled precisely by this i32-ranged
@@ -3834,6 +3936,94 @@ mod domain_law_tests {
             s.lt.entry(VarId(*a)).or_default().insert(VarId(*b));
         }
         s
+    }
+
+    /// The reduction step: a relation must tighten the interval it talks about,
+    /// not merely answer comparisons.
+    ///
+    /// This is the law behind `refined`, stated as the increment that provoked
+    /// it. A loop header widens the counter to `[0, i32::MAX]`; `i + 1` on
+    /// that interval genuinely wraps in Java, so the transfer must return Top,
+    /// and the counter's lower bound is destroyed along with its upper one.
+    /// Refining `i` against `i < n` first leaves `i <= n.hi - 1`, and the
+    /// increment is ordinary again.
+    ///
+    /// Note how weak the premise is: `n` is known only to be at least 1, so
+    /// `n.hi` is still `i32::MAX` and the refinement buys exactly one unit of
+    /// slack. One unit is the whole difference between a usable interval and
+    /// Top.
+    ///
+    /// Mutation-checked: fails both when `eval_operand` reads `get` instead of
+    /// `refined`, and when `refined` is made not to shrink.
+    ///
+    /// See `benchmarks/ajave/jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop`
+    /// for the program shape that provokes it.
+    #[test]
+    fn refinement_lets_a_widened_counter_be_incremented_without_overflow() {
+        let i = VarId(1);
+        let n = VarId(2);
+
+        // Without the relation the increment has to give up: MAX + 1 wraps.
+        let mut bare = empty(0);
+        bare.vars.insert(
+            i,
+            Interval {
+                lo: 0,
+                hi: i64::from(i32::MAX),
+            },
+        );
+        bare.vars.insert(
+            n,
+            Interval {
+                lo: 1,
+                hi: i64::from(i32::MAX),
+            },
+        );
+        let inc = Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::Const(Const::Int(1)));
+        assert_eq!(
+            bare.eval_rvalue(&inc),
+            Interval::top(),
+            "MAX + 1 wraps, so with no relation to lean on Top is the only \
+             sound answer -- and that is what loses the lower bound"
+        );
+
+        // With `i < n` the same increment keeps `i >= 0`.
+        let mut related = bare.clone();
+        related.add_lt(i, n);
+        let got = related.eval_rvalue(&inc);
+        assert!(
+            got.lo >= 0,
+            "refinement must preserve the counter's lower bound, got {got:?}"
+        );
+        assert_eq!(
+            got,
+            Interval {
+                lo: 1,
+                hi: i64::from(i32::MAX)
+            },
+            "`i < n` bounds `i` by `n.hi - 1`, so `i + 1` cannot overflow"
+        );
+    }
+
+    /// Refinement may only ever shrink an interval, and never invert it.
+    ///
+    /// A contradictory state (`i < n` with `i` already above `n`) is
+    /// unreachable, and the honest response is to say nothing rather than hand
+    /// back a `lo > hi` interval that every other operator in the domain would
+    /// misread as a range.
+    #[test]
+    fn refinement_never_returns_an_inverted_interval() {
+        let i = VarId(1);
+        let n = VarId(2);
+        let mut st = empty(0);
+        st.vars.insert(i, Interval { lo: 50, hi: 60 });
+        st.vars.insert(n, Interval { lo: 0, hi: 10 });
+        st.add_lt(i, n);
+        let got = st.refined(i);
+        assert!(
+            got.lo <= got.hi,
+            "a contradiction must not produce an inverted interval, got {got:?}"
+        );
     }
 
     /// A fact holding on one branch only is not a fact at the merge.

@@ -2,6 +2,101 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the reduction step, and a probe that lied because two things were broken
+
+### What the probe said, and why it was wrong
+
+The previous entry named a single remaining blocker on
+`FlattenedMatrixIndexAcrossACall`: the caller's upper bound on `n` never
+reaches the callee, so the lemma's overflow premise (`n*n` must fit in an
+`int`) declines. The plan was to hand-seed `n`'s interval, confirm the task
+flips, and only then build the two-phase propagation that would derive it.
+
+The probe seeded the interval and the task **stayed UNKNOWN**. Taken at face
+value that refutes the diagnosis. It did not: there were *two* independent
+missing facts, and the probe supplied one of them while the other still held
+the obligation open. The diagnosis was incomplete, not wrong — which is the
+more dangerous failure, because the probe was built to be decisive and
+returned a confident no.
+
+What rescued it was instrumenting the lemma to name *which* premise declined
+rather than reading the code and guessing. Six premises, one silent `None`, and
+two different causes producing a byte-identical symptom. That instrumentation
+is now kept behind `AJAVE_TRACE_FLAT=1`.
+
+### The second blocker: a widened counter cannot be incremented
+
+The outer loop counter reached the obligation as Top, so `i >= 0` was
+unprovable even though `i < n` had been recorded relationally the whole time.
+The chain:
+
+1. The **inner** loop's header is a program point reached once per *outer*
+   iteration with a different `i` each time, so `i` widens there to
+   `[0, i32::MAX]`.
+2. `i + 1` on `[0, i32::MAX]` genuinely wraps in Java, so the interval
+   transfer must return Top. That is correct — and it discards the *lower*
+   bound along with the upper one.
+3. Nothing restores it. Narrowing on the loop guard bounds a counter only from
+   above, and the increment sits on the path out of the inner loop, where the
+   outer guard's narrowing has already been applied and widened over.
+
+The inner loop is essential to the shape: with a single loop the branch
+narrowing caps `i` before the increment and the overflow never arises.
+
+### The fix: reduction, the operation that makes Pentagons a reduced product
+
+Relations were being consulted only to answer comparisons. They must also
+**tighten the intervals they talk about**: `i < n` with `n <= n.hi` gives
+`i <= n.hi - 1`. `IState::refined` does this and `eval_operand` routes every
+variable through it.
+
+Note how little is needed. `n` is known only to be at least 1, so `n.hi` is
+still `i32::MAX` and the refinement buys exactly **one unit** of slack. One
+unit is the whole difference between a usable interval and Top.
+
+Soundness is immediate — it intersects with facts the state already holds.
+Termination survives because the refinement is monotone in the lattice order:
+`leq` requires a superset of relations, so a state lower in the order refines
+at least as tightly, and the transfer stays monotone. Reduction is applied
+inside the transfer only, never at a merge point, so it cannot fight the
+widening it depends on.
+
+### What it is worth
+
+Smoke: **186, 0 WRONG** — unchanged. This buys no points on the gate, and
+`FlattenedMatrixIndexAcrossACall` is still UNKNOWN on the remaining premise.
+It is committed anyway because it is a precision law the domain was missing,
+it is the prerequisite for the propagation work, and the trace output now
+names a single unambiguous cause instead of a silent decline.
+
+### Two benchmarks, and one that had to be corrected twice
+
+`jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop` isolates the
+mechanism. It took two corrections, both worth recording because both produced
+a benchmark that passed and demonstrated nothing:
+
+- The first version assumed `n > 0 && n < 1000`. An upper bound on `n` lets
+  plain narrowing cap `i` and the overflow never happens, so it proved under
+  intervals alone. The finding requires `n` unbounded above.
+- The second version still proved with the full portfolio, because the BMC
+  unrolls it. The mechanism is visible only under `AJAVE_DISABLE` of the other
+  engines. So the guard that actually holds it is the domain law
+  `refinement_lets_a_widened_counter_be_incremented_without_overflow`, which
+  is mutation-checked against both the obvious mutants; the benchmark is there
+  for the shape.
+
+`jvm-arrays/FlattenedMatrixIndexAcrossACall` is a **deliberately unproven**
+case. It is committed UNKNOWN because it names the one fact still missing, and
+the trace prints it.
+
+### Process note
+
+While mutation-checking the laws I ran `git checkout` on `interval.rs` to undo
+a mutant and discarded every uncommitted change in the file. Everything was
+reconstructable from the session, but the lesson is cheap to state: undo a
+mutation with the inverse edit, never with a checkout of a file that holds work
+you have not committed.
+
 ## 2026-10-31 — array-length preconditions across a call, and the premise that still blocks
 
 The flattened-matrix lemma died at a call boundary. This carries it across, and
