@@ -452,6 +452,31 @@ def check_machine_idle(jobs, require_idle):
           "quiet-machine run.", file=sys.stderr)
 
 
+def warn_if_corrections_missing():
+    """Warn when the corpus's expected-verdict corrections are not in place.
+
+    A warning, not a refusal: the corrections are a property of the fetched
+    corpus, and a run on a stock corpus is legitimate -- it is just not
+    comparable to a recorded score. See tools/corpus_corrections.py.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import corpus_corrections as cc
+    except Exception:
+        return
+    stale = [(c, cc.classify(c)[0]) for c in cc.CORRECTIONS]
+    stale = [(c, st) for c, st in stale if st != "applied"]
+    if not stale:
+        return
+    print(f"  warning: {len(stale)} corpus correction(s) not applied — this "
+          "score is not comparable to a recorded one", file=sys.stderr)
+    for c, st in stale:
+        print(f"           {st}: {c['task']} [{c['property']}] ({c['issue']})",
+              file=sys.stderr)
+    print("           fix: python3 tools/corpus_corrections.py --apply",
+          file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Run an ajave benchmark set.",
@@ -567,6 +592,12 @@ def main():
     if args.repeat and args.repeat > 1:
         work = [w for w in work for _ in range(args.repeat)]
         print(f"determinism check: {args.repeat} repeats per task")
+
+    # The corpus is gitignored, so a corrected expected verdict lives only in
+    # a working copy and a re-fetch silently reverts it. A score that moves for
+    # that reason has no record explaining it, so say so before measuring
+    # rather than leaving it to be noticed in a diff that never happens.
+    warn_if_corrections_missing()
 
     print(f"{len(work)} runs from set '{args.set}' ({args.jobs} workers)")
     t0 = time.time()

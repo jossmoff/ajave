@@ -46,10 +46,35 @@ not "we disagree with the label" but **a JVM-reproducible witness**, as above:
 a concrete input, the exact stub, and an observed non-zero exit. Anything short
 of that is tuning the measurement rather than fixing it.
 
-The correction lives in a comment header in the task file itself rather than
-only in `changes.md`, because the file is what a future run reads, and a
-divergence recorded somewhere else is a divergence nobody sees. Deleting the
-header is all that is needed if upstream fixes the label.
+### The corpus is gitignored, so the correction needed somewhere to live
+
+`benchmarks/sv-comp/` has **zero tracked files** — it is fetched, not
+committed. A label corrected by hand therefore lives only in a working copy,
+and a re-clone or a corpus refresh reverts it silently. That is a score moving
+by 33 points for a reason no record explains, which is the exact failure this
+file's measurement-discipline section exists to prevent, arriving through the
+corpus instead of through the binary.
+
+So the correction is tracked data, in `tools/corpus_corrections.py`, carrying
+the witness and the issue alongside each entry:
+
+    python3 tools/corpus_corrections.py --check    # exit 1 if not applied
+    python3 tools/corpus_corrections.py --apply    # idempotent
+
+`--check` separates three states because they need different responses:
+*applied* (nothing to do), *missing* (run `--apply`), and **diverged** —
+neither the upstream value nor ours, meaning upstream changed the task and the
+witness must be re-verified before the correction is re-applied. Self-tested
+against all three rather than only the happy path, because a checker that only
+ever sees "applied" is the vacuous-validator shape this file already records
+once.
+
+`bench.py` calls it at startup and warns, rather than refusing: a run on a
+stock corpus is legitimate, it is just not comparable to a recorded score.
+
+A comment header in the task file states the divergence too, since that file is
+what a future reader opens. Deleting both is all that is needed if upstream
+fixes the label.
 
 The no-runtime-exception verdict is **not** corrected: `AssertionError` is an
 `Error`, not a `RuntimeException`, so it falls outside that property, and the
