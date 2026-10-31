@@ -2,6 +2,79 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — why CHC's summaries are vacuous: a cap of 6 against footprints of 233
+
+Traced the vacuous `m5_s` summary to its cause, which the existing refusal
+logging (added by gh #109 for exactly this purpose) answered immediately:
+
+```
+ 52  refused — empty footprint, nothing to thread
+ 16  footprint of 20 exceeds MAX_SUMMARY_FIELDS 6
+ 12  footprint of 99 exceeds MAX_SUMMARY_FIELDS 6
+ 10  footprint of 233 exceeds MAX_SUMMARY_FIELDS 6
+```
+
+`MAX_SUMMARY_FIELDS = 6`. The Alarm family's methods have footprints of 20,
+35, 66, 69, 87, 99, 109, 159 and 233 fields, so **every one is refused**, every
+summary degenerates to `params + ret`, and Spacer is free to pick a return
+value that violates the property. The log's "footprint of 20" for
+`setCurrentAlarm` matches an independent count of its field accesses in the
+Java source exactly.
+
+Two further gates compound it: `AJAVE_CHC_HEAP_SUMMARY` is **off by default**
+(`== Ok("1")`), which CLAUDE.md already calls unfinished rather than
+configured, and 52 methods have an empty footprint.
+
+### Raising the cap exposes a real encoder bug
+
+At `MAX_SUMMARY_FIELDS = 300` the summaries are granted — `setCurrentAlarm`
+becomes a 20-field relation — and the encoding becomes **malformed**:
+
+```
+(error "line 1372 column 31681: unknown constant fld_AlarmFunctional_IN_ALARMS")
+unsat
+```
+
+`IN_ALARMS` is `final int IN_ALARMS = 1`, a constant-initialised field that the
+*footprint* names and the *declaration* path never emits as an array. With the
+cap at 6 this almost never fires; at 300 it does. So the cap has been masking a
+footprint/declaration mismatch, and raising it alone produces garbage.
+
+### The error is not mistaken for a verdict, but only just
+
+z3 writes `(error …)` to **stdout** (stderr is empty), and `parse_result`
+matches `stdout.trim()` against `"sat"`/`"unsat"` as whole strings, so any
+extra output falls through to `Unknown`. That is the right answer, and it
+survives only because the match is against the whole output rather than the
+last line. A tidy-up to "take the last line" would convert a malformed
+encoding into `sat` → `Safe` → discharged obligations → a wrong TRUE. Worth an
+explicit `(error` rejection and a test named after this paragraph.
+
+### What has to happen, in order
+
+1. **Fix the footprint/declaration mismatch.** Either declare every field a
+   footprint names, or drop constant-initialised finals from footprints —
+   threading a compile-time constant through a summary buys nothing. Until
+   this is done, any cap raise emits malformed SMT-LIB and every answer from
+   it is void.
+2. **Make `parse_result` reject solver errors explicitly**, with a test. It is
+   correct today for an incidental reason.
+3. **Default `AJAVE_CHC_HEAP_SUMMARY` on**, measured on both properties. An
+   off-by-default producer is not a producer.
+4. **Remove the arity cliff rather than raising the cap.** Arity is
+   `2 × footprint`, so 233 fields is 466 array arguments; at 300 the encoding
+   already grew from 95 MB to 114 MB. The durable fix is one argument per
+   *object* instead of per field — a `declare-datatypes` record per generated
+   struct class, or one array per class indexed by field offset. Then arity is
+   constant in the footprint and `MAX_SUMMARY_FIELDS` can go away rather than
+   being re-tuned.
+5. **Only then re-measure whether Alarm proves.** With 1–4 outstanding, a
+   `sat` or `unsat` from this encoding means nothing.
+
+Item 6 is independent and smaller: the identity-equation frame measured at 7%
+of runtime (3.59s parse against 48.9s solve), fixable by equality substitution
+at encode time.
+
 ## 2026-10-31 — the 95 MB CHC encoding: measured, and it is not the problem
 
 Dumped the encoding for `Alarm_prop1` (`AJAVE_CHC_DUMP`) and measured it rather
