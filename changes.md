@@ -2,6 +2,87 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — array-length preconditions across a call, and the premise that still blocks
+
+The flattened-matrix lemma died at a call boundary. This carries it across, and
+stops one step short of the corpus task it was aimed at — recorded that way
+because the step is identified, not mysterious.
+
+### The probe that justified building it
+
+Two programs, identical code, one with the loop in a callee:
+
+| | verdict |
+|---|---|
+| loop inlined in `main` | **TRUE** |
+| same loop in `fill(int n, int[] d)` | UNKNOWN |
+
+So the call boundary was the *only* blocker for that shape. Worth stating
+because it is the opposite of what the three previous probes found, where the
+mechanism was sound and something one layer out was missing.
+
+### What was built
+
+`analyze_array_len_preconditions` is a pre-pass in the same shape as the AI's
+existing `nonnull_returns` and `nonnull_fields` summaries: it finds methods
+that may assume an array parameter's length is the product of two other
+parameters, because **every** call site passes exactly that. `IntervalCpa`
+carries the result and `initial()` seeds `array_len_prod` at method entry.
+
+Each soundness condition is checked rather than assumed, and the list is the
+interesting part:
+
+- **`static` only.** A virtual call could dispatch to an override with its own
+  callers, and enumerating those is a different analysis.
+- **Not the program entry**, which has no caller to establish anything.
+- **At least one call site.** Zero would make the precondition vacuous and let
+  it claim anything.
+- **Unanimity.** One disagreeing caller drops it entirely.
+- **No `long`/`double` parameters**, so argument index equals parameter slot —
+  wide types take two slots and would misalign the mapping.
+
+SV-COMP tasks are closed programs rooted at `main`, so scanning every body
+finds every call site. That assumption is exactly what the `static` condition
+protects: it is false for a virtual method.
+
+### Copy chains, for the third time
+
+The first version found **nothing at all**. `fill(v, d)` passes copies, so the
+array handed to the call is several `Use(Var(_))` hops from its `NewArray`, and
+the pass was looking for `NewArray` directly. A bounded `resolve` through copy
+chains fixed it — the same defect that made the relational domain look inert
+until copies were handled, and that javac's stack-to-local traffic will keep
+producing. **If an analysis over lifted bytecode finds nothing, suspect copies
+before suspecting the idea.**
+
+The precondition is now found and seeded correctly:
+`Main.fill(I[I)V: ArrayLenPre { array_slot: 1, factor_slots: (0, 0) }`.
+
+### And the premise that still blocks, which is *not* removable
+
+The task is still UNKNOWN, and the reason is sharp. Inside `fill`, `n` is a
+parameter with no interval, so the lemma cannot show `n*n` fits in `int` and
+declines.
+
+That premise cannot be dropped. It is tempting to argue it is redundant — the
+array was allocated, so its length is a valid `int`, so `n*n` must fit. **That
+argument is wrong.** If `v*v` overflows to a *positive* value the allocation
+succeeds with that wrapped length, and `i*v + j` wraps too, so the comparison
+`idx < len` compares two wrapped values and the lemma would claim a bound that
+does not hold. Only an overflow to a negative value is caught, by
+`NegativeArraySizeException`.
+
+So the missing fact is the **parameter's interval**, which comes from
+`assume(v < 46341)` in the caller. No syntactic pre-pass can read it: it needs
+the AI's own result for the caller, fed into the callee — a top-down,
+two-phase interprocedural analysis, which is a substantially larger change than
+this summary was.
+
+Smoke holds at 186 with 0 WRONG, all four relational benchmarks still TRUE, 16
+suites and clippy clean. The infrastructure is in and inert on the corpus; the
+one fact it still needs is named.
+
+
 ## 2026-10-31 — the flattened-matrix lemma, and the boundary it stops at
 
 Smoke **186 against 184**, 0 WRONG. A 2D array held as one flat allocation and

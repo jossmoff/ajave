@@ -818,6 +818,20 @@ pub struct IState {
     /// this variable. Lets a bounds check against the materialised length var
     /// reach the allocation expression behind it.
     pub len_alias: BTreeMap<VarId, VarId>,
+    /// This array's length is the product of these two variables.
+    ///
+    /// Distinct from `array_len_var`, which records a length that *is* a
+    /// variable. A flattened matrix is allocated `new T[m * s]`, so its length
+    /// is a product, and the flattened-index lemma needs the two factors
+    /// rather than the materialised result — intervals lose their identity the
+    /// moment the product is computed.
+    ///
+    /// Seeded at `NewArray` from `mul_of`, carried through copies, and — the
+    /// point of keeping it separate — **seedable at method entry** from a
+    /// call-site summary, which is what lets the lemma survive a call.
+    pub array_len_prod: BTreeMap<VarId, (VarId, VarId)>,
+    /// `len = arr.length` where `arr`'s length is a product of these two.
+    pub len_prod: BTreeMap<VarId, (VarId, VarId)>,
     /// Length of the array a reference variable points at. Missing = Top.
     ///
     /// Seeded at `NewArray` from the allocation length and propagated through
@@ -899,6 +913,8 @@ impl IState {
             mul_of: BTreeMap::new(),
             add_of: BTreeMap::new(),
             len_alias: BTreeMap::new(),
+            array_len_prod: BTreeMap::new(),
+            len_prod: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at,
             vars: BTreeMap::new(),
@@ -1004,8 +1020,16 @@ impl IState {
     /// to Java's. Given it, `i*stride + j <= m*stride - 1` cannot overflow
     /// either, since it is strictly smaller than a value already shown to fit.
     fn flattened_premises(&self, idx: VarId, len: VarId) -> Option<(VarId, VarId, VarId, VarId)> {
-        let len_src = self.len_alias.get(&len)?;
-        let (am, asx) = self.mul_of.get(len_src).copied()?;
+        let (am, asx) = self
+            .len_prod
+            .get(&len)
+            .copied()
+            // Fall back to the materialised path: `len` aliases a variable
+            // whose own provenance is a product.
+            .or_else(|| {
+                let src = self.len_alias.get(&len)?;
+                self.mul_of.get(src).copied()
+            })?;
         let (p, j) = self.add_of.get(&idx).copied()?;
         let (i, stride) = match self.mul_of.get(&p).copied()? {
             (x, y) if y == asx => (x, y),
@@ -1049,8 +1073,9 @@ impl IState {
     /// non-negative and the sum is below a value shown to fit in `int`, so no
     /// wrap occurs and the result cannot be negative.
     fn flattened_index_nonneg(&self, idx: VarId) -> bool {
-        self.len_alias
+        self.len_prod
             .keys()
+            .chain(self.len_alias.keys())
             .any(|len| self.flattened_premises(idx, *len).is_some())
     }
 
@@ -1087,6 +1112,10 @@ impl IState {
         self.mul_of.retain(|_, (a, b)| *a != v && *b != v);
         self.add_of.retain(|_, (a, b)| *a != v && *b != v);
         self.len_alias.retain(|_, src| *src != v);
+        self.array_len_prod.remove(&v);
+        self.len_prod.remove(&v);
+        self.array_len_prod.retain(|_, (a, b)| *a != v && *b != v);
+        self.len_prod.retain(|_, (a, b)| *a != v && *b != v);
         self.array_len_var.retain(|k, src| *k != v && *src != v);
     }
 
@@ -1842,6 +1871,16 @@ impl Lattice for IState {
                 return false;
             }
         }
+        for (k, v) in &other.array_len_prod {
+            if self.array_len_prod.get(k) != Some(v) {
+                return false;
+            }
+        }
+        for (k, v) in &other.len_prod {
+            if self.len_prod.get(k) != Some(v) {
+                return false;
+            }
+        }
         // Every variable known in `self` must be narrower-or-equal in
         // `other`; anything absent from `self` but present in `other` means
         // `self` (Top there) is not covered.
@@ -2043,6 +2082,8 @@ impl Lattice for IState {
                 .collect()
         };
         let mul_of = prov(&self.mul_of, &other.mul_of);
+        let array_len_prod = prov(&self.array_len_prod, &other.array_len_prod);
+        let len_prod = prov(&self.len_prod, &other.len_prod);
         let add_of = prov(&self.add_of, &other.add_of);
         let len_alias = if ajave_core::fixpoint::Lattice::is_bottom(self) {
             other.len_alias.clone()
@@ -2126,6 +2167,8 @@ impl Lattice for IState {
             mul_of,
             add_of,
             len_alias,
+            array_len_prod,
+            len_prod,
             array_len_var,
             at: self.at.clone(),
             vars,
@@ -2300,8 +2343,24 @@ impl FieldPrec {
     }
 }
 
+/// A precondition on an array parameter's length, agreed by every call site.
+///
+/// `array_slot`'s length is the product of the values arriving in
+/// `factor_slots`. Carries the flattened-matrix lemma across a call, which is
+/// the only thing it exists for: `BellmanFord` allocates `new int[V*V]` in
+/// `main` and passes it to `runBellmanFord(int N, int D[], int src)`, so inside
+/// the callee `D.length == N*N` is true at the one call site and otherwise
+/// unstated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayLenPre {
+    pub array_slot: u16,
+    pub factor_slots: (u16, u16),
+}
+
 #[derive(Default, Clone)]
 pub struct IntervalCpa {
+    /// Array-length preconditions, keyed by method. See `ArrayLenPre`.
+    pub array_len_pre: std::collections::HashMap<ajave_ir::MethodKey, ArrayLenPre>,
     /// Field-abstraction precision. Empty by default, which disables field
     /// tracking entirely (every cell reads as Top) — always sound.
     pub field_prec: FieldPrec,
@@ -2326,6 +2385,24 @@ impl AbstractDomain for IntervalCpa {
 
     fn initial(&self, prog: &Program, at: &ProgramPoint) -> IState {
         let mut nullness = BTreeMap::new();
+        // The array-length precondition, if every call site established one.
+        let mut array_len_prod = BTreeMap::new();
+        if let (Some(pre), Some(body)) = (self.array_len_pre.get(&at.method), prog.body(&at.method))
+        {
+            let slot_var = |want: u16| -> Option<VarId> {
+                body.vars.iter().enumerate().find_map(|(i, vi)| {
+                    matches!(vi.kind, ajave_ir::VarKind::Local(s) if s == want)
+                        .then_some(VarId(i as u32))
+                })
+            };
+            if let (Some(a), Some(f1), Some(f2)) = (
+                slot_var(pre.array_slot),
+                slot_var(pre.factor_slots.0),
+                slot_var(pre.factor_slots.1),
+            ) {
+                array_len_prod.insert(a, (f1, f2));
+            }
+        }
         // Mark Ref-typed parameters as NonNull at method entry.
         // For instance methods, slot 0 = `this` (always non-null).
         // For static methods, slot 0 = first param (non-null from caller).
@@ -2348,6 +2425,8 @@ impl AbstractDomain for IntervalCpa {
             mul_of: BTreeMap::new(),
             add_of: BTreeMap::new(),
             len_alias: BTreeMap::new(),
+            array_len_prod,
+            len_prod: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at: at.clone(),
             vars: BTreeMap::new(),
@@ -2581,12 +2660,20 @@ impl AbstractDomain for IntervalCpa {
                                 ..
                             } => {
                                 next.array_len_var.insert(*v, *n);
+                                // `new T[m * s]`: keep the factors, not just
+                                // the product's variable.
+                                if let Some(f) = next.mul_of.get(n).copied() {
+                                    next.array_len_prod.insert(*v, f);
+                                }
                             }
                             // A copy carries the association along, exactly as
                             // the interval length above does.
                             Rvalue::Use(Operand::Var(src)) => {
                                 if let Some(n) = next.array_len_var.get(src).copied() {
                                     next.array_len_var.insert(*v, n);
+                                }
+                                if let Some(f) = next.array_len_prod.get(src).copied() {
+                                    next.array_len_prod.insert(*v, f);
                                 }
                             }
                             // `x = y - c` with `c > 0` means `x < y`, and
@@ -2636,6 +2723,9 @@ impl AbstractDomain for IntervalCpa {
                             // variable holds against `len`. This is what turns
                             // `i < n` into `i < len` without any new inference.
                             Rvalue::ArrayLength(Operand::Var(arr)) => {
+                                if let Some(f) = next.array_len_prod.get(arr).copied() {
+                                    next.len_prod.insert(*v, f);
+                                }
                                 if let Some(n) = next.array_len_var.get(arr).copied() {
                                     // Remember which allocation expression
                                     // this materialised length came from, so a
@@ -3127,6 +3217,8 @@ impl WidenAtLoopHeaders {
             mul_of: agree_prov(&old.mul_of, &new.mul_of),
             add_of: agree_prov(&old.add_of, &new.add_of),
             len_alias: agree_alias(&old.len_alias, &new.len_alias),
+            array_len_prod: agree_prov(&old.array_len_prod, &new.array_len_prod),
+            len_prod: agree_prov(&old.len_prod, &new.len_prod),
             array_len_var: old
                 .array_len_var
                 .iter()
@@ -3248,6 +3340,8 @@ impl WidenAtLoopHeaders {
             mul_of: agree_prov(&old.mul_of, &new.mul_of),
             add_of: agree_prov(&old.add_of, &new.add_of),
             len_alias: agree_alias(&old.len_alias, &new.len_alias),
+            array_len_prod: agree_prov(&old.array_len_prod, &new.array_len_prod),
+            len_prod: agree_prov(&old.len_prod, &new.len_prod),
             array_len_var: old
                 .array_len_var
                 .iter()
@@ -3459,6 +3553,8 @@ mod domain_law_tests {
             mul_of: BTreeMap::new(),
             add_of: BTreeMap::new(),
             len_alias: BTreeMap::new(),
+            array_len_prod: BTreeMap::new(),
+            len_prod: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at: pp(block),
             vars: BTreeMap::new(),
