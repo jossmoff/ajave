@@ -2,6 +2,134 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — CHC calls a program unsafe that the BMC proves safe in 763ms
+
+The sharpest result of the CHC investigation, and it retires the whole
+"summaries are the blocker" line.
+
+With the footprint mismatch fixed and summaries granted, `alarm` still answered
+`unsat` (unsafe) on a safe program. Rather than keep probing a 1578-block
+program, ran the same question against its sibling:
+
+| program | blocks | smt-bmc | chc |
+|---|---|---|---|
+| Infusion_prop2 | 893 | **TRUE in 763ms** | **`unsat` — unsafe — in 14s** |
+| Alarm_prop1 | 1578 | caps out | `unsat` — unsafe — in 69s |
+
+**CHC calls Infusion unsafe, and the BMC proves it safe.** Same obligation in
+both cases (CHC reports "1 open obligation", the BMC discharges 1).
+
+So the over-approximation is generic to this program family and has nothing to
+do with size, footprints, arity or `MAX_SUMMARY_FIELDS`. No amount of summary
+work makes CHC prove either program, and gh #124's premise that "the CHC path
+looks closest to working, since the failure is encoding size rather than
+expressiveness" is wrong: the failure is expressiveness, and the size was a
+red herring twice over — first because parsing is 7% of the runtime, then
+because precision is the binding constraint.
+
+### Why this is a better position than it sounds
+
+It converts an open-ended precision question into a **bounded one with a known
+answer**. Infusion is safe on independent evidence — the BMC proves it
+exhaustively in under a second, with no reliance on CHC — so any CHC run that
+says `unsat` there is demonstrably wrong, on a 893-block program rather than a
+1578-block one. That is a regression test for CHC precision that needs no
+expected-verdict label and no JVM.
+
+Also worth stating plainly: this is *not* a soundness bug. CHC is an `Over`
+engine, `ChcOutcome::Unsafe` is consumed only in tests, and the explicit error
+refusal added alongside it keeps a malformed encoding from becoming a verdict.
+CHC saying "unsafe" costs precision, never correctness.
+
+### Corrections to earlier notes in this file
+
+- The "52 methods with an empty footprint" was 52 log *lines*, not 52 methods.
+  There are **two**: `AlarmFunctional.stepScalingFactor(I)I` and
+  `Divs32.divS32(II)I`, both pure functions of their `int` arguments, for which
+  an empty heap footprint is correct and which already receive exact
+  `(Int Int)` and `(Int Int Int)` summaries. The lead was spurious.
+- `main`'s input-bounding `assume` *is* in the encoding (5511 occurrences of
+  `255`), so unbounded inputs are not the cause either.
+
+## 2026-10-31 — fixing the CHC summary encoding: a mismatch, a guard, and a measurement
+
+Branch `chc-summary-footprint`. Steps 1-3 of the plan below; 4 and 5 are
+deliberately not done, for a measured reason.
+
+### 1. The footprint/declaration mismatch, fixed
+
+`all_fields` — the set bound as `(fld_X (Array Int Int))` in every clause's
+`forall` — was collected from `Stmt::PutField` and
+`Stmt::Assign(_, GetField)` across all bodies. A method's *footprint* is
+computed separately, and the two disagree: javac constant-folds a
+`final int IN_ALARMS = 1` at its use sites (JLS 13.1), so the field is never
+read by `getfield`, never lands in `all_fields`, and yet the footprint names
+it. The summary application then passes a variable nothing bound:
+
+```
+(error "line 1372 column 31681: unknown constant fld_AlarmFunctional_IN_ALARMS")
+```
+
+Measured on `alarm`: **72 fields used and unbound in a single clause**, all of
+them `AlarmFunctional`'s `final int IN_*` constants. It stayed hidden because
+`MAX_SUMMARY_FIELDS = 6` refuses almost every summary, so almost nothing was
+threaded.
+
+Fixed by binding exactly the fields a *granted* summary will reference —
+`heap_summary_of` applies both the flag and the cap, so the union is empty when
+the heap summary is off. **Union, not intersection**: dropping a field from a
+summary would let the caller treat it as unchanged across a call whose callee
+may write it, which is an unsound assumption rather than a precision loss.
+Binding a field nothing reads costs one quantified variable and says nothing.
+
+The float filter now runs *after* the union, and `summary_sig` applies the same
+filter to the footprint, so a `double` field cannot be in a signature while
+absent from the binding set — which would have reproduced the same bug.
+
+Verified rather than argued:
+
+| | size | errors |
+|---|---|---|
+| flag off | **95,042,200 — byte-identical to pre-change** | — |
+| flag on, cap 6 | 95,082,365 | **0** |
+| flag on, cap 300 | 146,120,409 | **0** (was malformed) |
+
+### 2. A solver error is not a verdict
+
+z3 writes `(error "...")` to **stdout**, not stderr, and then prints a result
+anyway, so a malformed encoding gives `(error ...)` followed by `unsat`.
+`parse_result` matched the *whole* trimmed stdout, so the extra line already
+fell through to `Unknown` — correct, but incidentally. The obvious tidy-up,
+taking the last line, silently turns a malformed encoding into `sat` → `Safe` →
+every obligation discharged → a wrong TRUE.
+
+Now refused explicitly, with `an_error_from_the_solver_is_not_a_verdict`. The
+test **passes before the change too**, and its doc says so: it guards the
+refactor rather than proving a fixed bug. Mutation-checked — it fails under
+last-line matching with the check removed.
+
+### 3. The heap summary flag: measured, still off
+
+The flag's own doc said what it needed: "a measurement showing it gains more
+than the arity costs". Smoke, 168 runs: **190 with the flag off, 190 with it
+on, 0 WRONG either way.** Inert, consistent with gh #109 measuring C1 inert
+across 107 heap-shaped tasks. Left off, now with a measurement behind that
+rather than an absence of one.
+
+### 4-5. Not done, because threading the footprint is not sufficient
+
+The point of the plan was that vacuous summaries caused the spurious `unsat` on
+`alarm`. With the mismatch fixed and the cap at 300, `setCurrentAlarm` gets its
+full 20-field relation, the encoding is well-formed, and z3 still answers
+**`unsat` — unsafe — on a safe program**, in 69s over 146 MB.
+
+So threading the footprint is necessary and not sufficient: the remaining
+over-approximation is somewhere else. Building the arity-reduction work (one
+argument per object instead of per field) would make a sound-but-still-useless
+encoding cheaper, and until the residual imprecision is found there is no
+evidence it converts anything. 52 methods still have an *empty* footprint,
+which is the next thing to look at.
+
 ## 2026-10-31 — why CHC's summaries are vacuous: a cap of 6 against footprints of 233
 
 Traced the vacuous `m5_s` summary to its cause, which the existing refusal

@@ -1171,8 +1171,21 @@ fn encode_chc_interproc(
     // consumer come to disagree about an artifact.
     let summary_sig = |mk: &MethodKey| -> Option<(usize, bool, Vec<FieldKey>)> {
         let ret_ch = return_type_char(&mk.desc);
+        // Float-valued fields are dropped here for the same reason
+        // `all_fields` drops them: they cannot live in an `(Array Int Int)` and
+        // LIA has nothing to say about one. The two filters must agree — a
+        // field in a summary signature but not in `all_fields` is an unbound
+        // constant in every clause that applies the summary. `summary_sig` is
+        // the single definition read by the declaration, the conclusion at each
+        // return and the application at each call site, so filtering here keeps
+        // all three consistent with the binding set.
         let fp: Vec<FieldKey> = heap_summary_of(mk)
-            .map(|s| s.iter().cloned().collect())
+            .map(|s| {
+                s.iter()
+                    .filter(|f| f.desc != "D" && f.desc != "F")
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         // Nothing to say about a void method with no heap footprint.
         if ret_ch == 'V' && fp.is_empty() {
@@ -1380,8 +1393,41 @@ fn encode_chc_interproc(
                 }
             }
         }
+        // Every field any summary mentions must be bound here too.
+        //
+        // `out` above is what the *bytecode* touches via `getfield`/`putfield`.
+        // A method's footprint is computed separately, and the two can disagree:
+        // javac constant-folds a `final int IN_ALARMS = 1` at its use sites
+        // (JLS 13.1), so the field is never read by `getfield` and never lands
+        // in `out`, while the footprint still names it. The summary application
+        // at a call site then passes `fld_AlarmFunctional_IN_ALARMS`, which no
+        // `forall` bound, and z3 answers
+        // `(error "unknown constant fld_AlarmFunctional_IN_ALARMS")`.
+        //
+        // Measured on `java-ranger-regression/alarm`: 72 such fields used and
+        // unbound in a single clause. It stayed hidden because
+        // `MAX_SUMMARY_FIELDS = 6` refused almost every summary, so almost
+        // nothing was ever threaded.
+        //
+        // Union rather than intersection, deliberately. Dropping a field from a
+        // summary is not the safe direction: the caller would then take the
+        // field as unchanged across a call whose callee may write it, which is
+        // an unsound assumption rather than a loss of precision. Binding a
+        // field nothing reads costs one quantified variable and says nothing.
+        // Exactly the fields a *granted* summary will reference — not every
+        // footprint. `heap_summary_of` applies the flag and the cap, so when
+        // the heap summary is off this adds nothing and the encoding is
+        // byte-identical to what it was. Unioning all footprints regardless
+        // would put bound variables in every clause on the default path that
+        // nothing references: pure cost, and unmeasured.
+        for mk2 in &all_methods {
+            if let Some(fp) = heap_summary_of(mk2) {
+                out.extend(fp.iter().cloned());
+            }
+        }
         // A float-valued field cannot live in an (Array Int Int), and the LIA
-        // theory has nothing to say about one anyway.
+        // theory has nothing to say about one anyway. Applied *after* the union
+        // so a footprint cannot smuggle one back in.
         out.retain(|f| f.desc != "D" && f.desc != "F");
         out
     };
@@ -3497,6 +3543,24 @@ fn run_chc_solver(
         debug!("chc: solver stderr: {}", &stderr[..stderr.len().min(500)]);
     }
 
+    // A solver that reported an error decided nothing, whatever it printed next.
+    //
+    // z3 writes `(error "...")` to **stdout**, not stderr, and then carries on
+    // and prints a result anyway: a malformed encoding yields
+    // `(error "unknown constant fld_...")` followed by `unsat`. Today the match
+    // below is against the *whole* trimmed stdout, so the extra line makes it
+    // fall through to `Unknown` — the right answer, but for an incidental
+    // reason. Anyone narrowing this to the last line, which is the obvious
+    // tidy-up, turns a malformed encoding into `sat` -> `Safe` -> discharged
+    // obligations -> a wrong TRUE at -16 each.
+    //
+    // So the refusal is explicit, and `an_error_from_the_solver_is_not_a_verdict`
+    // is the test named after this paragraph.
+    if result_line.contains("(error") {
+        debug!("chc: solver reported an error; treating the run as undecided");
+        return Ok((vec![], ChcOutcome::Unknown));
+    }
+
     // In CHC mode: `sat` means error is unreachable (safe), `unsat` means reachable (unsafe).
     match result_line {
         "sat" => Ok((
@@ -5133,6 +5197,48 @@ mod encoder_conformance {
     /// in one encoder and not the other lets that one prove something false,
     /// and CHC publishes `Discharged` on a `Safe`, so the cost is a wrong TRUE
     /// at −16 rather than a lost proof.
+    /// A solver that reported an error decided nothing.
+    ///
+    /// z3 writes `(error "...")` to **stdout**, not stderr, and then prints a
+    /// result anyway. A malformed encoding therefore produces
+    /// `(error "unknown constant fld_...")` followed by `unsat` — which is how
+    /// a footprint/declaration mismatch in the summary encoding showed up on
+    /// `java-ranger-regression/alarm`.
+    ///
+    /// **This test passes before the `(error` check was added**, and that is
+    /// the point of writing it down: the old code matched the *whole* trimmed
+    /// stdout against `"sat"`/`"unsat"`, so an extra line already fell through
+    /// to `Unknown`. It was correct incidentally. The obvious tidy-up — take
+    /// the last line of output — silently converts a malformed encoding into
+    /// `sat` -> `Safe` -> every obligation discharged -> a wrong TRUE at -16
+    /// each. So this is a guard against that refactor, not proof of a fixed
+    /// bug, and it is named after the paragraph in `run_chc_solver` that makes
+    /// the refusal explicit.
+    #[test]
+    fn an_error_from_the_solver_is_not_a_verdict() {
+        if !z3_available() {
+            eprintln!("no z3 on PATH; skipping");
+            return;
+        }
+        // Well-formed Horn apart from one undeclared constant, which is
+        // exactly the shape the summary mismatch produced.
+        let malformed = "(set-logic HORN)\n\
+             (declare-fun p (Int) Bool)\n\
+             (assert (forall ((x Int)) (=> (> x no_such_constant) (p x))))\n\
+             (assert (forall ((x Int)) (=> (p x) false)))\n\
+             (check-sat)\n";
+        let (discharged, outcome) = run_chc_solver("z3", malformed, &[], 10).expect("solver ran");
+        assert_eq!(
+            outcome,
+            ChcOutcome::Unknown,
+            "an encoding the solver could not even parse must decide nothing"
+        );
+        assert!(
+            discharged.is_empty(),
+            "nothing may be discharged on the strength of a solver error"
+        );
+    }
+
     #[test]
     fn neither_encoder_calls_an_unsafe_program_safe() {
         if !z3_available() {
