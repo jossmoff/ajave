@@ -2,6 +2,55 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — CHC calls a program unsafe that the BMC proves safe in 763ms
+
+The sharpest result of the CHC investigation, and it retires the whole
+"summaries are the blocker" line.
+
+With the footprint mismatch fixed and summaries granted, `alarm` still answered
+`unsat` (unsafe) on a safe program. Rather than keep probing a 1578-block
+program, ran the same question against its sibling:
+
+| program | blocks | smt-bmc | chc |
+|---|---|---|---|
+| Infusion_prop2 | 893 | **TRUE in 763ms** | **`unsat` — unsafe — in 14s** |
+| Alarm_prop1 | 1578 | caps out | `unsat` — unsafe — in 69s |
+
+**CHC calls Infusion unsafe, and the BMC proves it safe.** Same obligation in
+both cases (CHC reports "1 open obligation", the BMC discharges 1).
+
+So the over-approximation is generic to this program family and has nothing to
+do with size, footprints, arity or `MAX_SUMMARY_FIELDS`. No amount of summary
+work makes CHC prove either program, and gh #124's premise that "the CHC path
+looks closest to working, since the failure is encoding size rather than
+expressiveness" is wrong: the failure is expressiveness, and the size was a
+red herring twice over — first because parsing is 7% of the runtime, then
+because precision is the binding constraint.
+
+### Why this is a better position than it sounds
+
+It converts an open-ended precision question into a **bounded one with a known
+answer**. Infusion is safe on independent evidence — the BMC proves it
+exhaustively in under a second, with no reliance on CHC — so any CHC run that
+says `unsat` there is demonstrably wrong, on a 893-block program rather than a
+1578-block one. That is a regression test for CHC precision that needs no
+expected-verdict label and no JVM.
+
+Also worth stating plainly: this is *not* a soundness bug. CHC is an `Over`
+engine, `ChcOutcome::Unsafe` is consumed only in tests, and the explicit error
+refusal added alongside it keeps a malformed encoding from becoming a verdict.
+CHC saying "unsafe" costs precision, never correctness.
+
+### Corrections to earlier notes in this file
+
+- The "52 methods with an empty footprint" was 52 log *lines*, not 52 methods.
+  There are **two**: `AlarmFunctional.stepScalingFactor(I)I` and
+  `Divs32.divS32(II)I`, both pure functions of their `int` arguments, for which
+  an empty heap footprint is correct and which already receive exact
+  `(Int Int)` and `(Int Int Int)` summaries. The lead was spurious.
+- `main`'s input-bounding `assume` *is* in the encoding (5511 occurrences of
+  `255`), so unbounded inputs are not the cause either.
+
 ## 2026-10-31 — fixing the CHC summary encoding: a mismatch, a guard, and a measurement
 
 Branch `chc-summary-footprint`. Steps 1-3 of the plan below; 4 and 5 are
