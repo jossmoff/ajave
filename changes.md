@@ -2,6 +2,85 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — fixing the CHC summary encoding: a mismatch, a guard, and a measurement
+
+Branch `chc-summary-footprint`. Steps 1-3 of the plan below; 4 and 5 are
+deliberately not done, for a measured reason.
+
+### 1. The footprint/declaration mismatch, fixed
+
+`all_fields` — the set bound as `(fld_X (Array Int Int))` in every clause's
+`forall` — was collected from `Stmt::PutField` and
+`Stmt::Assign(_, GetField)` across all bodies. A method's *footprint* is
+computed separately, and the two disagree: javac constant-folds a
+`final int IN_ALARMS = 1` at its use sites (JLS 13.1), so the field is never
+read by `getfield`, never lands in `all_fields`, and yet the footprint names
+it. The summary application then passes a variable nothing bound:
+
+```
+(error "line 1372 column 31681: unknown constant fld_AlarmFunctional_IN_ALARMS")
+```
+
+Measured on `alarm`: **72 fields used and unbound in a single clause**, all of
+them `AlarmFunctional`'s `final int IN_*` constants. It stayed hidden because
+`MAX_SUMMARY_FIELDS = 6` refuses almost every summary, so almost nothing was
+threaded.
+
+Fixed by binding exactly the fields a *granted* summary will reference —
+`heap_summary_of` applies both the flag and the cap, so the union is empty when
+the heap summary is off. **Union, not intersection**: dropping a field from a
+summary would let the caller treat it as unchanged across a call whose callee
+may write it, which is an unsound assumption rather than a precision loss.
+Binding a field nothing reads costs one quantified variable and says nothing.
+
+The float filter now runs *after* the union, and `summary_sig` applies the same
+filter to the footprint, so a `double` field cannot be in a signature while
+absent from the binding set — which would have reproduced the same bug.
+
+Verified rather than argued:
+
+| | size | errors |
+|---|---|---|
+| flag off | **95,042,200 — byte-identical to pre-change** | — |
+| flag on, cap 6 | 95,082,365 | **0** |
+| flag on, cap 300 | 146,120,409 | **0** (was malformed) |
+
+### 2. A solver error is not a verdict
+
+z3 writes `(error "...")` to **stdout**, not stderr, and then prints a result
+anyway, so a malformed encoding gives `(error ...)` followed by `unsat`.
+`parse_result` matched the *whole* trimmed stdout, so the extra line already
+fell through to `Unknown` — correct, but incidentally. The obvious tidy-up,
+taking the last line, silently turns a malformed encoding into `sat` → `Safe` →
+every obligation discharged → a wrong TRUE.
+
+Now refused explicitly, with `an_error_from_the_solver_is_not_a_verdict`. The
+test **passes before the change too**, and its doc says so: it guards the
+refactor rather than proving a fixed bug. Mutation-checked — it fails under
+last-line matching with the check removed.
+
+### 3. The heap summary flag: measured, still off
+
+The flag's own doc said what it needed: "a measurement showing it gains more
+than the arity costs". Smoke, 168 runs: **190 with the flag off, 190 with it
+on, 0 WRONG either way.** Inert, consistent with gh #109 measuring C1 inert
+across 107 heap-shaped tasks. Left off, now with a measurement behind that
+rather than an absence of one.
+
+### 4-5. Not done, because threading the footprint is not sufficient
+
+The point of the plan was that vacuous summaries caused the spurious `unsat` on
+`alarm`. With the mismatch fixed and the cap at 300, `setCurrentAlarm` gets its
+full 20-field relation, the encoding is well-formed, and z3 still answers
+**`unsat` — unsafe — on a safe program**, in 69s over 146 MB.
+
+So threading the footprint is necessary and not sufficient: the remaining
+over-approximation is somewhere else. Building the arity-reduction work (one
+argument per object instead of per field) would make a sound-but-still-useless
+encoding cheaper, and until the residual imprecision is found there is no
+evidence it converts anything. 52 methods still have an *empty* footprint,
+which is the next thing to look at.
+
 ## 2026-10-31 — why CHC's summaries are vacuous: a cap of 6 against footprints of 233
 
 Traced the vacuous `m5_s` summary to its cause, which the existing refusal
