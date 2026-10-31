@@ -788,6 +788,36 @@ pub struct IState {
     /// relational facts held about `n`, which is what connects a loop guard
     /// `i < n` to the bounds check `i < a.length`.
     pub array_len_var: BTreeMap<VarId, VarId>,
+    /// `v` is the product of these two variables, and `v` is the sum of these
+    /// two. Syntactic provenance only — no arithmetic is re-done from them.
+    ///
+    /// These exist for one derivation, the flattened-matrix index. A 2D array
+    /// held as `new T[m * s]` and addressed `a[i * s + j]` is the common Java
+    /// idiom for a matrix, and its bounds proof is an *affine* fact that no
+    /// weakly relational domain can state:
+    ///
+    /// ```text
+    ///   i < s  and  j < s         (both loop guards)
+    ///   ---------------------
+    ///   i*s + j <= (s-1)*s + s-1 = s*s - 1 < s*s
+    /// ```
+    ///
+    /// That is a theorem of arithmetic, not a benchmark pattern: it holds for
+    /// every `i`, `j`, `s` satisfying the premises. What the maps supply is the
+    /// syntactic recognition of which variables play `i`, `j` and `s`, which
+    /// intervals cannot do because they lose the identity of `s` — `i*s + j`
+    /// bounds at ~2.1e9 while `s*s` bounds below at 1, and nothing records that
+    /// the two mention the same `s`.
+    ///
+    /// Overflow is checked rather than assumed: the relation is recorded only
+    /// when `s`'s interval shows `s*s` stays inside `int`. Where it does,
+    /// `i*s + j < s*s` cannot overflow either, since it is strictly smaller.
+    pub mul_of: BTreeMap<VarId, (VarId, VarId)>,
+    pub add_of: BTreeMap<VarId, (VarId, VarId)>,
+    /// `len` was produced by `arr.length` for an array whose length came from
+    /// this variable. Lets a bounds check against the materialised length var
+    /// reach the allocation expression behind it.
+    pub len_alias: BTreeMap<VarId, VarId>,
     /// Length of the array a reference variable points at. Missing = Top.
     ///
     /// Seeded at `NewArray` from the allocation length and propagated through
@@ -866,6 +896,9 @@ impl IState {
         IState {
             lt: BTreeMap::new(),
             le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at,
             vars: BTreeMap::new(),
@@ -954,6 +987,73 @@ impl IState {
         a == b || self.knows_lt(a, b) || self.le.get(&a).is_some_and(|s| s.contains(&b))
     }
 
+    /// The flattened-matrix lemma: is `idx < len` provable because `idx` is
+    /// `i*s + j` and `len` is the length of an array allocated as `m*s`, with
+    /// `i < m` and `j < s`?
+    ///
+    /// Each premise is read from syntax and checked; nothing is assumed. The
+    /// `m == s` case (a square matrix) is the common one but the lemma does
+    /// not need it.
+    /// The premises of the flattened-matrix lemma, if `idx` has that shape.
+    ///
+    /// Returns `(i, j, m, stride)` for `idx = i*stride + j` where the array
+    /// was allocated as `m * stride`, with `i < m`, `j < stride`, all three
+    /// non-negative, and `m * stride` inside `int`.
+    ///
+    /// The last condition is what carries the lemma from mathematical integers
+    /// to Java's. Given it, `i*stride + j <= m*stride - 1` cannot overflow
+    /// either, since it is strictly smaller than a value already shown to fit.
+    fn flattened_premises(&self, idx: VarId, len: VarId) -> Option<(VarId, VarId, VarId, VarId)> {
+        let len_src = self.len_alias.get(&len)?;
+        let (am, asx) = self.mul_of.get(len_src).copied()?;
+        let (p, j) = self.add_of.get(&idx).copied()?;
+        let (i, stride) = match self.mul_of.get(&p).copied()? {
+            (x, y) if y == asx => (x, y),
+            // `stride * i` is the same product written the other way round.
+            (x, y) if x == asx => (y, x),
+            _ => return None,
+        };
+        if !(self.knows_lt(i, am) || (am == stride && self.knows_lt(i, stride))) {
+            return None;
+        }
+        if !self.knows_lt(j, stride) {
+            return None;
+        }
+        if self.get(i).lo < 0 || self.get(j).lo < 0 || self.get(stride).lo < 0 {
+            return None;
+        }
+        let fits = self
+            .get(am)
+            .hi
+            .checked_mul(self.get(stride).hi)
+            .is_some_and(|hi| hi <= i32::MAX as i64);
+        fits.then_some((i, j, am, stride))
+    }
+
+    /// `i*stride + j < m*stride`, the upper half of the lemma.
+    fn flattened_index_below(&self, idx: VarId, len: VarId) -> bool {
+        self.flattened_premises(idx, len).is_some()
+    }
+
+    /// `i*stride + j >= 0`, the lower half — and it is **not** redundant.
+    ///
+    /// An `ArrayBounds` obligation is `idx >= 0 & idx < len`, and the abstract
+    /// interval for `idx` overflows precisely in the case the lemma exists to
+    /// handle: with `stride` bounded only by 46340, `i*stride` bounds at
+    /// ~2.147e9 and adding `j` leaves `int`, so `idx` becomes Top and even
+    /// `idx >= 0` is unprovable by intervals. Measured on
+    /// `jvm-arrays/FlattenedMatrixIndexStaysInBounds`: without this half the
+    /// upper half proved and the obligation still did not discharge.
+    ///
+    /// Non-negativity follows from the same premises: all three operands are
+    /// non-negative and the sum is below a value shown to fit in `int`, so no
+    /// wrap occurs and the result cannot be negative.
+    fn flattened_index_nonneg(&self, idx: VarId) -> bool {
+        self.len_alias
+            .keys()
+            .any(|len| self.flattened_premises(idx, *len).is_some())
+    }
+
     fn add_le(&mut self, a: VarId, b: VarId) {
         if a != b {
             self.le.entry(a).or_default().insert(b);
@@ -981,6 +1081,12 @@ impl IState {
         for s in self.le.values_mut() {
             s.remove(&v);
         }
+        self.mul_of.remove(&v);
+        self.add_of.remove(&v);
+        self.len_alias.remove(&v);
+        self.mul_of.retain(|_, (a, b)| *a != v && *b != v);
+        self.add_of.retain(|_, (a, b)| *a != v && *b != v);
+        self.len_alias.retain(|_, src| *src != v);
         self.array_len_var.retain(|k, src| *k != v && *src != v);
     }
 
@@ -1441,6 +1547,14 @@ impl IState {
                         // never false. `x < y` being absent means unknown, not
                         // negated, so concluding anything from its absence
                         // would turn a missing fact into a claim.
+                        // The lower half of the flattened-matrix lemma, where
+                        // the right operand is the constant zero rather than a
+                        // variable.
+                        if let (Operand::Var(av), Operand::Const(Const::Int(0))) = (a, b) {
+                            if matches!(op, BinOp::Ge) && self.flattened_index_nonneg(*av) {
+                                return Interval::point(1);
+                            }
+                        }
                         if let (Operand::Var(av), Operand::Var(bv)) = (a, b) {
                             // `x <= m` composed with `m < y` gives `x < y`.
                             // One hop only: a full transitive closure is a
@@ -1453,8 +1567,16 @@ impl IState {
                                     .is_some_and(|mids| mids.iter().any(|m| self.knows_lt(*m, y)))
                             };
                             let holds = match op {
-                                BinOp::Lt => self.knows_lt(*av, *bv) || strict_via_le(*av, *bv),
-                                BinOp::Gt => self.knows_lt(*bv, *av) || strict_via_le(*bv, *av),
+                                BinOp::Lt => {
+                                    self.knows_lt(*av, *bv)
+                                        || strict_via_le(*av, *bv)
+                                        || self.flattened_index_below(*av, *bv)
+                                }
+                                BinOp::Gt => {
+                                    self.knows_lt(*bv, *av)
+                                        || strict_via_le(*bv, *av)
+                                        || self.flattened_index_below(*bv, *av)
+                                }
                                 BinOp::Le => self.knows_le(*av, *bv),
                                 BinOp::Ge => self.knows_le(*bv, *av),
                                 // `x < y` implies `x != y`.
@@ -1585,6 +1707,26 @@ fn eval_bitwise(op: BinOp, a: Interval, b: Interval) -> Interval {
         }
         _ => Interval::top(),
     }
+}
+
+/// Keep only the provenance entries two states agree on. Same rule as every
+/// other relational component: a fact present on one path only is not a fact
+/// at the merge.
+fn agree_prov(
+    a: &BTreeMap<VarId, (VarId, VarId)>,
+    b: &BTreeMap<VarId, (VarId, VarId)>,
+) -> BTreeMap<VarId, (VarId, VarId)> {
+    a.iter()
+        .filter(|(k, v)| b.get(k) == Some(v))
+        .map(|(k, v)| (*k, *v))
+        .collect()
+}
+
+fn agree_alias(a: &BTreeMap<VarId, VarId>, b: &BTreeMap<VarId, VarId>) -> BTreeMap<VarId, VarId> {
+    a.iter()
+        .filter(|(k, v)| b.get(k) == Some(v))
+        .map(|(k, v)| (*k, *v))
+        .collect()
 }
 
 fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
@@ -1888,6 +2030,31 @@ impl Lattice for IState {
         // Pentagons joins by **intersection**: `x < y` survives only if both
         // sides had it. Union would publish a bound holding on one branch
         // only, which is precisely the defect gh #101 was.
+        let prov = |a: &BTreeMap<VarId, (VarId, VarId)>, b: &BTreeMap<VarId, (VarId, VarId)>| {
+            if ajave_core::fixpoint::Lattice::is_bottom(self) {
+                return b.clone();
+            }
+            if ajave_core::fixpoint::Lattice::is_bottom(other) {
+                return a.clone();
+            }
+            a.iter()
+                .filter(|(k, v)| b.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
+        let mul_of = prov(&self.mul_of, &other.mul_of);
+        let add_of = prov(&self.add_of, &other.add_of);
+        let len_alias = if ajave_core::fixpoint::Lattice::is_bottom(self) {
+            other.len_alias.clone()
+        } else if ajave_core::fixpoint::Lattice::is_bottom(other) {
+            self.len_alias.clone()
+        } else {
+            self.len_alias
+                .iter()
+                .filter(|(k, v)| other.len_alias.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
         let le = IState::agree_lt(
             &self.le,
             &other.le,
@@ -1956,6 +2123,9 @@ impl Lattice for IState {
         IState {
             lt,
             le,
+            mul_of,
+            add_of,
+            len_alias,
             array_len_var,
             at: self.at.clone(),
             vars,
@@ -2175,6 +2345,9 @@ impl AbstractDomain for IntervalCpa {
         IState {
             lt: BTreeMap::new(),
             le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at: at.clone(),
             vars: BTreeMap::new(),
@@ -2427,6 +2600,16 @@ impl AbstractDomain for IntervalCpa {
                             // already computed for the operand -- a symbolic
                             // offset would need difference bounds, which this
                             // domain does not have.
+                            // Syntactic provenance for the flattened-matrix
+                            // lemma. Recorded for *variable* operands only --
+                            // a constant operand is already handled by the
+                            // offset rule below and by intervals.
+                            Rvalue::Bin(BinOp::Mul, Operand::Var(a), Operand::Var(b)) => {
+                                next.mul_of.insert(*v, (*a, *b));
+                            }
+                            Rvalue::Bin(BinOp::Add, Operand::Var(a), Operand::Var(b)) => {
+                                next.add_of.insert(*v, (*a, *b));
+                            }
                             Rvalue::Bin(op @ (BinOp::Add | BinOp::Sub), x, y) => {
                                 if let (Operand::Var(xv), Operand::Const(Const::Int(c))) = (x, y) {
                                     let c = *c;
@@ -2454,6 +2637,10 @@ impl AbstractDomain for IntervalCpa {
                             // `i < n` into `i < len` without any new inference.
                             Rvalue::ArrayLength(Operand::Var(arr)) => {
                                 if let Some(n) = next.array_len_var.get(arr).copied() {
+                                    // Remember which allocation expression
+                                    // this materialised length came from, so a
+                                    // bounds check can reach behind it.
+                                    next.len_alias.insert(*v, n);
                                     let below: Vec<VarId> = next
                                         .lt
                                         .iter()
@@ -2936,6 +3123,10 @@ impl WidenAtLoopHeaders {
                 ajave_core::fixpoint::Lattice::is_bottom(old),
                 ajave_core::fixpoint::Lattice::is_bottom(new),
             ),
+            // Provenance is syntactic: keep what both sides agree on.
+            mul_of: agree_prov(&old.mul_of, &new.mul_of),
+            add_of: agree_prov(&old.add_of, &new.add_of),
+            len_alias: agree_alias(&old.len_alias, &new.len_alias),
             array_len_var: old
                 .array_len_var
                 .iter()
@@ -3053,6 +3244,10 @@ impl WidenAtLoopHeaders {
                 ajave_core::fixpoint::Lattice::is_bottom(old),
                 ajave_core::fixpoint::Lattice::is_bottom(new),
             ),
+            // Provenance is syntactic: keep what both sides agree on.
+            mul_of: agree_prov(&old.mul_of, &new.mul_of),
+            add_of: agree_prov(&old.add_of, &new.add_of),
+            len_alias: agree_alias(&old.len_alias, &new.len_alias),
             array_len_var: old
                 .array_len_var
                 .iter()
@@ -3261,6 +3456,9 @@ mod domain_law_tests {
         IState {
             lt: BTreeMap::new(),
             le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
             array_len_var: BTreeMap::new(),
             at: pp(block),
             vars: BTreeMap::new(),
@@ -3649,6 +3847,87 @@ mod domain_law_tests {
         let s = with_lt(0, &[(1, 2)]);
         assert!(s.knows_le(VarId(1), VarId(2)));
         assert!(s.knows_le(VarId(7), VarId(7)), "reflexive");
+    }
+
+    /// The flattened-matrix lemma refuses when its overflow premise fails.
+    ///
+    /// `i*s + j < m*s` is a theorem of arithmetic, and it transfers to Java
+    /// only when `m*s` stays inside `int`. With an unconstrained stride it does
+    /// not, and the lemma must decline rather than claim a bound that wraps.
+    #[test]
+    fn the_flattened_lemma_declines_when_the_product_can_overflow() {
+        // len = s * s ; idx = (i * s) + j ; i < s ; j < s
+        let mut st = empty(0);
+        let (i, j, sv, prod, idx, lensrc, lenv) = (
+            VarId(1),
+            VarId(2),
+            VarId(3),
+            VarId(4),
+            VarId(5),
+            VarId(6),
+            VarId(7),
+        );
+        st.mul_of.insert(lensrc, (sv, sv));
+        st.mul_of.insert(prod, (i, sv));
+        st.add_of.insert(idx, (prod, j));
+        st.len_alias.insert(lenv, lensrc);
+        st.lt.entry(i).or_default().insert(sv);
+        st.lt.entry(j).or_default().insert(sv);
+        for v in [i, j] {
+            st.vars.insert(v, Interval { lo: 0, hi: 46339 });
+        }
+
+        // Stride bounded so s*s fits: the lemma applies.
+        st.vars.insert(sv, Interval { lo: 1, hi: 46340 });
+        assert!(
+            st.flattened_index_below(idx, lenv),
+            "46340^2 is inside int, so the lemma holds"
+        );
+        assert!(st.flattened_index_nonneg(idx), "and so does its lower half");
+
+        // Stride unconstrained: s*s leaves int and the lemma must decline.
+        st.vars.insert(
+            sv,
+            Interval {
+                lo: 1,
+                hi: i32::MAX as i64,
+            },
+        );
+        assert!(
+            !st.flattened_index_below(idx, lenv),
+            "an unbounded stride makes s*s overflow, so the bound does not transfer"
+        );
+        assert!(!st.flattened_index_nonneg(idx));
+    }
+
+    /// And it refuses when a premise relation is missing, rather than assuming
+    /// the loop guards were there.
+    #[test]
+    fn the_flattened_lemma_declines_without_both_guard_relations() {
+        let mut st = empty(0);
+        let (i, j, sv, prod, idx, lensrc, lenv) = (
+            VarId(1),
+            VarId(2),
+            VarId(3),
+            VarId(4),
+            VarId(5),
+            VarId(6),
+            VarId(7),
+        );
+        st.mul_of.insert(lensrc, (sv, sv));
+        st.mul_of.insert(prod, (i, sv));
+        st.add_of.insert(idx, (prod, j));
+        st.len_alias.insert(lenv, lensrc);
+        st.vars.insert(sv, Interval { lo: 1, hi: 46340 });
+        for v in [i, j] {
+            st.vars.insert(v, Interval { lo: 0, hi: 46339 });
+        }
+        // only `i < s`, nothing about j
+        st.lt.entry(i).or_default().insert(sv);
+        assert!(
+            !st.flattened_index_below(idx, lenv),
+            "without `j < s` the index can reach i*s + s, which is out of bounds"
+        );
     }
 
     /// `leq` decides whether the fixpoint may discard a state as covered.

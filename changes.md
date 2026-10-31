@@ -2,6 +2,72 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the flattened-matrix lemma, and the boundary it stops at
+
+Smoke **186 against 184**, 0 WRONG. A 2D array held as one flat allocation and
+addressed `a[i * s + j]` is the standard Java idiom for a matrix, and its bounds
+proof is beyond every weakly relational domain:
+
+```text
+  i < m  and  j < s
+  ---------------------
+  i*s + j  <=  (m-1)*s + s-1  =  m*s - 1  <  m*s
+```
+
+`i*s + j < m*s` is **non-linear** — a product of two program variables. Outside
+Pentagons (`x < y`), outside difference bounds (`x - y <= c`), outside Octagons
+(`±x ±y <= c`, unit coefficients). And intervals lose the identity of `s`:
+`i*s` bounds at ~2.147e9 while `s*s` bounds *below* at 1, with nothing recording
+that both mention the same `s`.
+
+### Why this is a transfer function and not pattern matching
+
+The implication above is a theorem of arithmetic, true for all `i, j, m, s`
+satisfying its premises. What the domain adds is the *syntactic recognition* of
+which variables play those roles, read from `mul_of` and `add_of` provenance
+maps, and **every premise is checked**:
+
+- `i < m` and `j < s` must be known relations, not assumed from loop shape;
+- all three operands must be non-negative;
+- `m * s` must fit in `int`.
+
+That last one is what carries the lemma from mathematical integers to Java's.
+`the_flattened_lemma_declines_when_the_product_can_overflow` sets an
+unconstrained stride and asserts refusal;
+`the_flattened_lemma_declines_without_both_guard_relations` removes `j < s` and
+asserts the same.
+
+### The half that fails first, which measurement found and reasoning did not
+
+An `ArrayBounds` obligation is `idx >= 0 & idx < len`, and the **lower** half is
+the one that blocks. With a stride bounded only by 46340, `i*s` reaches ~2.147e9
+and adding `j` leaves `int`, so the abstract interval for the index is Top and
+even `idx >= 0` is unprovable.
+
+The trace showed this exactly: the comparison `idx < len` evaluated to `[1,1]`
+— the lemma working — while `idx >= 0` sat at `[0,1]` and the obligation stayed
+open. Both halves are now supplied from the same premises, since a sum of
+non-negatives below a value shown to fit cannot wrap.
+
+Worth keeping as a pattern: a relational fact can be proven and the obligation
+still refuse, because an obligation is a *conjunction* and intervals own the
+other conjunct.
+
+### The boundary, stated because it is the next thing
+
+`algorithms/BellmanFord-*` is this exact idiom and is **still UNKNOWN**. There
+`D` is allocated `new int[V*V]` in `main` and passed to
+`runBellmanFord(int N, int D[], int src)`, so inside the callee the needed fact
+`D.length == N*N` is a **precondition** — true at the one call site, never
+stated. The length provenance dies at the call boundary.
+
+That is an interprocedural gap, not a gap in the lemma, and it is the third time
+today a correct mechanism has been blocked one layer out from where it was
+built: C1's summaries were sound and the obligations needed contents; Pentagons
+was sound and BellmanFord's indices needed non-linearity; the lemma is sound and
+BellmanFord needs it across a call.
+
+
 ## 2026-10-31 — where the array-bounds frontier actually is: non-linear index arithmetic
 
 Having added strict and non-strict relations and converted one corpus task, the
