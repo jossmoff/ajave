@@ -2,6 +2,69 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the census's biggest convertible bucket is not convertible
+
+### What it said
+
+`blocker_census.py` maps each unproven task to the kind of work that would
+convert it, and `all_paths_complete` mapped to **`budget`**, labelled
+"scheduling / more effort  <-- the scheduler's ceiling". That bucket was 135 of
+409 declined pairs, and it is the bucket the whole scheduler workstream
+(`Progress`, `round_share`, per-engine deepening) was justified by.
+
+### What it is
+
+Picking the largest tractable category by points left on the table —
+securibench, 121 points across 71 pairs with only 3 timeouts — the census put
+**12 of 27** sampled tasks in `budget`. Every one of them reports:
+
+```
+smt-bmc: INCOMPLETE (handle_goto) in Basic18.doGet
+exhausted=false  budget_left=true  all_paths_complete=false
+113 block visits, 12 forks, 76 solver calls
+```
+
+`exhausted=false`. The search stopped **with budget still in hand**, at a loop
+back-edge (`handle_goto`) or the fork cap (`handle_branch_fork`). Checked
+across Basic5, Basic6, Basic33, Basic34, Basic37, Basic39 and Basic18: uniform,
+every one `exhausted=false`.
+
+**No amount of rescheduling converts these.** They need an invariant from an
+over-approximating engine, or a different cap — and gh #119 already measured
+raising the caps at about one task across four probes.
+
+### The fix is in the tool, not the engine
+
+`all_paths_complete` conflated two populations that respond to opposite work,
+and reported both as the thing a scheduler could fix. It now splits on
+`exhausted`:
+
+| kind | means | responds to |
+|---|---|---|
+| `budget` | the search really ran out | scheduling / more effort |
+| `structural` | stopped with budget left | an invariant, or a different cap — **not** more time |
+
+Re-run on securibench: **0 budget, 12 structural**. The entire
+scheduler-convertible bucket for that category was structural.
+
+The split is pinned at the level the claim is made — `self_test` now calls
+`classify` on a record with `exhausted` false and true and requires
+`structural` and `budget` respectively, as well as pinning the two new
+regexes. A regex that stops matching would silently revert every such task to
+"convertible by scheduling", which is exactly the claim the split exists to
+stop making, and this tool has already reported a table of zeros once from an
+unmatched pattern.
+
+### Why this is worth more than the points
+
+It reclassifies the largest apparently-cheap bucket as expensive, which is the
+opposite of a convenient result, and it was found by asking the tool's own
+output one more question rather than by trusting its label. The same shape has
+now appeared three times in one day: the `refuted-witness` bucket at 211 tasks
+(a precedence artefact, really 1), the flattened-lemma length premise at 198
+(a check-order artefact, really 4), and now `budget` at 135. In each case a
+bucket counted a *symptom* and was read as a *cause*.
+
 ## 2026-10-31 — corpus scores, on one build, with the contention named
 
 Both properties, engine build `d61b514`, 300s budget:

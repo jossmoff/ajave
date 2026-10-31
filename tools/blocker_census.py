@@ -78,6 +78,11 @@ RESIDUAL_RE = re.compile(r"residual from (\S+) \((\w+)\): (.*)$", re.M)
 DOWNGRADE_RE = re.compile(r"downgrading FALSE to UNKNOWN")
 REPLAY_RE = re.compile(r"jvm-replay: (\w+) for ")
 SCHED_RE = re.compile(r"schedule-replay: (confirmed|could not reproduce)")
+# Did the BMC run out of budget, or stop at a structural cap with time to
+# spare? `all_paths_complete` alone cannot tell those apart, and they respond
+# to opposite work -- see the `budget` vs `structural` split in KIND.
+EXHAUSTED_RE = re.compile(r"exploration complete,.*?exhausted=(true|false)")
+TRUNC_RE = re.compile(r"INCOMPLETE \(([a-z_]+)\)")
 
 # Which kind of work each blocker responds to. The whole point of the tool is
 # this mapping, so it is stated once, here, rather than inferred at the call
@@ -144,7 +149,8 @@ def run_one(args):
            "expected": task["expected"].get(prop),
            "verdict": "UNKNOWN", "blockers": [], "outer": None,
            "open_n": None, "open_kinds": "", "residuals": [],
-           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout}
+           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout,
+           "exhausted": None, "trunc": []}
     r = run_guarded(cmd, timeout=timeout, env=env)
     rec["dur"] = r.elapsed
     if r.timed_out:
@@ -159,6 +165,11 @@ def run_one(args):
     out = r.stdout.strip().splitlines()
     rec["verdict"] = out[-1] if out else "UNKNOWN"
     rec["blockers"] = BLOCKER_RE.findall(r.stderr)
+    # `exhausted=false` means the search stopped while it still had budget, so
+    # more time cannot convert the task however it is scheduled.
+    ex = EXHAUSTED_RE.findall(r.stderr)
+    rec["exhausted"] = any(e == "true" for e in ex) if ex else None
+    rec["trunc"] = sorted(set(TRUNC_RE.findall(r.stderr)))
     for m in OUTER_RE.finditer(r.stderr):
         rec["outer"] = tuple(int(x) for x in m.groups())
     for m in OPEN_RE.finditer(r.stderr):
@@ -258,12 +269,36 @@ SELF_TEST = [
     (DOWNGRADE_RE, "downgrading FALSE to UNKNOWN: witness did not replay "
                    "on a real JVM", None),
     (REPLAY_RE, "jvm-replay: Refuted for Main.foo#3", ["Refuted"]),
+    # The budget/structural split rests entirely on these two. If either stops
+    # matching, every `all_paths_complete` task silently reverts to being
+    # called "convertible by scheduling", which is the claim this split exists
+    # to stop making.
+    (EXHAUSTED_RE,
+     "smt-bmc: exploration complete, found 0 violation(s), 76 solver calls, "
+     "113 block visits, 12 forks, exhausted=false, completeness=Completeness "
+     "{ all_paths_complete: false }, skipped=0", ["false"]),
+    (TRUNC_RE,
+     "smt-bmc: INCOMPLETE (handle_goto) in securibench/micro/basic/"
+     "Basic18.doGet(Lmockx/servlet/http/HttpServletRequest;)V",
+     ["handle_goto"]),
 ]
 
 
 def self_test():
     """Refuse to run if any pattern has stopped matching what engines emit."""
     bad = []
+    # The split is a claim about *work*, so test it at the level the claim is
+    # made: a record, not a regex.
+    base = {"blockers": ["all_paths_complete"], "outer": None, "scored": False,
+            "open_n": 1,
+            "downgraded": False, "replay": [], "open": None, "residual": [],
+            "verdict": "UNKNOWN", "trunc": ["handle_goto"]}
+    got_struct = classify({**base, "exhausted": False})[0]
+    got_budget = classify({**base, "exhausted": True})[0]
+    if got_struct != "structural":
+        bad.append(f"budget-left task classified {got_struct!r}, want 'structural'")
+    if got_budget != "budget":
+        bad.append(f"exhausted task classified {got_budget!r}, want 'budget'")
     for rx, sample, expect in SELF_TEST:
         if expect is None:
             if not rx.search(sample):
@@ -323,7 +358,20 @@ def classify(rec):
     # every row.
     if rec["blockers"]:
         top = Counter(rec["blockers"]).most_common(1)[0][0]
-        return KIND.get(top, "other"), top, n
+        kind = KIND.get(top, "other")
+        # `all_paths_complete` conflates two populations that respond to
+        # opposite work, and the conflation mattered: it is the bucket the
+        # scheduler workstream was justified by. Measured on securibench
+        # 2026-10-31, every sampled task in it reported `exhausted=false` --
+        # the BMC stopped at a loop back-edge (`handle_goto`) or the fork cap
+        # (`handle_branch_fork`) with budget still in hand. No amount of
+        # rescheduling converts those; they need an invariant from an
+        # over-approximating engine, or a different cap (and gh #119 measured
+        # raising the caps at about one task across four probes).
+        if kind == "budget" and rec.get("exhausted") is False:
+            where = "/".join(rec.get("trunc") or ["unknown site"])
+            return "structural", f"{top} (truncated at {where}, budget left)", n
+        return kind, top, n
     if rec["outer"] is not None:
         _o, _t, elsewhere = rec["outer"]
         return "budget", ("all_paths_complete (outer gate, but open elsewhere)"
@@ -405,6 +453,7 @@ def report(records, dump=None):
 
     RESPONDS = {
         "budget": "scheduling / more effort  <-- the scheduler's ceiling",
+        "structural": "an invariant, or a different cap — NOT more time",
         "model":  "modelling the callee (lift java.base)",
         "theory": "a different encoding",
         "refuted": "feeding refutations back into the loop",
@@ -441,7 +490,7 @@ def report(records, dump=None):
         for k, n in res.most_common(10):
             print(f"{k[:52]:<52} {n:>6}")
 
-    for k in ("budget", "theory", "no-candidate", "refuted-witness"):
+    for k in ("budget", "structural", "theory", "no-candidate", "refuted-witness"):
         if examples[k]:
             print(f"\n{k} examples: " + ", ".join(sorted(set(examples[k]))[:8]))
 
@@ -457,7 +506,10 @@ def report(records, dump=None):
                         f"{nref}\t{r['open_kinds']}\n")
         print(f"\nwrote {len(unproven)} rows to {dump}")
 
-    print("\nThe 'budget' row is what a scheduler can convert. Everything "
+    print("\n'structural' is NOT convertible by scheduling: the search stopped "
+          "with budget\nstill in hand, so it needs an invariant or a different "
+          "cap. It was counted as\n'budget' until 2026-10-31.\n")
+    print("The 'budget' row is what a scheduler can convert. Everything "
           "below it needs\na model or a theory, and will not move however the "
           "time is spent.")
 
