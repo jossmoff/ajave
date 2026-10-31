@@ -1228,9 +1228,32 @@ pub(crate) fn run_with_choices(
 
 /// Run once with symbolic shadowing on, returning the branches taken.
 ///
-/// The `Outcome` is from a real execution: a `Violated` here means the
-/// interpreter actually reached the check and it actually failed, so the
-/// choices that produced it are a genuine witness rather than a candidate.
+/// The `Outcome` is from a real execution of *our model*: a `Violated` here
+/// means the interpreter reached the check and it failed under the values this
+/// interpreter supplied.
+///
+/// That is **not** the same as a genuine witness, and this comment used to say
+/// it was. `eval_havoc` supplies a value for every construct we do not model
+/// -- `I32(0)` for integers, a fresh ref otherwise -- and deliberately does
+/// not record it in `entries`, because there is no program input to record.
+/// So when the failing condition depends on a havoced value, the recorded
+/// choices do not determine the failure: replaying them on a real JVM lets
+/// the JVM compute the real value instead of our invented `0`. That is the
+/// `entries=0` signature in gh #88, and the all-zero shape of 56 of the 76
+/// replay-refuted witnesses per valid-assert run.
+///
+/// Why this is nonetheless sound, and why suppressing it here would be wrong:
+/// a violation is a *candidate* until `confirm_violations` reproduces it on a
+/// real JVM, and `main.rs` issues `Verdict::False` only when
+/// `confirmed_witness.is_some()` -- positive confirmation, not the absence of
+/// a refutation. An invented value therefore cannot reach a FALSE on its own.
+/// Suppressing candidates here instead was measured in gh #43 and cost 20
+/// points, because the JVM confirms some of them: an all-zero probe can
+/// trigger a real bug even when zero is not a value the program could choose.
+///
+/// So the rule from CLAUDE.md -- "if an engine cannot construct a witness
+/// through its own analysis, it must not publish a violation" -- is satisfied
+/// by the confirmation gate rather than by this function. Keep both.
 pub(crate) fn run_concolic(
     prog: &Program,
     body: &Body,

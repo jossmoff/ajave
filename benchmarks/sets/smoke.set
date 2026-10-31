@@ -309,3 +309,7 @@ ajave/jvm-arrays/FlattenedMatrixIndexStaysInBounds.yml no-runtime-exception
 # (a parameter's upper bound crossing a call) that is still missing.
 ajave/jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop.yml valid-assert
 ajave/jvm-arrays/FlattenedMatrixIndexAcrossACall.yml no-runtime-exception
+
+# gh #88: a call declared "modelled" but encoded as a free variable. The hash
+# of a literal is a constant, and the BMC used to claim it could be anything.
+ajave/jvm-strings/LiteralStringHashIsAConstantNotAFreeVariable.yml valid-assert

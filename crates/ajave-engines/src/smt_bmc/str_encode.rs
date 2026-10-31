@@ -60,7 +60,15 @@ impl<'a> ExploreCtx<'a> {
                 }
                 has_recv_str && has_arg1_str
             }
-            "charAt" | "substring" | "hashCode" => has_recv_str,
+            "charAt" | "substring" => has_recv_str,
+            // Modelled only for a receiver whose literal value we know, which
+            // is the only case `encode_str_call` can compute exactly. A
+            // tracked-but-symbolic receiver is *not* modelled, and saying so
+            // is what taints the result instead of inventing a hash.
+            "hashCode" => args
+                .first()
+                .and_then(|a| self.const_str_from_operand(a))
+                .is_some(),
             "indexOf" => {
                 if target.desc.starts_with("(I") {
                     has_recv_str
@@ -394,10 +402,33 @@ impl<'a> ExploreCtx<'a> {
                 Some((one, Some(result)))
             }
             "hashCode" => {
-                let s = recv_str?;
-                let _ = s;
-                let h = self.solver.fresh_bv("hash", 32);
-                Some((h, None))
+                // `String.hashCode()` is specified exactly -- Javadoc:
+                // `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]`, as `int`
+                // arithmetic with wraparound -- so for a literal receiver it
+                // is a compile-time constant and we compute it.
+                //
+                // This arm used to discard the receiver (`let _ = s;`) and
+                // return `fresh_bv("hash", 32)`: an entirely unconstrained
+                // value. Meanwhile `str_call_modelled` declared `hashCode`
+                // *modelled*, and the BMC keys taint on that classification,
+                // so the invented value was **untainted**. `handle_check`'s
+                // `!is_tainted` guard therefore let it through and a violation
+                // was published against `"abc".hashCode() != 0` -- a value the
+                // Javadoc pins at 96354.
+                //
+                // That is exactly gh #88's mechanism ("unknown treated as
+                // licence to claim a violation") in a place #88 never looked:
+                // not a `Havoc`, but a call *declared* modelled and encoded as
+                // a free variable. Being untainted it also skipped
+                // `skipped_obligations`, so the obligation was occupied by the
+                // claim rather than recorded as undecided.
+                //
+                // A non-literal receiver is now declined, which taints the
+                // result and withholds the claim. Declining can only remove
+                // violations, so it cannot create a wrong TRUE.
+                let lit = self.const_str_from_operand(args.first()?)?;
+                let h = java_string_hash(&lit);
+                Some((self.solver.bv_const(i64::from(h), 32), None))
             }
             "valueOf" if target.desc == "(Ljava/lang/Object;)Ljava/lang/String;" => {
                 // String.valueOf(Object) — dispatch to wrapper toString
@@ -954,5 +985,83 @@ impl<'a> ExploreCtx<'a> {
             }
             _ => None,
         }
+    }
+}
+
+/// `String.hashCode()`, exactly as the Javadoc specifies it.
+///
+/// `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]`, evaluated as `int`
+/// arithmetic — so it wraps, and `wrapping_*` is the specification rather than
+/// a convenience. The empty string hashes to 0, which is why `hashCode() != 0`
+/// is not vacuous.
+///
+/// Iterates UTF-16 code units, not `char`s: the Javadoc defines the hash over
+/// the `char` sequence, and a Rust `char` is a code *point*, so a supplementary
+/// character would contribute one term instead of the two surrogates the JVM
+/// uses.
+fn java_string_hash(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for unit in s.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    h
+}
+
+#[cfg(test)]
+mod java_string_hash_tests {
+    //! `String.hashCode()` is a *specification*, not an implementation detail,
+    //! and we now rely on that: a literal receiver's hash is encoded as a
+    //! constant, so if this function is wrong the BMC reasons about the wrong
+    //! number and can discharge or violate an obligation incorrectly.
+    //!
+    //! Values are taken from the Javadoc formula, not from running a JVM, and
+    //! cross-checked against one.
+    use super::*;
+
+    #[test]
+    fn the_empty_string_hashes_to_zero() {
+        // Which is why `s.hashCode() != 0` is a real obligation and not
+        // vacuously true.
+        assert_eq!(java_string_hash(""), 0);
+    }
+
+    #[test]
+    fn a_single_character_hashes_to_its_code_unit() {
+        assert_eq!(java_string_hash("a"), 97);
+    }
+
+    #[test]
+    fn the_javadoc_formula_is_applied_in_order() {
+        // 'a'*31^2 + 'b'*31 + 'c' = 97*961 + 98*31 + 99 = 96354.
+        // This is the case gh #88 surfaced: the old encoding claimed this
+        // could be 0 and published a violation on `!= 0`.
+        assert_eq!(java_string_hash("abc"), 96354);
+    }
+
+    #[test]
+    fn the_hash_wraps_as_int_arithmetic_rather_than_saturating() {
+        // The canonical witness for wraparound: this string hashes to exactly
+        // Integer.MIN_VALUE. A saturating or widening implementation gets a
+        // different answer, and a `> 0` obligation would then flip.
+        assert_eq!(java_string_hash("polygenelubricants"), i32::MIN);
+    }
+
+    #[test]
+    fn a_supplementary_character_contributes_both_surrogates() {
+        // The Javadoc defines the hash over the `char` sequence, i.e. UTF-16
+        // code units. A Rust `char` is a code *point*, so iterating `chars()`
+        // would contribute one term where the JVM contributes two.
+        let astral = "\u{1F600}"; // U+1F600, surrogates D83D DE00
+        let expected = 0i32
+            .wrapping_mul(31)
+            .wrapping_add(0xD83D)
+            .wrapping_mul(31)
+            .wrapping_add(0xDE00);
+        assert_eq!(java_string_hash(astral), expected);
+        assert_ne!(
+            java_string_hash(astral),
+            0x1F600,
+            "iterating code points instead of code units would give this"
+        );
     }
 }

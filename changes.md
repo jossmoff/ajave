@@ -2,6 +2,114 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — gh #88: the premise was wrong, and the real instance was somewhere else
+
+### #88's two proposed fixes were already implemented
+
+The issue proposed (a) refusing to publish a violation whose condition depends
+on a havoced value, and (b) modelling `multianewarray` as an allocation. Both
+are in the code: `explore.rs`'s `handle_check` gates on
+`res == Sat && !is_tainted`, with a second `unreplayable` check behind it, and
+`35b7c07` made `multianewarray` a real allocation so `some_a.length == 4` is
+now *provable* rather than merely unclaimed.
+
+### Its central premise is wrong, in the safe direction
+
+#88 says the 113 expected-TRUE tasks with published violations "cost nothing
+today **only because** JVM replay refuses them", i.e. that replay is a
+refutation filter and every one is a latent -32. It is not a refutation filter.
+`main.rs` reads:
+
+```rust
+if cli.no_replay || confirmed_witness.is_some() { Verdict::False }
+```
+
+FALSE requires replay to **positively confirm**. Refuted, failed to compile,
+timed out, JVM absent — all yield `None` and fall through to
+`verdict_excluding`, which will not return FALSE for that obligation. So the
+failure mode of certification is UNKNOWN, never -32. A full valid-assert corpus
+run the same day: 1013 tasks, **1 WRONG**, and that one is
+`ReverseInterpolator_true`, the known benchmark mislabel (gh #72).
+
+This matters for prioritisation: the 113 are a *precision* problem (the claim
+occupies the obligation) rather than a soundness one, and the real soundness
+exposure is #86 — replay wrongly **confirming** — not the publish path.
+
+### The real instance, which #88 never looked for
+
+`handle_check` keys taint on `rvalue_tainted`, which for a string call asks
+`str_call_modelled`. That listed `hashCode` as modelled. The encoder:
+
+```rust
+"hashCode" => {
+    let s = recv_str?;
+    let _ = s;                                 // the receiver, discarded
+    let h = self.solver.fresh_bv("hash", 32);  // unconstrained 32 bits
+    Some((h, None))
+}
+```
+
+So the call was *declared* modelled and *encoded* as a free variable. The
+invented value was therefore *untainted*, the `!is_tainted` guard passed, and
+the BMC published a violation against `"abc".hashCode() != 0` — a value the
+Javadoc pins at 96354.
+
+This is #88's mechanism — "unknown treated as licence to claim a violation" —
+arriving from the opposite side. #88 reasoned about `Rvalue::Havoc`, which the
+lifter is careful about (audited: exactly one `Rvalue::Nondet` construction
+site, and it carries `Some(jvm_byte)`, so the lifter's invariant holds). The
+gap was a *classification* disagreeing with an *encoding*. Being untainted it
+also bypassed `skipped_obligations`, so the obligation was occupied by the
+claim instead of recorded as undecided — which is what stops an
+over-approximating engine from proving it.
+
+Audited the rest of the string encoder for the same shape. `hashCode` was the
+only case: `encode_str_compare`'s fresh BVs are *constrained*
+(`s = str.from_code(..)`), so they are an approximation rather than a free
+variable.
+
+### The fix is +2, not merely -0
+
+`String.hashCode()` is specified exactly, so for a literal receiver it is a
+compile-time constant and we now compute it. A non-literal receiver is
+declined, which taints the result and withholds the claim; declining can only
+remove violations, so it cannot create a wrong TRUE.
+
+`jvm-strings/LiteralStringHashIsAConstantNotAFreeVariable` goes **UNKNOWN →
+TRUE** on valid-assert. The obligation is now *proved*, not just un-claimed.
+
+`java_string_hash` is mutation-checked by five tests argued from the Javadoc
+rather than from a JVM run: changing the multiplier from 31 fails four of them,
+and using `chars()` instead of `encode_utf16()` fails exactly the surrogate
+test written for it (a Rust `char` is a code *point*; the Javadoc defines the
+hash over `char`s, i.e. UTF-16 code units).
+
+### A false comment in the concrete engine, corrected not fixed
+
+`run_concolic`'s doc said a `Violated` meant "the choices that produced it are
+a genuine witness rather than a candidate". False whenever a havoc was
+evaluated: `eval_havoc` invents `I32(0)` and deliberately does not record it in
+`entries`, so the recorded choices do not determine the failure. That is the
+`entries=0` signature in #88 and the all-zero shape of 56 of the 76
+replay-refuted witnesses per run.
+
+Deliberately **not** fixed by suppression. gh #43 measured that at -20 points,
+because the JVM confirms some invented-value violations — an all-zero probe can
+trigger a real bug even when zero is not a value the program could choose. The
+CLAUDE.md rule ("if an engine cannot construct a witness through its own
+analysis, it must not publish a violation") is satisfied here by the
+confirmation gate rather than by the publishing engine, and the comment now
+says so.
+
+Worth recording that #43's stated prerequisite — the orchestrator
+short-circuiting on violations — *has* since been fixed
+(`orchestrator.rs:212`), so its precise variant is viable if the measurement
+ever justifies it. Three other under-approximating engines (`concrete`,
+`concolic`, `nra`) publish violations and none is taint-aware, which is sound
+only *given* that gate. That makes the gate load-bearing and it has no
+regression test; constructing one needs an invented-value source, which is
+what we keep eliminating.
+
 ## 2026-10-31 — measuring the flattened-matrix ceiling, which refuted the next two plans
 
 Two planned pieces of work were cancelled by one measurement. Recording it in
