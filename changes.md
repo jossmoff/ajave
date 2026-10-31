@@ -2,6 +2,53 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — corpus scores, on one build, with the contention named
+
+Both properties, engine build `d61b514`, 300s budget:
+
+| property | score | wrong | unproven | timeouts |
+|---|---|---|---|---|
+| valid-assert (upstream label) | 878 | 1 (the mislabel) | 274 | 21 |
+| valid-assert (corrected label) | **911** | **0** | 274 | 21 |
+| no-runtime-exception | **1186** | **0** | 170 | 17 |
+| **combined, corrected** | **2097** | **0** | | |
+
+Against 2058 on record that is +39, of which **+33 is the label correction**
+and +6 is unattributed — there is no stored `sv-comp` baseline to diff
+per-task, which is the gap being closed after the next improvement.
+
+### The valid-assert number needed an adjustment, and the cause was mine
+
+The matched-build run reported **877**, not 878, with **6 ERROR** results where
+the earlier run had none. `bench.py` scores `returncode < 0` as `ERROR`, so
+contention reads as a verdict change rather than as noise — exactly the trap
+this file records: *"5 tasks going FALSE → ERROR... the usual tell that a run
+is contended was therefore absent and it looked exactly like a code
+regression."*
+
+Here it was self-inflicted: I ran two `bench.py --set smoke --limit 1` checks
+*during* the scoring run, which is the one thing "run nothing else during a
+scoring run" forbids. The signature was identical to the recorded case — 5 of
+the 6 ERRORs were already TIMEOUTs (worth 0 either way) and the sixth,
+`StringValueOf08`, had been a correct FALSE, which is the entire 1-point
+difference. It **reproduces as FALSE, exit 0, on an idle machine**, so the
+matched-build figure is 878.
+
+Every other verdict count was identical across the two runs (172 TRUE, 253
+UNKNOWN, 566 FALSE), which is what makes the adjustment an inference about one
+task rather than a correction of the whole run. Stating it as adjusted rather
+than re-running is a deliberate trade: a clean run costs 52 minutes and the
+deferred `sv-comp` baseline will produce one anyway.
+
+### An incidental confirmation
+
+Valid-assert measured 878 on build `a8bd389` *and* on `d61b514`. The only
+engine change between them is the `hashCode` fix, so that fix is
+score-neutral on valid-assert — independently agreeing with the violation-claim
+probe, which found pre- and post-fix checkpoints identical at all eight. Two
+different measurements, same conclusion: a correct fix worth +2 on its own
+benchmark and nothing on the corpus.
+
 ## 2026-10-31 — the one locally-corrected benchmark label, and what it costs us
 
 `argv-tasks/ReverseInterpolator_true.yml`'s valid-assert verdict is corrected
