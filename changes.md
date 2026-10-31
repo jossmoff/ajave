@@ -2,6 +2,90 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — where the corpus is actually blocked, and an unsound fix the gate caught
+
+### The corrected corpus picture
+
+With the `budget`/`structural` split in place, valid-assert over 277 unproven
+tasks:
+
+| bucket | tasks | % | responds to |
+|---|---|---|---|
+| **structural** | 74 | 26.7% | an invariant or a different cap — not time |
+| float-escalation | 59 | 21.3% | *(see below — also structural)* |
+| no-candidate | 44 | 15.9% | nothing published at all |
+| refuted | 38 | 13.7% | feeding refutations back |
+| theory | 32 | 11.6% | a different encoding |
+| timeout | 22 | 7.9% | anytime engines |
+| model | 7 | 2.5% | lifting java.base |
+| **budget** | **1** | **0.4%** | scheduling |
+
+`budget` is **one task**. It was reported as 135 of 409.
+
+And `float-escalation` is structural underneath. Probing
+`argv-tasks/AccelerometerListener_false`: the FPA pass *is* reached, runs for
+63s, and reports `BLOCKER all_paths_complete` — not
+`float_arith_approximated`, which only the BV pass can emit
+(`!self.fp_arith` excepts the escalation instance). The census attributes the
+task to float-escalation because the BV pass's blocker is the dominant one
+recorded. So the label "letting the FPA pass reach it (theory exists)" is wrong
+for these: it reaches them and is blocked by truncation.
+
+That makes structural truncation the dominant corpus blocker, under at least
+two bucket names.
+
+### What truncates, and it is not a cap
+
+17 forks against `MAX_FORKS=500`; 55 block visits against `MAX_BLOCK_VISITS=50_000`.
+No cap binds. Two of the three `handle_branch_fork` truncations fire on
+`feas == SatResult::Unknown` — **the solver could not decide branch
+feasibility**, which for FPA queries is ordinary.
+
+Measured: 8 of 43 feasibility queries undecided at the configured 5s per-query
+soft timeout. At 60s: **0 undecided, `all_paths_complete` true, and the query
+count fell from 43 to 32** — a decided `Unsat` prunes a branch the search would
+otherwise walk, so the hard queries buy back more work than they cost.
+
+### The fix that followed from that, and why it is wrong
+
+Built a two-tier query: on `Unknown`, re-ask once with 12x the budget before
+marking incomplete. Cost bounded by the number of undecided queries, cheap path
+untouched. It worked mechanically — one escalated query, `Unknown → Sat`,
+`all_paths_complete: false → true`, one extra solver call.
+
+Smoke: **158, two wrong TRUEs**, one of them `Pan_exceptionprone` — the task
+the comment at the call site names as the original wrong TRUE. The canary
+existed for exactly this and fired on the first run.
+
+The reason, which the probe could not show and the comment only half states:
+the marker does not merely record that *the solver* could not decide. The BMC's
+encoding is **approximate** — floats as bitvector patterns, string
+approximations — so a `Sat` under that encoding does not mean the path is
+satisfiable in the real program. Deciding the query harder does not make the
+encoding faithful; it only removes the guard. The subtree is then explored
+under a constraint that may be genuinely infeasible, reports no violations
+vacuously, and now claims completeness.
+
+Stated plainly: **`all_paths_complete: true` was the thing being optimised, and
+it was achieved by deleting the reason it was false.** The probe looked
+excellent precisely because it removed a safety property, and no amount of
+measuring the flag would have revealed that — only running the canary did.
+
+### What this says about the direction
+
+Escalating solver effort cannot convert the structural bucket while the
+encoding is approximate, because the incompleteness is about the encoding, not
+the solver. The orderings that remain:
+
+1. A **faithful encoding** first (gh #48's territory for floats), after which
+   feasibility answers mean something and the marker can be relaxed with an
+   argument rather than a hope.
+2. An **over-approximating engine** proving the loop, which needs no
+   feasibility decision at all.
+
+Reverted. Filed with the measurement so the 5s-to-60s result is not
+rediscovered and mistaken for an opportunity a second time.
+
 ## 2026-10-31 — the census's biggest convertible bucket is not convertible
 
 ### What it said
