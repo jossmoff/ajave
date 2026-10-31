@@ -2,6 +2,102 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the 95 MB CHC encoding: measured, and it is not the problem
+
+Dumped the encoding for `Alarm_prop1` (`AJAVE_CHC_DUMP`) and measured it rather
+than reasoning about the size.
+
+### What the file is
+
+95,042,200 bytes in **3067 lines** — about 31 KB per line. 1327 predicates,
+1660 Horn clauses, and a **median of 1272 universally quantified variables per
+clause**, 1.88 million bound variables in total. The quantifier prefix of one
+clause is 30 KB and its body 33 KB.
+
+The body explains it:
+
+```
+(=> (and (= _f0 (ite (not (= v75 0)) 1 0))          ; the one real transition
+         (= _f0 0)
+         (= w0 v0) (= w1 v1) ... (= w690 v690))      ; 691 identity equations
+```
+
+Those `w`/`v` pairs are the **heap field frame** — `fld_SystemStatusOutputs_volumeInfused_w`
+and friends — restated in full on every clause. 63 KB to express one
+assignment. So fields *are* threaded intra-procedurally, explicitly and
+verbosely.
+
+### The size is 7% of the cost, so it is not the blocker
+
+| | time |
+|---|---|
+| parse only (query stripped) | **3.59s** |
+| full solve | **48.9s** |
+
+Parsing 95 MB costs 3.6 seconds. The other 45 seconds is solving. Shrinking
+the text is worth doing for memory and IO but converts nothing on its own —
+which is the opposite of what the headline number suggested, and the reason to
+measure before optimising.
+
+z3's own Horn preprocessing does not help either:
+`fp.xform.tail_simplifier_pve=true fp.xform.slice=true fp.xform.coi=true`
+measured **48.88s against 48.94s**. No effect. Do not reach for those options
+on the strength of their names.
+
+### The real blocker: summaries omit the fields
+
+z3 answers **`unsat`**, and in this encoding `unsat` means *unsafe*
+(`chc.rs:3500`). So CHC calls a safe program unsafe. It is not a soundness bug
+— CHC is an `Over` engine and `ChcOutcome::Unsafe` is consumed only in tests,
+never published — but it means **CHC cannot prove the Alarm family however fast
+the encoding becomes.**
+
+The cause is summary arity:
+
+```
+; summary for AlarmFunctional.setCurrentAlarm(LDW;)I
+(declare-fun m5_s (Int Int) Bool)        applied as (m5_s v67 _f1)
+```
+
+Two arguments: a receiver identity and a return value. But
+`int setCurrentAlarm(DW localDW)` reads about 19 `localDW` flag fields and
+writes `localDW.maxAlarmLevel`. **None of those 163 encoded fields appears in
+the relation**, so the summary constrains nothing, Spacer is free to pick a
+return value that violates the property, and the counterexample is spurious.
+
+Intra-procedurally the fields are threaded (that is what the 691 equations
+are); across a summarised call they are dropped. That is gh #95 exactly —
+"model heap contents with threaded state, not an uninterpreted predicate" — and
+it, not encoding size, is what gates these 9 tasks.
+
+### The footprint is small, which is what makes the fix tractable
+
+`setCurrentAlarm` touches **20 of 163** fields. So the honest summary is about
+arity 22 (its read set, the written field before and after, and the return),
+not 163 and certainly not 2. Threading *all* state through every summary would
+make the frame problem worse; threading each method's **footprint** is both
+exact for that method and cheap.
+
+### Ordered recommendations
+
+**Precision — this is what unlocks the family:**
+1. Summaries carry the callee's field **footprint**: read set in, write set out.
+   Currently zero fields, hence vacuous. (gh #95, and gh #111 is the
+   footprint-computation defect — it ignores `Stmt::ArrayStore`.)
+
+**Size — worth doing, measured at ~7%:**
+2. Eliminate identity equations by substitution at encode time (union-find over
+   bound variables, then rename). The 691 frame equations and their bound
+   variables disappear; 95 MB should fall by two orders of magnitude.
+3. Frame only the write footprint rather than all state.
+4. `declare-datatypes` records for the generated `B`/`DW` structs, so one bound
+   variable carries a struct instead of 163 scalars. Spacer supports ADTs, and
+   it matches what the Simulink generator actually emitted.
+
+**Measured not to help:**
+5. `fp.xform.{tail_simplifier_pve,slice,coi}` — no effect (48.88 vs 48.94).
+6. LIA over BV is already the right choice here and is already what is emitted.
+
 ## 2026-10-31 — the Alarm family: a controlled comparison, and three wrong theories
 
 The largest concentrated target found: `java-ranger-regression/alarm`, 9 tasks,
