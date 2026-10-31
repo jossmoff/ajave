@@ -2,10 +2,71 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — where the array-bounds frontier actually is: non-linear index arithmetic
+
+Having added strict and non-strict relations and converted one corpus task, the
+right question was no longer "what else can the domain express" but "what do the
+remaining obligations need". Measured rather than guessed, and the answer closes
+the relational line.
+
+`interval-ai` **is** running on the budget population and **is** discharging —
+19 to 33 obligations per BellmanFord task. What stays open is 8 or 9
+`ArrayBounds` apiece. So the engine is reaching them and the domain is simply
+not strong enough, which is a different diagnosis from anything the census
+could give.
+
+The index that defeats it, from `BellmanFord-FunSat01`:
+
+```java
+final int D[] = new int[V * V];
+...
+if (dist[j] > dist[i] + D[i * N + j])
+```
+
+The obligation is `0 <= i*N + j < N*N` given `i < N` and `j < N`. That is
+**non-linear** — a product of two program variables. It is outside Pentagons
+(`x < y`), outside difference bounds (`x - y <= c`) and outside Octagons
+(`±x ±y <= c`, unit coefficients alike). It needs polyhedra, or a dedicated
+rule for the `i*stride + j` flattened-matrix idiom.
+
+`dist[src]` adds a second, unrelated need: `src` is a method parameter, so the
+bound rests on a precondition no intra-procedural domain supplies.
+
+### What this means for the three filed extensions
+
+- **Difference bounds for `a[i+1]`** (11% by shape) — **abandoned before
+  starting.** The non-strict increment covered a 24% shape and converted
+  nothing; 11% is a weaker prior on the same already-falsified reasoning.
+- **gh #115, array segmentation** — reunified with this. `dist[edges[j]]`-style
+  indices and `∀n. value[n] >= 0` are the same *contents* problem, approached
+  from array bounds and from the heap respectively. Two independent routes now
+  end there, which is the strongest signal of the session.
+- **Polyhedra or an `i*stride + j` rule** — new, and the only thing that
+  reaches BellmanFord. The flattened-matrix idiom is common enough in this
+  corpus to be worth a targeted rule rather than a general domain, but that is
+  a hypothesis and the probe-first rule applies.
+
+### The method, restated because it paid for itself four times
+
+Four shape-frequency estimates predicted conversions and four delivered none or
+one: `refuted-witness` 52% → 1 task, `budget` 135 → 0 by gate, float escalation
+76 → 1 in 40, non-strict 24% → 0. A frequency count over *source text* says
+nothing about whether the blocked obligation needs that shape. The only estimate
+that held was the one taken from a six-line program where the mechanism was
+visible end to end.
+
+
 ## 2026-10-30 — non-strict bounds, and the off-by-one that makes them a second map
 
 Pentagons extended with `x <= y` alongside `x < y`. Smoke **184 against 182**,
-0 WRONG.
+0 WRONG — and **zero additional conversions** on `census/budget.set`, which
+still stands at the single `array1` task Pentagons alone reached.
+
+That is the fourth time a shape frequency has failed to predict a conversion.
+The 24% was "the task's source contains `i <= n`", never "the unproven
+obligation needs it". The increment is correct, tested and worth keeping for
+the guard shape it covers; it is not a scoring win, and the next extension was
+abandoned on this evidence rather than attempted.
 
 Sized before building, from the shapes actually present in the 135-task
 `budget` population: strict guards `i < n` in 57%, **non-strict `i <= n` in
