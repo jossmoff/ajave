@@ -386,6 +386,57 @@ now appeared three times in one day: the `refuted-witness` bucket at 211 tasks
 (a check-order artefact, really 4), and now `budget` at 135. In each case a
 bucket counted a *symptom* and was read as a *cause*.
 
+## 2026-10-31 — correction: NRE is 1184, not 1186, and the combined figure is 2095
+
+The 1186 recorded below is an **outlier**, and the correction matters because it
+was published as the headline number.
+
+Four no-runtime-exception runs, 300s budget, idle-gated:
+
+| build | score | `argv-tasks/HotspotIntegerGenerator_false` |
+|---|---|---|
+| `d61b514` (main) | **1186** | TRUE |
+| `4c360bc` (main) | **1184** | UNKNOWN |
+| `243f738` (branch) | **1184** | UNKNOWN |
+| `243f738` (branch) | **1184** | UNKNOWN |
+
+One task accounts for the whole 2-point spread, and it was TRUE in exactly one
+of the four runs. So:
+
+- **NRE is 1184**, not 1186.
+- **Combined is 911 + 1184 = 2095**, not 2097.
+- The `chc-summary-footprint` branch is **neutral**: main and branch both score
+  1184 with the same task unproven.
+
+### How this was nearly misread as a regression
+
+The branch's first NRE run scored 1184 against a 1186 baseline and the obvious
+reading was "the change cost 2 points". Three things were needed to refute it,
+in increasing cost:
+
+1. Run the task **in isolation**: TRUE on the branch 3/3 (~20s), TRUE on main
+   3/3 (~21s). Indistinguishable timings, so the change does not slow it.
+2. Run the branch's NRE set **again**: 1184 again, same task. That ruled out
+   simple variance and is where it stopped looking like noise.
+3. Run **main's** NRE set again: also 1184, same task. That is what settled it —
+   the baseline was the lucky draw, not the branch the unlucky one.
+
+Step 3 is the one that CLAUDE.md already insists on — *"before attributing a
+flagged regression to your change, run that task on the base commit"* — and the
+only reason it was reached is that step 2 came back identical rather than
+different. Had the re-run returned 1186, the honest conclusion would have been
+"variance" and the real instability would have stayed hidden.
+
+### The task itself is a genuine finding
+
+`HotspotIntegerGenerator_false` answers TRUE in **6 of 6 isolated runs** at
+~20s against a 300s budget, and UNKNOWN in **3 of 4 harness runs** at six-way
+parallelism. It is nowhere near the timeout, so the usual coin-flip tell —
+"finished within 40% of the budget" — does not fire. Its verdict depends on
+machine load at one fifteenth of the budget, which points at an engine's
+wall-clock time share rather than the task budget, and makes it a poor baseline
+entry in either direction.
+
 ## 2026-10-31 — corpus scores, on one build, with the contention named
 
 Both properties, engine build `d61b514`, 300s budget:
