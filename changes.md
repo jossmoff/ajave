@@ -2,6 +2,74 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-10-31 — the Alarm family: a controlled comparison, and three wrong theories
+
+The largest concentrated target found: `java-ranger-regression/alarm`, 9 tasks,
+**all expected TRUE on both properties, all UNKNOWN — 36 points**. Diagnosing
+it cost three theories, each killed by one measurement, and the sequence is
+worth recording because each theory was plausible and cheap to refute.
+
+### Theory 1: it needs predicate abstraction
+
+The assertion is `assert (!checkCondition || checkOutput)` — an *implication*
+between two booleans computed by a generated state machine. The interval domain
+is non-relational and cannot express `a ⟹ b`, and the engine for that is the
+predicate CPA, which has a real defect: `PredState::is_bottom` returns `false`
+unconditionally ("bottom is not representable in this encoding"), so it can
+never prune the counterexample state `checkCondition ∧ ¬checkOutput`, which is
+the whole proof. Coherent, and gh #42 already records the defect.
+
+**Refuted by sizing it.** Grepping the corpus for the same assertion shape
+found 21 tasks: 9 `alarm` and 12 `infusion`. All **12 Infusion tasks already
+score TRUE on both properties**. The implication form is not the blocker; we
+prove it twelve times over.
+
+### Theory 2: Alarm has loops that Infusion does not
+
+`PROGRAM_SHAPE` says `loops=false` for **both**.
+
+### Theory 3: the path-length cap binds
+
+True, and useless. `explore_block_until` truncates on
+`depth > max_depth` with `max_depth = 200`, and Alarm's loop-free paths exceed
+200 blocks where Infusion's do not — Alarm is 1578 blocks and 156 entry blocks
+against Infusion's 893 and 98.
+
+So raise it. At 2000 the truncation **moved** to `setCurrentAlarm`; at 3000 the
+run reports **1000 forks** — the fork cap — still `exhausted=false`, still
+UNKNOWN. Each cap raise relocates the bottleneck rather than removing it, which
+is what this file predicts about fitted constants and what gh #119 measured as
+about one task across four probes.
+
+### What it actually is
+
+A **scale** problem, and the controlled comparison is what shows it:
+
+| engine | on Alarm (1578 blocks) | on Infusion (893 blocks) |
+|---|---|---|
+| smt-bmc | caps out; raising one moves the bottleneck | **proves it in 763ms** |
+| chc | generates **95 MB** of Horn clauses, solver returns `timeout` | — |
+| interval-ai | non-relational; cannot prove the implication | — |
+
+Same assertion shape, same absence of loops, same `heap=true`. The only
+difference is 1.8x the program, and that is the difference between 763ms and
+unprovable. Nothing here needs a theory we lack; it needs the work to not grow
+with the number of paths.
+
+The named technique for exactly this is **region summarization** — and these
+are `java-ranger-regression` tasks, i.e. the benchmark family of the tool whose
+contribution region summarization is. The 95 MB CHC encoding points the same
+way: an inter-procedural encoding that emits per-block predicates for all 1578
+blocks is not summarising, it is transcribing.
+
+### The methodological point
+
+Four theories today have been bucket counts or shapes read as causes:
+`refuted-witness` 211→1, the flattened length premise 198→4, `budget` 135→1,
+and now the implication shape 21→0-as-a-cause. The thing that killed this one
+was looking for the tasks that **share the shape and succeed**. A population
+with positives in it is a controlled experiment; a bucket count is not.
+
 ## 2026-10-31 — where the corpus is actually blocked, and an unsound fix the gate caught
 
 ### The corrected corpus picture
