@@ -514,6 +514,62 @@ now appeared three times in one day: the `refuted-witness` bucket at 211 tasks
 (a check-order artefact, really 4), and now `budget` at 135. In each case a
 bucket counted a *symptom* and was read as a *cause*.
 
+## 2026-11-01 — the sv-comp baseline was recorded and then discarded, on purpose
+
+Recorded the long-deferred per-task baseline — 1785 entries, both properties in
+one invocation — and threw it away. The reason is worth keeping, because the
+run *completed* and the artefact looked fine.
+
+### Recording both properties has to be one invocation
+
+`write_baseline` opens the file with `"w"`. Running `--update-baseline` once per
+property therefore has the second overwrite the first, leaving a baseline with
+no valid-assert entries at all and no indication anything is missing. The
+default (no `--property`, each task using its own declared properties) is the
+only correct way to record a two-property set.
+
+### Why it was discarded
+
+32 of 1785 entries recorded a wall clock above the 300s budget, the worst at
+2280s — 7.6x. The machine was memory-starved: `bench.py` had just refused to
+start at 8.3GB free against the 9.0GB that six workers need, the run went ahead
+at five, and only about 1GB of pages were genuinely free.
+
+The score shows the cost: this run scored valid-assert **906** against **911**
+measured on an idle six-worker run of the same commit. Five points of tasks
+lost to starvation, recorded as the expected outcome.
+
+That is the documented failure: *"a baseline recorded on a loaded machine is
+inflated, which masks future slowdowns. Record baselines on an idle machine for
+the same reason scores are."* A pessimistic baseline does not cause false
+regressions, it causes **missed** ones — `--check` fails on correct→unproven,
+so an entry already recorded as unproven can silently rot.
+
+Moved out of `benchmarks/sets/` rather than left untracked, because `--check`
+resolves the baseline **by path** and does not care whether git knows about it.
+An uncommitted file there is not a draft, it is a live instrument.
+
+### Two wrong diagnoses on the way, recorded so they are not re-run
+
+The 2280s entry looked at first like gh #113 — the engine overrunning a stated
+timeout — which would have meant tasks scoring on time they should not have
+had, and a baseline institutionalising it. It is not that:
+
+1. **"The timeout is not enforced."** Wrong. `run_guarded` caps
+   `communicate(timeout=…)` and then kills the process group, and the same task
+   run alone measures **300.22s** and records TIMEOUT.
+2. **"The harness's own log parsing is counted into `elapsed`."** Partly real
+   but not the cause here. `collect_timing` *is* switched on by
+   `--update-baseline`, and `elapsed` is computed as
+   `t0 = now - r.elapsed; … now2 - t0`, which does fold the `TIMING_RE` scan
+   into the recorded time. But 22 of the 32 inflated entries are TIMEOUTs, and
+   a timeout sets `log = ""`, so there is nothing to scan. Re-running the task
+   with `--timing` measured 300.15s.
+
+What survives from (2) is a smaller real defect: `elapsed` should be `r.elapsed`
+directly rather than a round-trip through `t0`, so that the harness's own
+parsing is never attributed to the task it is parsing.
+
 ## 2026-10-31 — correction: NRE is 1184, not 1186, and the combined figure is 2095
 
 The 1186 recorded below is an **outlier**, and the correction matters because it
