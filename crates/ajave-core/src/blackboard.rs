@@ -58,6 +58,9 @@ pub struct Blackboard {
     /// about how the status was derived, not about the obligation, and every
     /// existing match on `Status` would otherwise have to be touched.
     status_approx: BTreeMap<ObligationRef, Approximations>,
+    /// Invariant maps, which are the unit that can be certified. See
+    /// `InvariantMap`.
+    maps: Vec<InvariantMap>,
 }
 
 /// Whether an invariant-backed discharge must name a checked invariant.
@@ -300,10 +303,24 @@ impl Blackboard {
                 }
             }
             Artifact::Invariant(inv) => self.invariants.push(inv.clone()),
+            Artifact::InvariantMap(m) => self.maps.push(m.clone()),
             Artifact::Trace(t) => self.traces.push(t.clone()),
             Artifact::Query(q) => self.queries.push(q.clone()),
             Artifact::Lemma(l) => self.lemmas.push((l.clone(), approximated)),
-            _ => {}
+            // Listed rather than caught by `_`, so adding an artifact kind is
+            // a compile error here instead of a silent omission. `InvariantMap`
+            // fell into the old catch-all and was logged but stored nowhere —
+            // published, append-only, and invisible to every consumer that
+            // does not walk the raw log. That is "inert by defect" in
+            // `docs/contracts.md`'s terms, and it is indistinguishable from
+            // "nobody publishes one".
+            //
+            // These two have no store because they have no producer, which is
+            // the contract defect `CLAUDE.md` names: an artifact kind with
+            // neither is "a comment with a type". When one gains a producer it
+            // must gain a store in the same change, and this match is where
+            // that is noticed.
+            Artifact::Precision(_, _) | Artifact::Residual(_) => {}
         }
 
         self.log.push(Tagged {
@@ -577,6 +594,34 @@ impl Blackboard {
     /// certificate that was never written.
     pub fn invariant(&self, id: u32) -> Option<&Invariant> {
         self.invariants.iter().find(|i| i.id == id)
+    }
+
+    /// Certified maps for a method — the only ones a discharge may rest on.
+    ///
+    /// `Candidate` maps are deliberately excluded: `InvStatus`'s contract says
+    /// a candidate "is never enough on its own to discharge", and a consumer
+    /// that wanted to *refine* candidates (the Houdini loop) asks for them
+    /// explicitly through `candidate_maps_for_method`.
+    pub fn inductive_maps_for_method(
+        &self,
+        method: &MethodKey,
+    ) -> impl Iterator<Item = &InvariantMap> {
+        let m = method.clone();
+        self.maps
+            .iter()
+            .filter(move |x| x.method == m && x.status == InvStatus::Inductive)
+    }
+
+    /// Proposed maps for a method, checked by nobody. Only a synthesiser or a
+    /// certifier has any business reading these.
+    pub fn candidate_maps_for_method(
+        &self,
+        method: &MethodKey,
+    ) -> impl Iterator<Item = &InvariantMap> {
+        let m = method.clone();
+        self.maps
+            .iter()
+            .filter(move |x| x.method == m && x.status == InvStatus::Candidate)
     }
 
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {

@@ -286,7 +286,10 @@ fn parse_interpolant_response(lines: &[String]) -> InterpolationResult {
 
 /// Encode a method body's transition relation in QF_LIA format.
 ///
-/// Returns (declarations, transition_formula, init_formula, error_formulas).
+/// Returns a `LiaEncoding`: declarations, the monolithic transition relation,
+/// the same clauses tagged per CFG edge, and one error formula per obligation.
+/// There is no init formula — a method's entry state is its parameters, which
+/// are unconstrained — and the doc claimed one for a long time.
 /// Variables are encoded as integers (not bitvectors) since interpolation
 /// requires LIA.
 /// Which array allocation site each reference variable names, within one body.
@@ -620,6 +623,20 @@ pub fn encode_body_lia(
 
     // Build per-block transition clauses.
     let mut block_clauses: Vec<String> = Vec::new();
+    // The same clauses, tagged with the edge each one takes.
+    //
+    // `transition` is their disjunction and stays byte-identical, so `imc` and
+    // `cegar` are unaffected. This exists because checking an invariant *map*
+    // needs per-edge preservation — "the assertion at the source, this
+    // transition, therefore the assertion at the target" — and the disjunction
+    // cannot express that: the encoding has no program counter, so a monolithic
+    // relation cannot say which point it is at. Adding a pc would change the
+    // relation every other consumer reasons about; tagging what is already
+    // built does not.
+    //
+    // `None` as the target means control leaves the method (return, throw,
+    // halt), so there is no successor assertion to preserve.
+    let mut edge_clauses: Vec<(BlockId, Option<BlockId>, String)> = Vec::new();
     let mut error_clauses: Vec<(ObligationId, String)> = Vec::new();
 
     for block in &body.blocks {
@@ -853,6 +870,11 @@ pub fn encode_body_lia(
                     } else {
                         format!("(and {})", conds.join(" "))
                     };
+                    let to = match &block.term {
+                        Terminator::Goto(t) => Some(*t),
+                        _ => None,
+                    };
+                    edge_clauses.push((block.id, to, clause.clone()));
                     block_clauses.push(clause);
                 }
             }
@@ -865,7 +887,11 @@ pub fn encode_body_lia(
                 then_conds.push(theory.encode_nonzero(&cond_expr));
                 then_conds.extend(assigns.iter().cloned());
                 if !then_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", then_conds.join(" ")));
+                    let c = format!("(and {})", then_conds.join(" "));
+                    if let Terminator::Branch { then_, .. } = &block.term {
+                        edge_clauses.push((block.id, Some(*then_), c.clone()));
+                    }
+                    block_clauses.push(c);
                 }
 
                 // Else branch: condition is zero.
@@ -873,7 +899,11 @@ pub fn encode_body_lia(
                 else_conds.push(theory.encode_is_zero(&cond_expr));
                 else_conds.extend(assigns);
                 if !else_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", else_conds.join(" ")));
+                    let c = format!("(and {})", else_conds.join(" "));
+                    if let Terminator::Branch { else_, .. } = &block.term {
+                        edge_clauses.push((block.id, Some(*else_), c.clone()));
+                    }
+                    block_clauses.push(c);
                 }
             }
             Terminator::Switch {
@@ -885,11 +915,13 @@ pub fn encode_body_lia(
                 let assigns = mk_assign(&var_exprs);
                 let mut neg_cases = Vec::new();
 
-                for (cv, _) in cases {
+                for (cv, target) in cases {
                     let mut case_conds = path_conds.clone();
                     case_conds.push(format!("(= {} {})", val_expr, cv));
                     case_conds.extend(assigns.iter().cloned());
-                    block_clauses.push(format!("(and {})", case_conds.join(" ")));
+                    let c = format!("(and {})", case_conds.join(" "));
+                    edge_clauses.push((block.id, Some(*target), c.clone()));
+                    block_clauses.push(c);
                     neg_cases.push(format!("(not (= {} {}))", val_expr, cv));
                 }
 
@@ -898,7 +930,11 @@ pub fn encode_body_lia(
                 def_conds.extend(neg_cases);
                 def_conds.extend(assigns);
                 if !def_conds.is_empty() {
-                    block_clauses.push(format!("(and {})", def_conds.join(" ")));
+                    let c = format!("(and {})", def_conds.join(" "));
+                    if let Terminator::Switch { default, .. } = &block.term {
+                        edge_clauses.push((block.id, Some(*default), c.clone()));
+                    }
+                    block_clauses.push(c);
                 }
             }
             _ => {}
@@ -920,6 +956,7 @@ pub fn encode_body_lia(
     LiaEncoding {
         declarations: decls,
         transition,
+        edge_clauses,
         error_formulas,
         n_vars,
     }
@@ -928,6 +965,9 @@ pub fn encode_body_lia(
 pub struct LiaEncoding {
     pub declarations: String,
     pub transition: String,
+    /// `(from, to, clause)` per CFG edge; `to` is `None` where control leaves
+    /// the method. The disjunction of the clauses is `transition`.
+    pub edge_clauses: Vec<(ajave_ir::BlockId, Option<ajave_ir::BlockId>, String)>,
     pub error_formulas: Vec<(ajave_ir::ObligationId, String)>,
     pub n_vars: usize,
 }
