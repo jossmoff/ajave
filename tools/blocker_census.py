@@ -83,6 +83,14 @@ SCHED_RE = re.compile(r"schedule-replay: (confirmed|could not reproduce)")
 # to opposite work -- see the `budget` vs `structural` split in KIND.
 EXHAUSTED_RE = re.compile(r"exploration complete,.*?exhausted=(true|false)")
 TRUNC_RE = re.compile(r"INCOMPLETE \(([a-z_]+)\)")
+# Why each branching block was refused a merge, per body. See
+# `docs/large-block-encoding.md`: a refused branch forks, and a fork duplicates
+# the remainder of the method, so these counts say which region extension is
+# worth building -- Java Ranger's levels 4 and 5 (multi-exit regions) address
+# `exits_method`, and nothing addresses `back_edge`.
+CFG_RE = re.compile(
+    r"cfg: (\S+) blocks=(\d+) merged=(\d+) exits_method=(\d+) "
+    r"back_edge=(\d+)\s+region_escapes=(\d+) over_cap=(\d+)")
 
 # Which kind of work each blocker responds to. The whole point of the tool is
 # this mapping, so it is stated once, here, rather than inferred at the call
@@ -150,7 +158,7 @@ def run_one(args):
            "verdict": "UNKNOWN", "blockers": [], "outer": None,
            "open_n": None, "open_kinds": "", "residuals": [],
            "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout,
-           "exhausted": None, "trunc": []}
+           "exhausted": None, "trunc": [], "cfg": []}
     r = run_guarded(cmd, timeout=timeout, env=env)
     rec["dur"] = r.elapsed
     if r.timed_out:
@@ -170,6 +178,10 @@ def run_one(args):
     ex = EXHAUSTED_RE.findall(r.stderr)
     rec["exhausted"] = any(e == "true" for e in ex) if ex else None
     rec["trunc"] = sorted(set(TRUNC_RE.findall(r.stderr)))
+    # One entry per body the BMC built a CFG for, deduplicated: a body is
+    # analysed once but may be logged once per BMC pass (bitvector, then FPA),
+    # and counting it twice would double every tally.
+    rec["cfg"] = sorted(set(CFG_RE.findall(r.stderr)))
     for m in OUTER_RE.finditer(r.stderr):
         rec["outer"] = tuple(int(x) for x in m.groups())
     for m in OPEN_RE.finditer(r.stderr):
@@ -250,6 +262,7 @@ def main():
     print("\r" + " " * 30 + "\r", end="", file=sys.stderr)
 
     report(records, args.dump)
+    cfg_report(records)
 
 
 # Sample log lines, verbatim from a real run. The regexes above are the whole
@@ -287,6 +300,16 @@ SELF_TEST = [
 def self_test():
     """Refuse to run if any pattern has stopped matching what engines emit."""
     bad = []
+    # Verbatim from a real run. A regex that matches nothing here would report
+    # a table of zeros, which is indistinguishable from "every branch merged".
+    cfg_line = ("[2026-11-21T19:02:11Z DEBUG ajave_engines::smt_bmc::cfg] "
+                "cfg: Main.main([Ljava/lang/String;)V blocks=51 merged=24 "
+                "exits_method=1 back_edge=2 region_escapes=0 over_cap=0")
+    m = CFG_RE.search(cfg_line)
+    if not m:
+        bad.append("CFG_RE no longer matches the cfg: line the BMC emits")
+    elif m.groups()[1:] != ("51", "24", "1", "2", "0", "0"):
+        bad.append(f"CFG_RE captured {m.groups()[1:]!r}, want the six counts")
     # The split is a claim about *work*, so test it at the level the claim is
     # made: a record, not a regex.
     base = {"blockers": ["all_paths_complete"], "outer": None, "scored": False,
@@ -381,6 +404,82 @@ def classify(rec):
         return "refuted-witness", \
             f"replay {why[0][0]}" if why else "replay refused (reason not logged)", n
     return "no-candidate", "(nothing published)", n
+
+
+def cfg_report(records):
+    """Why branches were refused a merge, over every body the BMC analysed.
+
+    This answers a question the bucket table cannot: a branch that forks does
+    not show up as a blocker, it shows up as the *cost* that later exhausts one.
+    So the refusal has to be counted where it happens.
+    """
+    seen, tot = set(), Counter()
+    bodies = 0
+    for r in records:
+        for (key, blocks, merged, exits, back, escapes, cap) in r["cfg"]:
+            if key in seen:
+                continue
+            seen.add(key)
+            bodies += 1
+            tot["blocks"] += int(blocks)
+            tot["merged"] += int(merged)
+            tot["exits_method"] += int(exits)
+            tot["back_edge"] += int(back)
+            tot["region_escapes"] += int(escapes)
+            tot["over_cap"] += int(cap)
+    branches = (tot["merged"] + tot["exits_method"] + tot["back_edge"]
+                + tot["region_escapes"] + tot["over_cap"])
+    if not branches:
+        print("\ncfg: no bodies logged a region decision — is "
+              "ajave_engines::smt_bmc=debug on, and is AJAVE_LBE unset?")
+        return
+    print(f"\nregion decisions over {bodies} distinct bodies "
+          f"({tot['blocks']} blocks, {branches} branching blocks)")
+    rows = [
+        ("merged", tot["merged"], "one formula, continuation explored once"),
+        ("exits_method", tot["exits_method"],
+         "an arm leaves without reconverging — Java Ranger L4/L5"),
+        ("back_edge", tot["back_edge"],
+         "the region holds a loop — no published level addresses this"),
+        ("over_cap", tot["over_cap"], "larger than AJAVE_LBE_MAX_REGION"),
+        ("region_escapes", tot["region_escapes"],
+         "BUG in cfg.rs if non-zero: a correct ipdom is always reachable"),
+    ]
+    for name, n, note in rows:
+        pct = 100.0 * n / branches
+        print(f"  {name:15s} {n:7d}  {pct:5.1f}%   {note}")
+
+    # The count above is over every body analysed, and most of those bodies
+    # were decided. A refused merge that cost nothing is not a target: a guard
+    # clause forks, but the arm that returns duplicates no continuation, so the
+    # fork is cheap. What matters is the profile of the tasks that are *still*
+    # truncating, which is the `structural` bucket.
+    still = [r for r in records if classify(r)[0] == "structural"]
+    if not still:
+        print("\n  no task is still classified structural — "
+              "truncation is no longer the dominant blocker")
+        return
+    seen2, st = set(), Counter()
+    for r in still:
+        for (key, blocks, merged, exits, back, escapes, cap) in r["cfg"]:
+            if key in seen2:
+                continue
+            seen2.add(key)
+            st["merged"] += int(merged)
+            st["exits_method"] += int(exits)
+            st["back_edge"] += int(back)
+            st["over_cap"] += int(cap)
+    sb = sum(st.values())
+    print(f"\n  restricted to the {len(still)} task(s) still truncating "
+          f"({len(seen2)} bodies, {sb} branching blocks):")
+    if not sb:
+        print("    none of them logged a region decision")
+        return
+    for name in ("merged", "exits_method", "back_edge", "over_cap"):
+        print(f"    {name:15s} {st[name]:7d}  {100.0 * st[name] / sb:5.1f}%")
+    worst = max(("exits_method", "back_edge", "over_cap"), key=lambda k: st[k])
+    print(f"\n  dominant refusal among still-truncating tasks: {worst} "
+          f"({st[worst]} branches)")
 
 
 def report(records, dump=None):

@@ -2,6 +2,128 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-21 — the CFG decline tally, and why region encoding stops at level 2
+
+A negative result, measured before it was built, which is the point.
+
+Large-block encoding landed at what Java Ranger calls `veritestingMode` level
+2: multi-path regions with no method calls and a single exit. Its levels 4 and
+5 admit regions with more than one exit, and treat `return` as an exit — and
+that looked like the obvious next increment, because `cfg.rs` refuses a merge
+whenever a branch has no immediate post-dominator inside the method, and a
+guard clause (`if (c) { return ...; }`) is exactly that shape. Guard clauses
+are everywhere in Java.
+
+### Instrument the refusal, do not infer it
+
+`CfgInfo` now tallies why each branching block was refused — `exits_method`,
+`back_edge`, `over_cap`, and `region_escapes` as a bug detector that should
+stay at zero because a correct immediate post-dominator is always reachable
+from its branch. `blocker_census.py` aggregates it, with the regex pinned
+against a verbatim log line: that file's own comments record that a regex
+matching nothing reports a table of zeros, which is indistinguishable from
+"every branch merged".
+
+The tally alone would have been misleading, so it is cross-tabulated against
+the bucket. Raw counts are over every body analysed, and most of those bodies
+were decided; what matters is the profile of tasks *still* truncating.
+
+### The measurement that killed the plan
+
+24 guard clauses in sequence, relational invariant so intervals cannot help
+(`benchmarks/ajave/engine-bmc/GuardClausesAreRefusedAMergeAndItCostsNothing`):
+
+```
+cfg: Main.f(I)I blocks=49 merged=0 exits_method=24 back_edge=0
+
+AJAVE_LBE=0   54 solver calls, 57 block visits, 27 forks
+AJAVE_LBE=1   54 solver calls, 57 block visits, 27 forks
+```
+
+**Every branch refused, and bit-identical either way.** Against the same count
+of refused branches in the one-armed-if benchmark: 980 solver calls versus 4.
+
+The reason is structural. A fork duplicates the remainder of the enclosing
+region once per arm, and an arm that returns immediately has no remainder to
+duplicate — 57 block visits over a 49-block method is one pass. The
+exponential cost large-block encoding removed comes only from branches where
+*both* arms have long continuations, which is the one-armed `if`, where the
+else target is the join and the arm rejoins it.
+
+So levels 4 and 5 would merge 24 branches here and save nothing measurable.
+Filed as #129 with `status:explored`.
+
+### The pattern, for the third time
+
+A high decline *count* is not a high decline *cost*. `budget` counted 135 tasks
+and was really 1. `refuted-witness` counted 211 pairs and was really 1. Here 24
+of 24 branches are refused and the refusal is free. The tally was worth
+building; acting on it without the cost measurement would have been effort for
+nothing, and the only thing that distinguished the two was one minimal program
+run twice.
+
+The residual worry is answered too: cheap forks do still charge `MAX_FORKS`,
+and exhausting it sets `mark_incomplete` and forfeits discharge — but 24 guard
+clauses charge 27 forks against a cap of 500, so it would take ~440 in one
+method to matter.
+
+### Level 3 looks thin too, and two bad probes before a good one
+
+Level 3 — regions that call methods which can be summarised — is the one the
+guard-clause result does not rule out, and it is the one that would attack
+inlining. A callee of 12 mergeable one-armed ifs, called from K sites, with the
+BMC isolated:
+
+| K | solver calls | block visits | forks |
+|---|---|---|---|
+| 1 | 4 | 31 | 2 |
+| 2 | 4 | 57 | 2 |
+| 4 | 4 | 109 | 2 |
+| 8 | 4 | 213 | 2 |
+
+Block visits scale exactly linearly — +26 per site, the callee re-explored each
+time — and **solver calls do not move at all**. So caching a method summary
+would save block visits against a cap of 50,000, i.e. it would start to matter
+at roughly 1,900 call sites. Not a lever, for a *mergeable* callee.
+
+The caveat is real and the probe does not settle it: this callee merges
+perfectly, so its summary is trivial and re-deriving it is nearly free. An
+expensive callee is one the encoding cannot merge, which means one containing a
+loop — and a summary of a loop-containing body **is a loop invariant**. So
+level 3's remaining value collapses into invariant synthesis rather than region
+encoding, which is where `back_edge`, k-induction's missing strengthening
+(#80), and the heap plan's own conclusion (the Horn query is decided in 0.05s;
+the gap is invariant inference) all already point.
+
+Two notes on getting there, because the first two runs of this probe measured
+nothing:
+
+* The first showed flat solver calls with every engine enabled. `checks=0`:
+  the BMC never reached the obligation and something else proved the program,
+  so the numbers described a different engine.
+* The second disabled the portfolio with `kinduction`, `float_search` and
+  `ai` — none of which are engine ids. They are `k-induction`, `float-search`
+  and `interval-ai`, matched exactly. k-induction ran throughout. This is the
+  identical mistake recorded in this file months ago for `smt_bmc` vs
+  `smt-bmc`, repeated by the same reasoning: the ids look like the module
+  names, and nothing complains when one does not match.
+
+The third run verified the disable took (`grep -c "disabled by
+AJAVE_DISABLE"` = 10) before reading any number off it. That check is the
+difference between the table above and two earlier versions of it that were
+wrong.
+
+### A process note, because the obvious check was wrong
+
+Establishing the guard-clause benchmark's ground truth, `java -ea Main` passed
+three times against the assertion `r == -1 || r == 0`, which is **false**.
+`Verifier.nondetInt()` virtually never returns 0, so the all-zero path — the
+only one that reaches `return x + y`, where the answer is 24 — was never taken.
+A benchmark with a wrong expected verdict was two minutes from being committed
+on the strength of a green JVM run. The verdict has to be argued from the JLS
+and confirmed with a driver that forces the case, which is what `CLAUDE.md`
+already says and what the green run quietly talked me out of.
+
 ## 2026-11-21 — large-block encoding: the BMC forked on every one-armed `if`
 
 +64 on the corpus (2095 to **2159**), the 36-point Alarm family decided and

@@ -262,12 +262,37 @@ before anyone relies on the default.
 ## What this does not do
 
 It merges **branches**, not calls. A call is still inlined, so a deep call
-graph still produces one enormous path constraint —
-`alarmFunctional` reaches 9858 conjuncts on a single path. Java Ranger's
-method-regions are the next step, and the structural answer for real codebases
-is a summary per procedure rather than a region per branch: interpolation-based
+graph still produces one enormous path constraint — `alarmFunctional` reaches
+9858 conjuncts on a single path. The structural answer for real codebases is a
+summary per procedure rather than a region per branch: interpolation-based
 function summaries (FunFrog, 2012; HiFrog, TACAS 2017) or bi-abduction
 (Calcagno, Distefano, O'Hearn, Yang, POPL 2009). Those are tracked separately.
+
+### Why it stops at level 2, measured
+
+This is Java Ranger's `veritestingMode` level 2 — multi-path regions with no
+method calls and a single exit. Its level 4 admits regions with more than one
+exit, and level 5 treats `return` as an exit. Those address the `exits_method`
+refusal, which is what a guard clause (`if (c) { return ...; }`) produces, and
+by count it is the dominant refusal.
+
+By **cost** it is free. 24 guard clauses in sequence
+(`benchmarks/ajave/engine-bmc/GuardClausesAreRefusedAMergeAndItCostsNothing`):
+
+| | solver calls | block visits | forks |
+|---|---|---|---|
+| `AJAVE_LBE=0` | 54 | 57 | 27 |
+| `AJAVE_LBE=1` | 54 | 57 | 27 |
+
+Every branch refused (`merged=0 exits_method=24`) and bit-identical either way,
+because a fork duplicates the remainder of the enclosing region *per arm* and
+an arm that returns has no remainder to duplicate. 57 block visits over a
+49-block method is one pass. The exponential cost removed by level 2 comes only
+from branches where both arms have long continuations.
+
+So levels 4 and 5 are not the next lever here — gh #129, `status:explored`.
+The open CFG question is `back_edge`, a region holding a loop, which no
+published level addresses.
 
 Loops are untouched: a region containing a back edge is declined and the
 explorer unrolls as before.

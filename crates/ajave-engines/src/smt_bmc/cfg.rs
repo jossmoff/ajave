@@ -103,12 +103,48 @@ fn successors(b: &Block) -> Vec<BlockId> {
     }
 }
 
+/// Why a branching block was refused a join.
+///
+/// Counted rather than inferred. The corpus history is three buckets that
+/// counted a *symptom* and were read as a *cause* — `refuted-witness` at 211
+/// pairs that was really 1, the flattened-length premise at 198 that was
+/// really 4, `budget` at 135 that was really 1 — so the next region increment
+/// is chosen from these tallies and not from which of Java Ranger's
+/// `veritestingMode` levels reads as next.
+#[derive(Default, Clone, Copy, Debug)]
+pub(super) struct DeclineTally {
+    /// Branching blocks that got a join and will merge.
+    pub merged: u32,
+    /// The immediate post-dominator is the virtual exit: some path out of this
+    /// branch leaves the method without reconverging. An arm with an early
+    /// `return` or `throw` — a guard clause — is the common case, and this is
+    /// what Java Ranger's levels 4 and 5 address by admitting regions with
+    /// more than one exit.
+    pub exits_method: u32,
+    /// The region holds a loop back edge, so an arm cannot be explored to the
+    /// join without unrolling. Not addressed by any Java Ranger level; loops
+    /// are the explorer's own territory.
+    pub back_edge: u32,
+    /// `region_blocks` could not reach the claimed join. Post-dominance should
+    /// make this impossible, so a non-zero count here is a bug in this file,
+    /// not a program shape.
+    pub region_escapes: u32,
+    /// The region was larger than `AJAVE_LBE_MAX_REGION`.
+    pub over_cap: u32,
+}
+
 pub(super) struct CfgInfo {
     /// `joins[i]` is where a branch or switch at block `i` may be merged, or
     /// `None` when it must fork. Computed eagerly: the explorer asks the same
     /// question once per visit to a block, and a loop body is visited many
     /// times.
     joins: Vec<Option<BlockId>>,
+    /// Test-only: in production the tally is emitted as a log line and not
+    /// retained, because nothing in the engine reads it back. Keeping the
+    /// field unconditionally would be a dead-code warning, and silencing that
+    /// with an allow would hide the next genuinely unread field.
+    #[cfg(test)]
+    tally: DeclineTally,
 }
 
 impl CfgInfo {
@@ -119,26 +155,66 @@ impl CfgInfo {
         let back_edge_source = back_edge_sources(body.entry, n, &succs);
         let cap = max_region_blocks();
 
-        let joins = (0..n)
-            .map(|i| {
-                // Only branching blocks are ever asked, so only they are
-                // computed: the region walk is the expensive part.
-                if succs[i].len() < 2 {
-                    return None;
-                }
-                let j = ipdom[i]?;
-                let region = region_blocks(BlockId(i as u32), j, &succs)?;
-                if region.iter().any(|&b| back_edge_source[b as usize]) {
-                    return None;
-                }
-                if cap != 0 && region.len() > cap {
-                    return None;
-                }
-                Some(j)
-            })
-            .collect();
+        let mut tally = DeclineTally::default();
+        let mut joins: Vec<Option<BlockId>> = Vec::with_capacity(n);
+        for i in 0..n {
+            // Only branching blocks are ever asked, so only they are
+            // computed: the region walk is the expensive part.
+            if succs[i].len() < 2 {
+                joins.push(None);
+                continue;
+            }
+            let Some(j) = ipdom[i] else {
+                tally.exits_method += 1;
+                joins.push(None);
+                continue;
+            };
+            let Some(region) = region_blocks(BlockId(i as u32), j, &succs) else {
+                tally.region_escapes += 1;
+                joins.push(None);
+                continue;
+            };
+            if region.iter().any(|&b| back_edge_source[b as usize]) {
+                tally.back_edge += 1;
+                joins.push(None);
+                continue;
+            }
+            if cap != 0 && region.len() > cap {
+                tally.over_cap += 1;
+                joins.push(None);
+                continue;
+            }
+            tally.merged += 1;
+            joins.push(Some(j));
+        }
 
-        CfgInfo { joins }
+        if tally.merged + tally.exits_method + tally.back_edge + tally.region_escapes
+            + tally.over_cap
+            > 0
+        {
+            log::debug!(
+                "cfg: {} blocks={} merged={} exits_method={} back_edge={} \
+                 region_escapes={} over_cap={}",
+                body.key,
+                n,
+                tally.merged,
+                tally.exits_method,
+                tally.back_edge,
+                tally.region_escapes,
+                tally.over_cap,
+            );
+        }
+
+        CfgInfo {
+            joins,
+            #[cfg(test)]
+            tally,
+        }
+    }
+
+    #[cfg(test)]
+    fn tally(&self) -> DeclineTally {
+        self.tally
     }
 
     /// The block the arms of a branch or switch at `from` reconverge at, when
@@ -476,6 +552,88 @@ mod tests {
         let succs: Vec<Vec<BlockId>> = b.blocks.iter().map(successors).collect();
         let region = region_blocks(BlockId(0), BlockId(2), &succs).expect("join reachable");
         assert_eq!(region, vec![0, 1]);
+    }
+
+    /// A guard clause — `if (c) return;` — has no join inside the method, and
+    /// the tally must attribute it to the exit reason rather than to a loop.
+    /// This is the shape Java Ranger's levels 4 and 5 admit, so the count
+    /// deciding whether to build them has to be right.
+    #[test]
+    fn a_guard_clause_is_counted_as_exiting_the_method() {
+        // bb0: branch -> bb1 (return) / bb2 (continue)
+        // bb1: return
+        // bb2: return
+        let b = body(vec![
+            br(1, 2),
+            Terminator::Return(None),
+            Terminator::Return(None),
+        ]);
+        let t = CfgInfo::of(&b).tally();
+        assert_eq!(t.exits_method, 1, "the branch exits without reconverging");
+        assert_eq!(t.merged, 0);
+        assert_eq!(t.back_edge, 0);
+        assert_eq!(t.region_escapes, 0, "a correct ipdom never escapes");
+    }
+
+    /// A loop header must be attributed to the back edge, not to the exit,
+    /// because the two reasons point at completely different work.
+    #[test]
+    fn a_loop_header_is_counted_as_a_back_edge_not_an_exit() {
+        let b = body(vec![
+            br(1, 2),
+            Terminator::Goto(BlockId(0)),
+            Terminator::Return(None),
+        ]);
+        let t = CfgInfo::of(&b).tally();
+        assert_eq!(t.back_edge, 1);
+        assert_eq!(t.exits_method, 0);
+        assert_eq!(t.merged, 0);
+    }
+
+    /// And the merging shapes must be counted as merged, or the tally would
+    /// make the encoding look like it never fires.
+    #[test]
+    fn a_chain_of_one_armed_ifs_is_counted_as_merged() {
+        let b = body(vec![
+            br(1, 2),
+            Terminator::Goto(BlockId(2)),
+            br(3, 4),
+            Terminator::Goto(BlockId(4)),
+            Terminator::Return(None),
+        ]);
+        let t = CfgInfo::of(&b).tally();
+        assert_eq!(t.merged, 2);
+        assert_eq!(t.exits_method, 0);
+        assert_eq!(t.back_edge, 0);
+    }
+
+    /// `region_escapes` is a bug detector, not a program shape: a correct
+    /// immediate post-dominator is always reachable from the branch. If this
+    /// ever fires on the corpus, `post_dominators` is wrong.
+    #[test]
+    fn region_escapes_stays_zero_on_every_shape_here() {
+        let shapes = vec![
+            vec![br(1, 2), Terminator::Goto(BlockId(2)), Terminator::Return(None)],
+            vec![
+                br(1, 2),
+                Terminator::Goto(BlockId(3)),
+                Terminator::Goto(BlockId(3)),
+                Terminator::Return(None),
+            ],
+            vec![br(1, 2), Terminator::Return(None), Terminator::Return(None)],
+            vec![br(1, 2), Terminator::Goto(BlockId(0)), Terminator::Return(None)],
+            vec![
+                br(1, 4),
+                br(2, 3),
+                Terminator::Goto(BlockId(3)),
+                Terminator::Goto(BlockId(0)),
+                Terminator::Return(None),
+            ],
+        ];
+        for (i, terms) in shapes.into_iter().enumerate() {
+            let t = CfgInfo::of(&body(terms)).tally();
+            assert_eq!(t.region_escapes, 0, "shape {i} escaped its own join");
+        }
     }
 
     /// An infinite loop makes the exit unreachable, so post-dominance is
