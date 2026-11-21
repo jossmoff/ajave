@@ -870,12 +870,21 @@ impl AiEngine {
     }
 }
 
-/// The integer part of an abstract state, as a conjunction of bounds.
+/// The checkable part of an abstract state, as a conjunction.
 ///
-/// Only variables the analysis actually narrowed, and only integer ones: the
-/// certifier checks in LIA, so a float bound could not be stated there and
-/// claiming one would invite a checker to confirm something it cannot see. See
-/// `invariant_check`'s module doc, and #48 for why that matters.
+/// Three kinds of conjunct, all of which the domain already computes:
+/// integer bounds, non-nullness, and array-length bounds.
+///
+/// Only variables the analysis actually narrowed, and **no float or double
+/// bound**: the certifier checks in LIA, so a float bound could not be stated
+/// there and claiming one would invite a checker to confirm something it
+/// cannot see. See `invariant_check`'s module doc, and #48 for why that
+/// matters — ajave's one confirmed wrong TRUE was a float-arithmetic proof.
+///
+/// A length conjunct is deliberately published even though `invariant_check`
+/// currently declines `Expr::Length`: an engine that models lengths (CHC, and
+/// this domain itself) can use the fact, and a claim the *certifier* cannot
+/// check refuses a discharge rather than permitting a bad one.
 ///
 /// Returns `None` when nothing was narrowed — an empty conjunction is `true`,
 /// which is a certificate that justifies nothing, and publishing one would
@@ -901,6 +910,83 @@ fn interval_state_as_formula(
             conjuncts.push(Expr::bin(Op::Le, Expr::Var(*vid), Expr::Int(iv.hi)));
         }
     }
+    // Nullness and array lengths, which the domain has tracked all along and
+    // could not state until `Expr::Null` and `Expr::Length` existed.
+    //
+    // This is the whole point of P1. `NullDeref` is 53% of the corpus's open
+    // obligations and `ArrayBounds` another 34%, and their safety conditions
+    // are exactly these two shapes -- so before this the strongest certificate
+    // this engine could offer for 87% of the open set was a bound on an
+    // unrelated integer. See `docs/proposals/invariant-synthesis.md` G1/G2.
+    //
+    // `Nullness::NonNull` only. `Unknown` is the lattice's top and carries no
+    // claim, and `Null` would be a claim that the *violation* happens, which
+    // is not an `Over` engine's business to publish as an invariant.
+    let n_bounds_only = conjuncts.len();
+    let _ = n_bounds_only;
+    let mut n_null = 0usize;
+    for (vid, n) in &state.nullness {
+        if !matches!(n, crate::interval::Nullness::NonNull) {
+            continue;
+        }
+        // A reference-typed variable only. Nullness of an int is meaningless
+        // and publishing one would invite a consumer to compare a number
+        // against `Null`.
+        if body
+            .vars
+            .get(vid.0 as usize)
+            .map(|vi| matches!(vi.ty, ajave_ir::Ty::Ref | ajave_ir::Ty::Str))
+            .unwrap_or(false)
+        {
+            conjuncts.push(Expr::non_null(Expr::Var(*vid)));
+            n_null += 1;
+        }
+    }
+    let mut n_len = 0usize;
+    // An array's length, as bounds on `Length{r}` rather than on a local that
+    // happens to hold it. `array_len_var` records "this *variable* is the
+    // length of that array", which is a fact about a local and dies with it;
+    // `Length{r}` is a fact about the reference and survives reassignment.
+    for (vid, iv) in &state.array_lens {
+        if *iv == Interval::top() {
+            continue;
+        }
+        let is_ref = body
+            .vars
+            .get(vid.0 as usize)
+            .map(|vi| matches!(vi.ty, ajave_ir::Ty::Ref))
+            .unwrap_or(false);
+        if !is_ref {
+            continue;
+        }
+        let len = Expr::length(Expr::Var(*vid));
+        if iv.lo > NEG_INF {
+            conjuncts.push(Expr::bin(Op::Le, Expr::Int(iv.lo), len.clone()));
+        }
+        if iv.hi < POS_INF {
+            conjuncts.push(Expr::bin(Op::Le, len, Expr::Int(iv.hi)));
+            n_len += 1;
+        }
+        if iv.lo > NEG_INF {
+            n_len += 1;
+        }
+    }
+
+    // P1's exit criterion, countable from a run: if this engine has few
+    // nullness or length facts to publish then G2 of
+    // `docs/proposals/invariant-synthesis.md` is wrong -- the domain does not
+    // know what the corpus needs -- and the plan is mis-targeted. Logged
+    // rather than inferred, for the same reason the region tally is.
+    if n_null + n_len > 0 || !conjuncts.is_empty() {
+        log::debug!(
+            "inv-vocab: {} bounds={} nonnull={} length={}",
+            body.key,
+            conjuncts.len() - n_null - n_len,
+            n_null,
+            n_len,
+        );
+    }
+
     let mut it = conjuncts.into_iter();
     let first = it.next()?;
     Some(it.fold(first, |acc, c| Expr::bin(Op::And, acc, c)))

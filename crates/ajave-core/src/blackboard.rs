@@ -635,32 +635,70 @@ impl Blackboard {
     /// the most valuable hint a Horn solver can be given. The facts now travel
     /// as `Artifact::Invariant` and anything can read them.
     ///
-    /// Recognises the shape the interval engine publishes, `lo <= v && v <= hi`,
-    /// and ignores anything else. A consumer that cannot read a claim must
-    /// skip it, never guess at it.
+    /// Walks the claim's **conjunction** and reads every bound in it, ignoring
+    /// conjuncts it cannot interpret. A consumer that cannot read a claim must
+    /// skip it, never guess at it — but it must skip the *conjunct*, not the
+    /// whole claim.
+    ///
+    /// That distinction was a real defect, not a nicety. This used to match
+    /// the entire formula against `lo <= v && v <= hi`, while the producer
+    /// builds its formula by folding conjuncts left-associatively. So a state
+    /// that narrowed **two or more** variables produced `((c1 && c2) && c3)`,
+    /// whose left operand is an `And` rather than a `Le`, and the match failed:
+    /// hints were recovered only from a state that narrowed exactly one
+    /// variable with both bounds, and every richer state silently yielded
+    /// nothing. Nothing reported it, because "no hints" and "no facts" are
+    /// indistinguishable to the consumer.
+    ///
+    /// Flattening also makes the channel extensible, which is the point. A
+    /// nullness or length conjunct now fails to match *this* reader and is
+    /// skipped individually, leaving the bounds beside it intact — so adding
+    /// vocabulary to `Expr` can no longer break an unrelated consumer.
     pub fn interval_hints_for_method(
         &self,
         method: &MethodKey,
     ) -> HashMap<(BlockId, VarId), (i64, i64)> {
         use crate::term::{Expr, Op};
+        /// Every non-`And` leaf of a conjunction, in order.
+        fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+            match e {
+                Expr::Bin(Op::And, a, b) => {
+                    conjuncts(a, out);
+                    conjuncts(b, out);
+                }
+                other => out.push(other),
+            }
+        }
         let mut out = HashMap::new();
         for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
-            let Expr::Bin(Op::And, lo_e, hi_e) = &inv.formula else {
-                continue;
-            };
-            let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) =
-                (lo_e.as_ref(), hi_e.as_ref())
-            else {
-                continue;
-            };
-            let (Expr::Int(lo), Expr::Var(v1), Expr::Var(v2), Expr::Int(hi)) =
-                (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref())
-            else {
-                continue;
-            };
-            if v1 != v2 {
-                continue;
+            let mut leaves = Vec::new();
+            conjuncts(&inv.formula, &mut leaves);
+            // `lo <= v` and `v <= hi` arrive as separate conjuncts, so a bound
+            // is accumulated per variable rather than read from one pattern.
+            // A variable with only one side bounded contributes that side and
+            // leaves the other at infinity, which is strictly more than the
+            // old reader could express.
+            let mut bounds: HashMap<VarId, (i64, i64)> = HashMap::new();
+            for leaf in leaves {
+                let Expr::Bin(Op::Le, l, r) = leaf else {
+                    continue;
+                };
+                match (l.as_ref(), r.as_ref()) {
+                    // lo <= v
+                    (Expr::Int(lo), Expr::Var(v)) => {
+                        let e = bounds.entry(*v).or_insert((i64::MIN, i64::MAX));
+                        e.0 = e.0.max(*lo);
+                    }
+                    // v <= hi
+                    (Expr::Var(v), Expr::Int(hi)) => {
+                        let e = bounds.entry(*v).or_insert((i64::MIN, i64::MAX));
+                        e.1 = e.1.min(*hi);
+                    }
+                    _ => continue,
+                }
             }
+            for (v1, (lo, hi)) in bounds {
+                let (v1, lo, hi) = (&v1, &lo, &hi);
             // Two claims for one (block, variable) are **intersected**, not
             // overwritten. The log is append-only and several engines may
             // publish bounds for the same point; each `Over` invariant is a
@@ -674,12 +712,13 @@ impl Blackboard {
             // could only ever be found by reading the producer. It took a
             // JVM-confirmed contradiction to find exactly such a bug in
             // `ai::join_block_intervals`.
-            out.entry((inv.at.block, *v1))
-                .and_modify(|(l, h): &mut (i64, i64)| {
-                    *l = (*l).max(*lo);
-                    *h = (*h).min(*hi);
-                })
-                .or_insert((*lo, *hi));
+                out.entry((inv.at.block, *v1))
+                    .and_modify(|(l, h): &mut (i64, i64)| {
+                        *l = (*l).max(*lo);
+                        *h = (*h).min(*hi);
+                    })
+                    .or_insert((*lo, *hi));
+            }
         }
         // An empty range means two producers disagree, which can only happen
         // if one of them is unsound. Dropping the key leaves the consumer with
@@ -1191,6 +1230,100 @@ mod tests {
         let hints = bb.interval_hints_for_method(&at.method);
         assert_eq!(hints.get(&(at.block, v)), Some(&(-3, 42)));
         assert!(bb.has_interval_hints());
+    }
+
+    /// The defect the round-trip test above could not see, because it
+    /// publishes a state that narrowed exactly **one** variable.
+    ///
+    /// `interval_state_as_formula` folds its conjuncts left-associatively, so
+    /// two narrowed variables give `((c1 && c2) && c3) && c4`. The old reader
+    /// matched the *whole* formula against `lo <= v && v <= hi`, whose left
+    /// operand must be a `Le` — and here it is an `And`, so every hint was
+    /// dropped. Hints therefore worked only for single-variable states, and
+    /// nothing reported it because "no hints" and "no facts" look identical
+    /// from the consumer's side.
+    #[test]
+    fn hints_survive_a_state_that_narrowed_more_than_one_variable() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let (v1, v2) = (ajave_ir::VarId(1), ajave_ir::VarId(2));
+
+        // Exactly the shape the producer's fold emits for two variables.
+        let cs = [
+            Expr::bin(Op::Le, Expr::Int(0), Expr::Var(v1)),
+            Expr::bin(Op::Le, Expr::Var(v1), Expr::Int(10)),
+            Expr::bin(Op::Le, Expr::Int(5), Expr::Var(v2)),
+            Expr::bin(Op::Le, Expr::Var(v2), Expr::Int(7)),
+        ];
+        let mut it = cs.into_iter();
+        let first = it.next().unwrap();
+        let formula = it.fold(first, |acc, c| Expr::bin(Op::And, acc, c));
+
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                formula,
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(hints.get(&(at.block, v1)), Some(&(0, 10)));
+        assert_eq!(hints.get(&(at.block, v2)), Some(&(5, 7)));
+    }
+
+    /// A conjunct the reader cannot interpret must cost only that conjunct.
+    ///
+    /// This is what makes the claim vocabulary extensible: nullness and length
+    /// conjuncts now sit beside the bounds, and a reader that only understands
+    /// bounds must still get them.
+    #[test]
+    fn an_uninterpretable_conjunct_does_not_hide_the_bounds_beside_it() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(3);
+        let r = ajave_ir::VarId(4);
+
+        let formula = Expr::bin(
+            Op::And,
+            Expr::bin(
+                Op::And,
+                // A nullness claim this reader knows nothing about.
+                Expr::non_null(Expr::Var(r)),
+                Expr::bin(Op::Le, Expr::Int(2), Expr::Var(v)),
+            ),
+            // And a length claim, likewise.
+            Expr::bin(Op::Le, Expr::length(Expr::Var(r)), Expr::Int(99)),
+        );
+
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                formula,
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(
+            hints.get(&(at.block, v)),
+            Some(&(2, i64::MAX)),
+            "the bound must survive the conjuncts this reader cannot parse"
+        );
     }
 
     /// A claim the reader cannot parse must be skipped, never guessed at.

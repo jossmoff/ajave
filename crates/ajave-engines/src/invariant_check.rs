@@ -203,6 +203,37 @@ fn render(e: &Expr, post: bool) -> Option<String> {
                 render(obj, post)?
             )
         }
+        // Null is the integer 0, which is the representation every encoder in
+        // the tree already chose for it -- `smt_encode` emits
+        // `bv_const(0, 32)`, `concrete` and `concurrent_exec` use `Ref(0)`,
+        // `nra` uses `mk_real(0)`. Matching that convention is the same
+        // requirement as matching `arr_name` and `fld_name`: a checker that
+        // spelled null differently from the transition relation would be
+        // checking a claim about a value the program never produces.
+        //
+        // The claim language keeps `Null` and `Int(0)` distinct even though
+        // this encoding does not, and that is deliberate rather than
+        // inconsistent. The distinction buys type discipline *in the
+        // vocabulary* -- it stops a producer writing `r + 1` or a consumer
+        // ordering two references -- and is discharged here, at the one place
+        // that is allowed to know how references are represented.
+        Expr::Null => "0".to_string(),
+        // Declined, and this is the honest answer rather than a gap.
+        //
+        // `encode_body_lia` does not encode `Rvalue::ArrayLength`: there is no
+        // ghost length array in the transition relation for a length claim to
+        // read. Rendering one would mean inventing a name the transition
+        // relation never writes, so preservation would be a question about a
+        // symbol nothing constrains -- which is exactly the failure the
+        // comments on `Select` and `Field` above exist to prevent, and it
+        // would confirm length invariants about nothing.
+        //
+        // So a length claim refuses the discharge until the LIA encoder tracks
+        // ghost lengths the way both CHC encoders already do. `Expr::Length`
+        // is still worth having before then: engines that *do* model lengths
+        // (CHC, and the interval domain's own `array_lens`) can exchange the
+        // fact, and the obligation is simply not certifiable yet.
+        Expr::Length { .. } => return None,
         // A double is held as a bit pattern and means nothing in LIA; an
         // `Apply` is an unmodelled library call by construction.
         Expr::Double(_) | Expr::Apply { .. } => return None,
@@ -453,6 +484,85 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// `body_check_only`, but the obligation is a dereference of a reference.
+    ///
+    /// The error formula is `cond == 0` for every obligation kind, and null is
+    /// encoded as 0, so for this obligation the error *is* `ref == null` and a
+    /// nullness invariant is exactly what sufficiency wants.
+    fn body_deref() -> Body {
+        let mut b = body_check_only(Ty::Ref);
+        b.obligations[0].kind = ObligationKind::NullDeref;
+        b
+    }
+
+    /// `NullDeref` is 53% of the corpus's open obligations and its safety
+    /// condition could not be *stated* before `Expr::Null`. This is the test
+    /// that the vocabulary addition does the thing it was added for.
+    #[test]
+    fn a_nullness_claim_is_sufficient_for_a_dereference() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(
+            &body_deref(),
+            &inv(Expr::non_null(Expr::Var(VarId(1)))),
+            ObligationId(0),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "`r != null` must discharge a dereference of `r`"
+        );
+    }
+
+    /// The negative control for the same addition. Without it, `Confirmed`
+    /// above could come from the checker waving through anything mentioning
+    /// `Null`.
+    #[test]
+    fn claiming_the_reference_is_null_cannot_discharge_a_dereference() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(
+            &body_deref(),
+            &inv(Expr::bin(Op::Eq, Expr::Var(VarId(1)), Expr::Null)),
+            ObligationId(0),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Refuted,
+            "`r == null` is the violation, not a proof of its absence"
+        );
+    }
+
+    /// `Expr::Length` is expressible and deliberately **not** checkable:
+    /// `encode_body_lia` does not track a ghost length, so there is no array
+    /// in the transition relation for the claim to read. Declining refuses the
+    /// discharge, which is the safe direction; confirming it would be a claim
+    /// about a symbol nothing constrains.
+    ///
+    /// This test is the guard on that decision. If someone later teaches the
+    /// LIA encoder ghost lengths, this test fails and must be replaced by a
+    /// `Confirmed` one -- which is the correct way to find out that the
+    /// `return None` in `render` has become wrong.
+    #[test]
+    fn a_length_claim_refuses_the_discharge_until_lia_tracks_ghost_lengths() {
+        let Some(s) = solver() else { return };
+        let r = check_inductive(
+            &body_deref(),
+            &inv(Expr::bin(
+                Op::Gt,
+                Expr::length(Expr::Var(VarId(1))),
+                Expr::Int(0),
+            )),
+            ObligationId(0),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Inconclusive,
+            "a length claim must refuse, not confirm, while LIA has no length"
+        );
     }
 
     /// Control. Without this, every `Refuted` below could come from the

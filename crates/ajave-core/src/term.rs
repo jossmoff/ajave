@@ -173,6 +173,49 @@ pub enum Expr {
         field: ajave_ir::FieldKey,
         obj: Box<Expr>,
     },
+    /// The null reference.
+    ///
+    /// # What a consumer may conclude
+    ///
+    /// `Bin(Ne, r, Null)` is the claim that `r` is non-null **at the program
+    /// point the carrying artifact names**, and nothing about `r` anywhere
+    /// else. `NullDeref` is 53% of the corpus's open obligations and its
+    /// safety condition is exactly this shape, so without it an invariant
+    /// cannot be *sufficient* for the commonest obligation there is.
+    ///
+    /// A reference is not a number. A consumer must not read `Null` as
+    /// `Int(0)` and must not do arithmetic on it: the JVM gives no numeric
+    /// meaning to a reference, and two distinct non-null references are
+    /// unordered. `Op::Eq` and `Op::Ne` are the only operators defined on it.
+    Null,
+    /// The length of the array that `obj` refers to.
+    ///
+    /// Burstall-style like `Field`: one length array indexed by the reference,
+    /// so `Length{o}` and `Length{p}` are the same cell exactly when `o = p`
+    /// and aliasing stays the solver's job rather than a points-to analysis's.
+    /// This is the shape both CHC encoders already maintain as a ghost length.
+    ///
+    /// # Strength, versus `Select`
+    ///
+    /// `Length { obj }` is about **one reference**, as `Field` is.
+    /// `Select { site }` is about **every array allocated at a site**. A
+    /// consumer must not read one as the other: a length claim about `o` says
+    /// nothing about another array from the same `new`.
+    ///
+    /// # Partiality
+    ///
+    /// A reference from a parameter or an unmodelled call has no known length.
+    /// An absent length is **unconstrained**, never zero — zero would be the
+    /// much stronger claim that the array is empty.
+    ///
+    /// # Why this is not `Apply` on `arraylength`
+    ///
+    /// `Apply` announces "nobody may have a model for this"
+    /// (`mentions_call`), and a consumer is entitled to decline it. Array
+    /// length is not unmodelled: the IR has `Rvalue::ArrayLength` and both CHC
+    /// encoders track it. Routing it through `Apply` would make every length
+    /// claim look optional to every consumer.
+    Length { obj: Box<Expr> },
     /// A named library method applied to arguments. Present so a claim can be
     /// *about* `Math.sin(x)` without anyone having to model it — which is the
     /// whole point of being able to ask.
@@ -198,6 +241,27 @@ impl Expr {
 
     pub fn double(v: f64) -> Expr {
         Expr::Double(v.to_bits())
+    }
+
+    /// `obj` is non-null. The commonest claim there is; see `Expr::Null`.
+    pub fn non_null(obj: Expr) -> Expr {
+        Expr::bin(Op::Ne, obj, Expr::Null)
+    }
+
+    pub fn length(obj: Expr) -> Expr {
+        Expr::Length {
+            obj: Box::new(obj),
+        }
+    }
+
+    /// `0 <= index < Length{obj}` — the safety condition of an `ArrayBounds`
+    /// obligation, which is 34% of the corpus's open obligations.
+    pub fn in_bounds(index: Expr, obj: Expr) -> Expr {
+        Expr::bin(
+            Op::And,
+            Expr::bin(Op::Le, Expr::Int(0), index.clone()),
+            Expr::bin(Op::Lt, index, Expr::length(obj)),
+        )
     }
 
     pub fn call(class: &str, name: &str, desc: &str, args: Vec<Expr>) -> Expr {
@@ -226,7 +290,9 @@ impl Expr {
                     out.push(*v);
                 }
             }
-            Expr::Int(_) | Expr::Double(_) | Expr::Bool(_) => {}
+            Expr::Int(_) | Expr::Double(_) | Expr::Bool(_) | Expr::Null => {}
+            // The reference may be a variable; the length itself is not one.
+            Expr::Length { obj } => obj.collect_vars(out),
             Expr::Bin(_, a, b) => {
                 a.collect_vars(out);
                 b.collect_vars(out);
@@ -289,6 +355,8 @@ impl std::fmt::Display for Expr {
                 }
             }
             Expr::Bool(b) => write!(f, "{b}"),
+            Expr::Null => f.write_str("null"),
+            Expr::Length { obj } => write!(f, "{obj}.length"),
             Expr::Bin(op, a, b) => write!(f, "({a} {} {b})", op.symbol()),
             Expr::Not(a) => write!(f, "!{a}"),
             Expr::Apply {
@@ -360,6 +428,49 @@ mod tests {
 
     /// Signatures are part of identity. `CLAUDE.md` states the rule for
     /// `contract_of`; a lemma about one overload is not a lemma about another.
+    #[test]
+    /// The claim language keeps these apart on purpose. A reference has no
+    /// numeric meaning in the JVM, so a producer must not be able to write
+    /// `r + 1` and a consumer must not be able to order two references. The
+    /// LIA checker is the one place allowed to know that null is encoded as 0.
+    #[test]
+    fn null_is_not_the_integer_zero() {
+        assert_ne!(Expr::Null, Expr::Int(0));
+        assert_ne!(Expr::non_null(x()), Expr::bin(Op::Ne, x(), Expr::Int(0)));
+    }
+
+    /// A consumer uses `vars` to check a claim is about variables it has and
+    /// to refuse it otherwise. A length claim's receiver is a variable, and a
+    /// `vars` that could not see through `Length` would let a consumer read a
+    /// claim about a variable it does not have.
+    #[test]
+    fn a_length_claim_is_about_its_receiver() {
+        assert_eq!(Expr::length(x()).vars(), vec![VarId(0)]);
+        assert_eq!(
+            Expr::in_bounds(Expr::Var(VarId(2)), x()).vars(),
+            vec![VarId(2), VarId(0)]
+        );
+    }
+
+    /// Array length is modelled, unlike `Math.sin`. If it announced itself as
+    /// an unmodelled call, every consumer would be entitled to decline every
+    /// bounds claim -- which is 34% of the corpus's open obligations.
+    #[test]
+    fn a_length_claim_is_not_an_unmodelled_call() {
+        assert!(!Expr::length(x()).mentions_call());
+        assert!(!Expr::in_bounds(Expr::Var(VarId(2)), x()).mentions_call());
+    }
+
+    #[test]
+    fn the_new_claims_read_back_the_way_they_were_written() {
+        assert_eq!(Expr::non_null(x()).to_string(), "(v0 != null)");
+        assert_eq!(Expr::length(x()).to_string(), "v0.length");
+        assert_eq!(
+            Expr::in_bounds(Expr::Var(VarId(2)), x()).to_string(),
+            "((0 <= v2) && (v2 < v0.length))"
+        );
+    }
+
     #[test]
     fn overloads_are_different_claims() {
         let from_int = Expr::call(
