@@ -426,9 +426,6 @@ mod tests {
         assert_eq!(e.vars(), vec![VarId(0)]);
     }
 
-    /// Signatures are part of identity. `CLAUDE.md` states the rule for
-    /// `contract_of`; a lemma about one overload is not a lemma about another.
-    #[test]
     /// The claim language keeps these apart on purpose. A reference has no
     /// numeric meaning in the JVM, so a producer must not be able to write
     /// `r + 1` and a consumer must not be able to order two references. The
@@ -471,6 +468,8 @@ mod tests {
         );
     }
 
+    /// Signatures are part of identity. `CLAUDE.md` states the rule for
+    /// `contract_of`; a lemma about one overload is not a lemma about another.
     #[test]
     fn overloads_are_different_claims() {
         let from_int = Expr::call(

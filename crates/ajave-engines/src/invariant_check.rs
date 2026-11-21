@@ -113,7 +113,7 @@ fn mentioned_vars(e: &Expr, out: &mut Vec<VarId>) {
 /// library application, a division (whose JVM semantics is truncating and not
 /// SMT-LIB's `div`). Declining is the safe direction: the caller turns `None`
 /// into `Inconclusive`, which refuses the discharge.
-fn render(e: &Expr, post: bool) -> Option<String> {
+pub(crate) fn render(e: &Expr, post: bool) -> Option<String> {
     Some(match e {
         // `v{i}p` directly, not a separate `post_v{i}` bound to it. The
         // indirection hid a bug: only *variables* were being prefixed, so a
@@ -244,7 +244,7 @@ fn render(e: &Expr, post: bool) -> Option<String> {
 ///
 /// `unknown`, a solver error, or anything unparseable is **not** UNSAT. A
 /// proof may only rest on a definite answer.
-fn is_unsat(solver: &str, script: &str) -> Option<bool> {
+pub(crate) fn is_unsat(solver: &str, script: &str) -> Option<bool> {
     match run_solver_batch_pub(solver, &["-in", "-smt2"], script) {
         Ok(lines) => {
             let answer = lines.iter().find(|l| {
