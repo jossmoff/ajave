@@ -313,3 +313,17 @@ ajave/jvm-arrays/FlattenedMatrixIndexAcrossACall.yml no-runtime-exception
 # gh #88: a call declared "modelled" but encoded as a free variable. The hash
 # of a literal is a constant, and the BMC used to claim it could be anything.
 ajave/jvm-strings/LiteralStringHashIsAConstantNotAFreeVariable.yml valid-assert
+
+# Large-block encoding (gh #128). The first is the minimal program: 24
+# one-armed ifs, which the old reachability join declined on every one and so
+# forked, exhausting MAX_FORKS. The second pins the Alarm family, 893 blocks in
+# one Simulink-generated method, which went from 0 to 36 points across both
+# properties -- it is the task that shows the path-length bound was capping the
+# size of method the engine could traverse at all, not its effort.
+ajave/engine-bmc/AChainOfOneArmedIfsMustNotForkPerBranch.yml valid-assert
+sv-comp/java-ranger-regression/alarm/Alarm_prop2.yml valid-assert
+# The FALSE twin. Merging is new discharge surface, and the TRUE twin cannot
+# tell a correct merge from one that silently loses an arm -- losing an arm
+# still leaves the invariant holding. Here the lost arm is the one carrying the
+# violation, so the same bug reads as a wrong TRUE at -32.
+ajave/engine-bmc/AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant.yml valid-assert

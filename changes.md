@@ -2,6 +2,145 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-21 — large-block encoding: the BMC forked on every one-armed `if`
+
++64 on the corpus (2095 to **2159**), the 36-point Alarm family decided and
+four times faster, and zero wrong answers. The interesting part is not the
+number but that the mechanism had been sitting in a helper nobody had reason to
+read, and that two independent defects had to be fixed together before either
+showed a gain.
+
+Full write-up, with the soundness argument: `docs/large-block-encoding.md`.
+
+### Defect 1: `find_join` was not computing post-dominators
+
+The explorer has always had two ways to encode a branch. `handle_branch_fork`
+explores each arm to the end of the enclosing region and merges the end states,
+so the remainder of the method is explored once per arm. `handle_branch_diamond`
+explores each arm only to the point where they reconverge, merges with one
+`ite` per differing variable, and explores the continuation **once**. Linear
+against exponential, and `find_join` decided which a branch got.
+
+It intersected depth-limited forward-reachable sets and took the numerically
+smallest common block, declining whenever one arm's target was reachable from
+another arm's — "the branches are not independent". That condition describes
+**the commonest branch shape in Java**: `if (c) { ... }` compiles to
+`ifeq join`, so the else target *is* the join and is trivially reachable from
+the then block. Every one-armed `if` forked. The reachability walk was also
+capped at 50 blocks and followed only edges to higher block ids, so a distant
+join was not found either.
+
+`cfg.rs` now computes immediate post-dominators as dominators of the reverse
+CFG rooted at a virtual exit (Cooper, Harvey, Kennedy, 2001), classifies back
+edges by three-colour DFS, and offers a join only when the region between
+branch and post-dominator is acyclic. Exception edges are deliberately absent
+from that graph: an implicit throw is explored under a saved state and
+restored, so it never rejoins the path it left, and including those edges would
+make the virtual exit post-dominate almost everything.
+
+**The merge is exact, not an approximation.** Each arm yields a variable-to-term
+map; the merged map sends each variable to `ite(c, t_then, t_else)`, and for any
+concrete execution `c` has a definite value, so the merged state denotes exactly
+the state that execution reaches. That is why the diamond path posts no
+feasibility query and sets no completeness flag — and why both preconditions
+are load-bearing rather than conservative. Without post-dominance an arm is
+explored to a *different program point* and the merge describes no execution at
+all. Without acyclicity the arm stops at the sentinel after one iteration and
+silently drops the rest.
+
+### Defect 2: `max_depth` capped the size of method, not the effort
+
+Found while measuring the first. `max_depth` bounds **path length in blocks**,
+and it is not what makes exploration terminate — iterations are bounded by
+`MAX_LOOP_UNROLL`, inlining by `MAX_CALL_DEPTH`, work by `MAX_BLOCK_VISITS`,
+`MAX_SOLVER_CALLS` and the deadline. A flat 200 therefore bought no
+termination; it capped the size of method the engine could traverse at all, at
+200 blocks of straight-line code.
+
+`alarmFunctional` is 893 blocks in one method, so the search was cut after a
+fraction of it with 59 forks against a cap of 500 and 608 block visits against
+50,000 — and iterative deepening deliberately never raises depth, so no
+resumption could reach it (#126). `path_length_bound` now takes the larger of
+the floor and the entry body's block count times a slack factor, which leaves
+every body under `floor / slack` blocks **bit-identical**.
+
+Neither fix scores on its own. With `AJAVE_LBE=1` at the default depth the
+Alarm family is still 0 of 18; with the depth raised and `AJAVE_LBE=0` it is
+also still 0 of 18, because the fork cap then binds instead. Both together:
+18 of 18.
+
+### Measured
+
+| | before (`e83a4a2`) | after | delta |
+|---|---|---|---|
+| valid-assert | 911 | **948** | +37 |
+| no-runtime-exception | 1184 | **1211** | +27 |
+| combined | 2095 | **2159** | **+64** |
+| correct | 1337 | 1370 | +33 |
+| wrong | 0 | **0** | — |
+
+1785 runs in 4741s, 29 timeouts, **0 `ERROR` verdicts** — so the run was not
+contended into process kills, which is the failure mode that reads as a verdict
+regression. The timeouts are 14 `jbmc-regression`, 9 `argv-tasks`, 3
+`securibench`, 3 `autostub`, and **none** in `java-ranger-regression`: the
+large-method category that gained most did not pay for it in wall clock.
+
+The Alarm family went 0 to **36** points, 18 of 18 correct, and 526s to 122s.
+That is 36 of the +64, so **+28 came from the rest of the corpus** — post-
+dominator joins are not a generated-code special case.
+
+On the minimal benchmark added for this (24 one-armed ifs maintaining
+`x + y == 24`), same build, valid-assert:
+
+| | forks | solver calls | block visits |
+|---|---|---|---|
+| `AJAVE_LBE=0` | 500 (the cap) | 980 | 862 |
+| `AJAVE_LBE=1` | 2 | 4 | 53 |
+
+Two minimal benchmarks were added, and the second is the one that matters.
+`AChainOfOneArmedIfsMustNotForkPerBranch` cannot tell a correct merge from one
+that silently loses an arm — losing an arm still leaves `x + y == 24` holding.
+`AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant` gives one arm the
+invariant-breaking update, so the lost arm is the one carrying the violation
+and the same bug reads as a **wrong TRUE at -32**. It also discriminates on the
+verdict in the full portfolio, which the TRUE twin does not, because CHC proves
+the TRUE one in a single query: `AJAVE_LBE=0` gives UNKNOWN and `AJAVE_LBE=1`
+gives FALSE, replayed.
+
+Oracles that use no expected verdict, which matter more than usual here because
+merging now fires on most branches and a latent bug in `merge_states_ite` would
+surface as a flip: `--repeat 2` all verdicts stable, `metamorphic.py` **PASS,
+no verdict changed** over 69 transformed runs, `smoke --check` PASS at 191
+against a 190 baseline with 0 WRONG.
+
+### A number that was a derivation and is now a measurement
+
+The run also settles the size of the witness gap filed as #127. Correct FALSE
+is **564** on valid-assert and **17** on no-runtime-exception: **581 of the
+2159 points are FALSE points**, each requiring a format-1.0 GraphML violation
+witness that ajave does not emit. The figure had been derived arithmetically as
+577-601 from the census and the scores before a full run existed; it lands
+inside that range.
+
+### What is still fitted, and what this does not do
+
+The slack factor is a fitted constant and its sweep is **not done** — it was
+started and abandoned rather than block the merge, so nothing above rests on
+it. What makes 4 low-risk is structural, not measured: the floor dominates
+below `floor / slack` blocks, so every small body is bit-identical either way.
+The sweep belongs on `java-ranger-regression` across slack in {1, 2, 4, 8}
+with an `AJAVE_LBE=0` control, and until it runs the value is provisional. `AJAVE_LBE_MAX_REGION` implements adjustable-block encoding's region
+operator (Beyer, Keremoglu, Wendler, FMCAD 2010) and is **unswept**, defaulting
+to unbounded: the corpus shows no sign yet of the formula-size cost that
+parameter exists to control, so it is in place and measured at 0 rather than
+tuned.
+
+This merges **branches, not calls**. A call is still inlined, so a deep call
+graph still yields one enormous path constraint — `alarmFunctional` reaches
+9858 conjuncts on a single path. Java Ranger's method-regions are the next
+step; the structural answer for real codebases is a summary per procedure
+rather than a region per branch.
+
 ## 2026-11-21 — the Alarm family dies on path enumeration, and three caps bind in turn
 
 The census (gh #123) attributed the `structural` bucket to `feas ==

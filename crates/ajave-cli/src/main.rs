@@ -309,10 +309,13 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         engines.push(Box::new(ajave_engines::ranges::Ranges::new()));
     }
     if let Some(factory) = ajave_core::smt_smtlib::SmtLibFactory::from_env() {
-        // Diagnostic only: which cut actually binds on a given task. The
-        // engine's own iterative deepening deliberately does not raise depth
-        // (see `scale`'s doc comment), so this is the only way to ask whether
-        // `max_depth` is what truncated an exploration.
+        // The *floor* under the BMC's path-length bound, which
+        // `path_length_bound` raises in proportion to the entry body's size.
+        // It began as a diagnostic — iterative deepening deliberately never
+        // raises depth, so this was the only way to ask whether `max_depth`
+        // was what truncated an exploration — and the answer was that a flat
+        // bound caps the size of method traversable at all. See
+        // `docs/large-block-encoding.md` and gh #126.
         let bmc_depth: u32 = std::env::var("AJAVE_BMC_DEPTH")
             .ok()
             .and_then(|v| v.parse().ok())

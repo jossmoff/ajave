@@ -58,9 +58,18 @@ CONCURRENT = re.compile(
 )
 
 
-def load_tasks(root):
+def load_tasks(root, only=None):
+    """Every task under `root`, or only those whose path contains `only`.
+
+    The filter exists because the default is 200 JVM executions per
+    nondeterministic benchmark across the whole suite, which runs for hours. A
+    validator that can only be run in full is a validator that does not get run
+    after adding one benchmark, which is exactly when `CLAUDE.md` asks for it.
+    """
     tasks = []
     for yml in sorted(glob.glob(os.path.join(root, "*", "*.yml"))):
+        if only and only not in yml:
+            continue
         with open(yml) as f:
             data = yaml.safe_load(f)
         verdicts = {}
@@ -143,12 +152,18 @@ def main():
     ap.add_argument("--dir", default="benchmarks/ajave")
     ap.add_argument("--runs", type=int, default=200,
                     help="executions per nondeterministic benchmark")
+    ap.add_argument("--only", default=None,
+                    help="validate only tasks whose path contains this "
+                         "substring, e.g. a category name or a benchmark name")
     args = ap.parse_args()
 
     common = os.path.join(args.dir, "common")
-    tasks = load_tasks(args.dir)
+    tasks = load_tasks(args.dir, args.only)
     if not tasks:
-        print(f"no tasks found under {args.dir}/")
+        where = f"{args.dir}/"
+        if args.only:
+            where += f" matching {args.only!r}"
+        print(f"no tasks found under {where}")
         sys.exit(2)
 
     print(f"Validating {len(tasks)} benchmarks against a real JVM\n")
