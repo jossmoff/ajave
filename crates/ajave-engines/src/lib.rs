@@ -26,6 +26,7 @@ pub mod imc;
 pub mod interpolation;
 pub mod interval;
 pub mod houdini;
+pub mod houdini_engine;
 pub mod invariant_check;
 pub mod kinduction;
 mod math_eval;

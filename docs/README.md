@@ -48,6 +48,7 @@ table mirrors it. `Direction` is what the blackboard lets an engine conclude —
 | `kinduction` | Over | — | Base and step case over a single loop |
 | `chc` | Over | — | Horn clauses through Z3's Spacer |
 | `imc` | Over | — | Interpolation-based model checking |
+| `houdini` | Over | — | Candidate-elimination invariant synthesis; off unless `AJAVE_HOUDINI=1` |
 | `cegar` | Over | — | Predicate abstraction with refinement |
 
 **7 of the 13 engines have no strategy doc.** That breaks the rule below, which asks

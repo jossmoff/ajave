@@ -279,6 +279,13 @@ pub fn synthesise(
     }
 }
 
+/// Fixtures shared with `houdini_engine`'s tests. A second hand-built CFG
+/// would be a second thing to keep correct.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    pub(crate) use super::tests::counting_loop;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +320,7 @@ mod tests {
     /// bb3: check, return
     ///
     /// v0 = x, v1 = n.
-    fn counting_loop() -> Body {
+    pub(crate) fn counting_loop() -> Body {
         let lt = VarId(2);
         Body {
             is_static: true,

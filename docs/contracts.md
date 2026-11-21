@@ -68,6 +68,18 @@ nothing had to.
 A kind deliberately parked (`Query`/`Lemma` were, behind a flag) declares that
 rather than being silently absent: `purpose: Parked { why }`.
 
+`InvariantMap` (2026-11-21) was added with both named up front, because the
+rule above is what it would otherwise have violated: produced by `houdini`,
+consumed by `Blackboard::interval_hints_for_method`, which reads a certified
+map's entries as bounds through the same walk as a point claim. It also
+exposed the mechanism that let the rule be broken silently —
+`Blackboard::publish` ended in `_ => {}`, so a new kind was logged and stored
+nowhere, which is indistinguishable from having no producer. That arm is now
+the explicit remaining variants, so the next kind is a compile error here.
+
+`Precision` and `Residual` remain producer-less and are now *named* as such in
+that match, with the reason, rather than disappearing into a catch-all.
+
 ### 3. Artifact monotonicity — dynamic, and the important one
 
 This generalises `contract_monotonicity.py` from library contracts to internal

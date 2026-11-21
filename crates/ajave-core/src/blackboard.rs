@@ -596,6 +596,42 @@ impl Blackboard {
         self.invariants.iter().find(|i| i.id == id)
     }
 
+    /// Every distinct conjunct any engine has claimed about a method, as a
+    /// candidate pool.
+    ///
+    /// The general form of `interval_hints_for_method`, and the reason that
+    /// one is a special case rather than the interface. A reader that wants
+    /// *bounds* has to parse a shape; a reader that wants *candidates* wants
+    /// the conjuncts themselves and will test each one anyway — so handing
+    /// back the claims unparsed is both simpler and lossless. A conjunct this
+    /// caller cannot use is dropped by whatever tests it, not silently here.
+    ///
+    /// Deduplicated and sorted by rendered form, because a candidate pool
+    /// whose order varies between runs makes synthesis non-reproducible even
+    /// though the result is order-independent — see `houdini`'s canonical
+    /// conjunct ordering for the same reason.
+    pub fn claim_conjuncts_for_method(&self, method: &MethodKey) -> Vec<crate::term::Expr> {
+        use crate::term::{Expr, Op};
+        fn flatten(e: &Expr, out: &mut Vec<Expr>) {
+            match e {
+                Expr::Bin(Op::And, a, b) => {
+                    flatten(a, out);
+                    flatten(b, out);
+                }
+                other => out.push(other.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
+            flatten(&inv.formula, &mut out);
+        }
+        // `Expr` is `Eq + Hash`, but dedup by rendered form so that two
+        // structurally different spellings of the same claim collapse.
+        out.sort_by_key(|e| e.to_string());
+        out.dedup_by_key(|e| e.to_string());
+        out
+    }
+
     /// Certified maps for a method — the only ones a discharge may rest on.
     ///
     /// `Candidate` maps are deliberately excluded: `InvStatus`'s contract says
@@ -714,10 +750,33 @@ impl Blackboard {
                 other => out.push(other),
             }
         }
+        // Point claims and **certified map entries**, read by the same walk.
+        //
+        // The map is what gives `Artifact::InvariantMap` a consumer. Without
+        // one it would be the fifth artifact kind with a producer and nobody
+        // reading it, which `CLAUDE.md` calls "a comment with a type" — and
+        // `docs/contracts.md`'s second mechanical check exists to catch
+        // exactly that.
+        //
+        // `Inductive` maps only. A `Candidate` map has been checked by nobody,
+        // and a hint derived from an unchecked claim would prune paths on the
+        // strength of a guess — which for an `Under` consumer like the BMC
+        // means missing a bug, i.e. the unsound direction.
+        let point_claims = self
+            .invariants
+            .iter()
+            .filter(|i| &i.at.method == method)
+            .map(|i| (i.at.block, &i.formula));
+        let map_claims = self
+            .maps
+            .iter()
+            .filter(|m| &m.method == method && m.status == InvStatus::Inductive)
+            .flat_map(|m| m.entries.iter().map(|(p, f)| (p.block, f)));
+
         let mut out = HashMap::new();
-        for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
+        for (block, formula) in point_claims.chain(map_claims) {
             let mut leaves = Vec::new();
-            conjuncts(&inv.formula, &mut leaves);
+            conjuncts(formula, &mut leaves);
             // `lo <= v` and `v <= hi` arrive as separate conjuncts, so a bound
             // is accumulated per variable rather than read from one pattern.
             // A variable with only one side bounded contributes that side and
@@ -757,7 +816,7 @@ impl Blackboard {
             // could only ever be found by reading the producer. It took a
             // JVM-confirmed contradiction to find exactly such a bug in
             // `ai::join_block_intervals`.
-                out.entry((inv.at.block, *v1))
+                out.entry((block, *v1))
                     .and_modify(|(l, h): &mut (i64, i64)| {
                         *l = (*l).max(*lo);
                         *h = (*h).min(*hi);
@@ -1368,6 +1427,76 @@ mod tests {
             hints.get(&(at.block, v)),
             Some(&(2, i64::MAX)),
             "the bound must survive the conjuncts this reader cannot parse"
+        );
+    }
+
+    /// `Artifact::InvariantMap` must have a consumer, or it is a comment with
+    /// a type. This is that consumer: a certified map's entries become hints
+    /// at their blocks, read by the same walk as a point claim.
+    #[test]
+    fn a_certified_map_entry_becomes_a_hint_at_its_block() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(5);
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("houdini"),
+            Direction::Over,
+            Artifact::InvariantMap(InvariantMap {
+                id,
+                method: at.method.clone(),
+                entries: [(
+                    at.clone(),
+                    Expr::bin(
+                        Op::And,
+                        Expr::bin(Op::Le, Expr::Int(1), Expr::Var(v)),
+                        Expr::bin(Op::Le, Expr::Var(v), Expr::Int(9)),
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+                status: InvStatus::Inductive,
+                scope: Scope::Method(at.method.clone()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            bb.interval_hints_for_method(&at.method).get(&(at.block, v)),
+            Some(&(1, 9))
+        );
+    }
+
+    /// And a map nobody checked must not become a hint. A hint prunes paths,
+    /// and for an `Under` consumer pruning on an unchecked claim means missing
+    /// a bug — the unsound direction.
+    #[test]
+    fn an_unchecked_map_does_not_become_a_hint() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(5);
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("houdini"),
+            Direction::Over,
+            Artifact::InvariantMap(InvariantMap {
+                id,
+                method: at.method.clone(),
+                entries: [(
+                    at.clone(),
+                    Expr::bin(Op::Le, Expr::Int(1), Expr::Var(v)),
+                )]
+                .into_iter()
+                .collect(),
+                status: InvStatus::Candidate,
+                scope: Scope::Method(at.method.clone()),
+            }),
+        )
+        .unwrap();
+        assert!(
+            bb.interval_hints_for_method(&at.method).is_empty(),
+            "a Candidate map has been checked by nobody and must not prune"
         );
     }
 

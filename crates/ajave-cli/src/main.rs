@@ -359,6 +359,18 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             )));
         }
     }
+    // Synthesis after the BMC and before CHC.
+    //
+    // After, because its candidate pool is other engines' claims and the BMC's
+    // are the richest; before CHC, because an inductive map is the hint a Horn
+    // solver most wants and CHC cannot use one it has not been given yet.
+    // Off unless AJAVE_HOUDINI=1 — see `houdini_engine::enabled`.
+    {
+        let h = ajave_engines::houdini_engine::HoudiniEngine::new();
+        if h.available() {
+            engines.push(Box::new(h));
+        }
+    }
     // CHC after BMC: BMC handles falsification; CHC proves safety for
     // recursive programs that BMC can't resolve (unbounded recursion).
     {
