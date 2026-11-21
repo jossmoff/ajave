@@ -2,6 +2,61 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-21 — the Alarm family dies on path enumeration, and three caps bind in turn
+
+The census (gh #123) attributed the `structural` bucket to `feas ==
+SatResult::Unknown` on branch feasibility. For the Alarm family that is wrong,
+and the real mechanism is worth recording because it changes what work is
+worth doing.
+
+`AJAVE_BMC_DEPTH` (branch `probe/bmc-depth-cap`, diagnostic only, default 200
+so behaviour is unchanged) makes the BMC's path-length bound settable. The
+engine's own iterative deepening deliberately refuses to raise it, so there was
+previously no way to ask the question.
+
+`java-ranger-regression/alarm/Alarm_prop2`, valid-assert, expected TRUE, 893
+basic blocks in one Simulink-generated method, single invocation, 240s:
+
+| `max_depth` | what cut it | forks | solver calls | blocks | violations | verdict |
+|---|---|---|---|---|---|---|
+| 200 (default) | path length, `explore_block_until` x6 | 59 | 447 | 608 | 1 | UNKNOWN |
+| 1000 | fork cap, `handle_branch_fork` x90 | 500 | 2068 | 1899 | 0 | UNKNOWN |
+| 5000 | fork cap after deepening, then time | 1000 | 3803 | 3209 | 0 | UNKNOWN |
+
+Three caps bind in sequence and the verdict never moves. **Not one of the 118
+branch-feasibility queries the trace records returned `unknown`** — 114 `sat`,
+4 `unsat` at the default. A single path constraint reaches 9858 conjuncts. This
+family is blocked on path enumeration as a strategy, which is the argument for
+large-block encoding (Beyer, Cimatti, Griggio, Keremoglu, Sebastiani, FMCAD
+2009; Java Ranger's region summaries, ESEC/FSE 2020) rather than for any
+reallocation of effort.
+
+### Two findings falling out of it
+
+**A comment that decides how the engine spends its second chance is false.**
+`scale`'s doc comment in `smt_bmc/mod.rs` states that sampling shows
+`MAX_FORKS` binding "long before `max_depth`", and justifies deepening on forks
+alone. On this family the default `max_depth` is exactly what binds, so no
+resumption can ever reach the answer. CLAUDE.md names this class — a comment
+asserting an invariant the code does not maintain — and here it sits in the
+comment that governs resumption policy.
+
+**Truncation manufactures candidate false alarms.** At depth 200 the BMC
+published a violation on a program that holds; at depth 1000 it publishes none.
+Replay withheld it, so no wrong answer was produced, but this is a plausible
+shared cause with the 38-task `refuted` bucket and the 42 unreplayable
+witnesses of gh #85. Hypothesis, cheaply tested: re-run `census/refuted.set` at
+a raised depth and count how many violations evaporate.
+
+### A third, in the harness
+
+`tools/bench.py`'s `POINTS` table has the two penalties swapped against
+SV-COMP's own Table 2 (Beyer & Strejcek, TACAS 2026): the competition charges
+**-32 for a wrong proof and -16 for a false alarm**, and we charged -16 and
+-32. It costs nothing while we have zero wrong answers — every baseline is
+unaffected — but it inverted the incentive on the axis the project cares most
+about. Fixed, with the citation in the comment.
+
 ## 2026-10-31 — CHC calls a program unsafe that the BMC proves safe in 763ms
 
 The sharpest result of the CHC investigation, and it retires the whole

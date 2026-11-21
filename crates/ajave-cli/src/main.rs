@@ -309,8 +309,16 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         engines.push(Box::new(ajave_engines::ranges::Ranges::new()));
     }
     if let Some(factory) = ajave_core::smt_smtlib::SmtLibFactory::from_env() {
+        // Diagnostic only: which cut actually binds on a given task. The
+        // engine's own iterative deepening deliberately does not raise depth
+        // (see `scale`'s doc comment), so this is the only way to ask whether
+        // `max_depth` is what truncated an exploration.
+        let bmc_depth: u32 = std::env::var("AJAVE_BMC_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
         let factory2 = ajave_core::smt_smtlib::SmtLibFactory::from_env();
-        let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
+        let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), bmc_depth);
         bmc.ascii_only = ascii_only;
         engines.push(Box::new(bmc));
         // A second BMC pass with FloatingPoint arithmetic, after the cheap one.
@@ -329,7 +337,7 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             // spend the whole task budget. FPA formulas are the hard ones, so
             // an unbounded solver here starves the run rather than adding to it.
             let f3 = f3.with_query_timeout(5_000);
-            let mut fpa = ajave_engines::smt_bmc::SmtBmc::new(Box::new(f3), 200);
+            let mut fpa = ajave_engines::smt_bmc::SmtBmc::new(Box::new(f3), bmc_depth);
             fpa.ascii_only = ascii_only;
             fpa.fp_arith = true;
             engines.push(Box::new(fpa));
