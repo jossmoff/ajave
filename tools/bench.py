@@ -66,8 +66,14 @@ CLI_PROPERTY = {
     "no-data-race": "no-data-race",
 }
 # SV-COMP scoring. A wrong answer costs eight correct TRUEs.
+# SV-COMP's own scoring table (Beyer & Strejcek, TACAS 2026, Table 2):
+# +2 correct True, +1 correct False, -32 for a wrong proof (True on a program
+# that violates), -16 for a false alarm (False on a program that holds). The
+# two penalties were swapped here, which inverted the incentive on the axis
+# this project cares most about. No recorded baseline is affected: every run
+# to date has zero wrong answers, so both penalty entries were unreachable.
 POINTS = {("TRUE", True): 2, ("FALSE", False): 1,
-          ("TRUE", False): -16, ("FALSE", True): -32}
+          ("TRUE", False): -32, ("FALSE", True): -16}
 
 TIMING_RE = re.compile(
     r"orchestrator: timing (?:init|step) (\S+) (\d+)ms"

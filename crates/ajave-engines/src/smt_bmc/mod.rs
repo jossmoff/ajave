@@ -7,6 +7,7 @@
 //!
 //! Direction: Under. JvmReplay confirms all witnesses.
 
+mod cfg;
 mod char_encode;
 mod encode;
 mod explore;
@@ -76,6 +77,46 @@ const MAX_BLOCK_VISITS: u64 = 50_000;
 /// Maximum number of path forks. Path forking (as opposed to diamond merging)
 /// doubles the work at each fork. This limit prevents exponential blowup.
 const MAX_FORKS: u32 = 500;
+
+/// Blocks of slack per block of the entry body in the path-length bound. See
+/// `path_length_bound`. `AJAVE_BMC_DEPTH_SLACK` overrides it, because it is a
+/// fitted constant and `CLAUDE.md` requires those to be swept rather than
+/// chosen.
+const DEFAULT_DEPTH_SLACK: u32 = 4;
+
+fn depth_slack() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("AJAVE_BMC_DEPTH_SLACK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_DEPTH_SLACK)
+    })
+}
+
+/// The path-length bound for one exploration: a floor, or the entry body's own
+/// size, whichever is larger.
+///
+/// `max_depth` bounds **path length in blocks**, which is not the quantity
+/// that makes exploration terminate. Iterations are bounded by
+/// `MAX_LOOP_UNROLL`, inlining by `MAX_CALL_DEPTH`, and total work by
+/// `MAX_BLOCK_VISITS`, `MAX_SOLVER_CALLS` and the deadline. So a flat 200 did
+/// not buy termination — it capped **the size of method this engine could
+/// traverse at all**, at 200 blocks of straight-line code.
+///
+/// `alarmFunctional` is 893 blocks in one method. The search was therefore cut
+/// after a fifth of it with every other budget untouched (59 forks against a
+/// cap of 500, 608 block visits against 50,000), and no resumption could help
+/// because iterative deepening deliberately never raises depth — gh #126.
+///
+/// Scaling with the entry body keeps every small task **bit-identical**: the
+/// floor dominates for bodies under `floor / slack` blocks, which is nearly
+/// all of the corpus. The slack covers blocks that are on the path but not in
+/// the entry body — inlined callees, and the extra copies a loop unrolling
+/// contributes.
+fn path_length_bound(floor: u32, body: &Body) -> u32 {
+    floor.max((body.blocks.len() as u32).saturating_mul(depth_slack()))
+}
 
 /// Multiplier on the *resource* caps above — solver calls, block visits,
 /// forks. Not on `MAX_CALL_DEPTH` or `MAX_LOOP_UNROLL`, which are semantic
@@ -806,7 +847,7 @@ impl Engine for SmtBmc {
             var_widths: HashMap::new(),
             violations: Vec::new(),
             depth: 0,
-            max_depth: self.max_depth,
+            max_depth: path_length_bound(self.max_depth, body),
             solver_calls: 0,
             exhausted: false,
             deadline: budget.deadline,
@@ -815,6 +856,7 @@ impl Engine for SmtBmc {
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
+            cfg_cache: HashMap::new(),
             cut_points: BTreeSet::new(),
             frames: Vec::new(),
             approximated: Approximations::EXACT,
@@ -1423,6 +1465,14 @@ struct ExploreCtx<'a> {
     skipped_obligations: HashSet<(MethodKey, ObligationId)>,
     /// Methods in which exploration was truncated. See `mark_incomplete`.
     incomplete_methods: HashSet<MethodKey>,
+    /// Post-dominator structure per body, built on first use.
+    ///
+    /// Keyed by `MethodKey` and not by anything derived from a `BlockId`:
+    /// block ids index *one* `Body`, and this outlives the body that filled
+    /// it because inlining swaps `self.body`. That is the seam `CLAUDE.md`
+    /// names as "a context-relative identifier used as a global key", and it
+    /// has already cost 32 points once.
+    cfg_cache: HashMap<MethodKey, std::rc::Rc<cfg::CfgInfo>>,
     /// Program points where exploration was cut short, as (method, block).
     ///
     /// A truncation cannot affect an obligation it cannot reach, so recording
