@@ -80,6 +80,19 @@ the explicit remaining variants, so the next kind is a compile error here.
 `Precision` and `Residual` remain producer-less and are now *named* as such in
 that match, with the reason, rather than disappearing into a catch-all.
 
+**`InvariantMap` currently has the opposite problem: a producer and no
+consumer**, as of 2026-11-21. Its consumer was `interval_hints_for_method`, and
+reading a synthesised map there produced a wrong TRUE (gh #130): the map is
+proved inductive in LIA, which does not wrap where Java's `int` does, and the
+BMC reasons in bitvectors and uses a hint to prune. The claim and the consumer
+could not express the disagreement, which is why it took a wrong answer to find
+— and is the argument for `Approximations` being checked at the point of use
+rather than declared and ignored.
+
+It is recorded here rather than quietly parked because the second check above
+is exactly what it now fails, and because the fix is known: overflow-guarded
+preservation, #77's problem in a new place.
+
 ### 3. Artifact monotonicity — dynamic, and the important one
 
 This generalises `contract_monotonicity.py` from library contracts to internal

@@ -2,6 +2,117 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-21 — invariant synthesis, and the wrong TRUE it produced
+
+Four phases of `docs/proposals/invariant-synthesis.md` built and measured. The
+vocabulary work stands; the value claim did not survive measurement, and the
+reason is worth more than the feature would have been.
+
+### What landed and holds
+
+**P1, the claim vocabulary.** `core::term::Expr` had no null constant and no
+array length, so an invariant could not state `r != null` or `i < a.length` —
+the safety conditions of 87.5% of open obligations. Meanwhile `interval.rs`
+tracked `nullness` with an explicit `NonNull` and `array_lens` per variable,
+and `interval_state_as_formula` published integer bounds only, by design. The
+facts existed and were unpublishable.
+
+Measured over 48 tasks from the nullness- and bounds-heavy categories: 13,718
+bounds conjuncts, **1,856 non-null and 1,486 length** — 3,342 facts the domain
+knew and could not say, 19.6% of everything it publishes.
+
+**A severe pre-existing defect, found while checking P1 was safe.**
+`interval_hints_for_method` matched the *whole* formula against
+`lo <= v && v <= hi` while the producer folds conjuncts left-associatively. So
+any state narrowing two or more variables produced `((c1 && c2) && c3)`,
+matched nothing, and yielded no hints at all: **hints were only ever recovered
+from single-variable states.** Nothing reported it, because "no hints" and "no
+facts" are indistinguishable to a consumer. The reader now walks the
+conjunction and skips the *conjunct* it cannot interpret.
+
+**P2, maps.** `invariant_check`'s own doc had named the blocker: initiation is
+a property of a map, not of a point, so certifying one invariant in isolation
+can refuse bad proofs but never confirm good ones. `Artifact::InvariantMap`
+and `check_map_inductive` decide A3. Per-edge preservation needed edges, and
+the encoder had none — `LiaEncoding` now carries `edge_clauses` tagged as they
+are built, with `transition` byte-identical so `imc` and `cegar` are untouched.
+
+**P3, Houdini.** Elimination over a candidate pool, with the three properties
+tested rather than asserted: sound by construction, terminating, and
+order-independent. The design's central claim held in code — the elimination
+step *is* initiation-and-preservation iterated, so the output is inductive by
+construction and A3 needed no separate certifier pass.
+
+### The wrong TRUE
+
+P4 wired maps into the BMC's hint path. Measured on the 69 loop-heavy unproven
+pairs, one build, both configs:
+
+```
+AJAVE_HOUDINI=0   5 correct, 64 unproven, 0 WRONG   score  10
+AJAVE_HOUDINI=1  13 correct, 55 unproven, 1 WRONG   score  -6
+```
+
+Nine tasks went UNKNOWN -> TRUE. Eight were right. One —
+`algorithms/BellmanFord-FunUnsat01` [no-runtime-exception], a program that
+really throws — was a wrong proof, and at -32 it cost more than the eight
+gained.
+
+**It was not where it looked.** `grep -c DISCHARGE` on the failing task is
+**0**: Houdini discharged nothing. The wrong answer arrived through the
+consumer. Preservation is checked in LIA, and `smt_text::lia_overflow_cond`
+already states the consequence in the tree: "Java's arithmetic wraps; linear
+integer arithmetic does not, so `x + 1 > x` is valid in an unbounded encoding
+and false on a JVM". So `0 <= sum` is genuinely preserved by `sum = sum + 2`
+in LIA and false on a JVM once it overflows — and the BMC, which reasons in
+**bitvectors**, used the bound to *prune* the throwing path while still
+reporting `all_paths_complete`.
+
+The general statement is the fault class `CLAUDE.md` names: producer and
+consumer disagreeing about an artifact. The map meant "inductive with respect
+to the arithmetic the LIA encoder models"; the hint reader heard "true at this
+block". `interval-ai`'s bounds were safe in that channel only because that
+domain models wrapping explicitly, so the channel was sound until a second
+producer joined it.
+
+A contributing factor: `Blackboard::publish` defaults to
+`Approximations::EXACT`, so an engine that forgets to declare an approximation
+silently claims not to make one.
+
+### What the fix gives up, deliberately
+
+Maps no longer feed hints. Houdini declares `INT_WRAPPING`. And **Houdini no
+longer discharges**, because `map_implies_safety` would assert the same
+unguarded claim against an obligation's error formula — the same defect by a
+shorter route. The engine publishes and does not conclude, which makes it a
+producer with no consumer; that is recorded in `docs/contracts.md` rather than
+left to be discovered.
+
+So the honest position is that invariant synthesis over the LIA encoder cannot
+support an `Over` claim about Java integer arithmetic until preservation is
+overflow-guarded, which is #77's problem in a new place. gh #130 carries it,
+including the part that is *not* fixed: `check_inductive` has the identical
+hole, since its preservation query uses the same relation. It is latent —
+`AJAVE_CERTIFY_TRUE` is off — but the checker is the thing meant to catch
+exactly this and cannot.
+
+### Three process notes
+
+A test asserting the unsound behaviour had to be **deleted**, not weakened:
+`a_certified_map_entry_becomes_a_hint_at_its_block` documented the defect as a
+feature, and it was written in the same session that found the defect.
+
+Annotating only loop headers does not work, and the design said it would.
+Preservation reasons from the *source* assertion, so a back edge from an
+unannotated block asks "assuming nothing, is `x + 1 >= 0`?" — false for
+`x = -5`. Every block must be annotated.
+
+And two baselines recorded from one commit 90 minutes apart **disagree** about
+`argv-tasks/AbstractSerializationStreamReader_false`: `correct FALSE 58.1s`
+against `unproven UNKNOWN 82.2s`, both far below the 300s budget. That is #66's
+class with hard evidence, it caused two false regression investigations in one
+day, and `--repeat 2` is too weak to catch it.
+
 ## 2026-11-21 — the CFG decline tally, and why region encoding stops at level 2
 
 A negative result, measured before it was built, which is the point.

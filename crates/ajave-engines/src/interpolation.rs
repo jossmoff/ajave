@@ -939,6 +939,37 @@ pub fn encode_body_lia(
             }
             _ => {}
         }
+
+        // Exceptional edges, with an **unconstrained** post-state.
+        //
+        // Without these, `edge_clauses` describes normal control flow only,
+        // and an invariant map checked against it is inductive *over normal
+        // edges* while a consumer reads it as "true at this block". Those
+        // differ exactly where exceptions flow, and for the
+        // no-runtime-exception property that is the whole property. It
+        // produced a wrong TRUE on `algorithms/BellmanFord-FunUnsat01`: a
+        // bound survived elimination at a handler block where it does not
+        // hold, the BMC pruned on it as a hint, and claimed
+        // `all_paths_complete` over a search that had missed the throwing
+        // path. See `benchmarks/ajave/engine-ai/
+        // AnInvariantAtAHandlerMustSurviveTheThrow`.
+        //
+        // The clause is deliberately vacuous rather than modelled. An
+        // exception may be raised at any point inside the block, so the state
+        // at the handler is the block's entry state with an arbitrary prefix
+        // of its writes applied — and enumerating those prefixes would be a
+        // second encoder. Leaving the post-state unconstrained over-deletes
+        // candidates at handler blocks, which is the sound direction: a
+        // candidate survives there only if it is valid.
+        //
+        // Deliberately NOT added to `transition`. That formula is shared with
+        // `imc` and `cegar`, and widening it would change what they reason
+        // about. The consequence is that `check_inductive`, which uses
+        // `transition`, keeps this hole for single-point claims — recorded as
+        // an issue rather than fixed silently here.
+        for exc in &block.exceptional {
+            edge_clauses.push((block.id, Some(exc.target), "true".to_string()));
+        }
     }
 
     // The transition relation is the disjunction of all block clauses.

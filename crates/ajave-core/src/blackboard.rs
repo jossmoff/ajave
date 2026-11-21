@@ -750,31 +750,37 @@ impl Blackboard {
                 other => out.push(other),
             }
         }
-        // Point claims and **certified map entries**, read by the same walk.
+        // Point claims only. **Invariant maps are deliberately not read here**,
+        // and the reason is a wrong TRUE rather than a preference.
         //
-        // The map is what gives `Artifact::InvariantMap` a consumer. Without
-        // one it would be the fifth artifact kind with a producer and nobody
-        // reading it, which `CLAUDE.md` calls "a comment with a type" — and
-        // `docs/contracts.md`'s second mechanical check exists to catch
-        // exactly that.
+        // A synthesised map is proved inductive in LIA, and LIA does not wrap
+        // where Java's `int` does — `smt_text::lia_overflow_cond` exists
+        // because of exactly that, and says so: "`x + 1 > x` is valid in an
+        // unbounded encoding and false on a JVM". The BMC reasons in
+        // bitvectors and uses a hint to *prune* branches, so handing it a
+        // claim that only holds without wrapping makes it miss paths while
+        // still claiming `all_paths_complete`. That produced a wrong TRUE on
+        // `algorithms/BellmanFord-FunUnsat01` [no-runtime-exception] — a
+        // program that really throws — and removing this consumer is what made
+        // it UNKNOWN again.
         //
-        // `Inductive` maps only. A `Candidate` map has been checked by nobody,
-        // and a hint derived from an unchecked claim would prune paths on the
-        // strength of a guess — which for an `Under` consumer like the BMC
-        // means missing a bug, i.e. the unsound direction.
+        // The general statement is the one `CLAUDE.md` names: producer and
+        // consumer disagreeing about an artifact. The map means "inductive
+        // with respect to the edges and the arithmetic the LIA encoder
+        // models"; this reader heard "true at this block". `interval-ai`'s own
+        // bounds are safe here because that domain models wrapping explicitly.
+        //
+        // Reinstating this needs overflow-guarded preservation, which is #77's
+        // problem in a new place. Until then `Artifact::InvariantMap` has a
+        // producer and no consumer and is declared as such.
         let point_claims = self
             .invariants
             .iter()
             .filter(|i| &i.at.method == method)
             .map(|i| (i.at.block, &i.formula));
-        let map_claims = self
-            .maps
-            .iter()
-            .filter(|m| &m.method == method && m.status == InvStatus::Inductive)
-            .flat_map(|m| m.entries.iter().map(|(p, f)| (p.block, f)));
 
         let mut out = HashMap::new();
-        for (block, formula) in point_claims.chain(map_claims) {
+        for (block, formula) in point_claims {
             let mut leaves = Vec::new();
             conjuncts(formula, &mut leaves);
             // `lo <= v` and `v <= hi` arrive as separate conjuncts, so a bound
@@ -1430,19 +1436,30 @@ mod tests {
         );
     }
 
-    /// `Artifact::InvariantMap` must have a consumer, or it is a comment with
-    /// a type. This is that consumer: a certified map's entries become hints
-    /// at their blocks, read by the same walk as a point claim.
+    /// A synthesised map must **not** reach the hint path, however certified.
+    ///
+    /// This test replaces one that asserted the opposite. The map is proved
+    /// inductive in LIA, where integers are unbounded; the BMC reasons in
+    /// bitvectors and uses a hint to *prune* branches. Handing it a claim that
+    /// only holds without wrapping made it skip a throwing path while still
+    /// reporting `all_paths_complete` — a wrong TRUE on
+    /// `algorithms/BellmanFord-FunUnsat01`, gh #130.
+    ///
+    /// So the assertion is the absence, and it is deliberate rather than an
+    /// unimplemented feature. Reinstating the consumer needs overflow-guarded
+    /// preservation; until then `Artifact::InvariantMap` has a producer and no
+    /// consumer, which `docs/contracts.md` records.
     #[test]
-    fn a_certified_map_entry_becomes_a_hint_at_its_block() {
+    fn a_synthesised_map_does_not_reach_the_hint_path() {
         use crate::term::{Expr, Op};
         let mut bb = Blackboard::new();
         let at = point();
         let v = ajave_ir::VarId(5);
         let id = bb.fresh_invariant_id();
-        bb.publish(
+        bb.publish_with(
             EngineId("houdini"),
             Direction::Over,
+            Approximations::INT_WRAPPING,
             Artifact::InvariantMap(InvariantMap {
                 id,
                 method: at.method.clone(),
@@ -1456,47 +1473,16 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+                // Even `Inductive` — being certified is not the issue, the
+                // arithmetic it was certified in is.
                 status: InvStatus::Inductive,
-                scope: Scope::Method(at.method.clone()),
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            bb.interval_hints_for_method(&at.method).get(&(at.block, v)),
-            Some(&(1, 9))
-        );
-    }
-
-    /// And a map nobody checked must not become a hint. A hint prunes paths,
-    /// and for an `Under` consumer pruning on an unchecked claim means missing
-    /// a bug — the unsound direction.
-    #[test]
-    fn an_unchecked_map_does_not_become_a_hint() {
-        use crate::term::{Expr, Op};
-        let mut bb = Blackboard::new();
-        let at = point();
-        let v = ajave_ir::VarId(5);
-        let id = bb.fresh_invariant_id();
-        bb.publish(
-            EngineId("houdini"),
-            Direction::Over,
-            Artifact::InvariantMap(InvariantMap {
-                id,
-                method: at.method.clone(),
-                entries: [(
-                    at.clone(),
-                    Expr::bin(Op::Le, Expr::Int(1), Expr::Var(v)),
-                )]
-                .into_iter()
-                .collect(),
-                status: InvStatus::Candidate,
                 scope: Scope::Method(at.method.clone()),
             }),
         )
         .unwrap();
         assert!(
             bb.interval_hints_for_method(&at.method).is_empty(),
-            "a Candidate map has been checked by nobody and must not prune"
+            "an LIA-proved bound must not prune a bitvector search (gh #130)"
         );
     }
 

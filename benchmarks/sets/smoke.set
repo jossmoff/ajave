@@ -327,3 +327,11 @@ sv-comp/java-ranger-regression/alarm/Alarm_prop2.yml valid-assert
 # still leaves the invariant holding. Here the lost arm is the one carrying the
 # violation, so the same bug reads as a wrong TRUE at -32.
 ajave/engine-bmc/AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant.yml valid-assert
+
+# gh #130: an invariant proved in LIA must not prune a bitvector search.
+# Synthesis published a map that was inductive over unbounded integers, the
+# hint path handed it to the BMC, and the BMC pruned the throwing path while
+# still claiming all_paths_complete -- a wrong TRUE at -32. The first is the
+# corpus task it fired on; the second is the minimal program.
+sv-comp/algorithms/BellmanFord-FunUnsat01.yml no-runtime-exception
+ajave/engine-ai/ALiaProvedBoundMustNotPruneABitvectorSearch.yml no-runtime-exception

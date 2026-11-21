@@ -41,7 +41,7 @@ use ajave_core::artifact::*;
 use ajave_core::blackboard::Blackboard;
 use ajave_core::engine::{Budget, Engine, Progress};
 use ajave_core::term::{Expr, Op};
-use ajave_ir::{MethodKey, Operand, Program, Stmt};
+use ajave_ir::{MethodKey, Operand, Program};
 use log::{debug, info};
 
 /// Whether synthesis runs at all.
@@ -170,13 +170,12 @@ impl Engine for HoudiniEngine {
             // The pool: other engines' conjuncts, plus each open obligation's
             // own safety condition.
             let mut pool = bb.claim_conjuncts_for_method(&mk);
-            let open_here: Vec<ajave_ir::ObligationId> = open_all
-                .iter()
-                .filter(|o| o.method == mk)
-                .map(|o| o.id)
-                .collect();
-            for oid in &open_here {
-                if let Some(c) = safety_condition(body, *oid) {
+            // Each open obligation's own safety condition joins the pool:
+            // for a `NullDeref` on `r` the thing we want to prove is
+            // `r != null`, and elimination's job is to find out whether it is
+            // preserved.
+            for oref in open_all.iter().filter(|o| o.method == mk) {
+                if let Some(c) = safety_condition(body, oref.id) {
                     pool.push(c);
                 }
             }
@@ -206,12 +205,42 @@ impl Engine for HoudiniEngine {
             }
 
             let id = bb.fresh_invariant_id();
-            // `converged` is the whole soundness condition, see the module doc.
-            let status = if r.converged {
+            // `converged` is necessary but, as it turns out, not sufficient.
+            //
+            // The module doc argued that elimination and certification are the
+            // same computation, so re-checking would re-derive the loop's own
+            // stopping condition. That argument produced a **wrong TRUE** on
+            // `algorithms/BellmanFord-FunUnsat01` [no-runtime-exception], a
+            // program that really throws. So the claim is now re-checked by
+            // the pass whose job is checking, and the engine's own belief is
+            // not enough to promote.
+            //
+            // This is `certify.rs`'s rule applied to this engine rather than
+            // excepted from it: no artifact reaches the reporter on an
+            // engine's authority alone.
+            let mut status = if r.converged {
                 InvStatus::Inductive
             } else {
                 InvStatus::Candidate
             };
+            if status == InvStatus::Inductive {
+                let candidate = InvariantMap {
+                    id,
+                    method: mk.clone(),
+                    entries: r.entries.clone(),
+                    status: InvStatus::Candidate,
+                    scope: Scope::Method(mk.clone()),
+                };
+                let verdict =
+                    crate::invariant_check::check_map_inductive(body, &candidate, &self.solver);
+                if verdict != ajave_core::certify::CertResult::Confirmed {
+                    debug!(
+                        "houdini: {} refused promotion — the checker said {:?}",
+                        mk, verdict
+                    );
+                    status = InvStatus::Candidate;
+                }
+            }
             let map = InvariantMap {
                 id,
                 method: mk.clone(),
@@ -219,10 +248,20 @@ impl Engine for HoudiniEngine {
                 status,
                 scope: Scope::Method(mk.clone()),
             };
+            // `INT_WRAPPING`, declared rather than discovered.
+            //
+            // Preservation is checked in LIA, which does not wrap where Java's
+            // `int` does, so every arithmetic conclusion here holds only on an
+            // overflow-free path. Publishing this as `EXACT` — which
+            // `publish` defaults to — is what let a consumer prune on it and
+            // produce a wrong TRUE. "Declare approximations honestly.
+            // Under-declaring means a more faithful engine never gets the
+            // obligation back; over-declaring only wastes time."
             if bb
-                .publish(
+                .publish_with(
                     EngineId("houdini"),
                     Direction::Over,
+                    Approximations::INT_WRAPPING,
                     Artifact::InvariantMap(map.clone()),
                 )
                 .is_err()
@@ -239,42 +278,24 @@ impl Engine for HoudiniEngine {
                 r.queries
             );
 
-            // Only an inductive map may discharge. A candidate one is still
-            // worth publishing — another engine may use it as a hint — but it
-            // justifies nothing.
-            if status != InvStatus::Inductive {
-                continue;
-            }
-            for oid in open_here {
-                // The obligation must actually be checked in this body, or
-                // sufficiency is about a point the map does not cover.
-                if !body
-                    .blocks
-                    .iter()
-                    .any(|b| b.stmts.iter().any(|st| matches!(st, Stmt::Check(o) if *o == oid)))
-                {
-                    continue;
-                }
-                if crate::invariant_check::map_implies_safety(body, &map, oid, &self.solver)
-                    == ajave_core::certify::CertResult::Confirmed
-                {
-                    let oref = ObligationRef {
-                        method: mk.clone(),
-                        id: oid,
-                    };
-                    let _ = bb.publish(
-                        EngineId("houdini"),
-                        Direction::Over,
-                        Artifact::Status(
-                            oref,
-                            Status::Discharged {
-                                by: EngineId("houdini"),
-                                proof: ProofKind::Invariant(map.id),
-                            },
-                        ),
-                    );
-                }
-            }
+            // **No discharge, for now.**
+            //
+            // The map is inductive in LIA, and a discharge is a claim about a
+            // JVM. `map_implies_safety` would assert the map against the
+            // obligation's error formula, so a bound that only survives
+            // without wrapping would close an obligation that can really fire
+            // — the same defect that reached a consumer through the hint path,
+            // arriving by a shorter route.
+            //
+            // The repair is known, and is the one `lia_overflow_cond`'s doc
+            // describes for error conditions: carry the overflow disjunct
+            // through preservation, so a surviving candidate is one that holds
+            // *and* cannot overflow. That is #77's problem in a new place and
+            // is not done here.
+            //
+            // So this engine publishes and does not conclude. That makes it a
+            // producer with no consumer, which is recorded in
+            // `docs/contracts.md` rather than left to be discovered.
         }
 
         if advanced {
