@@ -310,7 +310,7 @@ Task counts by family in `benchmarks/sv-comp`:
 Two things fall out of this that change the reading of everything above.
 
 **First: `autostub` is the single largest family at 244 tasks, and it confirms
-the "exactly twice" pattern from Part 10.** It is a generated JDK-API coverage
+the "exactly twice" pattern from Part 9.** It is a generated JDK-API coverage
 suite — which is why `contract_of` has 277 method names, and why the
 boxed-primitive long tail is already modelled. A seventh of the corpus is
 library-model coverage, and we have already taken it.
@@ -656,7 +656,7 @@ timeouts. The lesson is that a string capability must not be bought with an IR
 change that hurts the BMC — `CLAUDE.md`'s "IR changes must not regress other
 engines" rule was written from this.
 
-### T1.5 — The Astrée precision recipe: thresholds, array expansion, partitioning
+### T1.4 — The Astrée precision recipe: thresholds, array expansion, partitioning
 
 Astrée is the most successful industrial abstract interpreter, and its authors
 published the list of what actually buys precision. Theirs reads: "expansion of
@@ -747,7 +747,7 @@ measurement before it is worth building; trace partitioning is the largest and
 should wait until Pentagons exists, since partitioning a weak domain buys less
 than partitioning a relational one.
 
-### T1.4 — Sweep `fp.spacer.global` (global guidance / GSpacer)
+### T1.5 — Sweep `fp.spacer.global` (global guidance / GSpacer)
 
 Pure measurement, no new code, and the last documented lever in the
 CHC-COMP arrays-track configuration that we are not already pulling.
@@ -1050,24 +1050,51 @@ capability hour on proving programs correct.
    population, right side of the ledger. Carry the soundness inversion from
    T1.1: unannotated is maybe-null, narrowed only on evidence — the opposite of
    every industrial Java nullness tool.
-4. **T1.4 Spacer sweep** — zero code, runs while something else is being
+4. **T1.4(a) threshold widening** — out of order on purpose. It is the
+   cheapest item in Part 2, it is standard (Astrée has shipped it for twenty
+   years), it targets the array-bounds population directly, and it
+   *retires a known overfitting liability*: `widen_delay` is one of the
+   constants `CLAUDE.md` names as "chosen by raising them until specific
+   benchmarks passed". Replacing a fitted constant with thresholds derived
+   from the program text is a precision win and a debt repayment at once.
+5. **T1.5 Spacer sweep** — zero code, runs while something else is being
    written, and it is the one remaining documented lever on the quantified
    array question.
-5. **T1.2 Pentagons** — best-evidenced new capability. Close #130 first.
-6. **T1.3 strings via cvc5** — unlocks the securibench population without the
-   cheating that killed the taint engine.
-7. **N1's cheap half, at any time** — the corpus-wide `already-valid` ratio.
-   One bounded SMT query per obligation, and if InsertionSort's 23.8% holds it
-   says a quarter of our open obligations need no invariant at all and are lost
-   to routing. That number changes the value of items 3, 5 and 7, so it is
-   worth having early even though the instrument that produces it failed at its
-   original job.
+6. **T1.2 Pentagons** — best-evidenced new capability, on three independent
+   lines. Close #130 first, since it is a new producer of exactly the
+   artifacts that hole mishandles.
+7. **T1.3 strings via cvc5** — unlocks the securibench population (113 tasks)
+   without the cheating that killed the taint engine.
 8. **T2.1 / T2.2 / T2.3** — the structural work, in whichever order the
-   measurements from 3–7 justify.
-9. **S1 upstream the mislabelled benchmark** — a 34-point swing on one task and
-   it removes the asterisk from every external comparison. Placed last only
-   because it is someone else's merge queue, not ours; start the conversation
-   early because it is deadline-bound.
+   measurements justify. T1.4(b) array expansion and T1.4(c) trace
+   partitioning belong here too, not in Part 2 — (b) because it measured
+   small (38 of 196 allocation sites) and (c) because partitioning a weak
+   domain buys less than partitioning a relational one, so it waits for 6.
+
+**Two measurements to take at any time, both nearly free, both of which change
+the order above:**
+
+- **The `argv-tasks` split** (§0.5c). The ARG-V real-world tasks are *already
+  in our corpus* — 70 tasks, 104 pairs, max 171 — so this is a `grep` over a
+  full run we have already done, not new work. It decides whether §0.7's
+  incorrectness-logic avenue is capped at 59 points or is the main event, and
+  whether T3.1's library argument is urgent or theoretical. **Do this first of
+  everything; it costs minutes.**
+- **The corpus-wide `already-valid` ratio** (N1). One bounded SMT query per
+  obligation. If `InsertionSort`'s 23.8% holds, a quarter of our open
+  obligations need no invariant at all and are lost to routing — which changes
+  the value of items 3, 5, 6 and 8 simultaneously. Worth having early even
+  though the instrument that produces it failed at its original job.
+
+**And one thing to start before any of it, because it is latency not effort:**
+**Part 11's participation checklist.** A Zenodo archive, a `<tool>.yml` naming
+a human jury representative, a tool-info module in BenchExec, and a merge
+request to `category-structure.yml` — all in other people's repositories, on
+other people's review cycles. The tool-info module is also where the witness
+convention is formalised, so it and T0.1 are the same conversation.
+**S1** (upstreaming the mislabelled benchmark — a 34-point swing) is in the
+same category: deadline-bound rather than effort-bound, so open the
+conversation early and let it run in parallel.
 
 Deliberately **not** on this list, with the arithmetic recorded above:
 a scheduler (T3.2, 36-task ceiling), an incorrectness-logic/bi-abduction engine
@@ -1287,7 +1314,7 @@ Surveyed and deliberately not proposed, with reasons, so the list is closed:
 
 ---
 
-## Part 10 — Measured as already addressed
+## Part 9 — Measured as already addressed
 
 Four opportunities that looked promising when derived from the corpus and turn
 out to be done. Recorded because negative information prevents re-work, and
@@ -1324,7 +1351,7 @@ with no solving at all.
 **Quantified generalisation in Spacer.** `fp.spacer.q3.use_qgen=true` with
 `fp.spacer.ground_pobs=false` — on by default at `chc.rs:3501`, documented as
 D1, measured neutral on smoke and worth one task. Only `fp.spacer.global`
-remains unpulled (T1.4).
+remains unpulled (T1.5).
 
 **Collections.** They barely appear: `Arrays.copyOfRange` ×6, `Arrays.asList`
 ×5, `Collections.enumeration` ×4, `Collections.sort` ×3, `Collections.singleton`
@@ -1355,7 +1382,7 @@ assumed.
 
 ---
 
-## Part 9 — Avenues in the competition's structure, not in the code
+## Part 10 — Avenues in the competition's structure, not in the code
 
 Three of these are new; two are checked-and-unavailable, recorded so they are
 not re-proposed.
@@ -1561,12 +1588,12 @@ official per-category task counts before relying on the exact figure. The
 *direction* (NRE worth more) holds for any `n₂ < n₁`.
 
 **Array allocation counts** (196 total, 53 constant, 38 of length ≤ 8): the
-regex over `benchmarks/sv-comp/**/*.java` in T1.5(b). Counts *source
+regex over `benchmarks/sv-comp/**/*.java` in T1.4(b). Counts *source
 allocations*, not obligations, and that distinction is the whole argument in
 that section — do not quote it as an obligation count.
 
 **JDK call distribution** (`Math.sin` ×180 etc.): the `([A-Z]\w+)\.(\w+)\(`
-scan in Part 10. Crude — it cannot distinguish a user class named `Matrix` from
+scan in Part 9. Crude — it cannot distinguish a user class named `Matrix` from
 a JDK one, so it is filtered against a hand-written list of JDK class names and
 will miss instance calls through variables. Good enough for ranking
 populations, not for coverage claims.
