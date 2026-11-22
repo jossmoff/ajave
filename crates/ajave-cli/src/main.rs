@@ -309,8 +309,19 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
         engines.push(Box::new(ajave_engines::ranges::Ranges::new()));
     }
     if let Some(factory) = ajave_core::smt_smtlib::SmtLibFactory::from_env() {
+        // The *floor* under the BMC's path-length bound, which
+        // `path_length_bound` raises in proportion to the entry body's size.
+        // It began as a diagnostic — iterative deepening deliberately never
+        // raises depth, so this was the only way to ask whether `max_depth`
+        // was what truncated an exploration — and the answer was that a flat
+        // bound caps the size of method traversable at all. See
+        // `docs/large-block-encoding.md` and gh #126.
+        let bmc_depth: u32 = std::env::var("AJAVE_BMC_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
         let factory2 = ajave_core::smt_smtlib::SmtLibFactory::from_env();
-        let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), 200);
+        let mut bmc = ajave_engines::smt_bmc::SmtBmc::new(Box::new(factory), bmc_depth);
         bmc.ascii_only = ascii_only;
         engines.push(Box::new(bmc));
         // A second BMC pass with FloatingPoint arithmetic, after the cheap one.
@@ -329,7 +340,7 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             // spend the whole task budget. FPA formulas are the hard ones, so
             // an unbounded solver here starves the run rather than adding to it.
             let f3 = f3.with_query_timeout(5_000);
-            let mut fpa = ajave_engines::smt_bmc::SmtBmc::new(Box::new(f3), 200);
+            let mut fpa = ajave_engines::smt_bmc::SmtBmc::new(Box::new(f3), bmc_depth);
             fpa.ascii_only = ascii_only;
             fpa.fp_arith = true;
             engines.push(Box::new(fpa));
@@ -346,6 +357,18 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             engines.push(Box::new(ajave_engines::kinduction::KInduction::new(
                 Box::new(f2.with_query_timeout(5_000)),
             )));
+        }
+    }
+    // Synthesis after the BMC and before CHC.
+    //
+    // After, because its candidate pool is other engines' claims and the BMC's
+    // are the richest; before CHC, because an inductive map is the hint a Horn
+    // solver most wants and CHC cannot use one it has not been given yet.
+    // Off unless AJAVE_HOUDINI=1 — see `houdini_engine::enabled`.
+    {
+        let h = ajave_engines::houdini_engine::HoudiniEngine::new();
+        if h.available() {
+            engines.push(Box::new(h));
         }
     }
     // CHC after BMC: BMC handles falsification; CHC proves safety for
@@ -384,6 +407,7 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             .filter(|s| !s.is_empty())
             .collect();
         if !disabled.is_empty() {
+            let present: Vec<String> = engines.iter().map(|e| e.id().0.to_string()).collect();
             engines.retain(|e| {
                 let keep = !disabled.iter().any(|d| d == e.id().0);
                 if !keep {
@@ -391,6 +415,33 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
                 }
                 keep
             });
+            // A name that matched nothing used to be silently ignored, which
+            // turns a mis-typed ablation into a full-portfolio run that reads
+            // as "this engine was not needed". Three ablations in one session
+            // were wrong this way: `smt-bmc`, `kinduction` and `ai` against a
+            // portfolio that spells them `smt-bmc-fpa`, `k-induction` and
+            // `interval-ai`.
+            //
+            // A warning, not a refusal, because an absent name is legitimate:
+            // `imc` is not constructed at all without `AJAVE_SMTINTERPOL_JAR`,
+            // so `engine_ablation.py` would die on a clean checkout. Stderr
+            // rather than `info!`, so it is visible without `-v` -- the whole
+            // failure was that nothing said anything.
+            let unmatched: Vec<&String> =
+                disabled.iter().filter(|d| !present.contains(d)).collect();
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "WARNING: AJAVE_DISABLE named {} engine(s) that are not in this \
+                     portfolio and disabled nothing: {}",
+                    unmatched.len(),
+                    unmatched
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                eprintln!("         ids present in this run: {}", present.join(", "));
+            }
         }
     }
     engines

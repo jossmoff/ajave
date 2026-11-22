@@ -22,6 +22,8 @@ pub mod concurrency;
 pub mod concurrent_exec;
 pub mod concurrent_state;
 pub mod float_search;
+pub mod houdini;
+pub mod houdini_engine;
 pub mod imc;
 pub mod interpolation;
 pub mod interval;

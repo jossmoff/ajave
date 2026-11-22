@@ -2,6 +2,2470 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-22 — a silent ablation, and where the +10 actually came from
+
+Attribution of a measured score change, which found that most of what the
+number was credited to had nothing to do with it, and that a mandatory oracle
+had been reporting more coverage than it had.
+
+### The gain is one commit, and it is a consumer-side pattern match
+
+`feat/lia-faithfulness` measured 2170 against a 2159 baseline. Splitting the
+delta per task, then per commit, with a build at each point:
+
+| | tasks | points | earned by |
+|---|---|---|---|
+| sorting NRE proofs | 5 | +10 | `f26ed94` alone |
+| `argv-tasks/CustomViewAbove` | 0 | 0 | already TRUE on main |
+| #66 FALSE flake | 1 | +1 | contention |
+| `feat/lia-faithfulness` | 0 | 0 | soundness only |
+
+Solving `x + y = 1376`, `2x + y = 2170` gives 794 TRUE / 582 FALSE against the
+baseline's 789/581, so the delta is exactly +5 TRUE and +1 FALSE — not the "+6
+tasks" an aggregate correct-count suggests. `CustomViewAbove` is the instructive
+one: TRUE on main, on `c5d78d8` and on the branch when run alone, yet unproven
+in both the baseline and the full run. Its baseline time is 30.7s. It is the
+coin-flip task `CLAUDE.md` warns about, and it looked like a gain only in a
+subset re-run that had the machine to itself.
+
+All five real gains are `no-runtime-exception` proofs on integer sorting
+programs with no `float` or `double` anywhere in them. They are UNKNOWN on main
+(`21ec85c`), TRUE at `f26ed94`, and TRUE at every later commit — so P1 carries
+the whole +10 and the three commits after it (`80f3c28`, `fcc45c4`, `91d963c`)
+add nothing measurable, while `91d963c` introduced the wrong TRUE that
+`c5d78d8` had to remove.
+
+The mechanism, with the portfolio cut to `interval-ai` alone on both builds:
+the engine proves the *identical* obligations either way (15/27 in `merge`,
+7/9 in `main`, 4/4 in `iterativeMergesort`), so its reasoning did not change.
+What changed is who closes the other twelve:
+
+```
+main 21ec85c:   Main.merge#18 -> Open
+f26ed94:        Main.merge#18 -> Discharged { by: smt-bmc-fpa, proof: Exhaustive }
+```
+
+`interval-ai` publishes a certificate per discharge; `interval_hints_for_method`
+reads those certificates back into per-variable bounds; the BMC consumes them to
+bound its search (`smt-bmc: loaded 119 AI interval hints`). The old reader
+required the formula to be *exactly* `And(lo <= v, v <= hi)` and `continue`d
+otherwise — so any state narrowing two or more variables is `And(And(..),..)`
+and was dropped whole. The domain had the facts all along; the consumer
+discarded every multi-variable one. Producer and consumer disagreeing about an
+artifact, with the consumer's refusal invisible, which is the shape
+`CLAUDE.md` lists first among faults between engines.
+
+### `AJAVE_DISABLE` ignored names that matched nothing
+
+Found by mis-typing one. `AJAVE_DISABLE=zzz` ran the full portfolio and printed
+nothing, so a mis-aimed ablation reads as "removing this engine changes
+nothing" — the exact conclusion the harness exists to draw. Three of this
+session's ablations were wrong this way (`smt-bmc`, `kinduction`, `ai` against a
+portfolio that spells them `smt-bmc-fpa`, `k-induction`, `interval-ai`), and on
+the strength of one of them a correct explanation was retracted and replaced
+with a guess.
+
+The binary now warns to **stderr**, naming the unmatched names and listing the
+ids present in the run. A warning rather than a refusal: `imc` is not
+constructed without `AJAVE_SMTINTERPOL_JAR` and `cegar` only when
+`cegar.available()`, so refusing would break `engine_ablation.py` on a clean
+checkout. Stderr rather than `info!` because the whole failure was that nothing
+said anything without `-v`.
+
+### The ablation oracle never removed the BMC
+
+`tools/engine_ablation.py` listed eleven ids. `imc` and `cegar` are frequently
+absent, so those two ablations were inert. Worse, the BMC is constructed
+**twice** — a cheap integer pass and a second floating-point pass whose
+`Engine::id` returns `smt-bmc-fpa` so attribution shows which decided what — and
+the list named only `smt-bmc`. On the MergeSortIterative tasks the surviving FPA
+pass discharges 12 of the 27 obligations in `merge`, so "removing the BMC flips
+nothing" was measured against a BMC that was still half present.
+
+The list now carries the ids a running portfolio reports, `smt-bmc-fpa`,
+`concolic` and `ranges` included. This costs runs (eleven ablations to
+fourteen) and the previous stage-4 result should be read as weaker than it was
+reported, not as evidence.
+
+The harness also had to be taught to *show* the new warning. `run_guarded`
+captures stderr, `verdict()` was the only function that saw it, and it looked
+only at stdout — so the binary's warning was written and then dropped, and a
+re-run reported zero unmatched names while two of its fourteen rows were inert.
+It now records which ids disabled nothing and says so beside the totals, since
+silence about an inert row is indistinguishable from a real negative result:
+
+```
+378 ablated run(s); 4 answer(s) merely lost
+2 engine(s) were never in the portfolio, so those ablations removed nothing
+  cegar, imc
+PASS — no verdict flipped.
+```
+
+So the re-run is twelve real engine ablations against the previous nine, with
+the BMC genuinely removed in one of them for the first time.
+
+## 2026-11-22 — making the LIA transition relation faithful
+
+`docs/proposals/lia-faithfulness.md`. The previous entry's P4 was blocked on
+overflow-guarded preservation, filed as #130. Fixing it properly meant first
+establishing what the premise of such a guard is, and that turned up three more
+holes in the same encoder plus one capability gap big enough to change what the
+synthesis path can talk about at all.
+
+### Loose is fine, wrong is fatal, and there were exactly four wrong places
+
+An `Over` engine may over-approximate freely: if the encoded relation `T`
+contains every JVM step, "no `T`-execution reaches the error" implies "no JVM
+execution does". `encode_body_lia` leans on this correctly in many places —
+`models_binop` declines `Div`, `Rem` and every bitwise operator, unresolvable
+heap reads and unmodelled calls become unconstrained binders, exceptional edges
+carry the clause `true`. All loose, all sound.
+
+The danger is a term that *excludes* a real behaviour, making `T` smaller than
+the JVM's step relation. An audit of the encoder for that property found four,
+and the finiteness of that list is what made the rest of the work tractable —
+the soundness premise of the theorem below is an enumerable claim about one
+function.
+
+**Overflow** (#77, #130) was known. `(+ v0 1)` is not `iadd`, and the
+`lia_overflow_cond` disjunct reached `error_formulas` — covering `imc` and
+`cegar`, which prove unreachability of error — but not `edge_clauses`, which is
+what the per-edge preservation checks use.
+
+**Three float leaks** were not. LIA has no float sort, and the encoder let
+float-typed values be read as integers in three places: a `double` constant
+became `encode_zero()`, i.e. the literal `0`; `models_cast` tested only widths,
+and `lia_width(Ty::Float)` is 32, so `f2i` looked like a widening and
+`encode_cast` returned the operand unchanged; and `Rvalue::Cmp` was encoded
+with `encode_cmp` unconditionally, comparing two IEEE-754 bit patterns as
+signed integers. The last is the sharpest: every negative double has its sign
+bit set, so for two negative doubles the integer order is the *reverse* of the
+float order. Monniaux (TOPLAS 2008) is the general warning.
+
+`invariant_check` screens claims that *mention* a float variable, which is why
+none of this produced a wrong answer through that path. The screen is not
+sufficient — via `f2i` or `dcmpg` a float value reaches an **integer**-typed
+variable, and a claim about that variable passes the screen while resting on a
+bit pattern.
+
+The fix is one principle enforced at one place: **a floating-point operand may
+not flow into any integer-valued term.** `Encoder::rvalue` now takes the
+operand's JVM type rather than a `wide: Fn -> bool`, and havocs any rvalue that
+reads or produces a float before consulting the theory. `Rvalue::Cmp` is
+decided by its `CmpKind` as well as by its operands, because the kind is the
+bytecode's own answer and stays correct where variable types do not resolve.
+
+CHC's second LIA encoder (`chc::lia_rvalue`) had implemented exactly this
+quarantine, with the comment "wrong rather than coarse", since the #77 work.
+The shared `Encoder` — the one `imc`, `cegar`, `invariant_check` and `houdini`
+read — had not. `chc::rvalue_is_float` now delegates to the `smt_text` version
+rather than keeping a copy, because the copies had already diverged: only the
+shared one consults `CmpKind`.
+
+### The theorem, and why the guard is a disjunct of the transition
+
+Write `ovf_b` for the disjunction of a block's overflow conditions, a predicate
+on the *pre*-state.
+
+> **(I)** `¬M(entry)` is UNSAT. **(P)** for every edge `b → c`,
+> `M(b) ∧ (T_{b→c} ∨ ovf_b) ∧ ¬M(c)′` is UNSAT.
+> Then every JVM-reachable `(b, s)` satisfies `M(b)`.
+
+The step case splits. If block `b` did not overflow, `T_{b→c}` describes the
+step and (P) gives `M(c)`. If it did, the pre-state satisfies `ovf_b`, so the
+real `(s, s′)` pair satisfies the disjunction via a disjunct that **constrains
+the post-state not at all** — and (P) gives `M(c)` again.
+
+That is the design: **overflow is an exceptional edge in disguise.** The
+relation says `xp = x + 1` where a JVM says `xp = wrap(x + 1)`, so when
+something wraps we know nothing about the successor beyond that it is some
+state — which is precisely how `block.exceptional` is already modelled. No new
+machinery, and the same shape of argument.
+
+Two other formulations were built first and both are wrong:
+
+* `M(b) ∧ T ∧ ¬ovf_b ∧ ¬M(c)′`, *assuming* no overflow, is unsound: it proves
+  the invariant of overflow-free runs and says nothing about the run that wraps.
+* `M(b) ∧ T ∧ (¬M(c)′ ∨ ovf_b)`, requiring the invariant to *exclude*
+  overflow, is sound — and was what the plan specified — but needlessly
+  destructive. It deletes every candidate at the target of any edge whose
+  arithmetic the source cannot bound, **including candidates that are valid**
+  and so cannot be broken by a wrap. A tautology about a variable the block
+  never touches died under it.
+
+### The axiom that is needed, and the axiom that silently undoes everything
+
+LIA integers are unbounded, and nothing in the encoder said otherwise. So
+guarded preservation asks whether `x + 1 > 2147483647` is possible, and a bound
+like `x < n` does not help because LIA's `n` may be 2^40. It is always
+possible, every candidate dies, and **the empty map is the only fixpoint for
+any method containing arithmetic.** So the range axiom
+`-2^31 <= v <= 2^31-1` per `Int`-typed variable is not a refinement; without it
+the guard proves nothing. This is the bounded-integer discipline of Why3
+(Filliâtre & Paskevich, ESOP 2013) and SPARK/GNATprove: reason in unbounded
+integers, discharge a range condition per operation.
+
+The axiom must be **pre-state only**, and this is the trap. The post-state is
+exactly where LIA and the JVM disagree. Asserting `range(xp)` beside
+`xp = x + 1` does not state a fact — it removes the overflowing transition from
+the model, which is the unsound "assume no overflow" arriving through the
+axioms instead of through the query. It is self-concealing: with it present
+every `ovf` is unsatisfiable, so the guard does nothing and every test of the
+guard passes for the wrong reason.
+
+It was written that way, built, and the counting-loop fixture passed. It was
+caught by asking *why* the fixture still passed, not by a test — so it now has
+one (`range_axioms_are_asserted_of_the_pre_state_only`), and removing the
+post-state axiom immediately failed two tests that had been green.
+
+A reference's post-state is unaffected: references do not wrap.
+
+### There were no ghost lengths at all
+
+`encode_body_lia` had **no arm for `Rvalue::ArrayLength`**. It fell through
+`Encoder::rvalue`'s `_ => self.fresh(false)`, which mints a *fresh*
+unconstrained integer per read. So two reads of one array's length were
+unrelated, `new int[n]` did not relate the array to `n`, and the JVMS guarantee
+`length >= 0` was absent. `invariant_check::render` therefore had to decline
+`Expr::Length` — which meant all 1,486 length conjuncts the interval domain
+publishes were dropped from Houdini's pool and from the certifier. P1 of the
+predecessor plan built a vocabulary for 87.5% of the open obligation set and
+the encoder could read half of it.
+
+The model is one SMT array indexed by the **reference**: McCarthy's theory of
+arrays (1962) applied the way Burstall (1972) applies it to fields, which is
+how Boogie, VCC, Why3 and Dafny all encode lengths and how this encoder already
+handles fields. Indexing by reference rather than `AllocSite` is forced by the
+claim language — `Expr::Length { obj }` is a fact about a reference, which
+`ai.rs` notes "survives reassignment" — and it is also the truth: two
+references to one array have one length, which a site-indexed model cannot
+state. Length is immutable (JVMS §6.5), so the only threading constraint is the
+identity `ghost_lenp = ghost_len`, carried per edge.
+
+`Expr::Depth` turned out to have the defect its neighbours' comments warn
+about: `render` emitted `(select depth_C_f obj)` and **nothing declares that
+array** — `depth_array_name` occurs twice in the tree, both in the same file.
+z3 reports an unknown constant, drops the whole assertion, and answers on what
+is left. Conservative by luck. It has zero producers, so it now declines.
+
+### One struct, so the unsound query cannot be written
+
+The guard added three things a preservation query must not forget. A consumer
+that forgets the overflow disjunct gets the **unsound** behaviour silently, and
+two consumers were assembling that query by hand with a third coming. So
+`edge_clauses` stopped being a `(from, to, clause)` tuple and became an
+`EdgeClause` carrying `ghost` and `overflow`, with
+`LiaEncoding::preservation_query` the only code in the tree that writes a
+preservation script. The per-edge fields are filled at **one** site per block
+rather than at the six `push` sites, because a field set at six sites is a
+field forgotten at one of them.
+
+`transition` is not byte-identical any more, and the honest claim is about
+direction rather than equality. The float quarantine makes it *looser* (a wrong
+term becomes an unconstrained binder). The ghost length makes it
+*tighter-but-sound*: for a fixed receiver the select is as unconstrained as the
+binder it replaces, so the only states removed are ones where a single array
+has two different lengths. `ghost_len`'s declaration has to live in
+`declarations` rather than `ghost_preamble` because the term now appears in
+`transition`, and an undeclared symbol makes z3 drop the assertion containing
+it — which for `imc` and `cegar` would silently discard the transition
+relation. `edge_clauses_are_the_disjuncts_of_transition` pins the rest.
+
+### What this is worth, measured rather than claimed
+
+Four minimal benchmarks, each with ground truth argued from IEEE-754, the JLS
+or the JVMS and confirmed on a real JVM. **All four were already correct on
+`c5d78d8`**, the commit before this work — run on a base-commit build before
+the headers were written, per `CLAUDE.md`'s rule that a flagged difference must
+be reproduced on the base commit before it is attributed.
+
+So the defects were real and latent, which is the shape `CLAUDE.md` describes
+under "unsoundness masked by an unrelated conservative gate": *"k-induction,
+CHC and the StringBuffer model were each harmless only because something
+starved them. Removing a gate does not create these; it reveals them."* The
+starvation here is specific and worth recording: the engines answering these
+tasks are the bitvector BMC and the interval domain's real float domain, not
+LIA consumers; and of the LIA consumers, `imc` does not run at all without
+`AJAVE_SMTINTERPOL_JAR` (changes.md:7255), leaving `cegar`, `invariant_check`
+and `houdini`.
+
+The cost is visible and lands where Houdini is weakest. `0 <= i` in
+`i := 0; while (i < n) i++;` is a true invariant whose inductiveness depends on
+a **relation** between two variables, so it survives only if `i < n` is itself
+a candidate at the loop body — a conjunction of unary bounds cannot say "the
+increment is bounded". That is not a flaw in the guard; `{header: 0 <= i}`
+genuinely is not an inductive map of the Java program. It is an argument for
+implication candidates (`i < n => i + 1 <= n`, after Lahiri & Qadeer's clausal
+predicate abstraction) as the next widening, rather than a bigger pool.
+
+`houdini_engine` still publishes and discharges nothing, and the reason has
+changed from a soundness repair to a measurement: turning on a discharge path
+changes what may be answered TRUE, and `CLAUDE.md` is explicit that such a
+change is measured on both properties before it is believed.
+
+## 2026-11-21 — invariant synthesis, and the wrong TRUE it produced
+
+Four phases of `docs/proposals/invariant-synthesis.md` built and measured. The
+vocabulary work stands; the value claim did not survive measurement, and the
+reason is worth more than the feature would have been.
+
+### What landed and holds
+
+**P1, the claim vocabulary.** `core::term::Expr` had no null constant and no
+array length, so an invariant could not state `r != null` or `i < a.length` —
+the safety conditions of 87.5% of open obligations. Meanwhile `interval.rs`
+tracked `nullness` with an explicit `NonNull` and `array_lens` per variable,
+and `interval_state_as_formula` published integer bounds only, by design. The
+facts existed and were unpublishable.
+
+Measured over 48 tasks from the nullness- and bounds-heavy categories: 13,718
+bounds conjuncts, **1,856 non-null and 1,486 length** — 3,342 facts the domain
+knew and could not say, 19.6% of everything it publishes.
+
+**A severe pre-existing defect, found while checking P1 was safe.**
+`interval_hints_for_method` matched the *whole* formula against
+`lo <= v && v <= hi` while the producer folds conjuncts left-associatively. So
+any state narrowing two or more variables produced `((c1 && c2) && c3)`,
+matched nothing, and yielded no hints at all: **hints were only ever recovered
+from single-variable states.** Nothing reported it, because "no hints" and "no
+facts" are indistinguishable to a consumer. The reader now walks the
+conjunction and skips the *conjunct* it cannot interpret.
+
+**P2, maps.** `invariant_check`'s own doc had named the blocker: initiation is
+a property of a map, not of a point, so certifying one invariant in isolation
+can refuse bad proofs but never confirm good ones. `Artifact::InvariantMap`
+and `check_map_inductive` decide A3. Per-edge preservation needed edges, and
+the encoder had none — `LiaEncoding` now carries `edge_clauses` tagged as they
+are built, with `transition` byte-identical so `imc` and `cegar` are untouched.
+
+**P3, Houdini.** Elimination over a candidate pool, with the three properties
+tested rather than asserted: sound by construction, terminating, and
+order-independent. The design's central claim held in code — the elimination
+step *is* initiation-and-preservation iterated, so the output is inductive by
+construction and A3 needed no separate certifier pass.
+
+### The wrong TRUE
+
+P4 wired maps into the BMC's hint path. Measured on the 69 loop-heavy unproven
+pairs, one build, both configs:
+
+```
+AJAVE_HOUDINI=0   5 correct, 64 unproven, 0 WRONG   score  10
+AJAVE_HOUDINI=1  13 correct, 55 unproven, 1 WRONG   score  -6
+```
+
+Nine tasks went UNKNOWN -> TRUE. Eight were right. One —
+`algorithms/BellmanFord-FunUnsat01` [no-runtime-exception], a program that
+really throws — was a wrong proof, and at -32 it cost more than the eight
+gained.
+
+**It was not where it looked.** `grep -c DISCHARGE` on the failing task is
+**0**: Houdini discharged nothing. The wrong answer arrived through the
+consumer. Preservation is checked in LIA, and `smt_text::lia_overflow_cond`
+already states the consequence in the tree: "Java's arithmetic wraps; linear
+integer arithmetic does not, so `x + 1 > x` is valid in an unbounded encoding
+and false on a JVM". So `0 <= sum` is genuinely preserved by `sum = sum + 2`
+in LIA and false on a JVM once it overflows — and the BMC, which reasons in
+**bitvectors**, used the bound to *prune* the throwing path while still
+reporting `all_paths_complete`.
+
+The general statement is the fault class `CLAUDE.md` names: producer and
+consumer disagreeing about an artifact. The map meant "inductive with respect
+to the arithmetic the LIA encoder models"; the hint reader heard "true at this
+block". `interval-ai`'s bounds were safe in that channel only because that
+domain models wrapping explicitly, so the channel was sound until a second
+producer joined it.
+
+A contributing factor: `Blackboard::publish` defaults to
+`Approximations::EXACT`, so an engine that forgets to declare an approximation
+silently claims not to make one.
+
+### What the fix gives up, deliberately
+
+Maps no longer feed hints. Houdini declares `INT_WRAPPING`. And **Houdini no
+longer discharges**, because `map_implies_safety` would assert the same
+unguarded claim against an obligation's error formula — the same defect by a
+shorter route. The engine publishes and does not conclude, which makes it a
+producer with no consumer; that is recorded in `docs/contracts.md` rather than
+left to be discovered.
+
+So the honest position is that invariant synthesis over the LIA encoder cannot
+support an `Over` claim about Java integer arithmetic until preservation is
+overflow-guarded, which is #77's problem in a new place. gh #130 carries it,
+including the part that is *not* fixed: `check_inductive` has the identical
+hole, since its preservation query uses the same relation. It is latent —
+`AJAVE_CERTIFY_TRUE` is off — but the checker is the thing meant to catch
+exactly this and cannot.
+
+### Three process notes
+
+A test asserting the unsound behaviour had to be **deleted**, not weakened:
+`a_certified_map_entry_becomes_a_hint_at_its_block` documented the defect as a
+feature, and it was written in the same session that found the defect.
+
+Annotating only loop headers does not work, and the design said it would.
+Preservation reasons from the *source* assertion, so a back edge from an
+unannotated block asks "assuming nothing, is `x + 1 >= 0`?" — false for
+`x = -5`. Every block must be annotated.
+
+And two baselines recorded from one commit 90 minutes apart **disagree** about
+`argv-tasks/AbstractSerializationStreamReader_false`: `correct FALSE 58.1s`
+against `unproven UNKNOWN 82.2s`, both far below the 300s budget. That is #66's
+class with hard evidence, it caused two false regression investigations in one
+day, and `--repeat 2` is too weak to catch it.
+
+## 2026-11-21 — the CFG decline tally, and why region encoding stops at level 2
+
+A negative result, measured before it was built, which is the point.
+
+Large-block encoding landed at what Java Ranger calls `veritestingMode` level
+2: multi-path regions with no method calls and a single exit. Its levels 4 and
+5 admit regions with more than one exit, and treat `return` as an exit — and
+that looked like the obvious next increment, because `cfg.rs` refuses a merge
+whenever a branch has no immediate post-dominator inside the method, and a
+guard clause (`if (c) { return ...; }`) is exactly that shape. Guard clauses
+are everywhere in Java.
+
+### Instrument the refusal, do not infer it
+
+`CfgInfo` now tallies why each branching block was refused — `exits_method`,
+`back_edge`, `over_cap`, and `region_escapes` as a bug detector that should
+stay at zero because a correct immediate post-dominator is always reachable
+from its branch. `blocker_census.py` aggregates it, with the regex pinned
+against a verbatim log line: that file's own comments record that a regex
+matching nothing reports a table of zeros, which is indistinguishable from
+"every branch merged".
+
+The tally alone would have been misleading, so it is cross-tabulated against
+the bucket. Raw counts are over every body analysed, and most of those bodies
+were decided; what matters is the profile of tasks *still* truncating.
+
+### The measurement that killed the plan
+
+24 guard clauses in sequence, relational invariant so intervals cannot help
+(`benchmarks/ajave/engine-bmc/GuardClausesAreRefusedAMergeAndItCostsNothing`):
+
+```
+cfg: Main.f(I)I blocks=49 merged=0 exits_method=24 back_edge=0
+
+AJAVE_LBE=0   54 solver calls, 57 block visits, 27 forks
+AJAVE_LBE=1   54 solver calls, 57 block visits, 27 forks
+```
+
+**Every branch refused, and bit-identical either way.** Against the same count
+of refused branches in the one-armed-if benchmark: 980 solver calls versus 4.
+
+The reason is structural. A fork duplicates the remainder of the enclosing
+region once per arm, and an arm that returns immediately has no remainder to
+duplicate — 57 block visits over a 49-block method is one pass. The
+exponential cost large-block encoding removed comes only from branches where
+*both* arms have long continuations, which is the one-armed `if`, where the
+else target is the join and the arm rejoins it.
+
+So levels 4 and 5 would merge 24 branches here and save nothing measurable.
+Filed as #129 with `status:explored`.
+
+### The pattern, for the third time
+
+A high decline *count* is not a high decline *cost*. `budget` counted 135 tasks
+and was really 1. `refuted-witness` counted 211 pairs and was really 1. Here 24
+of 24 branches are refused and the refusal is free. The tally was worth
+building; acting on it without the cost measurement would have been effort for
+nothing, and the only thing that distinguished the two was one minimal program
+run twice.
+
+The residual worry is answered too: cheap forks do still charge `MAX_FORKS`,
+and exhausting it sets `mark_incomplete` and forfeits discharge — but 24 guard
+clauses charge 27 forks against a cap of 500, so it would take ~440 in one
+method to matter.
+
+### Level 3 looks thin too, and two bad probes before a good one
+
+Level 3 — regions that call methods which can be summarised — is the one the
+guard-clause result does not rule out, and it is the one that would attack
+inlining. A callee of 12 mergeable one-armed ifs, called from K sites, with the
+BMC isolated:
+
+| K | solver calls | block visits | forks |
+|---|---|---|---|
+| 1 | 4 | 31 | 2 |
+| 2 | 4 | 57 | 2 |
+| 4 | 4 | 109 | 2 |
+| 8 | 4 | 213 | 2 |
+
+Block visits scale exactly linearly — +26 per site, the callee re-explored each
+time — and **solver calls do not move at all**. So caching a method summary
+would save block visits against a cap of 50,000, i.e. it would start to matter
+at roughly 1,900 call sites. Not a lever, for a *mergeable* callee.
+
+The caveat is real and the probe does not settle it: this callee merges
+perfectly, so its summary is trivial and re-deriving it is nearly free. An
+expensive callee is one the encoding cannot merge, which means one containing a
+loop — and a summary of a loop-containing body **is a loop invariant**. So
+level 3's remaining value collapses into invariant synthesis rather than region
+encoding, which is where `back_edge`, k-induction's missing strengthening
+(#80), and the heap plan's own conclusion (the Horn query is decided in 0.05s;
+the gap is invariant inference) all already point.
+
+Two notes on getting there, because the first two runs of this probe measured
+nothing:
+
+* The first showed flat solver calls with every engine enabled. `checks=0`:
+  the BMC never reached the obligation and something else proved the program,
+  so the numbers described a different engine.
+* The second disabled the portfolio with `kinduction`, `float_search` and
+  `ai` — none of which are engine ids. They are `k-induction`, `float-search`
+  and `interval-ai`, matched exactly. k-induction ran throughout. This is the
+  identical mistake recorded in this file months ago for `smt_bmc` vs
+  `smt-bmc`, repeated by the same reasoning: the ids look like the module
+  names, and nothing complains when one does not match.
+
+The third run verified the disable took (`grep -c "disabled by
+AJAVE_DISABLE"` = 10) before reading any number off it. That check is the
+difference between the table above and two earlier versions of it that were
+wrong.
+
+### A process note, because the obvious check was wrong
+
+Establishing the guard-clause benchmark's ground truth, `java -ea Main` passed
+three times against the assertion `r == -1 || r == 0`, which is **false**.
+`Verifier.nondetInt()` virtually never returns 0, so the all-zero path — the
+only one that reaches `return x + y`, where the answer is 24 — was never taken.
+A benchmark with a wrong expected verdict was two minutes from being committed
+on the strength of a green JVM run. The verdict has to be argued from the JLS
+and confirmed with a driver that forces the case, which is what `CLAUDE.md`
+already says and what the green run quietly talked me out of.
+
+## 2026-11-21 — large-block encoding: the BMC forked on every one-armed `if`
+
++64 on the corpus (2095 to **2159**), the 36-point Alarm family decided and
+four times faster, and zero wrong answers. The interesting part is not the
+number but that the mechanism had been sitting in a helper nobody had reason to
+read, and that two independent defects had to be fixed together before either
+showed a gain.
+
+Full write-up, with the soundness argument: `docs/large-block-encoding.md`.
+
+### Defect 1: `find_join` was not computing post-dominators
+
+The explorer has always had two ways to encode a branch. `handle_branch_fork`
+explores each arm to the end of the enclosing region and merges the end states,
+so the remainder of the method is explored once per arm. `handle_branch_diamond`
+explores each arm only to the point where they reconverge, merges with one
+`ite` per differing variable, and explores the continuation **once**. Linear
+against exponential, and `find_join` decided which a branch got.
+
+It intersected depth-limited forward-reachable sets and took the numerically
+smallest common block, declining whenever one arm's target was reachable from
+another arm's — "the branches are not independent". That condition describes
+**the commonest branch shape in Java**: `if (c) { ... }` compiles to
+`ifeq join`, so the else target *is* the join and is trivially reachable from
+the then block. Every one-armed `if` forked. The reachability walk was also
+capped at 50 blocks and followed only edges to higher block ids, so a distant
+join was not found either.
+
+`cfg.rs` now computes immediate post-dominators as dominators of the reverse
+CFG rooted at a virtual exit (Cooper, Harvey, Kennedy, 2001), classifies back
+edges by three-colour DFS, and offers a join only when the region between
+branch and post-dominator is acyclic. Exception edges are deliberately absent
+from that graph: an implicit throw is explored under a saved state and
+restored, so it never rejoins the path it left, and including those edges would
+make the virtual exit post-dominate almost everything.
+
+**The merge is exact, not an approximation.** Each arm yields a variable-to-term
+map; the merged map sends each variable to `ite(c, t_then, t_else)`, and for any
+concrete execution `c` has a definite value, so the merged state denotes exactly
+the state that execution reaches. That is why the diamond path posts no
+feasibility query and sets no completeness flag — and why both preconditions
+are load-bearing rather than conservative. Without post-dominance an arm is
+explored to a *different program point* and the merge describes no execution at
+all. Without acyclicity the arm stops at the sentinel after one iteration and
+silently drops the rest.
+
+### Defect 2: `max_depth` capped the size of method, not the effort
+
+Found while measuring the first. `max_depth` bounds **path length in blocks**,
+and it is not what makes exploration terminate — iterations are bounded by
+`MAX_LOOP_UNROLL`, inlining by `MAX_CALL_DEPTH`, work by `MAX_BLOCK_VISITS`,
+`MAX_SOLVER_CALLS` and the deadline. A flat 200 therefore bought no
+termination; it capped the size of method the engine could traverse at all, at
+200 blocks of straight-line code.
+
+`alarmFunctional` is 893 blocks in one method, so the search was cut after a
+fraction of it with 59 forks against a cap of 500 and 608 block visits against
+50,000 — and iterative deepening deliberately never raises depth, so no
+resumption could reach it (#126). `path_length_bound` now takes the larger of
+the floor and the entry body's block count times a slack factor, which leaves
+every body under `floor / slack` blocks **bit-identical**.
+
+Neither fix scores on its own. With `AJAVE_LBE=1` at the default depth the
+Alarm family is still 0 of 18; with the depth raised and `AJAVE_LBE=0` it is
+also still 0 of 18, because the fork cap then binds instead. Both together:
+18 of 18.
+
+### Measured
+
+| | before (`e83a4a2`) | after | delta |
+|---|---|---|---|
+| valid-assert | 911 | **948** | +37 |
+| no-runtime-exception | 1184 | **1211** | +27 |
+| combined | 2095 | **2159** | **+64** |
+| correct | 1337 | 1370 | +33 |
+| wrong | 0 | **0** | — |
+
+1785 runs in 4741s, 29 timeouts, **0 `ERROR` verdicts** — so the run was not
+contended into process kills, which is the failure mode that reads as a verdict
+regression. The timeouts are 14 `jbmc-regression`, 9 `argv-tasks`, 3
+`securibench`, 3 `autostub`, and **none** in `java-ranger-regression`: the
+large-method category that gained most did not pay for it in wall clock.
+
+The Alarm family went 0 to **36** points, 18 of 18 correct, and 526s to 122s.
+That is 36 of the +64, so **+28 came from the rest of the corpus** — post-
+dominator joins are not a generated-code special case.
+
+On the minimal benchmark added for this (24 one-armed ifs maintaining
+`x + y == 24`), same build, valid-assert:
+
+| | forks | solver calls | block visits |
+|---|---|---|---|
+| `AJAVE_LBE=0` | 500 (the cap) | 980 | 862 |
+| `AJAVE_LBE=1` | 2 | 4 | 53 |
+
+Two minimal benchmarks were added, and the second is the one that matters.
+`AChainOfOneArmedIfsMustNotForkPerBranch` cannot tell a correct merge from one
+that silently loses an arm — losing an arm still leaves `x + y == 24` holding.
+`AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant` gives one arm the
+invariant-breaking update, so the lost arm is the one carrying the violation
+and the same bug reads as a **wrong TRUE at -32**. It also discriminates on the
+verdict in the full portfolio, which the TRUE twin does not, because CHC proves
+the TRUE one in a single query: `AJAVE_LBE=0` gives UNKNOWN and `AJAVE_LBE=1`
+gives FALSE, replayed.
+
+Oracles that use no expected verdict, which matter more than usual here because
+merging now fires on most branches and a latent bug in `merge_states_ite` would
+surface as a flip: `--repeat 2` all verdicts stable, `metamorphic.py` **PASS,
+no verdict changed** over 69 transformed runs, `smoke --check` PASS at 191
+against a 190 baseline with 0 WRONG.
+
+### A number that was a derivation and is now a measurement
+
+The run also settles the size of the witness gap filed as #127. Correct FALSE
+is **564** on valid-assert and **17** on no-runtime-exception: **581 of the
+2159 points are FALSE points**, each requiring a format-1.0 GraphML violation
+witness that ajave does not emit. The figure had been derived arithmetically as
+577-601 from the census and the scores before a full run existed; it lands
+inside that range.
+
+### What is still fitted, and what this does not do
+
+The slack factor is a fitted constant and its sweep is **not done** — it was
+started and abandoned rather than block the merge, so nothing above rests on
+it. What makes 4 low-risk is structural, not measured: the floor dominates
+below `floor / slack` blocks, so every small body is bit-identical either way.
+The sweep belongs on `java-ranger-regression` across slack in {1, 2, 4, 8}
+with an `AJAVE_LBE=0` control, and until it runs the value is provisional. `AJAVE_LBE_MAX_REGION` implements adjustable-block encoding's region
+operator (Beyer, Keremoglu, Wendler, FMCAD 2010) and is **unswept**, defaulting
+to unbounded: the corpus shows no sign yet of the formula-size cost that
+parameter exists to control, so it is in place and measured at 0 rather than
+tuned.
+
+This merges **branches, not calls**. A call is still inlined, so a deep call
+graph still yields one enormous path constraint — `alarmFunctional` reaches
+9858 conjuncts on a single path. Java Ranger's method-regions are the next
+step; the structural answer for real codebases is a summary per procedure
+rather than a region per branch.
+
+## 2026-11-21 — the Alarm family dies on path enumeration, and three caps bind in turn
+
+The census (gh #123) attributed the `structural` bucket to `feas ==
+SatResult::Unknown` on branch feasibility. For the Alarm family that is wrong,
+and the real mechanism is worth recording because it changes what work is
+worth doing.
+
+`AJAVE_BMC_DEPTH` (branch `probe/bmc-depth-cap`, diagnostic only, default 200
+so behaviour is unchanged) makes the BMC's path-length bound settable. The
+engine's own iterative deepening deliberately refuses to raise it, so there was
+previously no way to ask the question.
+
+`java-ranger-regression/alarm/Alarm_prop2`, valid-assert, expected TRUE, 893
+basic blocks in one Simulink-generated method, single invocation, 240s:
+
+| `max_depth` | what cut it | forks | solver calls | blocks | violations | verdict |
+|---|---|---|---|---|---|---|
+| 200 (default) | path length, `explore_block_until` x6 | 59 | 447 | 608 | 1 | UNKNOWN |
+| 1000 | fork cap, `handle_branch_fork` x90 | 500 | 2068 | 1899 | 0 | UNKNOWN |
+| 5000 | fork cap after deepening, then time | 1000 | 3803 | 3209 | 0 | UNKNOWN |
+
+Three caps bind in sequence and the verdict never moves. **Not one of the 118
+branch-feasibility queries the trace records returned `unknown`** — 114 `sat`,
+4 `unsat` at the default. A single path constraint reaches 9858 conjuncts. This
+family is blocked on path enumeration as a strategy, which is the argument for
+large-block encoding (Beyer, Cimatti, Griggio, Keremoglu, Sebastiani, FMCAD
+2009; Java Ranger's region summaries, ESEC/FSE 2020) rather than for any
+reallocation of effort.
+
+### Two findings falling out of it
+
+**A comment that decides how the engine spends its second chance is false.**
+`scale`'s doc comment in `smt_bmc/mod.rs` states that sampling shows
+`MAX_FORKS` binding "long before `max_depth`", and justifies deepening on forks
+alone. On this family the default `max_depth` is exactly what binds, so no
+resumption can ever reach the answer. CLAUDE.md names this class — a comment
+asserting an invariant the code does not maintain — and here it sits in the
+comment that governs resumption policy.
+
+**Truncation manufactures candidate false alarms.** At depth 200 the BMC
+published a violation on a program that holds; at depth 1000 it publishes none.
+Replay withheld it, so no wrong answer was produced, but this is a plausible
+shared cause with the 38-task `refuted` bucket and the 42 unreplayable
+witnesses of gh #85. Hypothesis, cheaply tested: re-run `census/refuted.set` at
+a raised depth and count how many violations evaporate.
+
+### A third, in the harness
+
+`tools/bench.py`'s `POINTS` table has the two penalties swapped against
+SV-COMP's own Table 2 (Beyer & Strejcek, TACAS 2026): the competition charges
+**-32 for a wrong proof and -16 for a false alarm**, and we charged -16 and
+-32. It costs nothing while we have zero wrong answers — every baseline is
+unaffected — but it inverted the incentive on the axis the project cares most
+about. Fixed, with the citation in the comment.
+
+## 2026-10-31 — CHC calls a program unsafe that the BMC proves safe in 763ms
+
+The sharpest result of the CHC investigation, and it retires the whole
+"summaries are the blocker" line.
+
+With the footprint mismatch fixed and summaries granted, `alarm` still answered
+`unsat` (unsafe) on a safe program. Rather than keep probing a 1578-block
+program, ran the same question against its sibling:
+
+| program | blocks | smt-bmc | chc |
+|---|---|---|---|
+| Infusion_prop2 | 893 | **TRUE in 763ms** | **`unsat` — unsafe — in 14s** |
+| Alarm_prop1 | 1578 | caps out | `unsat` — unsafe — in 69s |
+
+**CHC calls Infusion unsafe, and the BMC proves it safe.** Same obligation in
+both cases (CHC reports "1 open obligation", the BMC discharges 1).
+
+So the over-approximation is generic to this program family and has nothing to
+do with size, footprints, arity or `MAX_SUMMARY_FIELDS`. No amount of summary
+work makes CHC prove either program, and gh #124's premise that "the CHC path
+looks closest to working, since the failure is encoding size rather than
+expressiveness" is wrong: the failure is expressiveness, and the size was a
+red herring twice over — first because parsing is 7% of the runtime, then
+because precision is the binding constraint.
+
+### Why this is a better position than it sounds
+
+It converts an open-ended precision question into a **bounded one with a known
+answer**. Infusion is safe on independent evidence — the BMC proves it
+exhaustively in under a second, with no reliance on CHC — so any CHC run that
+says `unsat` there is demonstrably wrong, on a 893-block program rather than a
+1578-block one. That is a regression test for CHC precision that needs no
+expected-verdict label and no JVM.
+
+Also worth stating plainly: this is *not* a soundness bug. CHC is an `Over`
+engine, `ChcOutcome::Unsafe` is consumed only in tests, and the explicit error
+refusal added alongside it keeps a malformed encoding from becoming a verdict.
+CHC saying "unsafe" costs precision, never correctness.
+
+### Corrections to earlier notes in this file
+
+- The "52 methods with an empty footprint" was 52 log *lines*, not 52 methods.
+  There are **two**: `AlarmFunctional.stepScalingFactor(I)I` and
+  `Divs32.divS32(II)I`, both pure functions of their `int` arguments, for which
+  an empty heap footprint is correct and which already receive exact
+  `(Int Int)` and `(Int Int Int)` summaries. The lead was spurious.
+- `main`'s input-bounding `assume` *is* in the encoding (5511 occurrences of
+  `255`), so unbounded inputs are not the cause either.
+
+## 2026-10-31 — fixing the CHC summary encoding: a mismatch, a guard, and a measurement
+
+Branch `chc-summary-footprint`. Steps 1-3 of the plan below; 4 and 5 are
+deliberately not done, for a measured reason.
+
+### 1. The footprint/declaration mismatch, fixed
+
+`all_fields` — the set bound as `(fld_X (Array Int Int))` in every clause's
+`forall` — was collected from `Stmt::PutField` and
+`Stmt::Assign(_, GetField)` across all bodies. A method's *footprint* is
+computed separately, and the two disagree: javac constant-folds a
+`final int IN_ALARMS = 1` at its use sites (JLS 13.1), so the field is never
+read by `getfield`, never lands in `all_fields`, and yet the footprint names
+it. The summary application then passes a variable nothing bound:
+
+```
+(error "line 1372 column 31681: unknown constant fld_AlarmFunctional_IN_ALARMS")
+```
+
+Measured on `alarm`: **72 fields used and unbound in a single clause**, all of
+them `AlarmFunctional`'s `final int IN_*` constants. It stayed hidden because
+`MAX_SUMMARY_FIELDS = 6` refuses almost every summary, so almost nothing was
+threaded.
+
+Fixed by binding exactly the fields a *granted* summary will reference —
+`heap_summary_of` applies both the flag and the cap, so the union is empty when
+the heap summary is off. **Union, not intersection**: dropping a field from a
+summary would let the caller treat it as unchanged across a call whose callee
+may write it, which is an unsound assumption rather than a precision loss.
+Binding a field nothing reads costs one quantified variable and says nothing.
+
+The float filter now runs *after* the union, and `summary_sig` applies the same
+filter to the footprint, so a `double` field cannot be in a signature while
+absent from the binding set — which would have reproduced the same bug.
+
+Verified rather than argued:
+
+| | size | errors |
+|---|---|---|
+| flag off | **95,042,200 — byte-identical to pre-change** | — |
+| flag on, cap 6 | 95,082,365 | **0** |
+| flag on, cap 300 | 146,120,409 | **0** (was malformed) |
+
+### 2. A solver error is not a verdict
+
+z3 writes `(error "...")` to **stdout**, not stderr, and then prints a result
+anyway, so a malformed encoding gives `(error ...)` followed by `unsat`.
+`parse_result` matched the *whole* trimmed stdout, so the extra line already
+fell through to `Unknown` — correct, but incidentally. The obvious tidy-up,
+taking the last line, silently turns a malformed encoding into `sat` → `Safe` →
+every obligation discharged → a wrong TRUE.
+
+Now refused explicitly, with `an_error_from_the_solver_is_not_a_verdict`. The
+test **passes before the change too**, and its doc says so: it guards the
+refactor rather than proving a fixed bug. Mutation-checked — it fails under
+last-line matching with the check removed.
+
+### 3. The heap summary flag: measured, still off
+
+The flag's own doc said what it needed: "a measurement showing it gains more
+than the arity costs". Smoke, 168 runs: **190 with the flag off, 190 with it
+on, 0 WRONG either way.** Inert, consistent with gh #109 measuring C1 inert
+across 107 heap-shaped tasks. Left off, now with a measurement behind that
+rather than an absence of one.
+
+### 4-5. Not done, because threading the footprint is not sufficient
+
+The point of the plan was that vacuous summaries caused the spurious `unsat` on
+`alarm`. With the mismatch fixed and the cap at 300, `setCurrentAlarm` gets its
+full 20-field relation, the encoding is well-formed, and z3 still answers
+**`unsat` — unsafe — on a safe program**, in 69s over 146 MB.
+
+So threading the footprint is necessary and not sufficient: the remaining
+over-approximation is somewhere else. Building the arity-reduction work (one
+argument per object instead of per field) would make a sound-but-still-useless
+encoding cheaper, and until the residual imprecision is found there is no
+evidence it converts anything. 52 methods still have an *empty* footprint,
+which is the next thing to look at.
+
+## 2026-10-31 — why CHC's summaries are vacuous: a cap of 6 against footprints of 233
+
+Traced the vacuous `m5_s` summary to its cause, which the existing refusal
+logging (added by gh #109 for exactly this purpose) answered immediately:
+
+```
+ 52  refused — empty footprint, nothing to thread
+ 16  footprint of 20 exceeds MAX_SUMMARY_FIELDS 6
+ 12  footprint of 99 exceeds MAX_SUMMARY_FIELDS 6
+ 10  footprint of 233 exceeds MAX_SUMMARY_FIELDS 6
+```
+
+`MAX_SUMMARY_FIELDS = 6`. The Alarm family's methods have footprints of 20,
+35, 66, 69, 87, 99, 109, 159 and 233 fields, so **every one is refused**, every
+summary degenerates to `params + ret`, and Spacer is free to pick a return
+value that violates the property. The log's "footprint of 20" for
+`setCurrentAlarm` matches an independent count of its field accesses in the
+Java source exactly.
+
+Two further gates compound it: `AJAVE_CHC_HEAP_SUMMARY` is **off by default**
+(`== Ok("1")`), which CLAUDE.md already calls unfinished rather than
+configured, and 52 methods have an empty footprint.
+
+### Raising the cap exposes a real encoder bug
+
+At `MAX_SUMMARY_FIELDS = 300` the summaries are granted — `setCurrentAlarm`
+becomes a 20-field relation — and the encoding becomes **malformed**:
+
+```
+(error "line 1372 column 31681: unknown constant fld_AlarmFunctional_IN_ALARMS")
+unsat
+```
+
+`IN_ALARMS` is `final int IN_ALARMS = 1`, a constant-initialised field that the
+*footprint* names and the *declaration* path never emits as an array. With the
+cap at 6 this almost never fires; at 300 it does. So the cap has been masking a
+footprint/declaration mismatch, and raising it alone produces garbage.
+
+### The error is not mistaken for a verdict, but only just
+
+z3 writes `(error …)` to **stdout** (stderr is empty), and `parse_result`
+matches `stdout.trim()` against `"sat"`/`"unsat"` as whole strings, so any
+extra output falls through to `Unknown`. That is the right answer, and it
+survives only because the match is against the whole output rather than the
+last line. A tidy-up to "take the last line" would convert a malformed
+encoding into `sat` → `Safe` → discharged obligations → a wrong TRUE. Worth an
+explicit `(error` rejection and a test named after this paragraph.
+
+### What has to happen, in order
+
+1. **Fix the footprint/declaration mismatch.** Either declare every field a
+   footprint names, or drop constant-initialised finals from footprints —
+   threading a compile-time constant through a summary buys nothing. Until
+   this is done, any cap raise emits malformed SMT-LIB and every answer from
+   it is void.
+2. **Make `parse_result` reject solver errors explicitly**, with a test. It is
+   correct today for an incidental reason.
+3. **Default `AJAVE_CHC_HEAP_SUMMARY` on**, measured on both properties. An
+   off-by-default producer is not a producer.
+4. **Remove the arity cliff rather than raising the cap.** Arity is
+   `2 × footprint`, so 233 fields is 466 array arguments; at 300 the encoding
+   already grew from 95 MB to 114 MB. The durable fix is one argument per
+   *object* instead of per field — a `declare-datatypes` record per generated
+   struct class, or one array per class indexed by field offset. Then arity is
+   constant in the footprint and `MAX_SUMMARY_FIELDS` can go away rather than
+   being re-tuned.
+5. **Only then re-measure whether Alarm proves.** With 1–4 outstanding, a
+   `sat` or `unsat` from this encoding means nothing.
+
+Item 6 is independent and smaller: the identity-equation frame measured at 7%
+of runtime (3.59s parse against 48.9s solve), fixable by equality substitution
+at encode time.
+
+## 2026-10-31 — the 95 MB CHC encoding: measured, and it is not the problem
+
+Dumped the encoding for `Alarm_prop1` (`AJAVE_CHC_DUMP`) and measured it rather
+than reasoning about the size.
+
+### What the file is
+
+95,042,200 bytes in **3067 lines** — about 31 KB per line. 1327 predicates,
+1660 Horn clauses, and a **median of 1272 universally quantified variables per
+clause**, 1.88 million bound variables in total. The quantifier prefix of one
+clause is 30 KB and its body 33 KB.
+
+The body explains it:
+
+```
+(=> (and (= _f0 (ite (not (= v75 0)) 1 0))          ; the one real transition
+         (= _f0 0)
+         (= w0 v0) (= w1 v1) ... (= w690 v690))      ; 691 identity equations
+```
+
+Those `w`/`v` pairs are the **heap field frame** — `fld_SystemStatusOutputs_volumeInfused_w`
+and friends — restated in full on every clause. 63 KB to express one
+assignment. So fields *are* threaded intra-procedurally, explicitly and
+verbosely.
+
+### The size is 7% of the cost, so it is not the blocker
+
+| | time |
+|---|---|
+| parse only (query stripped) | **3.59s** |
+| full solve | **48.9s** |
+
+Parsing 95 MB costs 3.6 seconds. The other 45 seconds is solving. Shrinking
+the text is worth doing for memory and IO but converts nothing on its own —
+which is the opposite of what the headline number suggested, and the reason to
+measure before optimising.
+
+z3's own Horn preprocessing does not help either:
+`fp.xform.tail_simplifier_pve=true fp.xform.slice=true fp.xform.coi=true`
+measured **48.88s against 48.94s**. No effect. Do not reach for those options
+on the strength of their names.
+
+### The real blocker: summaries omit the fields
+
+z3 answers **`unsat`**, and in this encoding `unsat` means *unsafe*
+(`chc.rs:3500`). So CHC calls a safe program unsafe. It is not a soundness bug
+— CHC is an `Over` engine and `ChcOutcome::Unsafe` is consumed only in tests,
+never published — but it means **CHC cannot prove the Alarm family however fast
+the encoding becomes.**
+
+The cause is summary arity:
+
+```
+; summary for AlarmFunctional.setCurrentAlarm(LDW;)I
+(declare-fun m5_s (Int Int) Bool)        applied as (m5_s v67 _f1)
+```
+
+Two arguments: a receiver identity and a return value. But
+`int setCurrentAlarm(DW localDW)` reads about 19 `localDW` flag fields and
+writes `localDW.maxAlarmLevel`. **None of those 163 encoded fields appears in
+the relation**, so the summary constrains nothing, Spacer is free to pick a
+return value that violates the property, and the counterexample is spurious.
+
+Intra-procedurally the fields are threaded (that is what the 691 equations
+are); across a summarised call they are dropped. That is gh #95 exactly —
+"model heap contents with threaded state, not an uninterpreted predicate" — and
+it, not encoding size, is what gates these 9 tasks.
+
+### The footprint is small, which is what makes the fix tractable
+
+`setCurrentAlarm` touches **20 of 163** fields. So the honest summary is about
+arity 22 (its read set, the written field before and after, and the return),
+not 163 and certainly not 2. Threading *all* state through every summary would
+make the frame problem worse; threading each method's **footprint** is both
+exact for that method and cheap.
+
+### Ordered recommendations
+
+**Precision — this is what unlocks the family:**
+1. Summaries carry the callee's field **footprint**: read set in, write set out.
+   Currently zero fields, hence vacuous. (gh #95, and gh #111 is the
+   footprint-computation defect — it ignores `Stmt::ArrayStore`.)
+
+**Size — worth doing, measured at ~7%:**
+2. Eliminate identity equations by substitution at encode time (union-find over
+   bound variables, then rename). The 691 frame equations and their bound
+   variables disappear; 95 MB should fall by two orders of magnitude.
+3. Frame only the write footprint rather than all state.
+4. `declare-datatypes` records for the generated `B`/`DW` structs, so one bound
+   variable carries a struct instead of 163 scalars. Spacer supports ADTs, and
+   it matches what the Simulink generator actually emitted.
+
+**Measured not to help:**
+5. `fp.xform.{tail_simplifier_pve,slice,coi}` — no effect (48.88 vs 48.94).
+6. LIA over BV is already the right choice here and is already what is emitted.
+
+## 2026-10-31 — the Alarm family: a controlled comparison, and three wrong theories
+
+The largest concentrated target found: `java-ranger-regression/alarm`, 9 tasks,
+**all expected TRUE on both properties, all UNKNOWN — 36 points**. Diagnosing
+it cost three theories, each killed by one measurement, and the sequence is
+worth recording because each theory was plausible and cheap to refute.
+
+### Theory 1: it needs predicate abstraction
+
+The assertion is `assert (!checkCondition || checkOutput)` — an *implication*
+between two booleans computed by a generated state machine. The interval domain
+is non-relational and cannot express `a ⟹ b`, and the engine for that is the
+predicate CPA, which has a real defect: `PredState::is_bottom` returns `false`
+unconditionally ("bottom is not representable in this encoding"), so it can
+never prune the counterexample state `checkCondition ∧ ¬checkOutput`, which is
+the whole proof. Coherent, and gh #42 already records the defect.
+
+**Refuted by sizing it.** Grepping the corpus for the same assertion shape
+found 21 tasks: 9 `alarm` and 12 `infusion`. All **12 Infusion tasks already
+score TRUE on both properties**. The implication form is not the blocker; we
+prove it twelve times over.
+
+### Theory 2: Alarm has loops that Infusion does not
+
+`PROGRAM_SHAPE` says `loops=false` for **both**.
+
+### Theory 3: the path-length cap binds
+
+True, and useless. `explore_block_until` truncates on
+`depth > max_depth` with `max_depth = 200`, and Alarm's loop-free paths exceed
+200 blocks where Infusion's do not — Alarm is 1578 blocks and 156 entry blocks
+against Infusion's 893 and 98.
+
+So raise it. At 2000 the truncation **moved** to `setCurrentAlarm`; at 3000 the
+run reports **1000 forks** — the fork cap — still `exhausted=false`, still
+UNKNOWN. Each cap raise relocates the bottleneck rather than removing it, which
+is what this file predicts about fitted constants and what gh #119 measured as
+about one task across four probes.
+
+### What it actually is
+
+A **scale** problem, and the controlled comparison is what shows it:
+
+| engine | on Alarm (1578 blocks) | on Infusion (893 blocks) |
+|---|---|---|
+| smt-bmc | caps out; raising one moves the bottleneck | **proves it in 763ms** |
+| chc | generates **95 MB** of Horn clauses, solver returns `timeout` | — |
+| interval-ai | non-relational; cannot prove the implication | — |
+
+Same assertion shape, same absence of loops, same `heap=true`. The only
+difference is 1.8x the program, and that is the difference between 763ms and
+unprovable. Nothing here needs a theory we lack; it needs the work to not grow
+with the number of paths.
+
+The named technique for exactly this is **region summarization** — and these
+are `java-ranger-regression` tasks, i.e. the benchmark family of the tool whose
+contribution region summarization is. The 95 MB CHC encoding points the same
+way: an inter-procedural encoding that emits per-block predicates for all 1578
+blocks is not summarising, it is transcribing.
+
+### The methodological point
+
+Four theories today have been bucket counts or shapes read as causes:
+`refuted-witness` 211→1, the flattened length premise 198→4, `budget` 135→1,
+and now the implication shape 21→0-as-a-cause. The thing that killed this one
+was looking for the tasks that **share the shape and succeed**. A population
+with positives in it is a controlled experiment; a bucket count is not.
+
+## 2026-10-31 — where the corpus is actually blocked, and an unsound fix the gate caught
+
+### The corrected corpus picture
+
+With the `budget`/`structural` split in place, valid-assert over 277 unproven
+tasks:
+
+| bucket | tasks | % | responds to |
+|---|---|---|---|
+| **structural** | 74 | 26.7% | an invariant or a different cap — not time |
+| float-escalation | 59 | 21.3% | *(see below — also structural)* |
+| no-candidate | 44 | 15.9% | nothing published at all |
+| refuted | 38 | 13.7% | feeding refutations back |
+| theory | 32 | 11.6% | a different encoding |
+| timeout | 22 | 7.9% | anytime engines |
+| model | 7 | 2.5% | lifting java.base |
+| **budget** | **1** | **0.4%** | scheduling |
+
+`budget` is **one task**. It was reported as 135 of 409.
+
+And `float-escalation` is structural underneath. Probing
+`argv-tasks/AccelerometerListener_false`: the FPA pass *is* reached, runs for
+63s, and reports `BLOCKER all_paths_complete` — not
+`float_arith_approximated`, which only the BV pass can emit
+(`!self.fp_arith` excepts the escalation instance). The census attributes the
+task to float-escalation because the BV pass's blocker is the dominant one
+recorded. So the label "letting the FPA pass reach it (theory exists)" is wrong
+for these: it reaches them and is blocked by truncation.
+
+That makes structural truncation the dominant corpus blocker, under at least
+two bucket names.
+
+### What truncates, and it is not a cap
+
+17 forks against `MAX_FORKS=500`; 55 block visits against `MAX_BLOCK_VISITS=50_000`.
+No cap binds. Two of the three `handle_branch_fork` truncations fire on
+`feas == SatResult::Unknown` — **the solver could not decide branch
+feasibility**, which for FPA queries is ordinary.
+
+Measured: 8 of 43 feasibility queries undecided at the configured 5s per-query
+soft timeout. At 60s: **0 undecided, `all_paths_complete` true, and the query
+count fell from 43 to 32** — a decided `Unsat` prunes a branch the search would
+otherwise walk, so the hard queries buy back more work than they cost.
+
+### The fix that followed from that, and why it is wrong
+
+Built a two-tier query: on `Unknown`, re-ask once with 12x the budget before
+marking incomplete. Cost bounded by the number of undecided queries, cheap path
+untouched. It worked mechanically — one escalated query, `Unknown → Sat`,
+`all_paths_complete: false → true`, one extra solver call.
+
+Smoke: **158, two wrong TRUEs**, one of them `Pan_exceptionprone` — the task
+the comment at the call site names as the original wrong TRUE. The canary
+existed for exactly this and fired on the first run.
+
+The reason, which the probe could not show and the comment only half states:
+the marker does not merely record that *the solver* could not decide. The BMC's
+encoding is **approximate** — floats as bitvector patterns, string
+approximations — so a `Sat` under that encoding does not mean the path is
+satisfiable in the real program. Deciding the query harder does not make the
+encoding faithful; it only removes the guard. The subtree is then explored
+under a constraint that may be genuinely infeasible, reports no violations
+vacuously, and now claims completeness.
+
+Stated plainly: **`all_paths_complete: true` was the thing being optimised, and
+it was achieved by deleting the reason it was false.** The probe looked
+excellent precisely because it removed a safety property, and no amount of
+measuring the flag would have revealed that — only running the canary did.
+
+### What this says about the direction
+
+Escalating solver effort cannot convert the structural bucket while the
+encoding is approximate, because the incompleteness is about the encoding, not
+the solver. The orderings that remain:
+
+1. A **faithful encoding** first (gh #48's territory for floats), after which
+   feasibility answers mean something and the marker can be relaxed with an
+   argument rather than a hope.
+2. An **over-approximating engine** proving the loop, which needs no
+   feasibility decision at all.
+
+Reverted. Filed with the measurement so the 5s-to-60s result is not
+rediscovered and mistaken for an opportunity a second time.
+
+## 2026-10-31 — the census's biggest convertible bucket is not convertible
+
+### What it said
+
+`blocker_census.py` maps each unproven task to the kind of work that would
+convert it, and `all_paths_complete` mapped to **`budget`**, labelled
+"scheduling / more effort  <-- the scheduler's ceiling". That bucket was 135 of
+409 declined pairs, and it is the bucket the whole scheduler workstream
+(`Progress`, `round_share`, per-engine deepening) was justified by.
+
+### What it is
+
+Picking the largest tractable category by points left on the table —
+securibench, 121 points across 71 pairs with only 3 timeouts — the census put
+**12 of 27** sampled tasks in `budget`. Every one of them reports:
+
+```
+smt-bmc: INCOMPLETE (handle_goto) in Basic18.doGet
+exhausted=false  budget_left=true  all_paths_complete=false
+113 block visits, 12 forks, 76 solver calls
+```
+
+`exhausted=false`. The search stopped **with budget still in hand**, at a loop
+back-edge (`handle_goto`) or the fork cap (`handle_branch_fork`). Checked
+across Basic5, Basic6, Basic33, Basic34, Basic37, Basic39 and Basic18: uniform,
+every one `exhausted=false`.
+
+**No amount of rescheduling converts these.** They need an invariant from an
+over-approximating engine, or a different cap — and gh #119 already measured
+raising the caps at about one task across four probes.
+
+### The fix is in the tool, not the engine
+
+`all_paths_complete` conflated two populations that respond to opposite work,
+and reported both as the thing a scheduler could fix. It now splits on
+`exhausted`:
+
+| kind | means | responds to |
+|---|---|---|
+| `budget` | the search really ran out | scheduling / more effort |
+| `structural` | stopped with budget left | an invariant, or a different cap — **not** more time |
+
+Re-run on securibench: **0 budget, 12 structural**. The entire
+scheduler-convertible bucket for that category was structural.
+
+The split is pinned at the level the claim is made — `self_test` now calls
+`classify` on a record with `exhausted` false and true and requires
+`structural` and `budget` respectively, as well as pinning the two new
+regexes. A regex that stops matching would silently revert every such task to
+"convertible by scheduling", which is exactly the claim the split exists to
+stop making, and this tool has already reported a table of zeros once from an
+unmatched pattern.
+
+### Why this is worth more than the points
+
+It reclassifies the largest apparently-cheap bucket as expensive, which is the
+opposite of a convenient result, and it was found by asking the tool's own
+output one more question rather than by trusting its label. The same shape has
+now appeared three times in one day: the `refuted-witness` bucket at 211 tasks
+(a precedence artefact, really 1), the flattened-lemma length premise at 198
+(a check-order artefact, really 4), and now `budget` at 135. In each case a
+bucket counted a *symptom* and was read as a *cause*.
+
+## 2026-11-01 — the sv-comp baseline was recorded and then discarded, on purpose
+
+Recorded the long-deferred per-task baseline — 1785 entries, both properties in
+one invocation — and threw it away. The reason is worth keeping, because the
+run *completed* and the artefact looked fine.
+
+### Recording both properties has to be one invocation
+
+`write_baseline` opens the file with `"w"`. Running `--update-baseline` once per
+property therefore has the second overwrite the first, leaving a baseline with
+no valid-assert entries at all and no indication anything is missing. The
+default (no `--property`, each task using its own declared properties) is the
+only correct way to record a two-property set.
+
+### Why it was discarded
+
+32 of 1785 entries recorded a wall clock above the 300s budget, the worst at
+2280s — 7.6x. The machine was memory-starved: `bench.py` had just refused to
+start at 8.3GB free against the 9.0GB that six workers need, the run went ahead
+at five, and only about 1GB of pages were genuinely free.
+
+The score shows the cost: this run scored valid-assert **906** against **911**
+measured on an idle six-worker run of the same commit. Five points of tasks
+lost to starvation, recorded as the expected outcome.
+
+That is the documented failure: *"a baseline recorded on a loaded machine is
+inflated, which masks future slowdowns. Record baselines on an idle machine for
+the same reason scores are."* A pessimistic baseline does not cause false
+regressions, it causes **missed** ones — `--check` fails on correct→unproven,
+so an entry already recorded as unproven can silently rot.
+
+Moved out of `benchmarks/sets/` rather than left untracked, because `--check`
+resolves the baseline **by path** and does not care whether git knows about it.
+An uncommitted file there is not a draft, it is a live instrument.
+
+### Two wrong diagnoses on the way, recorded so they are not re-run
+
+The 2280s entry looked at first like gh #113 — the engine overrunning a stated
+timeout — which would have meant tasks scoring on time they should not have
+had, and a baseline institutionalising it. It is not that:
+
+1. **"The timeout is not enforced."** Wrong. `run_guarded` caps
+   `communicate(timeout=…)` and then kills the process group, and the same task
+   run alone measures **300.22s** and records TIMEOUT.
+2. **"The harness's own log parsing is counted into `elapsed`."** Partly real
+   but not the cause here. `collect_timing` *is* switched on by
+   `--update-baseline`, and `elapsed` is computed as
+   `t0 = now - r.elapsed; … now2 - t0`, which does fold the `TIMING_RE` scan
+   into the recorded time. But 22 of the 32 inflated entries are TIMEOUTs, and
+   a timeout sets `log = ""`, so there is nothing to scan. Re-running the task
+   with `--timing` measured 300.15s.
+
+What survives from (2) is a smaller real defect: `elapsed` should be `r.elapsed`
+directly rather than a round-trip through `t0`, so that the harness's own
+parsing is never attributed to the task it is parsing.
+
+## 2026-10-31 — correction: NRE is 1184, not 1186, and the combined figure is 2095
+
+The 1186 recorded below is an **outlier**, and the correction matters because it
+was published as the headline number.
+
+Four no-runtime-exception runs, 300s budget, idle-gated:
+
+| build | score | `argv-tasks/HotspotIntegerGenerator_false` |
+|---|---|---|
+| `d61b514` (main) | **1186** | TRUE |
+| `4c360bc` (main) | **1184** | UNKNOWN |
+| `243f738` (branch) | **1184** | UNKNOWN |
+| `243f738` (branch) | **1184** | UNKNOWN |
+
+One task accounts for the whole 2-point spread, and it was TRUE in exactly one
+of the four runs. So:
+
+- **NRE is 1184**, not 1186.
+- **Combined is 911 + 1184 = 2095**, not 2097.
+- The `chc-summary-footprint` branch is **neutral**: main and branch both score
+  1184 with the same task unproven.
+
+### How this was nearly misread as a regression
+
+The branch's first NRE run scored 1184 against a 1186 baseline and the obvious
+reading was "the change cost 2 points". Three things were needed to refute it,
+in increasing cost:
+
+1. Run the task **in isolation**: TRUE on the branch 3/3 (~20s), TRUE on main
+   3/3 (~21s). Indistinguishable timings, so the change does not slow it.
+2. Run the branch's NRE set **again**: 1184 again, same task. That ruled out
+   simple variance and is where it stopped looking like noise.
+3. Run **main's** NRE set again: also 1184, same task. That is what settled it —
+   the baseline was the lucky draw, not the branch the unlucky one.
+
+Step 3 is the one that CLAUDE.md already insists on — *"before attributing a
+flagged regression to your change, run that task on the base commit"* — and the
+only reason it was reached is that step 2 came back identical rather than
+different. Had the re-run returned 1186, the honest conclusion would have been
+"variance" and the real instability would have stayed hidden.
+
+### The task itself is a genuine finding
+
+`HotspotIntegerGenerator_false` answers TRUE in **6 of 6 isolated runs** at
+~20s against a 300s budget, and UNKNOWN in **3 of 4 harness runs** at six-way
+parallelism. It is nowhere near the timeout, so the usual coin-flip tell —
+"finished within 40% of the budget" — does not fire. Its verdict depends on
+machine load at one fifteenth of the budget, which points at an engine's
+wall-clock time share rather than the task budget, and makes it a poor baseline
+entry in either direction.
+
+## 2026-10-31 — corpus scores, on one build, with the contention named
+
+Both properties, engine build `d61b514`, 300s budget:
+
+| property | score | wrong | unproven | timeouts |
+|---|---|---|---|---|
+| valid-assert (upstream label) | 878 | 1 (the mislabel) | 274 | 21 |
+| valid-assert (corrected label) | **911** | **0** | 274 | 21 |
+| no-runtime-exception | **1186** | **0** | 170 | 17 |
+| **combined, corrected** | **2097** | **0** | | |
+
+Against 2058 on record that is +39, of which **+33 is the label correction**
+and +6 is unattributed — there is no stored `sv-comp` baseline to diff
+per-task, which is the gap being closed after the next improvement.
+
+### The valid-assert number needed an adjustment, and the cause was mine
+
+The matched-build run reported **877**, not 878, with **6 ERROR** results where
+the earlier run had none. `bench.py` scores `returncode < 0` as `ERROR`, so
+contention reads as a verdict change rather than as noise — exactly the trap
+this file records: *"5 tasks going FALSE → ERROR... the usual tell that a run
+is contended was therefore absent and it looked exactly like a code
+regression."*
+
+Here it was self-inflicted: I ran two `bench.py --set smoke --limit 1` checks
+*during* the scoring run, which is the one thing "run nothing else during a
+scoring run" forbids. The signature was identical to the recorded case — 5 of
+the 6 ERRORs were already TIMEOUTs (worth 0 either way) and the sixth,
+`StringValueOf08`, had been a correct FALSE, which is the entire 1-point
+difference. It **reproduces as FALSE, exit 0, on an idle machine**, so the
+matched-build figure is 878.
+
+Every other verdict count was identical across the two runs (172 TRUE, 253
+UNKNOWN, 566 FALSE), which is what makes the adjustment an inference about one
+task rather than a correction of the whole run. Stating it as adjusted rather
+than re-running is a deliberate trade: a clean run costs 52 minutes and the
+deferred `sv-comp` baseline will produce one anyway.
+
+### An incidental confirmation
+
+Valid-assert measured 878 on build `a8bd389` *and* on `d61b514`. The only
+engine change between them is the `hashCode` fix, so that fix is
+score-neutral on valid-assert — independently agreeing with the violation-claim
+probe, which found pre- and post-fix checkpoints identical at all eight. Two
+different measurements, same conclusion: a correct fix worth +2 on its own
+benchmark and nothing on the corpus.
+
+## 2026-10-31 — the one locally-corrected benchmark label, and what it costs us
+
+`argv-tasks/ReverseInterpolator_true.yml`'s valid-assert verdict is corrected
+from `true` to `false` locally. It is the **only** divergence from upstream
+sv-benchmarks in the corpus, and it should stay the only one.
+
+### Why it is a defect and not a gap in our analysis
+
+There is a legal `nondetFloat()` value for which a stock JVM throws
+`AssertionError`. Stub `nondetFloat` to return
+`Float.intBitsToFloat(1099087158)` — about 16.38, an ordinary finite float —
+compile the task's own sources against it, and run with `-ea`: exit 1,
+`AssertionError`. With the usual zero-returning stub: exit 0. That second line
+is why the mislabel survives casual checking, since merely running the
+benchmark suggests it is safe.
+
+ajave reports FALSE and its `jvm-replay` certifier confirms it by *executing*
+the program with that witness. So this was a correct FALSE being scored as
+wrong.
+
+### What it is worth, and the catch
+
+A wrong FALSE is -32 and a correct FALSE is +1, so the correction is a
+**33-point swing** on a single task — about 3.7% of the valid-assert score, and
+the largest single lever in that run. It was also the sole entry in our
+"wrong" column, so the corpus now has **zero** wrong answers on both
+properties.
+
+The catch, which matters more than the points: **our valid-assert score is now
++33 against what SV-COMP's own labels would award.** Any comparison with
+competition results, or with another tool scored on stock sv-benchmarks, must
+apply the same correction or subtract it back out. The memory note
+`ajave-vs-svcomp-field` records a 1,837-vs-1,561 comparison against JBMC; that
+figure predates this change and needs the adjustment stated when it is next
+used.
+
+### The rule this needs
+
+Editing an expected verdict is the most direct form of the benchmark
+overfitting this file warns about on every other page. The bar is therefore
+not "we disagree with the label" but **a JVM-reproducible witness**, as above:
+a concrete input, the exact stub, and an observed non-zero exit. Anything short
+of that is tuning the measurement rather than fixing it.
+
+### The corpus is gitignored, so the correction needed somewhere to live
+
+`benchmarks/sv-comp/` has **zero tracked files** — it is fetched, not
+committed. A label corrected by hand therefore lives only in a working copy,
+and a re-clone or a corpus refresh reverts it silently. That is a score moving
+by 33 points for a reason no record explains, which is the exact failure this
+file's measurement-discipline section exists to prevent, arriving through the
+corpus instead of through the binary.
+
+So the correction is tracked data, in `tools/corpus_corrections.py`, carrying
+the witness and the issue alongside each entry:
+
+    python3 tools/corpus_corrections.py --check    # exit 1 if not applied
+    python3 tools/corpus_corrections.py --apply    # idempotent
+
+`--check` separates three states because they need different responses:
+*applied* (nothing to do), *missing* (run `--apply`), and **diverged** —
+neither the upstream value nor ours, meaning upstream changed the task and the
+witness must be re-verified before the correction is re-applied. Self-tested
+against all three rather than only the happy path, because a checker that only
+ever sees "applied" is the vacuous-validator shape this file already records
+once.
+
+`bench.py` calls it at startup and warns, rather than refusing: a run on a
+stock corpus is legitimate, it is just not comparable to a recorded score.
+
+A comment header in the task file states the divergence too, since that file is
+what a future reader opens. Deleting both is all that is needed if upstream
+fixes the label.
+
+The no-runtime-exception verdict is **not** corrected: `AssertionError` is an
+`Error`, not a `RuntimeException`, so it falls outside that property, and the
+NRE run already scores this task correctly.
+
+### Deferred
+
+A stored `sv-comp` baseline. Its absence is why the move from 876 to 878 could
+not be attributed to anything — there is no per-task record to diff, only
+`smoke`, `ajave` and `concurrency` baselines. Deliberately deferred until after
+the next scoring improvement so it is recorded once, on a matched build, rather
+than twice.
+
+## 2026-10-31 — gh #88: the premise was wrong, and the real instance was somewhere else
+
+### #88's two proposed fixes were already implemented
+
+The issue proposed (a) refusing to publish a violation whose condition depends
+on a havoced value, and (b) modelling `multianewarray` as an allocation. Both
+are in the code: `explore.rs`'s `handle_check` gates on
+`res == Sat && !is_tainted`, with a second `unreplayable` check behind it, and
+`35b7c07` made `multianewarray` a real allocation so `some_a.length == 4` is
+now *provable* rather than merely unclaimed.
+
+### Its central premise is wrong, in the safe direction
+
+#88 says the 113 expected-TRUE tasks with published violations "cost nothing
+today **only because** JVM replay refuses them", i.e. that replay is a
+refutation filter and every one is a latent -32. It is not a refutation filter.
+`main.rs` reads:
+
+```rust
+if cli.no_replay || confirmed_witness.is_some() { Verdict::False }
+```
+
+FALSE requires replay to **positively confirm**. Refuted, failed to compile,
+timed out, JVM absent — all yield `None` and fall through to
+`verdict_excluding`, which will not return FALSE for that obligation. So the
+failure mode of certification is UNKNOWN, never -32. A full valid-assert corpus
+run the same day: 1013 tasks, **1 WRONG**, and that one is
+`ReverseInterpolator_true`, the known benchmark mislabel (gh #72).
+
+This matters for prioritisation: the 113 are a *precision* problem (the claim
+occupies the obligation) rather than a soundness one, and the real soundness
+exposure is #86 — replay wrongly **confirming** — not the publish path.
+
+### The real instance, which #88 never looked for
+
+`handle_check` keys taint on `rvalue_tainted`, which for a string call asks
+`str_call_modelled`. That listed `hashCode` as modelled. The encoder:
+
+```rust
+"hashCode" => {
+    let s = recv_str?;
+    let _ = s;                                 // the receiver, discarded
+    let h = self.solver.fresh_bv("hash", 32);  // unconstrained 32 bits
+    Some((h, None))
+}
+```
+
+So the call was *declared* modelled and *encoded* as a free variable. The
+invented value was therefore *untainted*, the `!is_tainted` guard passed, and
+the BMC published a violation against `"abc".hashCode() != 0` — a value the
+Javadoc pins at 96354.
+
+This is #88's mechanism — "unknown treated as licence to claim a violation" —
+arriving from the opposite side. #88 reasoned about `Rvalue::Havoc`, which the
+lifter is careful about (audited: exactly one `Rvalue::Nondet` construction
+site, and it carries `Some(jvm_byte)`, so the lifter's invariant holds). The
+gap was a *classification* disagreeing with an *encoding*. Being untainted it
+also bypassed `skipped_obligations`, so the obligation was occupied by the
+claim instead of recorded as undecided — which is what stops an
+over-approximating engine from proving it.
+
+Audited the rest of the string encoder for the same shape. `hashCode` was the
+only case: `encode_str_compare`'s fresh BVs are *constrained*
+(`s = str.from_code(..)`), so they are an approximation rather than a free
+variable.
+
+### The fix is +2, not merely -0
+
+`String.hashCode()` is specified exactly, so for a literal receiver it is a
+compile-time constant and we now compute it. A non-literal receiver is
+declined, which taints the result and withholds the claim; declining can only
+remove violations, so it cannot create a wrong TRUE.
+
+`jvm-strings/LiteralStringHashIsAConstantNotAFreeVariable` goes **UNKNOWN →
+TRUE** on valid-assert. The obligation is now *proved*, not just un-claimed.
+
+`java_string_hash` is mutation-checked by five tests argued from the Javadoc
+rather than from a JVM run: changing the multiplier from 31 fails four of them,
+and using `chars()` instead of `encode_utf16()` fails exactly the surrogate
+test written for it (a Rust `char` is a code *point*; the Javadoc defines the
+hash over `char`s, i.e. UTF-16 code units).
+
+### A false comment in the concrete engine, corrected not fixed
+
+`run_concolic`'s doc said a `Violated` meant "the choices that produced it are
+a genuine witness rather than a candidate". False whenever a havoc was
+evaluated: `eval_havoc` invents `I32(0)` and deliberately does not record it in
+`entries`, so the recorded choices do not determine the failure. That is the
+`entries=0` signature in #88 and the all-zero shape of 56 of the 76
+replay-refuted witnesses per run.
+
+Deliberately **not** fixed by suppression. gh #43 measured that at -20 points,
+because the JVM confirms some invented-value violations — an all-zero probe can
+trigger a real bug even when zero is not a value the program could choose. The
+CLAUDE.md rule ("if an engine cannot construct a witness through its own
+analysis, it must not publish a violation") is satisfied here by the
+confirmation gate rather than by the publishing engine, and the comment now
+says so.
+
+Worth recording that #43's stated prerequisite — the orchestrator
+short-circuiting on violations — *has* since been fixed
+(`orchestrator.rs:212`), so its precise variant is viable if the measurement
+ever justifies it. Three other under-approximating engines (`concrete`,
+`concolic`, `nra`) publish violations and none is taint-aware, which is sound
+only *given* that gate. That makes the gate load-bearing and it has no
+regression test; constructing one needs an invented-value source, which is
+what we keep eliminating.
+
+## 2026-10-31 — measuring the flattened-matrix ceiling, which refuted the next two plans
+
+Two planned pieces of work were cancelled by one measurement. Recording it in
+full, because the measurement cost minutes and each plan would have cost hours.
+
+### The probe
+
+`AJAVE_TRACE_FLAT=1` makes the lemma name the premise that declined. Running
+it over all 1033 corpus tasks with every other engine disabled — the abstract
+interpreter runs in milliseconds, so this is a six-minute sweep, not a scoring
+run — answers "which premise actually blocks, and on how many tasks".
+
+### First reading was an artefact, and it was the same artefact as last time
+
+The first run said **198 of 1033** tasks declined on "length is not a known
+product" and **1** on the overflow premise. Read naively that is a 198-task
+population for the length work.
+
+It is not. The length premise is checked **first**, so every decline in every
+program lands in that bucket whether or not the task was ever a candidate.
+This is precisely the bucket-precedence error that made `refuted-witness` look
+like 211 tasks earlier in the same session, and it reappeared within hours in a
+different harness.
+
+The fix is to make the first premise's message also report whether the *index*
+has the flattened shape, which is order-independent. Re-measured:
+
+| premise | tasks |
+|---|---|
+| index is not a flattened shape (not a candidate) | 198 |
+| **index is `i*s+j` but the length is not a known product** | **4** |
+| overflow: a factor's upper bound is unknown | 1 |
+| **blocked *only* on the overflow premise** | **0** |
+
+The four are `BellmanFord-{FunSat01,FunUnsat01,MemSat01,MemUnsat01}`. That is
+the entire flattened-matrix population of the corpus.
+
+### What this cancels
+
+**Two-phase parameter-interval propagation: cancelled.** Zero tasks are blocked
+solely on the overflow premise, so the whole design — harvesting argument
+intervals at call sites, gating on caller completeness and acyclicity, a second
+analysis round — would have unblocked nothing. It was the next item on the
+plan and had a written soundness argument before this was measured.
+
+`BellmanFord-MemUnsat01` is the one task reaching that premise, and it declines
+**correctly**: its `assume` bounds the dimension by 999999, so `n*n` is about
+1e12 and genuinely does not fit in an `int`. Nothing to fix.
+
+**A syntactic fix to the length matcher: attempted, reverted.** `BellmanFord`
+has exactly the shape `analyze_array_len_preconditions` was written for, and
+established no precondition. The cause is the javac copy chain again:
+
+```
+bb6:   v8  = v3 * v3          bb22:  v36 = call runBellmanFord(v3, v13, 0)
+       v10 = new int[v8]             v37 = v36
+       v12 = v10                     v11 = v37     <-- v11 assigned a second time
+       v11 = v12
+bb7:   v13 = v11
+```
+
+`v11` holds `D` at `bb6` and the call's own **return value** at `bb22`, so it
+is assigned twice and the whole-body single-definition test refuses to follow
+`v13` back to the allocation. Refusing is sound. But the precondition *is* true
+at that call site, and no whole-body definition count can see it: the fact is
+flow-sensitive and the matcher is not.
+
+Normalising both sides to a copy-chain root was tried and **regressed**: it
+rejects any chain passing through a later-reassigned variable, which also
+describes the synthetic benchmark (the lifter reuses the `assume` flag's
+variable), so it broke the one case that worked and fixed nothing. Reverted.
+
+### Where the fix actually belongs
+
+The abstract interpreter already computes this fact, flow-sensitively, and
+already propagates it through exactly those copies: at `bb22` its state holds
+`array_len_prod[v13] = (v3, v3)` and `v3` is argument 0. The precondition
+should be **harvested from the analysis state at the call edge**, not
+re-derived syntactically. That subsumes the syntactic pass rather than
+patching it.
+
+Ceiling for that work, measured rather than assumed: 4 tasks. Two are expected
+TRUE, and `BellmanFord-FunSat01` separately carries a refuted witness and an
+`all_paths_complete` blocker, so even a working lemma may not flip it. Filed
+with that number attached so the next person does not rediscover the estimate.
+
+### One incidental finding
+
+The matcher's middle arm is dead code. `resolve` loops *while* the rvalue is
+`Use(Var(_))`, so it can never return one, and
+`matches!(resolve(..), Some(Rvalue::Use(Operand::Var(z))) if z == w)` is
+unreachable. Harmless, and left alone pending the rewrite above.
+
+## 2026-10-31 — the reduction step, and a probe that lied because two things were broken
+
+### What the probe said, and why it was wrong
+
+The previous entry named a single remaining blocker on
+`FlattenedMatrixIndexAcrossACall`: the caller's upper bound on `n` never
+reaches the callee, so the lemma's overflow premise (`n*n` must fit in an
+`int`) declines. The plan was to hand-seed `n`'s interval, confirm the task
+flips, and only then build the two-phase propagation that would derive it.
+
+The probe seeded the interval and the task **stayed UNKNOWN**. Taken at face
+value that refutes the diagnosis. It did not: there were *two* independent
+missing facts, and the probe supplied one of them while the other still held
+the obligation open. The diagnosis was incomplete, not wrong — which is the
+more dangerous failure, because the probe was built to be decisive and
+returned a confident no.
+
+What rescued it was instrumenting the lemma to name *which* premise declined
+rather than reading the code and guessing. Six premises, one silent `None`, and
+two different causes producing a byte-identical symptom. That instrumentation
+is now kept behind `AJAVE_TRACE_FLAT=1`.
+
+### The second blocker: a widened counter cannot be incremented
+
+The outer loop counter reached the obligation as Top, so `i >= 0` was
+unprovable even though `i < n` had been recorded relationally the whole time.
+The chain:
+
+1. The **inner** loop's header is a program point reached once per *outer*
+   iteration with a different `i` each time, so `i` widens there to
+   `[0, i32::MAX]`.
+2. `i + 1` on `[0, i32::MAX]` genuinely wraps in Java, so the interval
+   transfer must return Top. That is correct — and it discards the *lower*
+   bound along with the upper one.
+3. Nothing restores it. Narrowing on the loop guard bounds a counter only from
+   above, and the increment sits on the path out of the inner loop, where the
+   outer guard's narrowing has already been applied and widened over.
+
+The inner loop is essential to the shape: with a single loop the branch
+narrowing caps `i` before the increment and the overflow never arises.
+
+### The fix: reduction, the operation that makes Pentagons a reduced product
+
+Relations were being consulted only to answer comparisons. They must also
+**tighten the intervals they talk about**: `i < n` with `n <= n.hi` gives
+`i <= n.hi - 1`. `IState::refined` does this and `eval_operand` routes every
+variable through it.
+
+Note how little is needed. `n` is known only to be at least 1, so `n.hi` is
+still `i32::MAX` and the refinement buys exactly **one unit** of slack. One
+unit is the whole difference between a usable interval and Top.
+
+Soundness is immediate — it intersects with facts the state already holds.
+Termination survives because the refinement is monotone in the lattice order:
+`leq` requires a superset of relations, so a state lower in the order refines
+at least as tightly, and the transfer stays monotone. Reduction is applied
+inside the transfer only, never at a merge point, so it cannot fight the
+widening it depends on.
+
+### What it is worth
+
+Smoke: **186, 0 WRONG** — unchanged. This buys no points on the gate, and
+`FlattenedMatrixIndexAcrossACall` is still UNKNOWN on the remaining premise.
+It is committed anyway because it is a precision law the domain was missing,
+it is the prerequisite for the propagation work, and the trace output now
+names a single unambiguous cause instead of a silent decline.
+
+### Two benchmarks, and one that had to be corrected twice
+
+`jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop` isolates the
+mechanism. It took two corrections, both worth recording because both produced
+a benchmark that passed and demonstrated nothing:
+
+- The first version assumed `n > 0 && n < 1000`. An upper bound on `n` lets
+  plain narrowing cap `i` and the overflow never happens, so it proved under
+  intervals alone. The finding requires `n` unbounded above.
+- The second version still proved with the full portfolio, because the BMC
+  unrolls it. The mechanism is visible only under `AJAVE_DISABLE` of the other
+  engines — and the first attempt at *that* was wrong too: `AJAVE_DISABLE`
+  matches engine ids exactly, the ids are hyphenated (`smt-bmc`,
+  `smt-bmc-fpa`, `concolic`), and an underscored `smt_bmc` disables nothing
+  while looking like it worked. Two runs labelled "AI only" in this session
+  still had the BMC active. The corrected configuration is
+  `AJAVE_DISABLE=smt-bmc,smt-bmc-fpa,concolic,kinduction,chc,imc,cegar,concrete,nra,presolve,exhaustive`,
+  under which valid-assert is UNKNOWN before the reduction step and TRUE after.
+  So the guard that actually holds it is the domain law
+  `refinement_lets_a_widened_counter_be_incremented_without_overflow`, which
+  is mutation-checked against both the obvious mutants; the benchmark is there
+  for the shape.
+
+`jvm-arrays/FlattenedMatrixIndexAcrossACall` is a **deliberately unproven**
+case. It is committed UNKNOWN because it names the one fact still missing, and
+the trace prints it.
+
+### Process note
+
+While mutation-checking the laws I ran `git checkout` on `interval.rs` to undo
+a mutant and discarded every uncommitted change in the file. Everything was
+reconstructable from the session, but the lesson is cheap to state: undo a
+mutation with the inverse edit, never with a checkout of a file that holds work
+you have not committed.
+
+## 2026-10-31 — array-length preconditions across a call, and the premise that still blocks
+
+The flattened-matrix lemma died at a call boundary. This carries it across, and
+stops one step short of the corpus task it was aimed at — recorded that way
+because the step is identified, not mysterious.
+
+### The probe that justified building it
+
+Two programs, identical code, one with the loop in a callee:
+
+| | verdict |
+|---|---|
+| loop inlined in `main` | **TRUE** |
+| same loop in `fill(int n, int[] d)` | UNKNOWN |
+
+So the call boundary was the *only* blocker for that shape. Worth stating
+because it is the opposite of what the three previous probes found, where the
+mechanism was sound and something one layer out was missing.
+
+### What was built
+
+`analyze_array_len_preconditions` is a pre-pass in the same shape as the AI's
+existing `nonnull_returns` and `nonnull_fields` summaries: it finds methods
+that may assume an array parameter's length is the product of two other
+parameters, because **every** call site passes exactly that. `IntervalCpa`
+carries the result and `initial()` seeds `array_len_prod` at method entry.
+
+Each soundness condition is checked rather than assumed, and the list is the
+interesting part:
+
+- **`static` only.** A virtual call could dispatch to an override with its own
+  callers, and enumerating those is a different analysis.
+- **Not the program entry**, which has no caller to establish anything.
+- **At least one call site.** Zero would make the precondition vacuous and let
+  it claim anything.
+- **Unanimity.** One disagreeing caller drops it entirely.
+- **No `long`/`double` parameters**, so argument index equals parameter slot —
+  wide types take two slots and would misalign the mapping.
+
+SV-COMP tasks are closed programs rooted at `main`, so scanning every body
+finds every call site. That assumption is exactly what the `static` condition
+protects: it is false for a virtual method.
+
+### Copy chains, for the third time
+
+The first version found **nothing at all**. `fill(v, d)` passes copies, so the
+array handed to the call is several `Use(Var(_))` hops from its `NewArray`, and
+the pass was looking for `NewArray` directly. A bounded `resolve` through copy
+chains fixed it — the same defect that made the relational domain look inert
+until copies were handled, and that javac's stack-to-local traffic will keep
+producing. **If an analysis over lifted bytecode finds nothing, suspect copies
+before suspecting the idea.**
+
+The precondition is now found and seeded correctly:
+`Main.fill(I[I)V: ArrayLenPre { array_slot: 1, factor_slots: (0, 0) }`.
+
+### And the premise that still blocks, which is *not* removable
+
+The task is still UNKNOWN, and the reason is sharp. Inside `fill`, `n` is a
+parameter with no interval, so the lemma cannot show `n*n` fits in `int` and
+declines.
+
+That premise cannot be dropped. It is tempting to argue it is redundant — the
+array was allocated, so its length is a valid `int`, so `n*n` must fit. **That
+argument is wrong.** If `v*v` overflows to a *positive* value the allocation
+succeeds with that wrapped length, and `i*v + j` wraps too, so the comparison
+`idx < len` compares two wrapped values and the lemma would claim a bound that
+does not hold. Only an overflow to a negative value is caught, by
+`NegativeArraySizeException`.
+
+So the missing fact is the **parameter's interval**, which comes from
+`assume(v < 46341)` in the caller. No syntactic pre-pass can read it: it needs
+the AI's own result for the caller, fed into the callee — a top-down,
+two-phase interprocedural analysis, which is a substantially larger change than
+this summary was.
+
+Smoke holds at 186 with 0 WRONG, all four relational benchmarks still TRUE, 16
+suites and clippy clean. The infrastructure is in and inert on the corpus; the
+one fact it still needs is named.
+
+
+## 2026-10-31 — the flattened-matrix lemma, and the boundary it stops at
+
+Smoke **186 against 184**, 0 WRONG. A 2D array held as one flat allocation and
+addressed `a[i * s + j]` is the standard Java idiom for a matrix, and its bounds
+proof is beyond every weakly relational domain:
+
+```text
+  i < m  and  j < s
+  ---------------------
+  i*s + j  <=  (m-1)*s + s-1  =  m*s - 1  <  m*s
+```
+
+`i*s + j < m*s` is **non-linear** — a product of two program variables. Outside
+Pentagons (`x < y`), outside difference bounds (`x - y <= c`), outside Octagons
+(`±x ±y <= c`, unit coefficients). And intervals lose the identity of `s`:
+`i*s` bounds at ~2.147e9 while `s*s` bounds *below* at 1, with nothing recording
+that both mention the same `s`.
+
+### Why this is a transfer function and not pattern matching
+
+The implication above is a theorem of arithmetic, true for all `i, j, m, s`
+satisfying its premises. What the domain adds is the *syntactic recognition* of
+which variables play those roles, read from `mul_of` and `add_of` provenance
+maps, and **every premise is checked**:
+
+- `i < m` and `j < s` must be known relations, not assumed from loop shape;
+- all three operands must be non-negative;
+- `m * s` must fit in `int`.
+
+That last one is what carries the lemma from mathematical integers to Java's.
+`the_flattened_lemma_declines_when_the_product_can_overflow` sets an
+unconstrained stride and asserts refusal;
+`the_flattened_lemma_declines_without_both_guard_relations` removes `j < s` and
+asserts the same.
+
+### The half that fails first, which measurement found and reasoning did not
+
+An `ArrayBounds` obligation is `idx >= 0 & idx < len`, and the **lower** half is
+the one that blocks. With a stride bounded only by 46340, `i*s` reaches ~2.147e9
+and adding `j` leaves `int`, so the abstract interval for the index is Top and
+even `idx >= 0` is unprovable.
+
+The trace showed this exactly: the comparison `idx < len` evaluated to `[1,1]`
+— the lemma working — while `idx >= 0` sat at `[0,1]` and the obligation stayed
+open. Both halves are now supplied from the same premises, since a sum of
+non-negatives below a value shown to fit cannot wrap.
+
+Worth keeping as a pattern: a relational fact can be proven and the obligation
+still refuse, because an obligation is a *conjunction* and intervals own the
+other conjunct.
+
+### The boundary, stated because it is the next thing
+
+`algorithms/BellmanFord-*` is this exact idiom and is **still UNKNOWN**. There
+`D` is allocated `new int[V*V]` in `main` and passed to
+`runBellmanFord(int N, int D[], int src)`, so inside the callee the needed fact
+`D.length == N*N` is a **precondition** — true at the one call site, never
+stated. The length provenance dies at the call boundary.
+
+That is an interprocedural gap, not a gap in the lemma, and it is the third time
+today a correct mechanism has been blocked one layer out from where it was
+built: C1's summaries were sound and the obligations needed contents; Pentagons
+was sound and BellmanFord's indices needed non-linearity; the lemma is sound and
+BellmanFord needs it across a call.
+
+
+## 2026-10-31 — where the array-bounds frontier actually is: non-linear index arithmetic
+
+Having added strict and non-strict relations and converted one corpus task, the
+right question was no longer "what else can the domain express" but "what do the
+remaining obligations need". Measured rather than guessed, and the answer closes
+the relational line.
+
+`interval-ai` **is** running on the budget population and **is** discharging —
+19 to 33 obligations per BellmanFord task. What stays open is 8 or 9
+`ArrayBounds` apiece. So the engine is reaching them and the domain is simply
+not strong enough, which is a different diagnosis from anything the census
+could give.
+
+The index that defeats it, from `BellmanFord-FunSat01`:
+
+```java
+final int D[] = new int[V * V];
+...
+if (dist[j] > dist[i] + D[i * N + j])
+```
+
+The obligation is `0 <= i*N + j < N*N` given `i < N` and `j < N`. That is
+**non-linear** — a product of two program variables. It is outside Pentagons
+(`x < y`), outside difference bounds (`x - y <= c`) and outside Octagons
+(`±x ±y <= c`, unit coefficients alike). It needs polyhedra, or a dedicated
+rule for the `i*stride + j` flattened-matrix idiom.
+
+`dist[src]` adds a second, unrelated need: `src` is a method parameter, so the
+bound rests on a precondition no intra-procedural domain supplies.
+
+### What this means for the three filed extensions
+
+- **Difference bounds for `a[i+1]`** (11% by shape) — **abandoned before
+  starting.** The non-strict increment covered a 24% shape and converted
+  nothing; 11% is a weaker prior on the same already-falsified reasoning.
+- **gh #115, array segmentation** — reunified with this. `dist[edges[j]]`-style
+  indices and `∀n. value[n] >= 0` are the same *contents* problem, approached
+  from array bounds and from the heap respectively. Two independent routes now
+  end there, which is the strongest signal of the session.
+- **Polyhedra or an `i*stride + j` rule** — new, and the only thing that
+  reaches BellmanFord. The flattened-matrix idiom is common enough in this
+  corpus to be worth a targeted rule rather than a general domain, but that is
+  a hypothesis and the probe-first rule applies.
+
+### The method, restated because it paid for itself four times
+
+Four shape-frequency estimates predicted conversions and four delivered none or
+one: `refuted-witness` 52% → 1 task, `budget` 135 → 0 by gate, float escalation
+76 → 1 in 40, non-strict 24% → 0. A frequency count over *source text* says
+nothing about whether the blocked obligation needs that shape. The only estimate
+that held was the one taken from a six-line program where the mechanism was
+visible end to end.
+
+
+## 2026-10-30 — non-strict bounds, and the off-by-one that makes them a second map
+
+Pentagons extended with `x <= y` alongside `x < y`. Smoke **184 against 182**,
+0 WRONG — and **zero additional conversions** on `census/budget.set`, which
+still stands at the single `array1` task Pentagons alone reached.
+
+That is the fourth time a shape frequency has failed to predict a conversion.
+The 24% was "the task's source contains `i <= n`", never "the unproven
+obligation needs it". The increment is correct, tested and worth keeping for
+the guard shape it covers; it is not a scoring win, and the next extension was
+abandoned on this evidence rather than attempted.
+
+Sized before building, from the shapes actually present in the 135-task
+`budget` population: strict guards `i < n` in 57%, **non-strict `i <= n` in
+24%**, `a[i+1]` offsets in 11%, scaled and nested indices in 6% and 4%. A
+domain carrying only strict relations therefore leaves a quarter of its own
+target population untouched.
+
+### Why `le` is a separate map and not a flag on `lt`
+
+`i <= len` is false of a strict question exactly at `i == len`, and an
+`ArrayBounds` obligation **is** a strict question. Answering it from a
+non-strict fact would be a wrong TRUE at the off-by-one — the single most
+obvious way to break an array-bounds analysis.
+
+So the non-strict relation is never consulted alone for a strict question. The
+proof composes:
+
+```
+i <= t      from the guard, t being the `n - 1` javac materialises
+t  <  n     from `t = n - 1`, recorded only if the interval shows no wrap
+----------
+i  <  n     one hop, derived on demand and never stored as a fact
+```
+
+`a_non_strict_relation_alone_never_answers_a_strict_question` is the negative
+test; `a_non_strict_relation_composes_with_a_strict_one` is the positive one.
+
+### Constant offsets, with the wrap guard that makes them sound
+
+`x = y ± c` for a constant `c` yields a strict relation in one direction, which
+is the step that makes the non-strict guard usable at all. It is recorded
+**only** when the interval already computed for `y` shows the arithmetic did not
+leave `int` range: on an unconstrained operand `y - 1 < y` is false at
+`Integer.MIN_VALUE`, and that is precisely the case a bounds analysis must not
+get wrong. No interval, no fact.
+
+Only *constant* offsets. A symbolic one (`a[i+j]`) needs difference bounds,
+which this domain does not have.
+
+### Deliberately one hop, not a closure
+
+Composition is applied by the comparison evaluator on demand rather than
+materialised into the state. A full transitive closure would be more precise
+and costs more on every join; one hop is what the measured guard shape needs,
+and the benchmark covers the whole path end to end.
+
+`jvm-arrays/NonStrictGuardBoundsTheIndexJustAsWell` is the third of the trio,
+ground truth confirmed on a real JVM over 200,000 trials. The other two were
+re-checked for regression.
+
+
+## 2026-10-30 — Pentagons: a weakly relational domain, and the copy chains that decide whether it works
+
+`interval.rs` gains the Pentagons domain of Logozzo and Fähndrich (SAC 2008):
+`x ∈ [a, b] ∧ x < y`. Intervals exactly as they were, plus a symbolic strict
+upper-bound relation.
+
+### The score, stated before the mechanism
+
+| | |
+|---|---|
+| smoke | **182 against 178**, 141 correct, 0 WRONG |
+| of which | **all +4 is the two new benchmarks**, at +2 each |
+| `census/budget.set` (135 pairs) | **1 conversion**: `jbmc-regression/array1` NRE → TRUE, score 0 → 2 |
+
+So the honest corpus gain measured so far is **one real task**. The smoke delta
+is entirely the two programs written to exercise the domain, and the baseline
+diff confirms no existing smoke task changed verdict — an earlier reading that
+it had picked up two more was wrong.
+
+That is a capability which did not exist rather than a scoring win, and the next
+two extensions are sized against the same population below.
+
+### Why: the domain could not state the proof
+
+ajave could not prove no-runtime-exception for this:
+
+```java
+int n = Verifier.nondetInt(); Verifier.assume(n > 0);
+int[] a = new int[n];
+for (int i = 0; i < n; i++) { a[i] = i; }
+```
+
+Three measurements, each discriminating. `n < 4` makes the BMC unroll and
+answer TRUE, so the program is provable. The BMC truncates at the unroll bound,
+correctly, and five separate bound probes converted one task between them. And
+`IState` was `BTreeMap<VarId, Interval>` — **non-relational**, deriving `i >= 0`
+and `len >= 1` with no way to express `i < len`, which is the entire proof.
+
+`Rvalue::ArrayLength` already existed, the lifter already phrased the obligation
+as `idx >= 0 & idx < len`, and `interval-ai` already discharges obligations
+itself. So the consumer was already there — which is what made this different
+from B2/B3 and gh #103, where correct facts were produced and nobody read them.
+
+### The part that is specific to bytecode, not to the domain
+
+`a[j] = a[j] + 1` is a compound assignment, and javac routes it through copies:
+
+```
+v22 = v12[v15]
+v23 = v12   v25 = v15   v27 = v22
+v10 = v23   v24 = v25   v26 = v27
+v30 = v10.length
+v32 = v24 < v30      // the obligation's condition
+```
+
+The index at the store is **three copies removed** from the one the guard
+constrained. A relational domain that does not transfer facts across `x = y`
+learns `v15 < n` and has lost it before the obligation. That is exactly what
+happened: the single-loop benchmark passed and the nested one did not, until
+copies were handled. `x = y` makes the two equal, so every relation on either
+side of `y` transfers to `x` — sound because it is an equality, and necessary
+because stack-to-local copies are everywhere in JVM bytecode.
+
+Nothing in the Pentagons paper says this; it targets .NET IL, where the same
+shape arises. It is the first thing to check if a relation goes missing.
+
+### Three lattice bugs, all the same shape
+
+Each was found by trace and each now has a mutation-checked test.
+
+1. **Widening rebuilt `lt` empty**, wiping facts at precisely the loop header
+   that needs them. Widening may *drop* a fact, never add one, so it intersects.
+2. **`join` computed the intersection and threw it away** — the struct literal
+   still read `BTreeMap::new()`. Symptom worth remembering: the trace showed the
+   fact being learned *and* used to discharge a comparison while the obligation
+   stayed open, because discharge is a conjunction over all reached states and
+   one lacked it.
+3. **Bottom.** For a relational domain ⊥ means *every* fact holds — vacuously,
+   there being no execution to violate one — not *no* facts. Intersecting
+   against an empty map erased everything, and a loop's back edge starts
+   unreachable.
+
+### And one soundness hole, which is the one that mattered
+
+`Lattice::leq` ignored `lt`. That is what the fixpoint uses to decide a state is
+covered and can be discarded. More facts means more precise, so `self ⊑ other`
+requires `self.lt ⊇ other.lt`; without it a state carrying *fewer* facts was
+judged covered by one carrying more, the poorer path was dropped, and a relation
+that does not hold on it became available to discharge an obligation. A wrong
+TRUE by the same route as gh #101.
+
+### The join test passed against a mutant, which is why mutation-checking is in the suite
+
+All four domain-law tests were verified by inverting the rule each guards. That
+was not ceremony: `join_keeps_only_relations_both_branches_agree_on` **passed**
+against a deliberately-unioning mutant on its first version, because its fixture
+put the extra fact on one side only — and a subject absent from the other map is
+dropped by union and intersection alike. A lattice test that passes either way
+defends nothing.
+
+### Measured against JBMC
+
+On the six-line fill loop:
+
+| | result |
+|---|---|
+| JBMC, no unwind bound | does not terminate (>400s) |
+| JBMC `--unwind 10 --unwinding-assertions` | **VERIFICATION FAILED**, `unwinding assertion loop 0: FAILURE` |
+| JBMC `--unwind 10 --no-unwinding-assertions` | "SUCCESS", with its own warning that this is not sound |
+| ajave + Pentagons | **TRUE** |
+
+The middle row is the honest statement of a bounded model checker's frontier:
+JBMC proves the bounds checks for ten iterations and then refuses, correctly,
+because `n` is unbounded above. No value of `--unwind` fixes it. This is a
+structural difference rather than a tuning one — which is why Kani added loop
+contracts for Rust, and those are hand-written annotations SV-COMP tasks do not
+carry. Context: JBMC placed **first** in the SV-COMP 2026 Java track over 1,731
+tasks. The claim is narrow — on unbounded-length array traversal an inferred
+relational invariant decides what unwinding cannot — not broad.
+
+### Cost
+
+interval-ai measures 1–2ms on the largest bodies in the corpus. `kill_lt`'s
+per-assignment scan runs over maps of a handful of entries. Everything is
+`BTreeMap`/`BTreeSet`, so determinism holds by construction: 163 tasks × 3 runs,
+all verdicts stable. Engine ablation PASS, 297 runs, no verdict flipped.
+
+### Deliberately not done
+
+- **Publishing relational facts as blackboard artifacts.** The AI's `Invariant`
+  formula carries intervals only; adding `i < len` would let CHC and the BMC
+  consume them. That is the architecturally interesting move, and gh #103 and
+  B2/B3 both measured hint-publishing as worthless here, so it needs its own
+  measurement rather than riding along.
+- **Transitive closure** (`x<y, y<z ⟹ x<z`). Precision only, never soundness.
+
+
+## 2026-10-30 — the gap is one level below the literature: a non-relational domain
+
+Four techniques were surveyed and filed as experiments (gh #115–#118). The one
+chosen — FunArray array segmentation — specified a prerequisite probe. The
+probe redirected it, by the falsification criterion written into the issue when
+it was filed.
+
+### Six lines ajave cannot prove
+
+```java
+int n = Verifier.nondetInt();
+Verifier.assume(n > 0);
+int[] a = new int[n];
+for (int i = 0; i < n; i++) { a[i] = i; }   // no-runtime-exception: UNKNOWN
+```
+
+Three measurements, each discriminating:
+
+1. **It is provable.** `n < 4` makes the BMC unroll and answer **TRUE**. The
+   program and its shape are fine.
+2. **It is not a budget problem.** The BMC truncates at `handle_goto`, correct
+   for an unbounded loop, and the five probes above convert one task between
+   them. No constant reaches an unbounded loop.
+3. **The interval AI structurally cannot do it.** `IState` is
+   `BTreeMap<VarId, Interval>` — one interval per variable, independently. The
+   domain is **non-relational**. It derives `i >= 0` and `a.length >= 1`, and
+   has no way to express `i < a.length`, which is the whole proof.
+
+### Why this matters more than the survey did
+
+The literature search was aimed at array *content* invariants, because that is
+where the heap work ended (`∀n. value[n] >= 0`, gh #109). That is a real gap.
+But it is not the first one: **we cannot reason about the index, let alone the
+elements.** Segmentation reasons about contents and is therefore downstream of
+a relational domain, which is what gh #115's own "what would make it fail"
+section predicted and what the probe confirmed.
+
+The answer is Pentagons (Logozzo & Fähndrich): intervals plus symbolic strict
+upper bounds `x < y`, deliberately weaker than Octagons to stay near-linear,
+and designed for array-bounds checking specifically. It extends `interval.rs`
+rather than replacing it — the interval half already exists. Filed as gh #119.
+
+Size: `ArrayBounds` 195 and `NullDeref` 239 are 78% of open obligations, and
+the `budget` bucket is 135 of 409 declined pairs with 98 expecting TRUE.
+
+### The hazard named up front
+
+gh #104, and B2/B3 measuring bit-identical across all 107 convertible pairs,
+both record interval-engine artifacts failing to reach a consumer. A new domain
+inferring correct facts nobody reads repeats that exactly. #119 says to name the
+consumer before building the producer, and
+`jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds` is the check — in
+`smoke.set` as a capability boundary, UNKNOWN by design, where a TRUE is a gain
+rather than a regression.
+
+### Method note
+
+Every step today was a probe before a plan: five bound probes, then a
+hand-written six-line control. The control is what found this — a real corpus
+task would have had four confounds, and `InsertionSort-FunSat01` in fact does
+(its assertion needs *sortedness*, not bounds). Reducing to the smallest program
+that still exhibits the behaviour is what CLAUDE.md asks for, and it worked
+exactly as advertised.
+
+
+## 2026-10-30 — five probes, and the measured answer: ajave needs invariants, not search
+
+Follow-up to the census. The `budget` bucket is 135 of 409 declined pairs and
+its "responds to" column says *scheduling / more effort*. That column is
+**wrong**, and five probes say so.
+
+| probe | what it raises | converted |
+|---|---|---|
+| force the outer discharge gate open | the `cuts_accounted` safety net | 0 of 40 |
+| `AJAVE_BMC_SCALE=8` | solver calls, block visits, forks | 0 of 40 |
+| `AJAVE_MAX_UNROLL=20` | the loop unroll bound | 1 of 40 |
+| `AJAVE_MAX_DEPTH=4000` | the path-length bound | 0 of 6 |
+| `ROUND_SHARE=0.9`, `ENGINE_CAP=0.95` | the engine's share of the clock | 0 of 3 |
+
+One conversion across all five. **These tasks truncate, but no tunable bound
+controls the truncation.**
+
+Two of the probes were only trustworthy because they had controls.
+`AJAVE_MAX_UNROLL=1` loses 3 tasks on `benchmarks/sets/ajave` (398 against
+404), so the override is observable in both directions; without that, a null
+result is indistinguishable from a knob that does nothing.
+
+### Three problems wearing one bucket's name
+
+Counting which `mark_incomplete` call site fires — rather than reading the
+blocker string, which is the same for all of them — partitions the bucket
+cleanly by task family:
+
+| site | occurrences | tasks | family |
+|---|---|---|---|
+| `handle_goto` (unroll bound) | 569 | 6 | BellmanFord, Basic |
+| `handle_branch_fork` | 120 | 4 | AbstractChart, Basic5 |
+| `explore_block_until` | 27 | 6 | the whole `Alarm_prop*` family |
+
+`BellmanFord` is the clearest case and it explains the whole result. Its loop
+count is a function of input size, so no constant unroll bound reaches it —
+`unroll=20` converted `Basic18` and left BellmanFord exactly where it was.
+Raising the bound is not even a budget question: the comment on `budget_scale`
+is right that unroll depth is a **semantic** bound, because `Bounded { k }`
+tells k-induction the search covered an obligation to depth k.
+
+For the `Alarm` family every bound was eliminated in turn — depth, counters,
+and time slice — which incidentally confirms the claim written in the deepening
+comment that "`max_depth` is nowhere near". It was worth testing: two
+documented claims were already wrong today.
+
+### The synthesis, which arrives from two independent directions
+
+The heap investigation ended at *quantified invariant inference over heap
+contents*. This one ends at *loop summarisation for input-dependent loops*.
+Those are the same shape of problem: **inferring an inductive invariant instead
+of enumerating states.**
+
+So the measured answer to "what unlocks the remaining score" is not a bigger
+budget, a better scheduler, or a slicing pass that makes the same budget go
+further. Two independent routes say ajave's limit is invariant inference, and
+the corpus agrees: `NullDeref` (239) and `ArrayBounds` (195) are 78% of open
+obligations, and both are exactly the shape that an array/field-range invariant
+discharges and that unrolling never will.
+
+### Why this cost an afternoon instead of a week
+
+Every probe was an env flag or a deliberately unsound three-line patch,
+reverted after measuring. None touched committed behaviour. The alternative —
+and the thing the withdrawn plan would have done — was to build per-property
+slicing first and discover afterwards that the budget it economises was never
+the constraint.
+
+
+## 2026-10-30 — three buckets probed, none converts: the unproven are hard, not blocked
+
+Follow-up to the census above. The plan written for its dominant bucket
+(`docs/plans/the-outer-gate.md`) was **withdrawn the same day by the
+falsification check it specified**, and two more buckets were probed the same
+way. The negative result is the contribution.
+
+| bucket | tasks | lever probed | converted |
+|---|---|---|---|
+| budget (`all_paths_complete`) | 135 | force the outer gate open | **0** |
+| float-escalation | 76 | `AJAVE_FP_ARITH=1` | 1 of 40 |
+| no-candidate | 60 | discharge past the budget | **0** |
+
+271 of 409 declined pairs, 66% of the population. Nothing is behind the
+plumbing.
+
+### What each probe established
+
+**The outer gate never fires.** The plan assumed the 135 were refused by the
+`cuts_accounted` safety net. It fired **zero times across all 409 tasks** —
+and `classify()` distinguishes its log line, so the absence is a measurement.
+All 135 carry the *per-obligation* blocker: the obligation genuinely lies
+downstream of a truncation, and `at_risk` is doing its job
+(`BellmanFord-FunSat01`: `at_risk=30`). An unsound probe that opened the gate
+unconditionally produced an identical 0 correct / 40 unproven.
+
+**The FPA escalation converts ~1 in 40.** The bucket was the plan's "cheap"
+phase because the theory is implemented. It is, and it still does not fire for
+these obligations.
+
+**`no-candidate` is the BMC exiting before it decides anything.** The discharge
+gate shows `budget_left=false`, so neither the decision nor its own refusal log
+runs — which is exactly why these tasks have no blocker. The decision makes no
+solver calls, so letting it run past the budget is nearly free; it refuses
+anyway, 0 conversions on all 60. Two tasks moved TIMEOUT → UNKNOWN, which is
+anytime behaviour rather than score.
+
+### The methodological point, which is the reusable part
+
+Four opportunity sizings were wrong in one day: `refuted-witness` 211 → 1,
+`budget` 135 → 0, `float-escalation` 76 → ~2, and the no-candidate plan before
+it was written. Every time, a **bucket count** was read as an **opportunity
+size**.
+
+A bucket counts tasks sharing a *symptom*. The opportunity is the subset whose
+cause that symptom names **and** for which a lever exists. Three different sets,
+and only the last is worth points.
+
+So the rule: **probe the lever on a sample before planning the work.** An env
+flag or a deliberately unsound probe costs ten minutes and invalidates a day of
+planning. Writing the falsification check into the plan *before* implementing
+is what caught the largest of these — the check was pre-registered, and running
+it first saved the whole of Phase 0.
+
+### Where the capability question actually sits
+
+`NullDeref` (239) and `ArrayBounds` (195) are 78% of open obligations in the
+chunk that counted them, against `Assertion` at 102. The remaining ground is
+dominated by runtime-exception obligations on genuinely truncated explorations.
+That is capability work, not plumbing, and it is where the next attempt should
+start.
+
+Also filed: gh #114. `obligations_at_risk` follows only the **static** call
+target and nothing in the workspace enumerates overrides, so `at_risk`
+under-approximates and an obligation inside an override can be discharged as
+exhaustively proven. Found while planning rather than while implementing. It
+survives the plan's withdrawal and is a latent unsoundness of the same shape as
+#101 and #106 — not demonstrated on any task, and stated that way on the issue.
+
+
+## 2026-10-30 — the unproven census, and two corrections it needed first
+
+`tools/blocker_census.py` over the 409 **declined** task-property pairs (the
+unproven population with the 37 known timeouts and the one SV-COMP mislabel held
+out). The result and the two wrong answers on the way are both worth recording;
+the plan is in `docs/plans/the-outer-gate.md`.
+
+| why not | tasks | % | expects TRUE | expects FALSE |
+|---|---|---|---|---|
+| **budget** (`all_paths_complete`) | 135 | 33% | 98 | 37 |
+| **float-escalation** | 76 | 19% | 48 | 28 |
+| refuted (`violated` stands) | 61 | 15% | 25 | 36 |
+| no-candidate (nothing published) | 60 | 15% | 53 | 7 |
+| theory | 44 | 11% | 26 | 18 |
+| model | 31 | 8% | 19 | 12 |
+| refuted-witness | 1 | 0% | 1 | 0 |
+
+### A bucket that pre-empted the cause, and read as a 52% finding
+
+The first run ordered `refuted-witness` ahead of the blocker case, with a
+comment asserting that "the witness is the proximate reason this task scores
+nothing". It reported **211 of 409 (52%)** and a claimed **+228** recoverable.
+Both were withdrawn.
+
+`BellmanFord-FunSat01` disproved the premise. It carries a refuted witness *and*
+`BLOCKER all_paths_complete`, with `discharged=0` from every engine. Remove the
+spurious violation and the obligation is merely open-and-unproven, so the
+verdict is UNKNOWN either way — the witness recovers nothing.
+
+And that is not a guess about the architecture; it is what the architecture
+already guarantees. `open_or_unconfirmed()` offers violated obligations to
+over-approximating engines, specifically so whichever engine published first
+cannot win outright. `verdict_excluding()` recovers TRUE when a refuted
+violation is the only obstacle and refuses to when the obligation has no
+independent proof. **Both mechanisms were built for this exact case and both
+work.** The corrected count is **1 task**.
+
+The lesson is narrow and reusable: the census's own `RESPONDS` text for that
+bucket said "feeding refutations back into the loop", which presupposes they are
+not fed back. Reading the consumer before sizing the opportunity would have
+caught it in one grep. The 358 refuted witnesses are real, and now travel as an
+annotation column that can never pre-empt a cause.
+
+### A nameable cause hiding behind the word "unclassified"
+
+`float_arith_approximated` — 76 tasks, 19% — sat in `other`. It now has its own
+bucket, because the work it responds to is unlike every other row: the theory
+exists and is implemented, and what is missing is the FPA escalation pass
+reaching the obligation. Coverage, not capability.
+
+The dumps carry the blocker per row, so both corrections were applied to the
+finished chunks **offline** rather than costing another hour of engine time.
+That is the whole reason the blocker is a column and not only a bucket.
+
+### The dominant cause, and the soundness problem in front of it
+
+33% is one gate. Task #20 already made the completeness test per-obligation, and
+the outer gate bypasses that work in one case: a cut was recorded and `at_risk`
+came back empty, whereupon nothing is discharged at all. Empty has two causes
+the code cannot distinguish — a cut whose method had no body and was silently
+dropped, versus a cut that provably reaches no obligation.
+
+Loosening it is blocked on a soundness gap found while planning:
+`obligations_at_risk` follows only the **static** target of a call, and nothing
+in the workspace enumerates overrides, so a cut-reachable virtual call omits
+obligations in any override. The safety net is therefore doing real work rather
+than merely being conservative, and the gap has to be closed before the gate
+can be trusted. `is_virtual` is recorded by the lifter and never consulted.
+
+### Six before/after populations
+
+`benchmarks/sets/census/{budget,float-escalation,refuted,no-candidate,theory,
+model}.set` — one per bucket, every one verified to load. The thing missing from
+previous attempts in this area was a population to measure against; each phase
+of the plan is measured alone against the bucket it targets.
+
+
 ## 2026-10-30 — the heap model was never the problem: a decided query, not a timeout
 
 The last open question about the heap work (gh #109) was whether CHC's Horn

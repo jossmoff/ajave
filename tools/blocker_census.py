@@ -78,6 +78,19 @@ RESIDUAL_RE = re.compile(r"residual from (\S+) \((\w+)\): (.*)$", re.M)
 DOWNGRADE_RE = re.compile(r"downgrading FALSE to UNKNOWN")
 REPLAY_RE = re.compile(r"jvm-replay: (\w+) for ")
 SCHED_RE = re.compile(r"schedule-replay: (confirmed|could not reproduce)")
+# Did the BMC run out of budget, or stop at a structural cap with time to
+# spare? `all_paths_complete` alone cannot tell those apart, and they respond
+# to opposite work -- see the `budget` vs `structural` split in KIND.
+EXHAUSTED_RE = re.compile(r"exploration complete,.*?exhausted=(true|false)")
+TRUNC_RE = re.compile(r"INCOMPLETE \(([a-z_]+)\)")
+# Why each branching block was refused a merge, per body. See
+# `docs/large-block-encoding.md`: a refused branch forks, and a fork duplicates
+# the remainder of the method, so these counts say which region extension is
+# worth building -- Java Ranger's levels 4 and 5 (multi-exit regions) address
+# `exits_method`, and nothing addresses `back_edge`.
+CFG_RE = re.compile(
+    r"cfg: (\S+) blocks=(\d+) merged=(\d+) exits_method=(\d+) "
+    r"back_edge=(\d+)\s+region_escapes=(\d+) over_cap=(\d+)")
 
 # Which kind of work each blocker responds to. The whole point of the tool is
 # this mapping, so it is stated once, here, rather than inferred at the call
@@ -98,6 +111,13 @@ KIND = {
     # after the engine loop, so nothing ever reconsidered it. This bucket is
     # the one that responds to feeding refutations back.
     "violated": "refuted",
+    # The bitvector pass refuses a float-arithmetic obligation because only the
+    # FPA pass may conclude there (gh #48). Its own bucket, because lumping it
+    # under "other" hid 50+ tasks behind the word "unclassified", and because
+    # the work it responds to is unlike every other bucket: the theory already
+    # exists and is implemented. What is missing is the escalation pass
+    # reaching this obligation — coverage, not a model and not an encoding.
+    "float_arith_approximated": "float-escalation",
 }
 
 
@@ -137,7 +157,8 @@ def run_one(args):
            "expected": task["expected"].get(prop),
            "verdict": "UNKNOWN", "blockers": [], "outer": None,
            "open_n": None, "open_kinds": "", "residuals": [],
-           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout}
+           "downgraded": False, "replay": [], "dur": 0.0, "budget": timeout,
+           "exhausted": None, "trunc": [], "cfg": []}
     r = run_guarded(cmd, timeout=timeout, env=env)
     rec["dur"] = r.elapsed
     if r.timed_out:
@@ -152,6 +173,15 @@ def run_one(args):
     out = r.stdout.strip().splitlines()
     rec["verdict"] = out[-1] if out else "UNKNOWN"
     rec["blockers"] = BLOCKER_RE.findall(r.stderr)
+    # `exhausted=false` means the search stopped while it still had budget, so
+    # more time cannot convert the task however it is scheduled.
+    ex = EXHAUSTED_RE.findall(r.stderr)
+    rec["exhausted"] = any(e == "true" for e in ex) if ex else None
+    rec["trunc"] = sorted(set(TRUNC_RE.findall(r.stderr)))
+    # One entry per body the BMC built a CFG for, deduplicated: a body is
+    # analysed once but may be logged once per BMC pass (bitvector, then FPA),
+    # and counting it twice would double every tally.
+    rec["cfg"] = sorted(set(CFG_RE.findall(r.stderr)))
     for m in OUTER_RE.finditer(r.stderr):
         rec["outer"] = tuple(int(x) for x in m.groups())
     for m in OPEN_RE.finditer(r.stderr):
@@ -232,6 +262,7 @@ def main():
     print("\r" + " " * 30 + "\r", end="", file=sys.stderr)
 
     report(records, args.dump)
+    cfg_report(records)
 
 
 # Sample log lines, verbatim from a real run. The regexes above are the whole
@@ -251,12 +282,46 @@ SELF_TEST = [
     (DOWNGRADE_RE, "downgrading FALSE to UNKNOWN: witness did not replay "
                    "on a real JVM", None),
     (REPLAY_RE, "jvm-replay: Refuted for Main.foo#3", ["Refuted"]),
+    # The budget/structural split rests entirely on these two. If either stops
+    # matching, every `all_paths_complete` task silently reverts to being
+    # called "convertible by scheduling", which is the claim this split exists
+    # to stop making.
+    (EXHAUSTED_RE,
+     "smt-bmc: exploration complete, found 0 violation(s), 76 solver calls, "
+     "113 block visits, 12 forks, exhausted=false, completeness=Completeness "
+     "{ all_paths_complete: false }, skipped=0", ["false"]),
+    (TRUNC_RE,
+     "smt-bmc: INCOMPLETE (handle_goto) in securibench/micro/basic/"
+     "Basic18.doGet(Lmockx/servlet/http/HttpServletRequest;)V",
+     ["handle_goto"]),
 ]
 
 
 def self_test():
     """Refuse to run if any pattern has stopped matching what engines emit."""
     bad = []
+    # Verbatim from a real run. A regex that matches nothing here would report
+    # a table of zeros, which is indistinguishable from "every branch merged".
+    cfg_line = ("[2026-11-21T19:02:11Z DEBUG ajave_engines::smt_bmc::cfg] "
+                "cfg: Main.main([Ljava/lang/String;)V blocks=51 merged=24 "
+                "exits_method=1 back_edge=2 region_escapes=0 over_cap=0")
+    m = CFG_RE.search(cfg_line)
+    if not m:
+        bad.append("CFG_RE no longer matches the cfg: line the BMC emits")
+    elif m.groups()[1:] != ("51", "24", "1", "2", "0", "0"):
+        bad.append(f"CFG_RE captured {m.groups()[1:]!r}, want the six counts")
+    # The split is a claim about *work*, so test it at the level the claim is
+    # made: a record, not a regex.
+    base = {"blockers": ["all_paths_complete"], "outer": None, "scored": False,
+            "open_n": 1,
+            "downgraded": False, "replay": [], "open": None, "residual": [],
+            "verdict": "UNKNOWN", "trunc": ["handle_goto"]}
+    got_struct = classify({**base, "exhausted": False})[0]
+    got_budget = classify({**base, "exhausted": True})[0]
+    if got_struct != "structural":
+        bad.append(f"budget-left task classified {got_struct!r}, want 'structural'")
+    if got_budget != "budget":
+        bad.append(f"exhausted task classified {got_budget!r}, want 'budget'")
     for rx, sample, expect in SELF_TEST:
         if expect is None:
             if not rx.search(sample):
@@ -292,26 +357,129 @@ def classify(rec):
         return "timeout", "(killed at the wall clock)", n
     if rec["verdict"].startswith("KILLED") or rec["verdict"].startswith("ERROR"):
         return "killed", "(signal, not a verdict)", n
+    # A blocker outranks a refuted witness, and getting this order wrong once
+    # produced a 52%-of-population "finding" that was an artefact.
+    #
+    # The earlier version returned `refuted-witness` first, on the reasoning
+    # that the witness is "the proximate reason this task scores nothing".
+    # That is false whenever the task also has a blocker.
+    # `BellmanFord-FunSat01` is the case that disproved it: it carries a
+    # refuted witness *and* `BLOCKER all_paths_complete`, and no engine
+    # discharges anything. Remove the spurious violation and the obligation is
+    # merely open-and-unproven, so the verdict is UNKNOWN either way -- the
+    # witness recovers nothing.
+    #
+    # That is not a guess about the architecture. `open_or_unconfirmed()`
+    # already offers violated obligations to over-approximating engines, and
+    # `verdict_excluding()` already recovers TRUE when a refuted violation is
+    # the *only* thing standing in the way. Both exist for this, so a task that
+    # is still UNKNOWN after a refutation is one where nothing could discharge
+    # the obligation regardless.
+    #
+    # So `refuted-witness` is reported only when there is no blocker to
+    # explain the task, and the refutation count travels as an annotation on
+    # every row.
+    if rec["blockers"]:
+        top = Counter(rec["blockers"]).most_common(1)[0][0]
+        kind = KIND.get(top, "other")
+        # `all_paths_complete` conflates two populations that respond to
+        # opposite work, and the conflation mattered: it is the bucket the
+        # scheduler workstream was justified by. Measured on securibench
+        # 2026-10-31, every sampled task in it reported `exhausted=false` --
+        # the BMC stopped at a loop back-edge (`handle_goto`) or the fork cap
+        # (`handle_branch_fork`) with budget still in hand. No amount of
+        # rescheduling converts those; they need an invariant from an
+        # over-approximating engine, or a different cap (and gh #119 measured
+        # raising the caps at about one task across four probes).
+        if kind == "budget" and rec.get("exhausted") is False:
+            where = "/".join(rec.get("trunc") or ["unknown site"])
+            return "structural", f"{top} (truncated at {where}, budget left)", n
+        return kind, top, n
+    if rec["outer"] is not None:
+        _o, _t, elsewhere = rec["outer"]
+        return "budget", ("all_paths_complete (outer gate, but open elsewhere)"
+                          if elsewhere else "all_paths_complete (outer gate)"), n
     if rec["downgraded"]:
-        # Ordered before the blocker case deliberately. Such a task usually
-        # *also* has blockers -- the obligations nobody violated are still
-        # unproven -- but the witness is the proximate reason this task scores
-        # nothing, and it is the one that responds to different work.
         why = Counter(rec["replay"]).most_common(1)
         return "refuted-witness", \
             f"replay {why[0][0]}" if why else "replay refused (reason not logged)", n
-    if rec["blockers"]:
-        top = Counter(rec["blockers"]).most_common(1)[0][0]
-        return KIND.get(top, "other"), top, n
-    if rec["outer"] is not None:
-        # The BMC never reached its discharge loop. Its own accounting of
-        # where the open obligations live is the finding: obligations open in
-        # a method that was never truncated cannot be explained by depth.
-        _open_m, _trunc_m, elsewhere = rec["outer"]
-        if elsewhere:
-            return "budget", "all_paths_complete (outer gate, but open elsewhere)", n
-        return "budget", "all_paths_complete (outer gate)", n
     return "no-candidate", "(nothing published)", n
+
+
+def cfg_report(records):
+    """Why branches were refused a merge, over every body the BMC analysed.
+
+    This answers a question the bucket table cannot: a branch that forks does
+    not show up as a blocker, it shows up as the *cost* that later exhausts one.
+    So the refusal has to be counted where it happens.
+    """
+    seen, tot = set(), Counter()
+    bodies = 0
+    for r in records:
+        for (key, blocks, merged, exits, back, escapes, cap) in r["cfg"]:
+            if key in seen:
+                continue
+            seen.add(key)
+            bodies += 1
+            tot["blocks"] += int(blocks)
+            tot["merged"] += int(merged)
+            tot["exits_method"] += int(exits)
+            tot["back_edge"] += int(back)
+            tot["region_escapes"] += int(escapes)
+            tot["over_cap"] += int(cap)
+    branches = (tot["merged"] + tot["exits_method"] + tot["back_edge"]
+                + tot["region_escapes"] + tot["over_cap"])
+    if not branches:
+        print("\ncfg: no bodies logged a region decision — is "
+              "ajave_engines::smt_bmc=debug on, and is AJAVE_LBE unset?")
+        return
+    print(f"\nregion decisions over {bodies} distinct bodies "
+          f"({tot['blocks']} blocks, {branches} branching blocks)")
+    rows = [
+        ("merged", tot["merged"], "one formula, continuation explored once"),
+        ("exits_method", tot["exits_method"],
+         "an arm leaves without reconverging — Java Ranger L4/L5"),
+        ("back_edge", tot["back_edge"],
+         "the region holds a loop — no published level addresses this"),
+        ("over_cap", tot["over_cap"], "larger than AJAVE_LBE_MAX_REGION"),
+        ("region_escapes", tot["region_escapes"],
+         "BUG in cfg.rs if non-zero: a correct ipdom is always reachable"),
+    ]
+    for name, n, note in rows:
+        pct = 100.0 * n / branches
+        print(f"  {name:15s} {n:7d}  {pct:5.1f}%   {note}")
+
+    # The count above is over every body analysed, and most of those bodies
+    # were decided. A refused merge that cost nothing is not a target: a guard
+    # clause forks, but the arm that returns duplicates no continuation, so the
+    # fork is cheap. What matters is the profile of the tasks that are *still*
+    # truncating, which is the `structural` bucket.
+    still = [r for r in records if classify(r)[0] == "structural"]
+    if not still:
+        print("\n  no task is still classified structural — "
+              "truncation is no longer the dominant blocker")
+        return
+    seen2, st = set(), Counter()
+    for r in still:
+        for (key, blocks, merged, exits, back, escapes, cap) in r["cfg"]:
+            if key in seen2:
+                continue
+            seen2.add(key)
+            st["merged"] += int(merged)
+            st["exits_method"] += int(exits)
+            st["back_edge"] += int(back)
+            st["over_cap"] += int(cap)
+    sb = sum(st.values())
+    print(f"\n  restricted to the {len(still)} task(s) still truncating "
+          f"({len(seen2)} bodies, {sb} branching blocks):")
+    if not sb:
+        print("    none of them logged a region decision")
+        return
+    for name in ("merged", "exits_method", "back_edge", "over_cap"):
+        print(f"    {name:15s} {st[name]:7d}  {100.0 * st[name] / sb:5.1f}%")
+    worst = max(("exits_method", "back_edge", "over_cap"), key=lambda k: st[k])
+    print(f"\n  dominant refusal among still-truncating tasks: {worst} "
+          f"({st[worst]} branches)")
 
 
 def report(records, dump=None):
@@ -384,12 +552,14 @@ def report(records, dump=None):
 
     RESPONDS = {
         "budget": "scheduling / more effort  <-- the scheduler's ceiling",
+        "structural": "an invariant, or a different cap — NOT more time",
         "model":  "modelling the callee (lift java.base)",
         "theory": "a different encoding",
         "refuted": "feeding refutations back into the loop",
         "refuted-witness": "witness construction / replay fidelity (#25)",
         "timeout": "anytime engines, partly",
         "killed": "nothing — contention artefact, re-run on an idle machine",
+        "float-escalation": "letting the FPA pass reach it (theory exists, gh #48)",
         "no-candidate": "unknown — nothing published at all",
         "other": "unclassified blocker",
     }
@@ -419,22 +589,26 @@ def report(records, dump=None):
         for k, n in res.most_common(10):
             print(f"{k[:52]:<52} {n:>6}")
 
-    for k in ("budget", "theory", "no-candidate", "refuted-witness"):
+    for k in ("budget", "structural", "theory", "no-candidate", "refuted-witness"):
         if examples[k]:
             print(f"\n{k} examples: " + ", ".join(sorted(set(examples[k]))[:8]))
 
     if dump:
         with open(dump, "w") as f:
             f.write("name\tproperty\texpected\tverdict\tbucket\tblocker"
-                    "\topen\tkinds\n")
+                    "\topen\trefuted\tkinds\n")
             for r in unproven:
                 bucket, top, n = classify(r)
+                nref = len([x for x in r["replay"] if x != "Confirmed"])
                 f.write(f"{r['name']}\t{r['prop']}\t{r['expected']}\t"
                         f"{r['verdict']}\t{bucket}\t{top}\t{n if n else ''}\t"
-                        f"{r['open_kinds']}\n")
+                        f"{nref}\t{r['open_kinds']}\n")
         print(f"\nwrote {len(unproven)} rows to {dump}")
 
-    print("\nThe 'budget' row is what a scheduler can convert. Everything "
+    print("\n'structural' is NOT convertible by scheduling: the search stopped "
+          "with budget\nstill in hand, so it needs an invariant or a different "
+          "cap. It was counted as\n'budget' until 2026-10-31.\n")
+    print("The 'budget' row is what a scheduler can convert. Everything "
           "below it needs\na model or a theory, and will not move however the "
           "time is spent.")
 

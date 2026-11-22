@@ -123,6 +123,20 @@ validate — which is why it is separated from everything around it.
 
 ## A3 — Promote, and let a promoted invariant discharge
 
+> **Decided 2026-11-21: maps.** A2's spec above lists initiation as one of
+> three checkable obligations. The implementation found it is not checkable at
+> a *point* — "holds initially" is a property of an invariant map, and an
+> assertion at a non-entry block is established by its predecessors — and said
+> so in its module doc, deferring the choice to A3. The implementation was
+> right. `Artifact::InvariantMap` and `check_map_inductive` are the answer, and
+> `docs/proposals/invariant-synthesis.md` carries the design.
+>
+> Promotion also turned out not to need a separate certifier pass for the
+> synthesised case: candidate elimination terminates *because* initiation and
+> preservation hold of what survives, so `houdini` publishes `Inductive`
+> directly, gated on `Synthesised::converged`. A run that stopped on its query
+> budget has not tested every candidate and is published as `Candidate`.
+
 * A new `InvariantCertifier` implementing `Certifier`, calling `check_inductive`.
 * On `Confirmed`, republish the invariant with `status: InvStatus::Inductive`.
   Append-only, so this is a new artifact, not a mutation.

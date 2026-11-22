@@ -423,6 +423,170 @@ pub struct AiEngine {
     nonnull_statics: HashSet<FieldKey>,
     /// Precision policy for the flat field abstraction.
     field_prec: crate::interval::FieldPrec,
+    /// Array-length preconditions agreed by every call site.
+    array_len_pre: HashMap<MethodKey, crate::interval::ArrayLenPre>,
+}
+
+/// Which methods may assume an array parameter's length is a product of two
+/// other parameters, because **every** call site passes exactly that.
+///
+/// The flattened-matrix lemma (see `interval::flattened_premises`) proves
+/// `a[i*s + j]` in bounds against `new T[m*s]`, and dies at a call boundary:
+/// `BellmanFord` allocates in `main` and indexes in `runBellmanFord`, where
+/// `D.length == N*N` is true at the one call site and otherwise unstated. This
+/// recovers it.
+///
+/// # Soundness
+///
+/// The precondition is only recorded when **all** of the following hold, and
+/// each is checked rather than assumed:
+///
+/// - The method is `static`. A virtual call could dispatch to an override with
+///   different callers, and enumerating those is a different analysis.
+/// - It is **not** the program entry, which has no caller to establish
+///   anything.
+/// - It has at least one call site. Zero call sites would make the
+///   precondition vacuous and let it claim anything.
+/// - Every call site agrees on the same `(array_slot, factor_slots)`. One
+///   disagreeing caller drops the precondition entirely.
+/// - No parameter is `long`/`double`, so argument index equals parameter slot.
+///   Wide types occupy two slots and would misalign the mapping.
+///
+/// SV-COMP tasks are closed programs rooted at `main`, so scanning every body
+/// in `prog` finds every call site. That is the assumption the first bullet
+/// protects: it is false for a virtual method, and the check excludes those.
+fn analyze_array_len_preconditions(
+    prog: &Program,
+) -> HashMap<MethodKey, crate::interval::ArrayLenPre> {
+    use ajave_ir::{Operand, Rvalue, Stmt};
+
+    // Vars assigned exactly once in a body, with their defining rvalue. A var
+    // assigned twice has no single definition and is skipped -- reading the
+    // first would describe a value that may have been overwritten.
+    fn single_defs(body: &ajave_ir::Body) -> HashMap<ajave_ir::VarId, &Rvalue> {
+        let mut seen: HashMap<ajave_ir::VarId, Option<&Rvalue>> = HashMap::new();
+        for block in &body.blocks {
+            for st in &block.stmts {
+                if let Stmt::Assign(v, rv) = st {
+                    seen.entry(*v).and_modify(|e| *e = None).or_insert(Some(rv));
+                }
+            }
+        }
+        seen.into_iter()
+            .filter_map(|(k, v)| v.map(|r| (k, r)))
+            .collect()
+    }
+
+    // Resolve a variable through copy chains to its real definition.
+    //
+    // javac routes almost everything through stack-to-local copies, so the
+    // array handed to a call is typically several `Use(Var(_))` hops from its
+    // `NewArray`. The first version of this pass looked for `NewArray`
+    // directly and found nothing at all -- the same copy-chain problem that
+    // made the relational domain itself look inert until copies were handled.
+    fn resolve<'a>(
+        defs: &HashMap<ajave_ir::VarId, &'a Rvalue>,
+        mut v: ajave_ir::VarId,
+    ) -> Option<&'a Rvalue> {
+        // Bounded, because a malformed body could in principle cycle.
+        for _ in 0..16 {
+            match defs.get(&v).copied()? {
+                Rvalue::Use(Operand::Var(next)) => v = *next,
+                other => return Some(other),
+            }
+        }
+        None
+    }
+
+    // `found[m]` is None once two call sites disagree.
+    let mut found: HashMap<MethodKey, Option<crate::interval::ArrayLenPre>> = HashMap::new();
+    for caller in prog.bodies.values() {
+        let defs = single_defs(caller);
+        for block in &caller.blocks {
+            for st in &block.stmts {
+                let Stmt::Assign(
+                    _,
+                    Rvalue::Call {
+                        target,
+                        args,
+                        is_virtual,
+                    },
+                ) = st
+                else {
+                    continue;
+                };
+                if *is_virtual {
+                    continue;
+                }
+                let Some(callee) = prog.body(target) else {
+                    continue;
+                };
+                if !callee.is_static || prog.entry.as_ref() == Some(target) {
+                    continue;
+                }
+                if target.desc.contains('J') || target.desc.contains('D') {
+                    continue;
+                }
+                // Which argument is an array whose length is a product, and
+                // are both factors themselves arguments of this same call?
+                let mut here = None;
+                for (ai, a) in args.iter().enumerate() {
+                    let Operand::Var(av) = a else { continue };
+                    let Some(Rvalue::NewArray {
+                        len: Operand::Var(lv),
+                        ..
+                    }) = resolve(&defs, *av)
+                    else {
+                        continue;
+                    };
+                    let Some(Rvalue::Bin(ajave_ir::BinOp::Mul, Operand::Var(f1), Operand::Var(f2))) =
+                        resolve(&defs, *lv)
+                    else {
+                        continue;
+                    };
+                    // The factors must themselves be arguments of this call,
+                    // up to copies -- `fill(v, d)` passes a copy of `v`, not
+                    // the variable the multiplication named.
+                    let pos = |w: &ajave_ir::VarId| {
+                        args.iter().position(|x| match x {
+                            Operand::Var(y) => {
+                                y == w
+                                    || matches!(resolve(&defs, *y), Some(Rvalue::Use(Operand::Var(z))) if z == w)
+                                    || matches!(defs.get(y).copied(), Some(Rvalue::Use(Operand::Var(z))) if z == w)
+                            }
+                            _ => false,
+                        })
+                    };
+                    if let (Some(p1), Some(p2)) = (pos(f1), pos(f2)) {
+                        here = Some(crate::interval::ArrayLenPre {
+                            array_slot: ai as u16,
+                            factor_slots: (p1 as u16, p2 as u16),
+                        });
+                        break;
+                    }
+                }
+                match (found.get(target), here) {
+                    (None, Some(p)) => {
+                        found.insert(target.clone(), Some(p));
+                    }
+                    (Some(Some(prev)), Some(p)) if *prev == p => {}
+                    // Any disagreement, or a call site that establishes
+                    // nothing, poisons the precondition for good.
+                    _ => {
+                        found.insert(target.clone(), None);
+                    }
+                }
+            }
+        }
+    }
+    let out: HashMap<_, _> = found
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|p| (k, p)))
+        .collect();
+    for (m, p) in &out {
+        debug!("interval-ai: array-length precondition for {m}: {p:?}");
+    }
+    out
 }
 
 /// Hints are per **block entry**: states whose `location().index != 0` are
@@ -499,6 +663,7 @@ fn join_block_intervals(
 impl AiEngine {
     pub fn new() -> Self {
         AiEngine {
+            array_len_pre: HashMap::new(),
             done: false,
             nonnull_fields: HashSet::new(),
             nonnull_returns: HashSet::new(),
@@ -705,12 +870,21 @@ impl AiEngine {
     }
 }
 
-/// The integer part of an abstract state, as a conjunction of bounds.
+/// The checkable part of an abstract state, as a conjunction.
 ///
-/// Only variables the analysis actually narrowed, and only integer ones: the
-/// certifier checks in LIA, so a float bound could not be stated there and
-/// claiming one would invite a checker to confirm something it cannot see. See
-/// `invariant_check`'s module doc, and #48 for why that matters.
+/// Three kinds of conjunct, all of which the domain already computes:
+/// integer bounds, non-nullness, and array-length bounds.
+///
+/// Only variables the analysis actually narrowed, and **no float or double
+/// bound**: the certifier checks in LIA, so a float bound could not be stated
+/// there and claiming one would invite a checker to confirm something it
+/// cannot see. See `invariant_check`'s module doc, and #48 for why that
+/// matters — ajave's one confirmed wrong TRUE was a float-arithmetic proof.
+///
+/// A length conjunct is deliberately published even though `invariant_check`
+/// currently declines `Expr::Length`: an engine that models lengths (CHC, and
+/// this domain itself) can use the fact, and a claim the *certifier* cannot
+/// check refuses a discharge rather than permitting a bad one.
 ///
 /// Returns `None` when nothing was narrowed — an empty conjunction is `true`,
 /// which is a certificate that justifies nothing, and publishing one would
@@ -736,6 +910,83 @@ fn interval_state_as_formula(
             conjuncts.push(Expr::bin(Op::Le, Expr::Var(*vid), Expr::Int(iv.hi)));
         }
     }
+    // Nullness and array lengths, which the domain has tracked all along and
+    // could not state until `Expr::Null` and `Expr::Length` existed.
+    //
+    // This is the whole point of P1. `NullDeref` is 53% of the corpus's open
+    // obligations and `ArrayBounds` another 34%, and their safety conditions
+    // are exactly these two shapes -- so before this the strongest certificate
+    // this engine could offer for 87% of the open set was a bound on an
+    // unrelated integer. See `docs/proposals/invariant-synthesis.md` G1/G2.
+    //
+    // `Nullness::NonNull` only. `Unknown` is the lattice's top and carries no
+    // claim, and `Null` would be a claim that the *violation* happens, which
+    // is not an `Over` engine's business to publish as an invariant.
+    let n_bounds_only = conjuncts.len();
+    let _ = n_bounds_only;
+    let mut n_null = 0usize;
+    for (vid, n) in &state.nullness {
+        if !matches!(n, crate::interval::Nullness::NonNull) {
+            continue;
+        }
+        // A reference-typed variable only. Nullness of an int is meaningless
+        // and publishing one would invite a consumer to compare a number
+        // against `Null`.
+        if body
+            .vars
+            .get(vid.0 as usize)
+            .map(|vi| matches!(vi.ty, ajave_ir::Ty::Ref | ajave_ir::Ty::Str))
+            .unwrap_or(false)
+        {
+            conjuncts.push(Expr::non_null(Expr::Var(*vid)));
+            n_null += 1;
+        }
+    }
+    let mut n_len = 0usize;
+    // An array's length, as bounds on `Length{r}` rather than on a local that
+    // happens to hold it. `array_len_var` records "this *variable* is the
+    // length of that array", which is a fact about a local and dies with it;
+    // `Length{r}` is a fact about the reference and survives reassignment.
+    for (vid, iv) in &state.array_lens {
+        if *iv == Interval::top() {
+            continue;
+        }
+        let is_ref = body
+            .vars
+            .get(vid.0 as usize)
+            .map(|vi| matches!(vi.ty, ajave_ir::Ty::Ref))
+            .unwrap_or(false);
+        if !is_ref {
+            continue;
+        }
+        let len = Expr::length(Expr::Var(*vid));
+        if iv.lo > NEG_INF {
+            conjuncts.push(Expr::bin(Op::Le, Expr::Int(iv.lo), len.clone()));
+        }
+        if iv.hi < POS_INF {
+            conjuncts.push(Expr::bin(Op::Le, len, Expr::Int(iv.hi)));
+            n_len += 1;
+        }
+        if iv.lo > NEG_INF {
+            n_len += 1;
+        }
+    }
+
+    // P1's exit criterion, countable from a run: if this engine has few
+    // nullness or length facts to publish then G2 of
+    // `docs/proposals/invariant-synthesis.md` is wrong -- the domain does not
+    // know what the corpus needs -- and the plan is mis-targeted. Logged
+    // rather than inferred, for the same reason the region tally is.
+    if n_null + n_len > 0 || !conjuncts.is_empty() {
+        log::debug!(
+            "inv-vocab: {} bounds={} nonnull={} length={}",
+            body.key,
+            conjuncts.len() - n_null - n_len,
+            n_null,
+            n_len,
+        );
+    }
+
     let mut it = conjuncts.into_iter();
     let first = it.next()?;
     Some(it.fold(first, |acc, c| Expr::bin(Op::And, acc, c)))
@@ -778,6 +1029,7 @@ impl Engine for AiEngine {
             );
         }
         self.nonnull_returns = analyze_return_nullness(prog, &self.nonnull_fields);
+        self.array_len_pre = analyze_array_len_preconditions(prog);
         self.nonnull_statics = stable_stream_statics(prog);
         self.field_prec = analyze_field_precision(prog);
         debug!(
@@ -844,6 +1096,7 @@ impl Engine for AiEngine {
         // loops) was analysed and the easier one was not.
 
         let cpa = IntervalCpa {
+            array_len_pre: self.array_len_pre.clone(),
             nonnull_fields: self.nonnull_fields.clone(),
             nonnull_returns: self.nonnull_returns.clone(),
             nonnull_statics: self.nonnull_statics.clone(),
@@ -953,6 +1206,7 @@ impl Engine for AiEngine {
         let max_states_per_method =
             ((budget.work as usize) / methods_to_analyze.len().max(1)).max(500);
         let cpa = IntervalCpa {
+            array_len_pre: self.array_len_pre.clone(),
             nonnull_fields: self.nonnull_fields.clone(),
             nonnull_returns: self.nonnull_returns.clone(),
             nonnull_statics: self.nonnull_statics.clone(),

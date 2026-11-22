@@ -514,8 +514,33 @@ impl<'a> ExploreCtx<'a> {
         }
     }
 
-    pub(super) fn find_join(&self, then_: BlockId, else_: BlockId) -> Option<BlockId> {
-        self.find_join_multi(&[then_, else_])
+    /// Post-dominator structure for the body being explored, built once.
+    fn cfg_info(&mut self) -> std::rc::Rc<super::cfg::CfgInfo> {
+        if let Some(info) = self.cfg_cache.get(&self.body.key) {
+            return info.clone();
+        }
+        let info = std::rc::Rc::new(super::cfg::CfgInfo::of(self.body));
+        self.cfg_cache.insert(self.body.key.clone(), info.clone());
+        info
+    }
+
+    /// Where the arms of the branch or switch terminating `block_id` may be
+    /// merged, or `None` if it must fork.
+    ///
+    /// The immediate post-dominator is the right answer and
+    /// `find_join_multi` was not computing it — see `cfg.rs`. The old
+    /// heuristic is kept behind `AJAVE_LBE=0` so the two can be measured
+    /// against each other on one build, which is the only way to attribute a
+    /// score change to the encoding rather than to the build.
+    pub(super) fn join_for_block(&mut self, block_id: BlockId) -> Option<BlockId> {
+        if super::cfg::lbe_enabled() {
+            return self.cfg_info().join_for(block_id);
+        }
+        let targets = self.block_successors(block_id);
+        if targets.len() < 2 {
+            return None;
+        }
+        self.find_join_multi(&targets)
     }
 
     fn find_join_multi(&self, targets: &[BlockId]) -> Option<BlockId> {
@@ -1421,7 +1446,7 @@ impl<'a> ExploreCtx<'a> {
         let cond_bool = self.solver.bveq(ct, zero);
         let cond_nz = self.solver.not(cond_bool);
 
-        if let Some(join) = self.find_join(then_, else_) {
+        if let Some(join) = self.join_for_block(block_id) {
             self.handle_branch_diamond(
                 cond_tainted,
                 cond_nz,
@@ -1677,6 +1702,7 @@ impl<'a> ExploreCtx<'a> {
 
     fn handle_switch(
         &mut self,
+        block_id: BlockId,
         value: Operand,
         cases: Vec<(i32, BlockId)>,
         default: BlockId,
@@ -1685,10 +1711,7 @@ impl<'a> ExploreCtx<'a> {
         let value_tainted = self.operand_tainted(&value);
         let vt = self.encode_operand(&value);
 
-        let mut all_targets: Vec<BlockId> = cases.iter().map(|(_, t)| *t).collect();
-        all_targets.push(default);
-
-        if let Some(join) = self.find_join_multi(&all_targets) {
+        if let Some(join) = self.join_for_block(block_id) {
             self.handle_switch_diamond(value_tainted, vt, &cases, default, join, stop_at);
         } else {
             self.handle_switch_fork(value_tainted, vt, &cases, default, stop_at);
@@ -2014,7 +2037,7 @@ impl<'a> ExploreCtx<'a> {
                 cases,
                 default,
             } => {
-                self.handle_switch(value.clone(), cases.clone(), *default, stop_at);
+                self.handle_switch(block_id, value.clone(), cases.clone(), *default, stop_at);
             }
             Terminator::Return(Some(val)) => {
                 if self.call_depth > 0 {

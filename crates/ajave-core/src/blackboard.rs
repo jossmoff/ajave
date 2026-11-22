@@ -58,6 +58,9 @@ pub struct Blackboard {
     /// about how the status was derived, not about the obligation, and every
     /// existing match on `Status` would otherwise have to be touched.
     status_approx: BTreeMap<ObligationRef, Approximations>,
+    /// Invariant maps, which are the unit that can be certified. See
+    /// `InvariantMap`.
+    maps: Vec<InvariantMap>,
 }
 
 /// Whether an invariant-backed discharge must name a checked invariant.
@@ -300,10 +303,24 @@ impl Blackboard {
                 }
             }
             Artifact::Invariant(inv) => self.invariants.push(inv.clone()),
+            Artifact::InvariantMap(m) => self.maps.push(m.clone()),
             Artifact::Trace(t) => self.traces.push(t.clone()),
             Artifact::Query(q) => self.queries.push(q.clone()),
             Artifact::Lemma(l) => self.lemmas.push((l.clone(), approximated)),
-            _ => {}
+            // Listed rather than caught by `_`, so adding an artifact kind is
+            // a compile error here instead of a silent omission. `InvariantMap`
+            // fell into the old catch-all and was logged but stored nowhere —
+            // published, append-only, and invisible to every consumer that
+            // does not walk the raw log. That is "inert by defect" in
+            // `docs/contracts.md`'s terms, and it is indistinguishable from
+            // "nobody publishes one".
+            //
+            // These two have no store because they have no producer, which is
+            // the contract defect `CLAUDE.md` names: an artifact kind with
+            // neither is "a comment with a type". When one gains a producer it
+            // must gain a store in the same change, and this match is where
+            // that is noticed.
+            Artifact::Precision(_, _) | Artifact::Residual(_) => {}
         }
 
         self.log.push(Tagged {
@@ -579,6 +596,70 @@ impl Blackboard {
         self.invariants.iter().find(|i| i.id == id)
     }
 
+    /// Every distinct conjunct any engine has claimed about a method, as a
+    /// candidate pool.
+    ///
+    /// The general form of `interval_hints_for_method`, and the reason that
+    /// one is a special case rather than the interface. A reader that wants
+    /// *bounds* has to parse a shape; a reader that wants *candidates* wants
+    /// the conjuncts themselves and will test each one anyway — so handing
+    /// back the claims unparsed is both simpler and lossless. A conjunct this
+    /// caller cannot use is dropped by whatever tests it, not silently here.
+    ///
+    /// Deduplicated and sorted by rendered form, because a candidate pool
+    /// whose order varies between runs makes synthesis non-reproducible even
+    /// though the result is order-independent — see `houdini`'s canonical
+    /// conjunct ordering for the same reason.
+    pub fn claim_conjuncts_for_method(&self, method: &MethodKey) -> Vec<crate::term::Expr> {
+        use crate::term::{Expr, Op};
+        fn flatten(e: &Expr, out: &mut Vec<Expr>) {
+            match e {
+                Expr::Bin(Op::And, a, b) => {
+                    flatten(a, out);
+                    flatten(b, out);
+                }
+                other => out.push(other.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
+            flatten(&inv.formula, &mut out);
+        }
+        // `Expr` is `Eq + Hash`, but dedup by rendered form so that two
+        // structurally different spellings of the same claim collapse.
+        out.sort_by_key(|e| e.to_string());
+        out.dedup_by_key(|e| e.to_string());
+        out
+    }
+
+    /// Certified maps for a method — the only ones a discharge may rest on.
+    ///
+    /// `Candidate` maps are deliberately excluded: `InvStatus`'s contract says
+    /// a candidate "is never enough on its own to discharge", and a consumer
+    /// that wanted to *refine* candidates (the Houdini loop) asks for them
+    /// explicitly through `candidate_maps_for_method`.
+    pub fn inductive_maps_for_method(
+        &self,
+        method: &MethodKey,
+    ) -> impl Iterator<Item = &InvariantMap> {
+        let m = method.clone();
+        self.maps
+            .iter()
+            .filter(move |x| x.method == m && x.status == InvStatus::Inductive)
+    }
+
+    /// Proposed maps for a method, checked by nobody. Only a synthesiser or a
+    /// certifier has any business reading these.
+    pub fn candidate_maps_for_method(
+        &self,
+        method: &MethodKey,
+    ) -> impl Iterator<Item = &InvariantMap> {
+        let m = method.clone();
+        self.maps
+            .iter()
+            .filter(move |x| x.method == m && x.status == InvStatus::Candidate)
+    }
+
     pub fn inductive_invariants(&self) -> impl Iterator<Item = &Invariant> {
         self.invariants
             .iter()
@@ -635,51 +716,119 @@ impl Blackboard {
     /// the most valuable hint a Horn solver can be given. The facts now travel
     /// as `Artifact::Invariant` and anything can read them.
     ///
-    /// Recognises the shape the interval engine publishes, `lo <= v && v <= hi`,
-    /// and ignores anything else. A consumer that cannot read a claim must
-    /// skip it, never guess at it.
+    /// Walks the claim's **conjunction** and reads every bound in it, ignoring
+    /// conjuncts it cannot interpret. A consumer that cannot read a claim must
+    /// skip it, never guess at it — but it must skip the *conjunct*, not the
+    /// whole claim.
+    ///
+    /// That distinction was a real defect, not a nicety. This used to match
+    /// the entire formula against `lo <= v && v <= hi`, while the producer
+    /// builds its formula by folding conjuncts left-associatively. So a state
+    /// that narrowed **two or more** variables produced `((c1 && c2) && c3)`,
+    /// whose left operand is an `And` rather than a `Le`, and the match failed:
+    /// hints were recovered only from a state that narrowed exactly one
+    /// variable with both bounds, and every richer state silently yielded
+    /// nothing. Nothing reported it, because "no hints" and "no facts" are
+    /// indistinguishable to the consumer.
+    ///
+    /// Flattening also makes the channel extensible, which is the point. A
+    /// nullness or length conjunct now fails to match *this* reader and is
+    /// skipped individually, leaving the bounds beside it intact — so adding
+    /// vocabulary to `Expr` can no longer break an unrelated consumer.
     pub fn interval_hints_for_method(
         &self,
         method: &MethodKey,
     ) -> HashMap<(BlockId, VarId), (i64, i64)> {
         use crate::term::{Expr, Op};
-        let mut out = HashMap::new();
-        for inv in self.invariants.iter().filter(|i| &i.at.method == method) {
-            let Expr::Bin(Op::And, lo_e, hi_e) = &inv.formula else {
-                continue;
-            };
-            let (Expr::Bin(Op::Le, l, lv), Expr::Bin(Op::Le, hv, h)) =
-                (lo_e.as_ref(), hi_e.as_ref())
-            else {
-                continue;
-            };
-            let (Expr::Int(lo), Expr::Var(v1), Expr::Var(v2), Expr::Int(hi)) =
-                (l.as_ref(), lv.as_ref(), hv.as_ref(), h.as_ref())
-            else {
-                continue;
-            };
-            if v1 != v2 {
-                continue;
+        /// Every non-`And` leaf of a conjunction, in order.
+        fn conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+            match e {
+                Expr::Bin(Op::And, a, b) => {
+                    conjuncts(a, out);
+                    conjuncts(b, out);
+                }
+                other => out.push(other),
             }
-            // Two claims for one (block, variable) are **intersected**, not
-            // overwritten. The log is append-only and several engines may
-            // publish bounds for the same point; each `Over` invariant is a
-            // claim that holds there, so their conjunction holds too, and the
-            // meet is the strongest thing a consumer may conclude.
-            //
-            // This was a plain `insert`, so whichever claim the log happened
-            // to carry last won and the others vanished. That is not unsound
-            // given honest producers — every claim is true — but it made the
-            // answer depend on publication order, and it meant a producer bug
-            // could only ever be found by reading the producer. It took a
-            // JVM-confirmed contradiction to find exactly such a bug in
-            // `ai::join_block_intervals`.
-            out.entry((inv.at.block, *v1))
-                .and_modify(|(l, h): &mut (i64, i64)| {
-                    *l = (*l).max(*lo);
-                    *h = (*h).min(*hi);
-                })
-                .or_insert((*lo, *hi));
+        }
+        // Point claims only. **Invariant maps are deliberately not read here**,
+        // and the reason is a wrong TRUE rather than a preference.
+        //
+        // A synthesised map is proved inductive in LIA, and LIA does not wrap
+        // where Java's `int` does — `smt_text::lia_overflow_cond` exists
+        // because of exactly that, and says so: "`x + 1 > x` is valid in an
+        // unbounded encoding and false on a JVM". The BMC reasons in
+        // bitvectors and uses a hint to *prune* branches, so handing it a
+        // claim that only holds without wrapping makes it miss paths while
+        // still claiming `all_paths_complete`. That produced a wrong TRUE on
+        // `algorithms/BellmanFord-FunUnsat01` [no-runtime-exception] — a
+        // program that really throws — and removing this consumer is what made
+        // it UNKNOWN again.
+        //
+        // The general statement is the one `CLAUDE.md` names: producer and
+        // consumer disagreeing about an artifact. The map means "inductive
+        // with respect to the edges and the arithmetic the LIA encoder
+        // models"; this reader heard "true at this block". `interval-ai`'s own
+        // bounds are safe here because that domain models wrapping explicitly.
+        //
+        // Reinstating this needs overflow-guarded preservation, which is #77's
+        // problem in a new place. Until then `Artifact::InvariantMap` has a
+        // producer and no consumer and is declared as such.
+        let point_claims = self
+            .invariants
+            .iter()
+            .filter(|i| &i.at.method == method)
+            .map(|i| (i.at.block, &i.formula));
+
+        let mut out = HashMap::new();
+        for (block, formula) in point_claims {
+            let mut leaves = Vec::new();
+            conjuncts(formula, &mut leaves);
+            // `lo <= v` and `v <= hi` arrive as separate conjuncts, so a bound
+            // is accumulated per variable rather than read from one pattern.
+            // A variable with only one side bounded contributes that side and
+            // leaves the other at infinity, which is strictly more than the
+            // old reader could express.
+            let mut bounds: HashMap<VarId, (i64, i64)> = HashMap::new();
+            for leaf in leaves {
+                let Expr::Bin(Op::Le, l, r) = leaf else {
+                    continue;
+                };
+                match (l.as_ref(), r.as_ref()) {
+                    // lo <= v
+                    (Expr::Int(lo), Expr::Var(v)) => {
+                        let e = bounds.entry(*v).or_insert((i64::MIN, i64::MAX));
+                        e.0 = e.0.max(*lo);
+                    }
+                    // v <= hi
+                    (Expr::Var(v), Expr::Int(hi)) => {
+                        let e = bounds.entry(*v).or_insert((i64::MIN, i64::MAX));
+                        e.1 = e.1.min(*hi);
+                    }
+                    _ => continue,
+                }
+            }
+            for (v1, (lo, hi)) in bounds {
+                let (v1, lo, hi) = (&v1, &lo, &hi);
+                // Two claims for one (block, variable) are **intersected**, not
+                // overwritten. The log is append-only and several engines may
+                // publish bounds for the same point; each `Over` invariant is a
+                // claim that holds there, so their conjunction holds too, and the
+                // meet is the strongest thing a consumer may conclude.
+                //
+                // This was a plain `insert`, so whichever claim the log happened
+                // to carry last won and the others vanished. That is not unsound
+                // given honest producers — every claim is true — but it made the
+                // answer depend on publication order, and it meant a producer bug
+                // could only ever be found by reading the producer. It took a
+                // JVM-confirmed contradiction to find exactly such a bug in
+                // `ai::join_block_intervals`.
+                out.entry((block, *v1))
+                    .and_modify(|(l, h): &mut (i64, i64)| {
+                        *l = (*l).max(*lo);
+                        *h = (*h).min(*hi);
+                    })
+                    .or_insert((*lo, *hi));
+            }
         }
         // An empty range means two producers disagree, which can only happen
         // if one of them is unsound. Dropping the key leaves the consumer with
@@ -1191,6 +1340,150 @@ mod tests {
         let hints = bb.interval_hints_for_method(&at.method);
         assert_eq!(hints.get(&(at.block, v)), Some(&(-3, 42)));
         assert!(bb.has_interval_hints());
+    }
+
+    /// The defect the round-trip test above could not see, because it
+    /// publishes a state that narrowed exactly **one** variable.
+    ///
+    /// `interval_state_as_formula` folds its conjuncts left-associatively, so
+    /// two narrowed variables give `((c1 && c2) && c3) && c4`. The old reader
+    /// matched the *whole* formula against `lo <= v && v <= hi`, whose left
+    /// operand must be a `Le` — and here it is an `And`, so every hint was
+    /// dropped. Hints therefore worked only for single-variable states, and
+    /// nothing reported it because "no hints" and "no facts" look identical
+    /// from the consumer's side.
+    #[test]
+    fn hints_survive_a_state_that_narrowed_more_than_one_variable() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let (v1, v2) = (ajave_ir::VarId(1), ajave_ir::VarId(2));
+
+        // Exactly the shape the producer's fold emits for two variables.
+        let cs = [
+            Expr::bin(Op::Le, Expr::Int(0), Expr::Var(v1)),
+            Expr::bin(Op::Le, Expr::Var(v1), Expr::Int(10)),
+            Expr::bin(Op::Le, Expr::Int(5), Expr::Var(v2)),
+            Expr::bin(Op::Le, Expr::Var(v2), Expr::Int(7)),
+        ];
+        let mut it = cs.into_iter();
+        let first = it.next().unwrap();
+        let formula = it.fold(first, |acc, c| Expr::bin(Op::And, acc, c));
+
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                formula,
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(hints.get(&(at.block, v1)), Some(&(0, 10)));
+        assert_eq!(hints.get(&(at.block, v2)), Some(&(5, 7)));
+    }
+
+    /// A conjunct the reader cannot interpret must cost only that conjunct.
+    ///
+    /// This is what makes the claim vocabulary extensible: nullness and length
+    /// conjuncts now sit beside the bounds, and a reader that only understands
+    /// bounds must still get them.
+    #[test]
+    fn an_uninterpretable_conjunct_does_not_hide_the_bounds_beside_it() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(3);
+        let r = ajave_ir::VarId(4);
+
+        let formula = Expr::bin(
+            Op::And,
+            Expr::bin(
+                Op::And,
+                // A nullness claim this reader knows nothing about.
+                Expr::non_null(Expr::Var(r)),
+                Expr::bin(Op::Le, Expr::Int(2), Expr::Var(v)),
+            ),
+            // And a length claim, likewise.
+            Expr::bin(Op::Le, Expr::length(Expr::Var(r)), Expr::Int(99)),
+        );
+
+        let id = bb.fresh_invariant_id();
+        bb.publish(
+            EngineId("interval-ai"),
+            Direction::Over,
+            Artifact::Invariant(Invariant {
+                id,
+                at: at.clone(),
+                formula,
+                status: InvStatus::Candidate,
+                scope: Scope::Point(at.clone()),
+            }),
+        )
+        .unwrap();
+
+        let hints = bb.interval_hints_for_method(&at.method);
+        assert_eq!(
+            hints.get(&(at.block, v)),
+            Some(&(2, i64::MAX)),
+            "the bound must survive the conjuncts this reader cannot parse"
+        );
+    }
+
+    /// A synthesised map must **not** reach the hint path, however certified.
+    ///
+    /// This test replaces one that asserted the opposite. The map is proved
+    /// inductive in LIA, where integers are unbounded; the BMC reasons in
+    /// bitvectors and uses a hint to *prune* branches. Handing it a claim that
+    /// only holds without wrapping made it skip a throwing path while still
+    /// reporting `all_paths_complete` — a wrong TRUE on
+    /// `algorithms/BellmanFord-FunUnsat01`, gh #130.
+    ///
+    /// So the assertion is the absence, and it is deliberate rather than an
+    /// unimplemented feature. Reinstating the consumer needs overflow-guarded
+    /// preservation; until then `Artifact::InvariantMap` has a producer and no
+    /// consumer, which `docs/contracts.md` records.
+    #[test]
+    fn a_synthesised_map_does_not_reach_the_hint_path() {
+        use crate::term::{Expr, Op};
+        let mut bb = Blackboard::new();
+        let at = point();
+        let v = ajave_ir::VarId(5);
+        let id = bb.fresh_invariant_id();
+        bb.publish_with(
+            EngineId("houdini"),
+            Direction::Over,
+            Approximations::INT_WRAPPING,
+            Artifact::InvariantMap(InvariantMap {
+                id,
+                method: at.method.clone(),
+                entries: [(
+                    at.clone(),
+                    Expr::bin(
+                        Op::And,
+                        Expr::bin(Op::Le, Expr::Int(1), Expr::Var(v)),
+                        Expr::bin(Op::Le, Expr::Var(v), Expr::Int(9)),
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+                // Even `Inductive` — being certified is not the issue, the
+                // arithmetic it was certified in is.
+                status: InvStatus::Inductive,
+                scope: Scope::Method(at.method.clone()),
+            }),
+        )
+        .unwrap();
+        assert!(
+            bb.interval_hints_for_method(&at.method).is_empty(),
+            "an LIA-proved bound must not prune a bitvector search (gh #130)"
+        );
     }
 
     /// A claim the reader cannot parse must be skipped, never guessed at.

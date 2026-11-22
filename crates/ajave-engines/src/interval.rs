@@ -735,6 +735,103 @@ pub struct IState {
     pub float_vars: BTreeMap<VarId, FloatInterval>,
     /// Nullness tracking for reference variables. Missing = Unknown.
     pub nullness: BTreeMap<VarId, Nullness>,
+    /// Pentagons. Symbolic strict upper bounds: `x` maps to the set of `y`
+    /// for which `x < y` is known. Missing = no bound known.
+    ///
+    /// # Why this exists
+    ///
+    /// `vars` above is `VarId -> Interval`, one interval per variable,
+    /// independently. That domain is **non-relational**: it can derive
+    /// `i >= 0` and `len >= 1` and has no way to express `i < len`, which is
+    /// the entire content of an array-bounds proof when the length is not a
+    /// constant. Measured: ajave could not prove no-runtime-exception for a
+    /// six-line fill loop over an array of unbounded length, and no budget,
+    /// unroll, depth or scheduling knob moved it (gh #119).
+    ///
+    /// This is the Pentagons domain of Logozzo and Fähndrich (SAC 2008):
+    /// `x ∈ [a, b] ∧ x < y`. Deliberately weaker than Octagons — it keeps the
+    /// intervals exactly as they are and adds only a symbolic less-than
+    /// relation, which is what makes it cheap enough to run on everything.
+    /// It was designed for validating array accesses in bytecode, which is
+    /// what we have.
+    ///
+    /// # Soundness
+    ///
+    /// Every fact here must hold on **every** execution reaching this point.
+    /// Three rules keep that true, and each has a test named after it:
+    ///
+    /// - **Join intersects.** A fact survives a merge only if both branches
+    ///   had it. Union would claim a bound that holds on one path only — the
+    ///   shape of the wrong discharge in gh #101.
+    /// - **Assignment kills.** Writing `x` invalidates every fact mentioning
+    ///   `x`, on either side. A stale `x < y` describes the old value.
+    /// - **Widening never invents.** Widening may only drop facts, never add,
+    ///   so the fixpoint stays an over-approximation.
+    pub lt: BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+    /// Non-strict companion to `lt`: `x` maps to the set of `y` for which
+    /// `x <= y` is known.
+    ///
+    /// Separate from `lt` rather than folded into it, because the two prove
+    /// different things and conflating them is wrong exactly at `x == y`. An
+    /// `ArrayBounds` obligation needs `i < len` and is **not** discharged by
+    /// `i <= len`; what `le` buys is the guard shape
+    /// `for (i = 0; i <= n - 1; i++)`, measured in 24% of the 135-task
+    /// `budget` population, where the strict fact about `i` comes from
+    /// combining `i <= n-1` with `n-1 < n`.
+    ///
+    /// Every rule that governs `lt` governs this identically — join and
+    /// widening intersect, assignment kills, copies transfer, and `leq`
+    /// requires a superset. The tests are parameterised over both.
+    pub le: BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+    /// The variable an array's length came from, when it was an allocation
+    /// `new T[n]` with `n` a variable. Lets `len = a.length` inherit the
+    /// relational facts held about `n`, which is what connects a loop guard
+    /// `i < n` to the bounds check `i < a.length`.
+    pub array_len_var: BTreeMap<VarId, VarId>,
+    /// `v` is the product of these two variables, and `v` is the sum of these
+    /// two. Syntactic provenance only — no arithmetic is re-done from them.
+    ///
+    /// These exist for one derivation, the flattened-matrix index. A 2D array
+    /// held as `new T[m * s]` and addressed `a[i * s + j]` is the common Java
+    /// idiom for a matrix, and its bounds proof is an *affine* fact that no
+    /// weakly relational domain can state:
+    ///
+    /// ```text
+    ///   i < s  and  j < s         (both loop guards)
+    ///   ---------------------
+    ///   i*s + j <= (s-1)*s + s-1 = s*s - 1 < s*s
+    /// ```
+    ///
+    /// That is a theorem of arithmetic, not a benchmark pattern: it holds for
+    /// every `i`, `j`, `s` satisfying the premises. What the maps supply is the
+    /// syntactic recognition of which variables play `i`, `j` and `s`, which
+    /// intervals cannot do because they lose the identity of `s` — `i*s + j`
+    /// bounds at ~2.1e9 while `s*s` bounds below at 1, and nothing records that
+    /// the two mention the same `s`.
+    ///
+    /// Overflow is checked rather than assumed: the relation is recorded only
+    /// when `s`'s interval shows `s*s` stays inside `int`. Where it does,
+    /// `i*s + j < s*s` cannot overflow either, since it is strictly smaller.
+    pub mul_of: BTreeMap<VarId, (VarId, VarId)>,
+    pub add_of: BTreeMap<VarId, (VarId, VarId)>,
+    /// `len` was produced by `arr.length` for an array whose length came from
+    /// this variable. Lets a bounds check against the materialised length var
+    /// reach the allocation expression behind it.
+    pub len_alias: BTreeMap<VarId, VarId>,
+    /// This array's length is the product of these two variables.
+    ///
+    /// Distinct from `array_len_var`, which records a length that *is* a
+    /// variable. A flattened matrix is allocated `new T[m * s]`, so its length
+    /// is a product, and the flattened-index lemma needs the two factors
+    /// rather than the materialised result — intervals lose their identity the
+    /// moment the product is computed.
+    ///
+    /// Seeded at `NewArray` from `mul_of`, carried through copies, and — the
+    /// point of keeping it separate — **seedable at method entry** from a
+    /// call-site summary, which is what lets the lemma survive a call.
+    pub array_len_prod: BTreeMap<VarId, (VarId, VarId)>,
+    /// `len = arr.length` where `arr`'s length is a product of these two.
+    pub len_prod: BTreeMap<VarId, (VarId, VarId)>,
     /// Length of the array a reference variable points at. Missing = Top.
     ///
     /// Seeded at `NewArray` from the allocation length and propagated through
@@ -811,6 +908,14 @@ impl IState {
     /// state has no opinion to contribute".
     pub fn top_at(at: ProgramPoint) -> IState {
         IState {
+            lt: BTreeMap::new(),
+            le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
+            array_len_prod: BTreeMap::new(),
+            len_prod: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at,
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -838,6 +943,292 @@ impl IState {
             self.vars.insert(v, i);
         }
     }
+    /// The relational facts two states agree on.
+    ///
+    /// Used by **both** join and widening. Join must intersect because a fact
+    /// holding on one branch only is not a fact at the merge. Widening must
+    /// intersect for a different reason: it is allowed to *drop* facts and
+    /// never to add them, or the fixpoint stops over-approximating. Keeping
+    /// them was the first version's bug — `lt` was rebuilt empty in both
+    /// widening functions, so every relational fact was erased at precisely
+    /// the loop header where it was needed, and the fill-loop benchmark stayed
+    /// UNKNOWN while the trace showed the fact being learned and used.
+    /// `a_bottom` / `b_bottom` say whether that side is unreachable.
+    ///
+    /// This parameter is the whole correctness of the operation, and omitting
+    /// it was the second bug in this domain. Intersection is right for two
+    /// reachable states. For an **unreachable** one, the relational component
+    /// of bottom is "every fact holds" — vacuously, since there is no
+    /// execution to violate one — not "no facts hold". Intersecting against an
+    /// empty map therefore erased everything, and at a loop header the back
+    /// edge *starts* unreachable, so the facts were wiped on the first
+    /// fixpoint iteration and never recovered.
+    ///
+    /// Symptom, for the next person: the fact is visibly learned and visibly
+    /// used in a trace, and the obligation still is not discharged, because
+    /// one state among those reached at the check lacks it and discharge is a
+    /// conjunction over all of them.
+    fn agree_lt(
+        a: &BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+        b: &BTreeMap<VarId, std::collections::BTreeSet<VarId>>,
+        a_bottom: bool,
+        b_bottom: bool,
+    ) -> BTreeMap<VarId, std::collections::BTreeSet<VarId>> {
+        if a_bottom {
+            return b.clone();
+        }
+        if b_bottom {
+            return a.clone();
+        }
+        let mut out: BTreeMap<VarId, std::collections::BTreeSet<VarId>> = BTreeMap::new();
+        for (k, mine) in a {
+            if let Some(theirs) = b.get(k) {
+                let both: std::collections::BTreeSet<VarId> =
+                    mine.intersection(theirs).copied().collect();
+                if !both.is_empty() {
+                    out.insert(*k, both);
+                }
+            }
+        }
+        out
+    }
+
+    /// Is `a < b` known?
+    pub fn knows_lt(&self, a: VarId, b: VarId) -> bool {
+        self.lt.get(&a).is_some_and(|s| s.contains(&b))
+    }
+
+    /// Is `a <= b` known? Implied by `a < b`.
+    pub fn knows_le(&self, a: VarId, b: VarId) -> bool {
+        a == b || self.knows_lt(a, b) || self.le.get(&a).is_some_and(|s| s.contains(&b))
+    }
+
+    /// `v`'s interval, intersected with what the relations already say.
+    ///
+    /// This is the **reduction** step of a reduced product — the operation
+    /// that makes Pentagons more than two domains kept side by side. `v < y`
+    /// together with `y <= y.hi` gives `v <= y.hi - 1`, which the interval
+    /// component cannot derive on its own.
+    ///
+    /// It is needed for more than sharper answers. A loop header widens a
+    /// counter's upper bound to `i32::MAX`, after which `i + 1` can genuinely
+    /// overflow, so the interval transfer must return Top — and that destroys
+    /// the counter's *lower* bound as well, which no narrowing on a later
+    /// branch restores, because a guard bounds a counter only from above.
+    /// Refining the operand first means the increment is computed against the
+    /// guard's bound and never looks like an overflow.
+    ///
+    /// Sound because it only intersects with facts the state already holds.
+    /// Monotone in the lattice order, so the fixpoint still converges: `leq`
+    /// requires a superset of relations, so a state lower in the order refines
+    /// at least as tightly.
+    ///
+    /// Only the upper direction is derived, and only one hop. The symmetric
+    /// lower bound (`x < v` gives `v >= x.lo + 1`) would need a reverse index,
+    /// and without one, reading it would mean scanning every relation in the
+    /// state on every operand evaluation.
+    fn refined(&self, v: VarId) -> Interval {
+        let iv = self.get(v);
+        if self.lt.is_empty() && self.le.is_empty() {
+            return iv;
+        }
+        let mut hi = iv.hi;
+        if let Some(ys) = self.lt.get(&v) {
+            for y in ys {
+                let h = self.get(*y).hi;
+                if h > i64::from(i32::MIN) && h - 1 < hi {
+                    hi = h - 1;
+                }
+            }
+        }
+        if let Some(ys) = self.le.get(&v) {
+            for y in ys {
+                let h = self.get(*y).hi;
+                if h < hi {
+                    hi = h;
+                }
+            }
+        }
+        // A contradiction means the state is unreachable. Say nothing rather
+        // than hand back an inverted interval that the rest of the domain
+        // would misread as a range.
+        if hi < iv.lo {
+            return iv;
+        }
+        Interval { lo: iv.lo, hi }
+    }
+
+    /// The flattened-matrix lemma: is `idx < len` provable because `idx` is
+    /// `i*s + j` and `len` is the length of an array allocated as `m*s`, with
+    /// `i < m` and `j < s`?
+    ///
+    /// Each premise is read from syntax and checked; nothing is assumed. The
+    /// `m == s` case (a square matrix) is the common one but the lemma does
+    /// not need it.
+    /// The premises of the flattened-matrix lemma, if `idx` has that shape.
+    ///
+    /// Returns `(i, j, m, stride)` for `idx = i*stride + j` where the array
+    /// was allocated as `m * stride`, with `i < m`, `j < stride`, all three
+    /// non-negative, and `m * stride` inside `int`.
+    ///
+    /// The last condition is what carries the lemma from mathematical integers
+    /// to Java's. Given it, `i*stride + j <= m*stride - 1` cannot overflow
+    /// either, since it is strictly smaller than a value already shown to fit.
+    fn flattened_premises(&self, idx: VarId, len: VarId) -> Option<(VarId, VarId, VarId, VarId)> {
+        // Six premises, any one of which turns the lemma into a silent
+        // `None`. `AJAVE_TRACE_FLAT=1` names the one that declined -- it is
+        // what found both blockers on `FlattenedMatrixIndexAcrossACall`, where
+        // the symptom was identical in each case. Cached so the hot path is an
+        // atomic load rather than a `getenv` per evaluation.
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var_os("AJAVE_TRACE_FLAT").is_some());
+        macro_rules! decline {
+            ($why:expr) => {{
+                if trace {
+                    log::debug!("flat-lemma idx=v{} len=v{}: {}", idx.0, len.0, $why);
+                }
+                return None;
+            }};
+        }
+        let Some((am, asx)) = self
+            .len_prod
+            .get(&len)
+            .copied()
+            // Fall back to the materialised path: `len` aliases a variable
+            // whose own provenance is a product.
+            .or_else(|| {
+                let src = self.len_alias.get(&len)?;
+                self.mul_of.get(src).copied()
+            })
+        else {
+            // Say whether the *index* has the flattened shape too. This premise
+            // is checked first, so without that every decline in the program
+            // lands in this bucket regardless of whether the task was ever a
+            // candidate -- and the bucket then measures premise order rather
+            // than a population.
+            let idx_is_flattened = self
+                .add_of
+                .get(&idx)
+                .is_some_and(|(p, _)| self.mul_of.contains_key(p));
+            decline!(format!(
+                "len has no product provenance (index is {}a flattened shape)",
+                if idx_is_flattened { "" } else { "not " }
+            ))
+        };
+        let Some((p, j)) = self.add_of.get(&idx).copied() else {
+            decline!("idx is not a sum")
+        };
+        let Some(prod) = self.mul_of.get(&p).copied() else {
+            decline!("the sum's left operand is not a product")
+        };
+        let (i, stride) = match prod {
+            (x, y) if y == asx => (x, y),
+            // `stride * i` is the same product written the other way round.
+            (x, y) if x == asx => (y, x),
+            _ => decline!(format!(
+                "product v{}*v{} shares no factor with the length's stride v{}",
+                prod.0 .0, prod.1 .0, asx.0
+            )),
+        };
+        if !(self.knows_lt(i, am) || (am == stride && self.knows_lt(i, stride))) {
+            decline!(format!("no v{} < v{}", i.0, am.0))
+        }
+        if !self.knows_lt(j, stride) {
+            decline!(format!("no v{} < v{}", j.0, stride.0))
+        }
+        if self.get(i).lo < 0 || self.get(j).lo < 0 || self.get(stride).lo < 0 {
+            decline!(format!(
+                "an operand may be negative: i=v{}{:?} j=v{}{:?} stride=v{}{:?}",
+                i.0,
+                self.get(i),
+                j.0,
+                self.get(j),
+                stride.0,
+                self.get(stride)
+            ))
+        }
+        let fits = self
+            .get(am)
+            .hi
+            .checked_mul(self.get(stride).hi)
+            .is_some_and(|hi| hi <= i32::MAX as i64);
+        if !fits {
+            decline!(format!(
+                "v{}*v{} may overflow int ({:?} * {:?})",
+                am.0,
+                stride.0,
+                self.get(am),
+                self.get(stride)
+            ))
+        }
+        Some((i, j, am, stride))
+    }
+
+    /// `i*stride + j < m*stride`, the upper half of the lemma.
+    fn flattened_index_below(&self, idx: VarId, len: VarId) -> bool {
+        self.flattened_premises(idx, len).is_some()
+    }
+
+    /// `i*stride + j >= 0`, the lower half — and it is **not** redundant.
+    ///
+    /// An `ArrayBounds` obligation is `idx >= 0 & idx < len`, and the abstract
+    /// interval for `idx` overflows precisely in the case the lemma exists to
+    /// handle: with `stride` bounded only by 46340, `i*stride` bounds at
+    /// ~2.147e9 and adding `j` leaves `int`, so `idx` becomes Top and even
+    /// `idx >= 0` is unprovable by intervals. Measured on
+    /// `jvm-arrays/FlattenedMatrixIndexStaysInBounds`: without this half the
+    /// upper half proved and the obligation still did not discharge.
+    ///
+    /// Non-negativity follows from the same premises: all three operands are
+    /// non-negative and the sum is below a value shown to fit in `int`, so no
+    /// wrap occurs and the result cannot be negative.
+    fn flattened_index_nonneg(&self, idx: VarId) -> bool {
+        self.len_prod
+            .keys()
+            .chain(self.len_alias.keys())
+            .any(|len| self.flattened_premises(idx, *len).is_some())
+    }
+
+    fn add_le(&mut self, a: VarId, b: VarId) {
+        if a != b {
+            self.le.entry(a).or_default().insert(b);
+        }
+    }
+
+    /// Record `a < b`.
+    fn add_lt(&mut self, a: VarId, b: VarId) {
+        if a != b {
+            self.lt.entry(a).or_default().insert(b);
+        }
+    }
+
+    /// Drop every fact mentioning `v`, on either side.
+    ///
+    /// Called whenever `v` is assigned. A fact recorded about the previous
+    /// value of a variable says nothing about its new one, and keeping it is
+    /// how a relational domain goes unsound at its very first store.
+    fn kill_lt(&mut self, v: VarId) {
+        self.lt.remove(&v);
+        for s in self.lt.values_mut() {
+            s.remove(&v);
+        }
+        self.le.remove(&v);
+        for s in self.le.values_mut() {
+            s.remove(&v);
+        }
+        self.mul_of.remove(&v);
+        self.add_of.remove(&v);
+        self.len_alias.remove(&v);
+        self.mul_of.retain(|_, (a, b)| *a != v && *b != v);
+        self.add_of.retain(|_, (a, b)| *a != v && *b != v);
+        self.len_alias.retain(|_, src| *src != v);
+        self.array_len_prod.remove(&v);
+        self.len_prod.remove(&v);
+        self.array_len_prod.retain(|_, (a, b)| *a != v && *b != v);
+        self.len_prod.retain(|_, (a, b)| *a != v && *b != v);
+        self.array_len_var.retain(|k, src| *k != v && *src != v);
+    }
+
     pub fn get_array_len(&self, v: VarId) -> Interval {
         self.array_lens
             .get(&v)
@@ -1185,7 +1576,8 @@ impl IState {
     /// Evaluate an operand under this state.
     pub fn eval_operand(&self, op: &Operand) -> Interval {
         match op {
-            Operand::Var(v) => self.get(*v),
+            // Reduced-product reduction, not a plain lookup. See `refined`.
+            Operand::Var(v) => self.refined(*v),
             Operand::Const(Const::Int(n)) => Interval::point(*n as i64),
             Operand::Const(Const::Long(n)) => {
                 // Long arithmetic isn't modelled precisely by this i32-ranged
@@ -1290,6 +1682,51 @@ impl IState {
                     BinOp::Sub => ia.sub(ib),
                     BinOp::Mul => ia.mul(ib),
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        // Pentagons is consulted *before* the interval truth
+                        // table, and only ever to prove a comparison true —
+                        // never false. `x < y` being absent means unknown, not
+                        // negated, so concluding anything from its absence
+                        // would turn a missing fact into a claim.
+                        // The lower half of the flattened-matrix lemma, where
+                        // the right operand is the constant zero rather than a
+                        // variable.
+                        if let (Operand::Var(av), Operand::Const(Const::Int(0))) = (a, b) {
+                            if matches!(op, BinOp::Ge) && self.flattened_index_nonneg(*av) {
+                                return Interval::point(1);
+                            }
+                        }
+                        if let (Operand::Var(av), Operand::Var(bv)) = (a, b) {
+                            // `x <= m` composed with `m < y` gives `x < y`.
+                            // One hop only: a full transitive closure is a
+                            // precision question this domain leaves open, and
+                            // one hop is what the `i <= n-1`, `n-1 < n` shape
+                            // needs.
+                            let strict_via_le = |x: VarId, y: VarId| -> bool {
+                                self.le
+                                    .get(&x)
+                                    .is_some_and(|mids| mids.iter().any(|m| self.knows_lt(*m, y)))
+                            };
+                            let holds = match op {
+                                BinOp::Lt => {
+                                    self.knows_lt(*av, *bv)
+                                        || strict_via_le(*av, *bv)
+                                        || self.flattened_index_below(*av, *bv)
+                                }
+                                BinOp::Gt => {
+                                    self.knows_lt(*bv, *av)
+                                        || strict_via_le(*bv, *av)
+                                        || self.flattened_index_below(*bv, *av)
+                                }
+                                BinOp::Le => self.knows_le(*av, *bv),
+                                BinOp::Ge => self.knows_le(*bv, *av),
+                                // `x < y` implies `x != y`.
+                                BinOp::Ne => self.knows_lt(*av, *bv) || self.knows_lt(*bv, *av),
+                                _ => false,
+                            };
+                            if holds {
+                                return Interval::point(1);
+                            }
+                        }
                         eval_comparison(*op, ia, ib)
                     }
                     // javac compiles `a && b` over comparison results into a
@@ -1412,6 +1849,26 @@ fn eval_bitwise(op: BinOp, a: Interval, b: Interval) -> Interval {
     }
 }
 
+/// Keep only the provenance entries two states agree on. Same rule as every
+/// other relational component: a fact present on one path only is not a fact
+/// at the merge.
+fn agree_prov(
+    a: &BTreeMap<VarId, (VarId, VarId)>,
+    b: &BTreeMap<VarId, (VarId, VarId)>,
+) -> BTreeMap<VarId, (VarId, VarId)> {
+    a.iter()
+        .filter(|(k, v)| b.get(k) == Some(v))
+        .map(|(k, v)| (*k, *v))
+        .collect()
+}
+
+fn agree_alias(a: &BTreeMap<VarId, VarId>, b: &BTreeMap<VarId, VarId>) -> BTreeMap<VarId, VarId> {
+    a.iter()
+        .filter(|(k, v)| b.get(k) == Some(v))
+        .map(|(k, v)| (*k, *v))
+        .collect()
+}
+
 fn eval_comparison(op: BinOp, a: Interval, b: Interval) -> Interval {
     if a.is_bottom() || b.is_bottom() {
         return Interval::bottom();
@@ -1494,6 +1951,47 @@ impl IState {
 
 impl Lattice for IState {
     fn leq(&self, other: &Self) -> bool {
+        // Pentagons, and this clause is load-bearing for **soundness**, not
+        // precision.
+        //
+        // `leq` is what the fixpoint uses to decide a new state is already
+        // covered and can be discarded. In this domain more facts means more
+        // precise, so `self ⊑ other` requires `self.lt ⊇ other.lt`. Omit this
+        // and a state carrying *fewer* facts is judged covered by one carrying
+        // more; the fixpoint drops it, `reached` keeps only the richer state,
+        // and a relation that does not hold on the dropped path is then used
+        // to discharge an obligation. That is a wrong TRUE (-16), by the same
+        // route as gh #101.
+        //
+        // `a_state_with_fewer_relations_is_not_covered_by_one_with_more` is
+        // the test named after this paragraph.
+        for (x, ubs) in &other.lt {
+            match self.lt.get(x) {
+                Some(mine) if ubs.is_subset(mine) => {}
+                _ => return false,
+            }
+        }
+        for (x, ubs) in &other.le {
+            match self.le.get(x) {
+                Some(mine) if ubs.is_subset(mine) => {}
+                _ => return false,
+            }
+        }
+        for (arr, src) in &other.array_len_var {
+            if self.array_len_var.get(arr) != Some(src) {
+                return false;
+            }
+        }
+        for (k, v) in &other.array_len_prod {
+            if self.array_len_prod.get(k) != Some(v) {
+                return false;
+            }
+        }
+        for (k, v) in &other.len_prod {
+            if self.len_prod.get(k) != Some(v) {
+                return false;
+            }
+        }
         // Every variable known in `self` must be narrower-or-equal in
         // `other`; anything absent from `self` but present in `other` means
         // `self` (Top there) is not covered.
@@ -1679,6 +2177,62 @@ impl Lattice for IState {
                 nullness.insert(k, j);
             }
         }
+        // Pentagons joins by **intersection**: `x < y` survives only if both
+        // sides had it. Union would publish a bound holding on one branch
+        // only, which is precisely the defect gh #101 was.
+        let prov = |a: &BTreeMap<VarId, (VarId, VarId)>, b: &BTreeMap<VarId, (VarId, VarId)>| {
+            if ajave_core::fixpoint::Lattice::is_bottom(self) {
+                return b.clone();
+            }
+            if ajave_core::fixpoint::Lattice::is_bottom(other) {
+                return a.clone();
+            }
+            a.iter()
+                .filter(|(k, v)| b.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
+        let mul_of = prov(&self.mul_of, &other.mul_of);
+        let array_len_prod = prov(&self.array_len_prod, &other.array_len_prod);
+        let len_prod = prov(&self.len_prod, &other.len_prod);
+        let add_of = prov(&self.add_of, &other.add_of);
+        let len_alias = if ajave_core::fixpoint::Lattice::is_bottom(self) {
+            other.len_alias.clone()
+        } else if ajave_core::fixpoint::Lattice::is_bottom(other) {
+            self.len_alias.clone()
+        } else {
+            self.len_alias
+                .iter()
+                .filter(|(k, v)| other.len_alias.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
+        let le = IState::agree_lt(
+            &self.le,
+            &other.le,
+            ajave_core::fixpoint::Lattice::is_bottom(self),
+            ajave_core::fixpoint::Lattice::is_bottom(other),
+        );
+        let lt = IState::agree_lt(
+            &self.lt,
+            &other.lt,
+            ajave_core::fixpoint::Lattice::is_bottom(self),
+            ajave_core::fixpoint::Lattice::is_bottom(other),
+        );
+        // Same rule for the length-source map: keep it only where both agree.
+        // Same bottom rule as `agree_lt`: an unreachable side constrains
+        // nothing, so it must not veto the other side's association.
+        let array_len_var = if ajave_core::fixpoint::Lattice::is_bottom(self) {
+            other.array_len_var.clone()
+        } else if ajave_core::fixpoint::Lattice::is_bottom(other) {
+            self.array_len_var.clone()
+        } else {
+            self.array_len_var
+                .iter()
+                .filter(|(k, v)| other.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
         let mut array_lens = BTreeMap::new();
         let akeys: std::collections::BTreeSet<_> = self
             .array_lens
@@ -1719,6 +2273,14 @@ impl Lattice for IState {
             }
         }
         IState {
+            lt,
+            le,
+            mul_of,
+            add_of,
+            len_alias,
+            array_len_prod,
+            len_prod,
+            array_len_var,
             at: self.at.clone(),
             vars,
             float_vars,
@@ -1892,8 +2454,24 @@ impl FieldPrec {
     }
 }
 
+/// A precondition on an array parameter's length, agreed by every call site.
+///
+/// `array_slot`'s length is the product of the values arriving in
+/// `factor_slots`. Carries the flattened-matrix lemma across a call, which is
+/// the only thing it exists for: `BellmanFord` allocates `new int[V*V]` in
+/// `main` and passes it to `runBellmanFord(int N, int D[], int src)`, so inside
+/// the callee `D.length == N*N` is true at the one call site and otherwise
+/// unstated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayLenPre {
+    pub array_slot: u16,
+    pub factor_slots: (u16, u16),
+}
+
 #[derive(Default, Clone)]
 pub struct IntervalCpa {
+    /// Array-length preconditions, keyed by method. See `ArrayLenPre`.
+    pub array_len_pre: std::collections::HashMap<ajave_ir::MethodKey, ArrayLenPre>,
     /// Field-abstraction precision. Empty by default, which disables field
     /// tracking entirely (every cell reads as Top) — always sound.
     pub field_prec: FieldPrec,
@@ -1918,6 +2496,24 @@ impl AbstractDomain for IntervalCpa {
 
     fn initial(&self, prog: &Program, at: &ProgramPoint) -> IState {
         let mut nullness = BTreeMap::new();
+        // The array-length precondition, if every call site established one.
+        let mut array_len_prod = BTreeMap::new();
+        if let (Some(pre), Some(body)) = (self.array_len_pre.get(&at.method), prog.body(&at.method))
+        {
+            let slot_var = |want: u16| -> Option<VarId> {
+                body.vars.iter().enumerate().find_map(|(i, vi)| {
+                    matches!(vi.kind, ajave_ir::VarKind::Local(s) if s == want)
+                        .then_some(VarId(i as u32))
+                })
+            };
+            if let (Some(a), Some(f1), Some(f2)) = (
+                slot_var(pre.array_slot),
+                slot_var(pre.factor_slots.0),
+                slot_var(pre.factor_slots.1),
+            ) {
+                array_len_prod.insert(a, (f1, f2));
+            }
+        }
         // Mark Ref-typed parameters as NonNull at method entry.
         // For instance methods, slot 0 = `this` (always non-null).
         // For static methods, slot 0 = first param (non-null from caller).
@@ -1935,6 +2531,14 @@ impl AbstractDomain for IntervalCpa {
             }
         }
         IState {
+            lt: BTreeMap::new(),
+            le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
+            array_len_prod,
+            len_prod: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at: at.clone(),
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -2106,6 +2710,151 @@ impl AbstractDomain for IntervalCpa {
                             _ => Interval::top(),
                         };
                         next.set_array_len(*v, len);
+                        // Pentagons. `v = src` makes the two equal, so every
+                        // relation either side of `src` transfers to `v`.
+                        // Captured *before* the kill below, because `v = v`
+                        // would otherwise erase the facts and then copy the
+                        // emptied set back.
+                        //
+                        // This matters far more than it looks. javac routes
+                        // almost everything through copies -- `a[j] = a[j] + 1`
+                        // compiles to a chain `v24 = v25 = v15` -- so without
+                        // it a relation is learned on the loop guard and then
+                        // immediately lost to the first copy, which is exactly
+                        // why the nested-loop case stayed UNKNOWN while the
+                        // single-loop one was proven.
+                        type Rel = (Vec<VarId>, Vec<VarId>);
+                        let copied: Option<(Rel, Rel)> = match rv {
+                            Rvalue::Use(Operand::Var(src)) => {
+                                let grab =
+                                    |m: &BTreeMap<VarId, std::collections::BTreeSet<VarId>>| {
+                                        let above: Vec<VarId> = m
+                                            .get(src)
+                                            .map(|s| s.iter().copied().collect())
+                                            .unwrap_or_default();
+                                        let below: Vec<VarId> = m
+                                            .iter()
+                                            .filter(|(_, ubs)| ubs.contains(src))
+                                            .map(|(x, _)| *x)
+                                            .collect();
+                                        (above, below)
+                                    };
+                                Some((grab(&next.lt), grab(&next.le)))
+                            }
+                            _ => None,
+                        };
+                        // The assignment redefines `v`, so every relational
+                        // fact about its previous value is stale and must go
+                        // before anything new is recorded.
+                        next.kill_lt(*v);
+                        if let Some(((lt_above, lt_below), (le_above, le_below))) = copied {
+                            for b in lt_above {
+                                next.add_lt(*v, b);
+                            }
+                            for a in lt_below {
+                                next.add_lt(a, *v);
+                            }
+                            for b in le_above {
+                                next.add_le(*v, b);
+                            }
+                            for a in le_below {
+                                next.add_le(a, *v);
+                            }
+                        }
+                        match rv {
+                            // `new T[n]` with `n` a variable: remember which
+                            // variable the length came from. This is the link
+                            // that lets a loop guard `i < n` discharge a bounds
+                            // check against `a.length` further down.
+                            Rvalue::NewArray {
+                                len: Operand::Var(n),
+                                ..
+                            } => {
+                                next.array_len_var.insert(*v, *n);
+                                // `new T[m * s]`: keep the factors, not just
+                                // the product's variable.
+                                if let Some(f) = next.mul_of.get(n).copied() {
+                                    next.array_len_prod.insert(*v, f);
+                                }
+                            }
+                            // A copy carries the association along, exactly as
+                            // the interval length above does.
+                            Rvalue::Use(Operand::Var(src)) => {
+                                if let Some(n) = next.array_len_var.get(src).copied() {
+                                    next.array_len_var.insert(*v, n);
+                                }
+                                if let Some(f) = next.array_len_prod.get(src).copied() {
+                                    next.array_len_prod.insert(*v, f);
+                                }
+                            }
+                            // `x = y - c` with `c > 0` means `x < y`, and
+                            // `x = y + c` means `y < x`. This is the step that
+                            // makes the non-strict guard useful: javac
+                            // materialises `n - 1` as its own variable, so
+                            // `i <= t` with `t = n - 1` yields `i <= t` and
+                            // `t < n`, and the bounds check needs `i < n`.
+                            //
+                            // Only constant offsets, and only via the interval
+                            // already computed for the operand -- a symbolic
+                            // offset would need difference bounds, which this
+                            // domain does not have.
+                            // Syntactic provenance for the flattened-matrix
+                            // lemma. Recorded for *variable* operands only --
+                            // a constant operand is already handled by the
+                            // offset rule below and by intervals.
+                            Rvalue::Bin(BinOp::Mul, Operand::Var(a), Operand::Var(b)) => {
+                                next.mul_of.insert(*v, (*a, *b));
+                            }
+                            Rvalue::Bin(BinOp::Add, Operand::Var(a), Operand::Var(b)) => {
+                                next.add_of.insert(*v, (*a, *b));
+                            }
+                            Rvalue::Bin(op @ (BinOp::Add | BinOp::Sub), x, y) => {
+                                if let (Operand::Var(xv), Operand::Const(Const::Int(c))) = (x, y) {
+                                    let c = *c;
+                                    let sub = matches!(op, BinOp::Sub);
+                                    let delta = if sub { -c } else { c };
+                                    // `v = xv + delta`. Guard against the
+                                    // wrap: the relation only holds if the
+                                    // arithmetic did not overflow, which the
+                                    // interval for `xv` is what establishes.
+                                    let xi = next.get(*xv);
+                                    let no_wrap = xi.lo.checked_add(delta as i64).is_some()
+                                        && xi.hi.checked_add(delta as i64).is_some()
+                                        && xi.lo + (delta as i64) >= i32::MIN as i64
+                                        && xi.hi + (delta as i64) <= i32::MAX as i64;
+                                    if no_wrap && delta < 0 {
+                                        next.add_lt(*v, *xv);
+                                    } else if no_wrap && delta > 0 {
+                                        next.add_lt(*xv, *v);
+                                    }
+                                }
+                            }
+                            // `len = a.length`: `len` *is* the allocation
+                            // length, so every strict bound held against that
+                            // variable holds against `len`. This is what turns
+                            // `i < n` into `i < len` without any new inference.
+                            Rvalue::ArrayLength(Operand::Var(arr)) => {
+                                if let Some(f) = next.array_len_prod.get(arr).copied() {
+                                    next.len_prod.insert(*v, f);
+                                }
+                                if let Some(n) = next.array_len_var.get(arr).copied() {
+                                    // Remember which allocation expression
+                                    // this materialised length came from, so a
+                                    // bounds check can reach behind it.
+                                    next.len_alias.insert(*v, n);
+                                    let below: Vec<VarId> = next
+                                        .lt
+                                        .iter()
+                                        .filter(|(_, ub)| ub.contains(&n))
+                                        .map(|(x, _)| *x)
+                                        .collect();
+                                    for x in below {
+                                        next.add_lt(x, *v);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                         // B3. A fresh array is zero-filled (JVMS 6.5), so this
                         // is the one point at which the contents are known
                         // completely — which is what makes element tracking
@@ -2201,6 +2950,30 @@ impl AbstractDomain for IntervalCpa {
                             }
                             if let Operand::Var(bv) = b {
                                 next.set(*bv, nb);
+                            }
+                        }
+                        // Pentagons: the branch that proves `x < y` is the only
+                        // place a strict symbolic bound is created. `i < n` on
+                        // a loop guard is the fact the whole domain exists for.
+                        //
+                        // Only `Lt`/`Gt` produce a *strict* bound. `Le` gives
+                        // `x <= y`, which this domain does not represent, so it
+                        // is dropped rather than approximated — recording it as
+                        // `x < y` would be a claim one off the truth and wrong
+                        // exactly at `x == y`.
+                        if let (Operand::Var(av), Operand::Var(bv)) = (a, b) {
+                            match eff_op {
+                                BinOp::Lt => next.add_lt(*av, *bv),
+                                BinOp::Gt => next.add_lt(*bv, *av),
+                                // The non-strict guard shape, measured in 24%
+                                // of the `budget` population. `i <= n` alone
+                                // does **not** discharge a bounds check -- it
+                                // becomes strict only when composed with a
+                                // known `n < len`, which is what `add_le`
+                                // below propagates.
+                                BinOp::Le => next.add_le(*av, *bv),
+                                BinOp::Ge => next.add_le(*bv, *av),
+                                _ => {}
                             }
                         }
                         // Nullness narrowing on null comparisons.
@@ -2538,6 +3311,31 @@ impl WidenAtLoopHeaders {
             }
         }
         IState {
+            // Widening may drop a relational fact, never add one.
+            lt: IState::agree_lt(
+                &old.lt,
+                &new.lt,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            le: IState::agree_lt(
+                &old.le,
+                &new.le,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            // Provenance is syntactic: keep what both sides agree on.
+            mul_of: agree_prov(&old.mul_of, &new.mul_of),
+            add_of: agree_prov(&old.add_of, &new.add_of),
+            len_alias: agree_alias(&old.len_alias, &new.len_alias),
+            array_len_prod: agree_prov(&old.array_len_prod, &new.array_len_prod),
+            len_prod: agree_prov(&old.len_prod, &new.len_prod),
+            array_len_var: old
+                .array_len_var
+                .iter()
+                .filter(|(k, v)| new.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             at: old.at.clone(),
             vars,
             float_vars,
@@ -2636,6 +3434,31 @@ impl WidenAtLoopHeaders {
             }
         }
         IState {
+            // Widening may drop a relational fact, never add one.
+            lt: IState::agree_lt(
+                &old.lt,
+                &new.lt,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            le: IState::agree_lt(
+                &old.le,
+                &new.le,
+                ajave_core::fixpoint::Lattice::is_bottom(old),
+                ajave_core::fixpoint::Lattice::is_bottom(new),
+            ),
+            // Provenance is syntactic: keep what both sides agree on.
+            mul_of: agree_prov(&old.mul_of, &new.mul_of),
+            add_of: agree_prov(&old.add_of, &new.add_of),
+            len_alias: agree_alias(&old.len_alias, &new.len_alias),
+            array_len_prod: agree_prov(&old.array_len_prod, &new.array_len_prod),
+            len_prod: agree_prov(&old.len_prod, &new.len_prod),
+            array_len_var: old
+                .array_len_var
+                .iter()
+                .filter(|(k, v)| new.array_len_var.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             at: old.at.clone(),
             vars,
             float_vars,
@@ -2836,6 +3659,14 @@ mod domain_law_tests {
 
     fn empty(block: u32) -> IState {
         IState {
+            lt: BTreeMap::new(),
+            le: BTreeMap::new(),
+            mul_of: BTreeMap::new(),
+            add_of: BTreeMap::new(),
+            len_alias: BTreeMap::new(),
+            array_len_prod: BTreeMap::new(),
+            len_prod: BTreeMap::new(),
+            array_len_var: BTreeMap::new(),
             at: pp(block),
             vars: BTreeMap::new(),
             float_vars: BTreeMap::new(),
@@ -3093,6 +3924,322 @@ mod domain_law_tests {
                 MergeResult::Sep
             ),
             "block 0 is not a loop header, so nothing is joined there"
+        );
+    }
+
+    // ---- Pentagons ------------------------------------------------------
+    //
+    // One test per rule in the `lt` doc comment, each named after the
+    // paragraph it defends.
+    //
+    // All four were mutation-checked: the rule each one guards was inverted in
+    // turn and the test confirmed to fail. That is not ceremony. The join test
+    // *passed* against a deliberately-unioning mutant on its first version,
+    // because its fixture put the extra fact on one side only and a subject
+    // absent from the other map is dropped by union and intersection alike.
+    // A lattice test that passes either way defends nothing.
+
+    fn with_lt(block: u32, facts: &[(u32, u32)]) -> IState {
+        let mut s = empty(block);
+        for (a, b) in facts {
+            s.lt.entry(VarId(*a)).or_default().insert(VarId(*b));
+        }
+        s
+    }
+
+    /// The reduction step: a relation must tighten the interval it talks about,
+    /// not merely answer comparisons.
+    ///
+    /// This is the law behind `refined`, stated as the increment that provoked
+    /// it. A loop header widens the counter to `[0, i32::MAX]`; `i + 1` on
+    /// that interval genuinely wraps in Java, so the transfer must return Top,
+    /// and the counter's lower bound is destroyed along with its upper one.
+    /// Refining `i` against `i < n` first leaves `i <= n.hi - 1`, and the
+    /// increment is ordinary again.
+    ///
+    /// Note how weak the premise is: `n` is known only to be at least 1, so
+    /// `n.hi` is still `i32::MAX` and the refinement buys exactly one unit of
+    /// slack. One unit is the whole difference between a usable interval and
+    /// Top.
+    ///
+    /// Mutation-checked: fails both when `eval_operand` reads `get` instead of
+    /// `refined`, and when `refined` is made not to shrink.
+    ///
+    /// See `benchmarks/ajave/jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop`
+    /// for the program shape that provokes it.
+    #[test]
+    fn refinement_lets_a_widened_counter_be_incremented_without_overflow() {
+        let i = VarId(1);
+        let n = VarId(2);
+
+        // Without the relation the increment has to give up: MAX + 1 wraps.
+        let mut bare = empty(0);
+        bare.vars.insert(
+            i,
+            Interval {
+                lo: 0,
+                hi: i64::from(i32::MAX),
+            },
+        );
+        bare.vars.insert(
+            n,
+            Interval {
+                lo: 1,
+                hi: i64::from(i32::MAX),
+            },
+        );
+        let inc = Rvalue::Bin(BinOp::Add, Operand::Var(i), Operand::Const(Const::Int(1)));
+        assert_eq!(
+            bare.eval_rvalue(&inc),
+            Interval::top(),
+            "MAX + 1 wraps, so with no relation to lean on Top is the only \
+             sound answer -- and that is what loses the lower bound"
+        );
+
+        // With `i < n` the same increment keeps `i >= 0`.
+        let mut related = bare.clone();
+        related.add_lt(i, n);
+        let got = related.eval_rvalue(&inc);
+        assert!(
+            got.lo >= 0,
+            "refinement must preserve the counter's lower bound, got {got:?}"
+        );
+        assert_eq!(
+            got,
+            Interval {
+                lo: 1,
+                hi: i64::from(i32::MAX)
+            },
+            "`i < n` bounds `i` by `n.hi - 1`, so `i + 1` cannot overflow"
+        );
+    }
+
+    /// Refinement may only ever shrink an interval, and never invert it.
+    ///
+    /// A contradictory state (`i < n` with `i` already above `n`) is
+    /// unreachable, and the honest response is to say nothing rather than hand
+    /// back a `lo > hi` interval that every other operator in the domain would
+    /// misread as a range.
+    #[test]
+    fn refinement_never_returns_an_inverted_interval() {
+        let i = VarId(1);
+        let n = VarId(2);
+        let mut st = empty(0);
+        st.vars.insert(i, Interval { lo: 50, hi: 60 });
+        st.vars.insert(n, Interval { lo: 0, hi: 10 });
+        st.add_lt(i, n);
+        let got = st.refined(i);
+        assert!(
+            got.lo <= got.hi,
+            "a contradiction must not produce an inverted interval, got {got:?}"
+        );
+    }
+
+    /// A fact holding on one branch only is not a fact at the merge.
+    ///
+    /// Union here would be the shape of gh #101: an interval hint published at
+    /// a join that held on one branch, which smt-bmc then discharged on.
+    #[test]
+    fn join_keeps_only_relations_both_branches_agree_on() {
+        // Both facts are about the *same* subject, which is what makes this
+        // discriminating. An earlier version used `3 < 4` present on one side
+        // only -- and a key absent from the other map is dropped whether the
+        // operation intersects or unions, so the test passed against a
+        // deliberately unioning mutant and defended nothing. Mutation-checked
+        // after that: swapping `intersection` for `union` now fails here.
+        let a = with_lt(0, &[(1, 2), (1, 3)]);
+        let b = with_lt(0, &[(1, 2)]);
+        let j = ajave_core::fixpoint::Lattice::join(&a, &b);
+        assert!(j.knows_lt(VarId(1), VarId(2)), "both sides had 1 < 2");
+        assert!(
+            !j.knows_lt(VarId(1), VarId(3)),
+            "only one side had 1 < 3, so it must not survive the join"
+        );
+        // And a subject present on one side only is dropped entirely.
+        let c = with_lt(0, &[(5, 6)]);
+        let j2 = ajave_core::fixpoint::Lattice::join(&c, &b);
+        assert!(!j2.knows_lt(VarId(5), VarId(6)));
+    }
+
+    /// An unreachable side constrains nothing, so it must not veto the other's
+    /// facts. Bottom's relational component is "every fact holds" -- vacuously,
+    /// there being no execution to violate one -- not "no facts hold".
+    ///
+    /// Getting this wrong wiped every fact at a loop header, because a back
+    /// edge starts unreachable.
+    #[test]
+    fn joining_with_an_unreachable_state_keeps_the_reachable_sides_relations() {
+        let a = with_lt(0, &[(1, 2)]);
+        let mut bot = empty(0);
+        bot.vars.insert(VarId(9), Interval::bottom());
+        assert!(ajave_core::fixpoint::Lattice::is_bottom(&bot));
+
+        let j = ajave_core::fixpoint::Lattice::join(&a, &bot);
+        assert!(
+            j.knows_lt(VarId(1), VarId(2)),
+            "bottom must not erase 1 < 2"
+        );
+        let j2 = ajave_core::fixpoint::Lattice::join(&bot, &a);
+        assert!(j2.knows_lt(VarId(1), VarId(2)), "join is symmetric here");
+    }
+
+    /// Widening may drop a relation, never invent one, or the fixpoint stops
+    /// over-approximating.
+    #[test]
+    fn widening_drops_relations_it_cannot_justify_and_invents_none() {
+        let old = with_lt(0, &[(1, 2), (3, 4)]);
+        let new = with_lt(0, &[(1, 2), (5, 6)]);
+        let w = WidenAtLoopHeaders::widen_state(&old, &new);
+        assert!(
+            w.knows_lt(VarId(1), VarId(2)),
+            "held on both, so it is kept"
+        );
+        assert!(!w.knows_lt(VarId(3), VarId(4)), "dropped: new lost it");
+        assert!(
+            !w.knows_lt(VarId(5), VarId(6)),
+            "never invented: widening may only lose facts"
+        );
+    }
+
+    /// The off-by-one this domain must never make.
+    ///
+    /// `x <= y` is false of a strict question exactly at `x == y`, and an
+    /// `ArrayBounds` obligation is a strict question. Answering it from `le`
+    /// alone would be a wrong TRUE at `i == len`.
+    #[test]
+    fn a_non_strict_relation_alone_never_answers_a_strict_question() {
+        let mut s = empty(0);
+        s.le.entry(VarId(1)).or_default().insert(VarId(2));
+        assert!(s.knows_le(VarId(1), VarId(2)));
+        assert!(
+            !s.knows_lt(VarId(1), VarId(2)),
+            "1 <= 2 must not be read as 1 < 2"
+        );
+    }
+
+    /// And the composition that makes it useful: `x <= m` with `m < y` gives
+    /// `x < y`. This is the `i <= n-1`, `n-1 < n` shape, which is the guard in
+    /// 24% of the budget population.
+    #[test]
+    fn a_non_strict_relation_composes_with_a_strict_one() {
+        let mut s = empty(0);
+        s.le.entry(VarId(1)).or_default().insert(VarId(3)); // i <= t
+        s.lt.entry(VarId(3)).or_default().insert(VarId(2)); // t < n
+                                                            // The composition is applied by the comparison evaluator, not stored,
+                                                            // so assert on the pieces and let the benchmark cover the whole path.
+        assert!(s.knows_le(VarId(1), VarId(3)));
+        assert!(s.knows_lt(VarId(3), VarId(2)));
+        assert!(
+            !s.knows_lt(VarId(1), VarId(2)),
+            "composition is derived on demand, never recorded as a fact"
+        );
+    }
+
+    /// Strict implies non-strict, so a strict fact answers a non-strict
+    /// question without needing a duplicate entry.
+    #[test]
+    fn a_strict_relation_answers_a_non_strict_question() {
+        let s = with_lt(0, &[(1, 2)]);
+        assert!(s.knows_le(VarId(1), VarId(2)));
+        assert!(s.knows_le(VarId(7), VarId(7)), "reflexive");
+    }
+
+    /// The flattened-matrix lemma refuses when its overflow premise fails.
+    ///
+    /// `i*s + j < m*s` is a theorem of arithmetic, and it transfers to Java
+    /// only when `m*s` stays inside `int`. With an unconstrained stride it does
+    /// not, and the lemma must decline rather than claim a bound that wraps.
+    #[test]
+    fn the_flattened_lemma_declines_when_the_product_can_overflow() {
+        // len = s * s ; idx = (i * s) + j ; i < s ; j < s
+        let mut st = empty(0);
+        let (i, j, sv, prod, idx, lensrc, lenv) = (
+            VarId(1),
+            VarId(2),
+            VarId(3),
+            VarId(4),
+            VarId(5),
+            VarId(6),
+            VarId(7),
+        );
+        st.mul_of.insert(lensrc, (sv, sv));
+        st.mul_of.insert(prod, (i, sv));
+        st.add_of.insert(idx, (prod, j));
+        st.len_alias.insert(lenv, lensrc);
+        st.lt.entry(i).or_default().insert(sv);
+        st.lt.entry(j).or_default().insert(sv);
+        for v in [i, j] {
+            st.vars.insert(v, Interval { lo: 0, hi: 46339 });
+        }
+
+        // Stride bounded so s*s fits: the lemma applies.
+        st.vars.insert(sv, Interval { lo: 1, hi: 46340 });
+        assert!(
+            st.flattened_index_below(idx, lenv),
+            "46340^2 is inside int, so the lemma holds"
+        );
+        assert!(st.flattened_index_nonneg(idx), "and so does its lower half");
+
+        // Stride unconstrained: s*s leaves int and the lemma must decline.
+        st.vars.insert(
+            sv,
+            Interval {
+                lo: 1,
+                hi: i32::MAX as i64,
+            },
+        );
+        assert!(
+            !st.flattened_index_below(idx, lenv),
+            "an unbounded stride makes s*s overflow, so the bound does not transfer"
+        );
+        assert!(!st.flattened_index_nonneg(idx));
+    }
+
+    /// And it refuses when a premise relation is missing, rather than assuming
+    /// the loop guards were there.
+    #[test]
+    fn the_flattened_lemma_declines_without_both_guard_relations() {
+        let mut st = empty(0);
+        let (i, j, sv, prod, idx, lensrc, lenv) = (
+            VarId(1),
+            VarId(2),
+            VarId(3),
+            VarId(4),
+            VarId(5),
+            VarId(6),
+            VarId(7),
+        );
+        st.mul_of.insert(lensrc, (sv, sv));
+        st.mul_of.insert(prod, (i, sv));
+        st.add_of.insert(idx, (prod, j));
+        st.len_alias.insert(lenv, lensrc);
+        st.vars.insert(sv, Interval { lo: 1, hi: 46340 });
+        for v in [i, j] {
+            st.vars.insert(v, Interval { lo: 0, hi: 46339 });
+        }
+        // only `i < s`, nothing about j
+        st.lt.entry(i).or_default().insert(sv);
+        assert!(
+            !st.flattened_index_below(idx, lenv),
+            "without `j < s` the index can reach i*s + s, which is out of bounds"
+        );
+    }
+
+    /// `leq` decides whether the fixpoint may discard a state as covered.
+    /// More facts is more precise, so a state with fewer is **not** covered by
+    /// one with more -- discarding it would keep a relation that does not hold
+    /// on the discarded path.
+    #[test]
+    fn a_state_with_fewer_relations_is_not_covered_by_one_with_more() {
+        let fewer = with_lt(0, &[(1, 2)]);
+        let more = with_lt(0, &[(1, 2), (3, 4)]);
+        assert!(
+            !ajave_core::fixpoint::Lattice::leq(&fewer, &more),
+            "a state missing 3 < 4 is not below one that claims it"
+        );
+        assert!(
+            ajave_core::fixpoint::Lattice::leq(&more, &fewer),
+            "the richer state is below the poorer one"
         );
     }
 

@@ -194,6 +194,16 @@ default there because that is the claim that rots.
 | `AJAVE_CHC_QGEN` | **on** (`=0` ablates) | D1: `fp.spacer.q3.use_qgen` + `fp.spacer.ground_pobs=false` | smoke **173 vs 171** when introduced. Also **bit-identical** on the 107 — it finds a quantified array fact established and consumed in one method, not one that crosses a call |
 | `AJAVE_WIDEN_HINTS` | **on** (`=0` ablates) | whether the interval-ai hint exploration widens at loop headers so it converges | `=0` publishes nothing on any program with an unbounded loop; see `docs/interval-ai-hint-path.md` |
 
+# Large-block encoding options (2026-11-21), from `docs/large-block-encoding.md`
+
+| flag | default | what it does | measured |
+|---|---|---|---|
+| `AJAVE_LBE` | **on** (`=0` ablates) | whether a branch's join is its immediate post-dominator (`cfg.rs`) rather than the old smallest-common-reachable-block heuristic | corpus **2159 vs 2095** (VA 948 vs 911, NRE 1211 vs 1184), 0 wrong; the Alarm family **36 vs 0** and 4x faster. Kept rather than deleted because it is the control for any later regression hunt |
+| `AJAVE_BMC_DEPTH` | 200 | floor under `path_length_bound` — the BMC's path-length bound in blocks | at 200 alone the Alarm family stays 0 **even with `AJAVE_LBE=1`**: the bound caps the size of method traversable at all, so both changes are needed together. gh #126 |
+| `AJAVE_BMC_DEPTH_SLACK` | 4 | blocks of path-length budget per block of the entry body | **fitted, unswept**. The sweep was started and abandoned rather than block the merge. Low-risk structurally rather than by measurement: below `floor/slack` blocks the floor dominates and behaviour is bit-identical |
+| `AJAVE_HOUDINI` | **off** (`=1` enables) | candidate-elimination invariant synthesis (`houdini_engine`) | smoke **197 vs 197**, 0 wrong, 161s vs 173s — no gain and ~7% cost on a set of mostly already-decided tasks, which is the wrong population to judge it on. Off until measured against the 80 `handle_goto` tasks it targets |
+| `AJAVE_LBE_MAX_REGION` | 0 (unbounded) | caps the blocks in one merged region, i.e. adjustable-block encoding's region operator | **unswept**. Provisional: the corpus run shows no sign of the formula-size cost (score rose, timeouts did not concentrate in the large-method category), so it is in place and measured at 0 |
+
 ### The 2026-10-29 ablation, and why all three rows now read "bit-identical"
 
 All three heap mechanisms were measured on the **only population that could

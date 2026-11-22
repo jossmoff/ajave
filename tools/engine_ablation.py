@@ -41,9 +41,25 @@ BENCH = os.path.join(ROOT, "benchmarks")
 # `[profile.release-checked]` in Cargo.toml.
 AJAVE = os.environ.get("AJAVE_BIN") or os.path.join(ROOT, "target", "release", "ajave")
 
+# The ids a *running* portfolio reports, not the module names. An id that
+# matches no engine disables nothing, and until 2026-11-22 the binary said so
+# only at `info!` -- so a name that had drifted read as "removing this engine
+# changes nothing", which is the conclusion this harness exists to draw.
+#
+# `smt-bmc-fpa` is the one that mattered. The BMC is constructed twice: a cheap
+# integer pass (`smt-bmc`) and a second floating-point pass whose `Engine::id`
+# returns `smt-bmc-fpa` so attribution shows which decided what. Ablating
+# `smt-bmc` therefore left the FPA pass running, and on the MergeSortIterative
+# tasks that pass discharges 12 of the 27 obligations in `merge` -- so "removing
+# the BMC loses nothing" was measured against a BMC that was still half there.
+#
+# `imc` is kept deliberately even though it is absent without
+# AJAVE_SMTINTERPOL_JAR: the warning now names it, and an inert ablation is
+# honest as long as it is visible.
 ENGINES = [
     "presolve", "concurrency", "concrete", "nra", "float-search",
-    "interval-ai", "smt-bmc", "k-induction", "chc", "imc", "cegar",
+    "interval-ai", "smt-bmc", "smt-bmc-fpa", "k-induction", "chc", "imc",
+    "cegar", "concolic", "ranges",
 ]
 DECIDED = {"TRUE", "FALSE"}
 
@@ -63,11 +79,20 @@ def resolve(yml):
     return [os.path.join(base, i) for i in data["input_files"]], props
 
 
+# Engine ids an ablation named while the portfolio did not contain them, so the
+# run removed nothing. The binary warns on stderr; `verdict` is the only place
+# that sees stderr, and discarding it is how a row of inert ablations passed for
+# a row of real ones.
+INERT = set()
+
+
 def verdict(inputs, prop, timeout, disable=None):
     env = dict(os.environ)
     if disable:
         env["AJAVE_DISABLE"] = disable
     r = run_guarded([AJAVE, "--property", prop] + inputs, timeout=timeout, env=env)
+    if disable and "disabled nothing" in (r.stderr or ""):
+        INERT.add(disable)
     if r.timed_out:
         return "TIMEOUT"
     lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
@@ -117,6 +142,13 @@ def main():
                       f"{eng}: {base} -> {got}")
 
     print(f"\n{checked} ablated run(s); {weakened} answer(s) merely lost")
+    # An ablation of an engine that was never in the portfolio proves nothing,
+    # and silence about it is indistinguishable from a real negative result.
+    if INERT:
+        print(f"\n{len(INERT)} engine(s) were never in the portfolio, so those "
+              f"ablations removed nothing and their rows are not evidence:")
+        print(f"  {', '.join(sorted(INERT))}")
+        print("  (imc needs AJAVE_SMTINTERPOL_JAR; cegar needs cegar.available())")
     if flips:
         print(f"\n{len(flips)} verdict(s) FLIPPED between TRUE and FALSE.")
         print("Removing an engine can only remove evidence, so a flip means two")

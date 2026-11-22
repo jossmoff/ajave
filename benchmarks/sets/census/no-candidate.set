@@ -1,0 +1,66 @@
+# The 60 declined task-property pairs the 2026-10-30 census
+# attributes to 'no-candidate'. main at fdd9b6e, corpus 2058.
+#
+# A before/after population for work aimed at this bucket. See
+# docs/plans/the-outer-gate.md for the protocol: measure one phase
+# at a time against the bucket it targets, never two at once.
+sv-comp/argv-tasks/ActiveCheck.yml valid-assert
+sv-comp/argv-tasks/AlbersProjection_true.yml valid-assert
+sv-comp/securibench/Aliasing4.yml no-runtime-exception
+sv-comp/securibench/Aliasing6.yml no-runtime-exception
+sv-comp/securibench/Basic19.yml no-runtime-exception
+sv-comp/securibench/Basic20.yml no-runtime-exception
+sv-comp/securibench/Basic21.yml no-runtime-exception
+sv-comp/securibench/Basic39.yml no-runtime-exception
+sv-comp/securibench/Basic8.yml no-runtime-exception
+sv-comp/algorithms/BinaryTreeSearch-FunSat01.yml valid-assert
+sv-comp/algorithms/BinaryTreeSearch-MemSat01.yml valid-assert
+sv-comp/algorithms/BinaryTreeSearch-MemUnsat02.yml valid-assert
+sv-comp/jbmc-regression/BufferedReaderReadLine.yml no-runtime-exception
+sv-comp/securibench/Pred1.yml valid-assert
+sv-comp/algorithms/RedBlackTree-MemSat01.yml no-runtime-exception
+sv-comp/algorithms/RedBlackTree-MemSat01.yml valid-assert
+sv-comp/algorithms/RedBlackTree-MemUnsat01.yml valid-assert
+sv-comp/securibench/Refl4.yml valid-assert
+sv-comp/securibench/Sanitizers2.yml no-runtime-exception
+sv-comp/securibench/Sanitizers6.yml no-runtime-exception
+sv-comp/securibench/Sanitizers6.yml valid-assert
+sv-comp/jayhorn-recursive/SatAckermann01.yml valid-assert
+sv-comp/jayhorn-recursive/SatAckermann02.yml valid-assert
+sv-comp/jayhorn-recursive/SatAckermann03.yml valid-assert
+sv-comp/jayhorn-recursive/SatFibonacci01.yml valid-assert
+sv-comp/jayhorn-recursive/SatFibonacci03.yml valid-assert
+sv-comp/jayhorn-recursive/SatHanoi01.yml valid-assert
+sv-comp/jayhorn-recursive/SatPrimes01.yml valid-assert
+sv-comp/algorithms/SortedListInsert-FunSat01.yml valid-assert
+sv-comp/algorithms/SortedListInsert-FunSat02.yml valid-assert
+sv-comp/algorithms/SortedListInsert-MemSat01.yml valid-assert
+sv-comp/algorithms/SortedListInsert-MemUnsat01.yml valid-assert
+sv-comp/jbmc-regression/StringBuilderCapLen01.yml no-runtime-exception
+sv-comp/jbmc-regression/StringValueOf10.yml no-runtime-exception
+sv-comp/algorithms/Trie-MemUnsat01.yml valid-assert
+sv-comp/jbmc-regression/Validate01.yml no-runtime-exception
+sv-comp/jbmc-regression/Validate02.yml no-runtime-exception
+sv-comp/jbmc-regression/calc.yml no-runtime-exception
+sv-comp/float-nonlinear-calculation/coral46.yml valid-assert
+sv-comp/float-nonlinear-calculation/coral5.yml valid-assert
+sv-comp/objects/objects01.yml valid-assert
+sv-comp/objects/objects02.yml valid-assert
+sv-comp/java-ranger-regression/printtokens_eqchk/printtokens_prop1.yml no-runtime-exception
+sv-comp/java-ranger-regression/printtokens_eqchk/printtokens_prop1.yml valid-assert
+sv-comp/java-ranger-regression/printtokens_eqchk/printtokens_prop2.yml no-runtime-exception
+sv-comp/java-ranger-regression/printtokens_eqchk/printtokens_prop2.yml valid-assert
+sv-comp/java-ranger-regression/replace5_eqchk/replace5_prop1.yml no-runtime-exception
+sv-comp/java-ranger-regression/replace5_eqchk/replace5_prop1.yml valid-assert
+sv-comp/java-ranger-regression/replace5_eqchk/replace5_prop2.yml no-runtime-exception
+sv-comp/java-ranger-regression/replace5_eqchk/replace5_prop2.yml valid-assert
+sv-comp/java-ranger-regression/schedule_eqchk.yml no-runtime-exception
+sv-comp/java-ranger-regression/schedule_eqchk.yml valid-assert
+sv-comp/MinePump/spec1-5_product57.yml valid-assert
+sv-comp/MinePump/spec1-5_product58.yml valid-assert
+sv-comp/MinePump/spec1-5_product59.yml valid-assert
+sv-comp/MinePump/spec1-5_product60.yml valid-assert
+sv-comp/MinePump/spec1-5_product61.yml valid-assert
+sv-comp/MinePump/spec1-5_product62.yml valid-assert
+sv-comp/MinePump/spec1-5_product63.yml valid-assert
+sv-comp/MinePump/spec1-5_product64.yml valid-assert

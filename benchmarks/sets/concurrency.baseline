@@ -15,23 +15,103 @@
 # handing the slow ones extra time would make our score stop
 # predicting competition performance.
 # Format: <task>\t<property>\t<outcome>\t<verdict>\t<seconds>
-ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	correct	TRUE	0.6
-ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	0.7
-ajave/concurrency/DeadlockNeedsBlockedDependency.yml	no-deadlock	correct	FALSE	0.6
-ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	correct	TRUE	0.6
-ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	0.4
-ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.3
-ajave/concurrency/MissedSignalDeadlock.yml	no-deadlock	correct	FALSE	0.3
-ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	0.4
-ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	correct	TRUE	0.4
-ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	correct	TRUE	0.4
-ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	correct	FALSE	0.4
-ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN	0.4
-ajave/concurrency/StaticMonitorLockOrder.yml	no-deadlock	correct	FALSE	0.3
-ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	0.4
-ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	0.4
-ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.4
-ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.4
-ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.4
-ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.4
-ajave/concurrency/WaitNotifyHandshake.yml	no-deadlock	correct	TRUE	0.3
+#
+# The two fields below anchor every claim --check makes against
+# this file. Without them "regressed from correct" does not say
+# regressed *since when*, so a reader cannot tell their own change
+# from one made months ago -- and on 2026-10-27 three tasks flagged
+# here were found to fail identically on the branch and on main.
+# commit: f09f7ab
+# recorded: 2026-11-21T18:23:40
+ajave/concurrency/AliasedStaticLocks.yml	no-deadlock	correct	TRUE	0.8
+ajave/concurrency/AtomicCounterIsRaceFree.yml	no-data-race	correct	TRUE	0.8
+ajave/concurrency/AtomicCounterIsRaceFree.yml	valid-assert	correct	TRUE	1.1
+ajave/concurrency/AtomicReferenceCas.yml	valid-assert	correct	TRUE	1.1
+ajave/concurrency/BankTransferDeadlock.yml	no-deadlock	correct	FALSE	0.8
+ajave/concurrency/BankTransferOrdered.yml	no-deadlock	correct	TRUE	1.1
+ajave/concurrency/BlockingQueueHandoff.yml	no-deadlock	correct	TRUE	0.4
+ajave/concurrency/BlockingQueueTakeNeverFilled.yml	no-deadlock	correct	FALSE	0.4
+ajave/concurrency/BoundedBufferProducerConsumer.yml	no-data-race	correct	TRUE	0.7
+ajave/concurrency/BoundedBufferProducerConsumer.yml	no-deadlock	correct	TRUE	0.4
+ajave/concurrency/CompletableFutureNeverCompleted.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/CompletableFutureOrders.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ConcurrentMapPutIfAbsentIsAtomic.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ConditionGuardedHandshake.yml	no-deadlock	correct	TRUE	0.5
+ajave/concurrency/ConditionMissedSignal.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/ConnectionPoolSemaphore.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/ConnectionPoolSemaphore.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ConsistentLockOrder.yml	no-deadlock	correct	TRUE	0.5
+ajave/concurrency/ConsistentLockOrder.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/CyclicBarrierMissingParty.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/CyclicBarrierRendezvous.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/DeadlockNeedsBlockedDependency.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/DiningPhilosophers.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/DiningPhilosophersOrdered.yml	no-deadlock	correct	TRUE	1.6
+ajave/concurrency/ExecutorFutureOrders.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ExecutorSingleThreadSerialises.yml	valid-assert	unproven	UNKNOWN	1.8
+ajave/concurrency/ExecutorTasksRace.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/GuardedNullDeref.yml	no-runtime-exception	correct	TRUE	0.8
+ajave/concurrency/InterruptWakesParkedThread.yml	no-deadlock	correct	TRUE	0.5
+ajave/concurrency/JoinOrdersWrite.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/JoinThenNotAlive.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/LambdaCapturesLocal.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/LambdaRunnableRuns.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/LatchHappensBefore.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/LatchNeverCountedDown.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/LockOrderInversion.yml	no-deadlock	correct	FALSE	0.4
+ajave/concurrency/MethodReferenceRunnable.yml	valid-assert	correct	TRUE	0.9
+ajave/concurrency/MissedSignalDeadlock.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/MutualExclusionHolds.yml	valid-assert	correct	TRUE	0.9
+ajave/concurrency/NoJoinNoOrdering.yml	no-runtime-exception	unproven	UNKNOWN	0.9
+ajave/concurrency/NonVolatileNoGuarantee.yml	no-runtime-exception	unproven	UNKNOWN	0.9
+ajave/concurrency/NondetBothBranchesSafe.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/NondetBothBranchesSafe.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/NondetLockOrderAlwaysSafe.yml	no-deadlock	correct	TRUE	0.5
+ajave/concurrency/NondetPicksLockOrder.yml	no-deadlock	correct	FALSE	0.4
+ajave/concurrency/NondetPicksRacingBranch.yml	no-data-race	correct	FALSE	0.5
+ajave/concurrency/NondetPicksRacingBranch.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/NotifyAllWakesEveryWaiter.yml	no-deadlock	correct	TRUE	3.1
+ajave/concurrency/NotifyMayWakeWrongWaiter.yml	no-deadlock	correct	FALSE	0.7
+ajave/concurrency/RacyNullDeref.yml	no-runtime-exception	correct	FALSE	0.9
+ajave/concurrency/ReadWriteLockConcurrentReaders.yml	no-data-race	correct	FALSE	0.5
+ajave/concurrency/ReadWriteLockConcurrentReaders.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/ReadWriteLockNoTornRead.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/ReadWriteLockNoTornRead.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ReadWriteLockUpgradeDeadlock.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/ReentrantLockMutualExclusion.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ReentrantLockOrderInversion.yml	no-deadlock	correct	FALSE	0.4
+ajave/concurrency/ScheduleAndInputBoth.yml	valid-assert	unproven	UNKNOWN	1.1
+ajave/concurrency/SemaphoreMutualExclusion.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/SemaphoreMutualExclusion.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/SemaphorePermitDeadlock.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/SleepIsNotSynchronization.yml	no-data-race	correct	FALSE	0.4
+ajave/concurrency/SleepIsNotSynchronization.yml	valid-assert	correct	FALSE	0.8
+ajave/concurrency/SpuriousWakeupBreaksIfGuard.yml	valid-assert	correct	FALSE	0.8
+ajave/concurrency/StaticMonitorLockOrder.yml	no-deadlock	correct	FALSE	0.5
+ajave/concurrency/SynchronizedCounter.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/SynchronizedCounter.yml	no-runtime-exception	correct	TRUE	0.8
+ajave/concurrency/SynchronizedCounter.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ThreadBodySafe.yml	no-runtime-exception	correct	TRUE	0.8
+ajave/concurrency/ThreadBodyThrows.yml	no-runtime-exception	correct	FALSE	0.9
+ajave/concurrency/ThreadFromFactoryMethod.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ThreadLocalIsPerThread.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ThreadSubclassRuns.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/ThreadsStartedInLoop.yml	valid-assert	correct	TRUE	0.9
+ajave/concurrency/TimedAwaitCanExpire.yml	valid-assert	correct	FALSE	0.8
+ajave/concurrency/TimedAwaitCanSucceed.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/TryLockSucceedsWhenFree.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/TwoWorkersSameClass.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/TwoWorkersSameClass.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/UnsafePublicationSeesStaleData.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/UnsynchronizedCounter.yml	no-data-race	correct	FALSE	0.5
+ajave/concurrency/UnsynchronizedCounter.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/VolatileVisibility.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/VolatileVisibility.yml	no-runtime-exception	correct	TRUE	0.8
+ajave/concurrency/WaitNotifyHandshake.yml	no-deadlock	correct	TRUE	0.4
+ajave/concurrency/WeakCasNeedsRetryLoop.yml	valid-assert	correct	FALSE	0.9
+ajave/concurrency/WeakCasWithRetryLoop.yml	valid-assert	correct	TRUE	0.9
+ajave/concurrency/WhileGuardSurvivesSpuriousWakeup.yml	valid-assert	correct	TRUE	0.9
+ajave/concurrency/WorkQueueLatchAggregation.yml	no-data-race	correct	TRUE	0.5
+ajave/concurrency/WorkQueueLatchAggregation.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/WorkerCatchesOwnException.yml	valid-assert	correct	TRUE	0.8
+ajave/concurrency/WorkersBoundInConstructionOrder.yml	valid-assert	correct	TRUE	0.6

@@ -68,6 +68,59 @@ nothing had to.
 A kind deliberately parked (`Query`/`Lemma` were, behind a flag) declares that
 rather than being silently absent: `purpose: Parked { why }`.
 
+`InvariantMap` (2026-11-21) was added with both named up front, because the
+rule above is what it would otherwise have violated: produced by `houdini`,
+consumed by `Blackboard::interval_hints_for_method`, which reads a certified
+map's entries as bounds through the same walk as a point claim. It also
+exposed the mechanism that let the rule be broken silently —
+`Blackboard::publish` ended in `_ => {}`, so a new kind was logged and stored
+nowhere, which is indistinguishable from having no producer. That arm is now
+the explicit remaining variants, so the next kind is a compile error here.
+
+`Precision` and `Residual` remain producer-less and are now *named* as such in
+that match, with the reason, rather than disappearing into a catch-all.
+
+**`InvariantMap` currently has the opposite problem: a producer and no
+consumer**, as of 2026-11-21. Its consumer was `interval_hints_for_method`, and
+reading a synthesised map there produced a wrong TRUE (gh #130): the map is
+proved inductive in LIA, which does not wrap where Java's `int` does, and the
+BMC reasons in bitvectors and uses a hint to prune. The claim and the consumer
+could not express the disagreement, which is why it took a wrong answer to find
+— and is the argument for `Approximations` being checked at the point of use
+rather than declared and ignored.
+
+It is recorded here rather than quietly parked because the second check above
+is exactly what it now fails, and because the fix is known: overflow-guarded
+preservation, #77's problem in a new place.
+
+**Update, 2026-11-22.** The fix is in (`docs/proposals/lia-faithfulness.md`),
+and `InvariantMap` still has no consumer — for a different and better reason.
+
+`LiaEncoding::preservation_query` now carries each edge's overflow condition as
+a second disjunct of the transition with an unconstrained post-state, so a map
+reaching the blackboard is inductive over Java's wrapping arithmetic and not
+only over its unbounded-integer shadow. The soundness objection above is
+answered, and the honest tag for such a map would be `EXACT` rather than
+`INT_WRAPPING`.
+
+What is not answered is *how often a non-trivial map survives the guard*. The
+guard is strictly stricter and it bites hardest on the shape Houdini is weakest
+at: a bound whose overflow-freedom depends on a relation between variables
+cannot be expressed as a conjunction of unary candidates. Re-attaching
+`interval_hints_for_method` as the consumer, or enabling a discharge, is a
+change to what may be answered TRUE — which `CLAUDE.md` requires be measured on
+valid-assert **and** no-runtime-exception, because the `all_calls_resolved`
+loosening scored a clean-looking +22 on NRE while putting eight wrong TRUEs on
+VA. So the map keeps its `INT_WRAPPING` tag and its missing consumer until
+there is a number, and the next step is a measurement rather than a repair.
+
+This is also a worked instance of check 3 below. The 2026-11-21 defect was
+precisely *"verdicts strengthen or flip"* — the consumer concluded more than the
+contract permitted, because `Approximations` was declared and never checked at
+the point of use. A guard inside the producer fixes this map; it does not fix
+the general case, and `open_for(models_faithfully)` is still the only place that
+compares a producer's declaration against a consumer's needs.
+
 ### 3. Artifact monotonicity — dynamic, and the important one
 
 This generalises `contract_monotonicity.py` from library contracts to internal

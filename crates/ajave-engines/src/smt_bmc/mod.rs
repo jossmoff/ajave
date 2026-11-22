@@ -7,6 +7,7 @@
 //!
 //! Direction: Under. JvmReplay confirms all witnesses.
 
+mod cfg;
 mod char_encode;
 mod encode;
 mod explore;
@@ -76,6 +77,46 @@ const MAX_BLOCK_VISITS: u64 = 50_000;
 /// Maximum number of path forks. Path forking (as opposed to diamond merging)
 /// doubles the work at each fork. This limit prevents exponential blowup.
 const MAX_FORKS: u32 = 500;
+
+/// Blocks of slack per block of the entry body in the path-length bound. See
+/// `path_length_bound`. `AJAVE_BMC_DEPTH_SLACK` overrides it, because it is a
+/// fitted constant and `CLAUDE.md` requires those to be swept rather than
+/// chosen.
+const DEFAULT_DEPTH_SLACK: u32 = 4;
+
+fn depth_slack() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("AJAVE_BMC_DEPTH_SLACK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_DEPTH_SLACK)
+    })
+}
+
+/// The path-length bound for one exploration: a floor, or the entry body's own
+/// size, whichever is larger.
+///
+/// `max_depth` bounds **path length in blocks**, which is not the quantity
+/// that makes exploration terminate. Iterations are bounded by
+/// `MAX_LOOP_UNROLL`, inlining by `MAX_CALL_DEPTH`, and total work by
+/// `MAX_BLOCK_VISITS`, `MAX_SOLVER_CALLS` and the deadline. So a flat 200 did
+/// not buy termination — it capped **the size of method this engine could
+/// traverse at all**, at 200 blocks of straight-line code.
+///
+/// `alarmFunctional` is 893 blocks in one method. The search was therefore cut
+/// after a fifth of it with every other budget untouched (59 forks against a
+/// cap of 500, 608 block visits against 50,000), and no resumption could help
+/// because iterative deepening deliberately never raises depth — gh #126.
+///
+/// Scaling with the entry body keeps every small task **bit-identical**: the
+/// floor dominates for bodies under `floor / slack` blocks, which is nearly
+/// all of the corpus. The slack covers blocks that are on the path but not in
+/// the entry body — inlined callees, and the extra copies a loop unrolling
+/// contributes.
+fn path_length_bound(floor: u32, body: &Body) -> u32 {
+    floor.max((body.blocks.len() as u32).saturating_mul(depth_slack()))
+}
 
 /// Multiplier on the *resource* caps above — solver calls, block visits,
 /// forks. Not on `MAX_CALL_DEPTH` or `MAX_LOOP_UNROLL`, which are semantic
@@ -406,6 +447,53 @@ fn obligations_at_risk(
     // into them may not have happened.
     let mut tainted_methods: BTreeSet<MethodKey> = BTreeSet::new();
 
+    // Every loaded method, indexed by the signature a virtual call names
+    // (gh #114).
+    //
+    // A `Rvalue::Call` carries the **static** target. For `is_virtual` the
+    // runtime target may be any override, so following only the static one
+    // leaves obligations in the override out of `at_risk` — and an obligation
+    // *missing* from `at_risk` is not refused, so it can be discharged as
+    // exhaustively proven on an exploration that never covered it. That is a
+    // wrong TRUE of the same shape as #101 and #106.
+    //
+    // Built once rather than per call site: the first version of this function
+    // was O(bodies) per cut-reachable call, and `at_risk` is computed on every
+    // truncating run, which is most of the corpus.
+    //
+    // `BTreeMap` so the traversal order is reproducible in logs. The result is
+    // a set that is only membership-tested, so order cannot change the answer —
+    // but a collection whose iteration order varies has no business near a
+    // discharge decision (CLAUDE.md).
+    let mut by_sig: std::collections::BTreeMap<(&str, &str), Vec<&MethodKey>> =
+        std::collections::BTreeMap::new();
+    for mk in prog.bodies.keys() {
+        by_sig
+            .entry((mk.name.as_str(), mk.desc.as_str()))
+            .or_default()
+            .push(mk);
+    }
+    // Every loaded method that could be the runtime target of this call.
+    //
+    // `is_subtype` answers `true` for a class it does not know, because "not
+    // knowing must not let us rule an exceptional edge out". That is the safe
+    // direction here too: an unknown class is treated as a possible override,
+    // which only enlarges `at_risk`.
+    let runtime_targets = |target: &MethodKey, is_virtual: bool| -> Vec<MethodKey> {
+        if !is_virtual {
+            return vec![target.clone()];
+        }
+        let mut out = vec![target.clone()];
+        if let Some(cands) = by_sig.get(&(target.name.as_str(), target.desc.as_str())) {
+            for mk in cands {
+                if mk.class != target.class && prog.is_subtype(&mk.class, &target.class) {
+                    out.push((*mk).clone());
+                }
+            }
+        }
+        out
+    };
+
     for (mk, start) in cut_points {
         let Some(body) = prog.body(mk) else {
             continue;
@@ -436,8 +524,15 @@ fn obligations_at_risk(
                     Stmt::Check(oid) => {
                         at_risk.insert((mk.clone(), *oid));
                     }
-                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
-                        tainted_methods.insert(target.clone());
+                    Stmt::Assign(
+                        _,
+                        Rvalue::Call {
+                            target, is_virtual, ..
+                        },
+                    ) => {
+                        for mk in runtime_targets(target, *is_virtual) {
+                            tainted_methods.insert(mk);
+                        }
                     }
                     _ => {}
                 }
@@ -459,8 +554,13 @@ fn obligations_at_risk(
                     Stmt::Check(oid) => {
                         at_risk.insert((mk.clone(), *oid));
                     }
-                    Stmt::Assign(_, Rvalue::Call { target, .. }) => {
-                        work.push(target.clone());
+                    Stmt::Assign(
+                        _,
+                        Rvalue::Call {
+                            target, is_virtual, ..
+                        },
+                    ) => {
+                        work.extend(runtime_targets(target, *is_virtual));
                     }
                     _ => {}
                 }
@@ -747,7 +847,7 @@ impl Engine for SmtBmc {
             var_widths: HashMap::new(),
             violations: Vec::new(),
             depth: 0,
-            max_depth: self.max_depth,
+            max_depth: path_length_bound(self.max_depth, body),
             solver_calls: 0,
             exhausted: false,
             deadline: budget.deadline,
@@ -756,6 +856,7 @@ impl Engine for SmtBmc {
             completeness: Completeness::new(),
             skipped_obligations: HashSet::new(),
             incomplete_methods: HashSet::new(),
+            cfg_cache: HashMap::new(),
             cut_points: BTreeSet::new(),
             frames: Vec::new(),
             approximated: Approximations::EXACT,
@@ -1364,6 +1465,14 @@ struct ExploreCtx<'a> {
     skipped_obligations: HashSet<(MethodKey, ObligationId)>,
     /// Methods in which exploration was truncated. See `mark_incomplete`.
     incomplete_methods: HashSet<MethodKey>,
+    /// Post-dominator structure per body, built on first use.
+    ///
+    /// Keyed by `MethodKey` and not by anything derived from a `BlockId`:
+    /// block ids index *one* `Body`, and this outlives the body that filled
+    /// it because inlining swaps `self.body`. That is the seam `CLAUDE.md`
+    /// names as "a context-relative identifier used as a global key", and it
+    /// has already cost 32 points once.
+    cfg_cache: HashMap<MethodKey, std::rc::Rc<cfg::CfgInfo>>,
     /// Program points where exploration was cut short, as (method, block).
     ///
     /// A truncation cannot affect an obligation it cannot reach, so recording
@@ -2260,6 +2369,114 @@ mod bounded_publish_tests {
         assert!(
             at_risk.contains(&(mk.clone(), ObligationId(0))),
             "exploration stopped at bb0, which reaches the obligation in bb1"
+        );
+    }
+
+    /// Named after the soundness argument on `obligations_at_risk` (gh #114).
+    ///
+    /// `at_risk` gates discharge in the safe direction only if it is a
+    /// **superset** of the obligations a truncation could have hidden: an
+    /// obligation missing from it is not refused, so it can be discharged as
+    /// exhaustively proven on an exploration that never covered it.
+    ///
+    /// A `Rvalue::Call` carries the *static* target. For a virtual call the
+    /// runtime target may be any override, so following only the static one
+    /// omits obligations in the override and breaks that superset property.
+    /// This is the -16 shape of #101 and #106, reached by a different route.
+    #[test]
+    fn a_cut_reaching_a_virtual_call_puts_every_override_at_risk() {
+        use ajave_ir::{Obligation, Ty};
+
+        // main() { bb0: r = base.run()  } with Sub <: Base, both defining run().
+        // The obligation lives in Sub.run, which only a virtual dispatch
+        // reaches -- the static target is Base.run.
+        let main = key("main");
+        let base = MethodKey {
+            class: "Base".into(),
+            name: "run".into(),
+            desc: "()V".into(),
+        };
+        let sub = MethodKey {
+            class: "Sub".into(),
+            name: "run".into(),
+            desc: "()V".into(),
+        };
+
+        let mut prog = Program::default();
+        prog.supers.insert("Sub".into(), "Base".into());
+
+        let caller_block = Block {
+            id: BlockId(0),
+            bytecode_offset: 0,
+            stmts: vec![Stmt::Assign(
+                VarId(0),
+                Rvalue::Call {
+                    target: base.clone(),
+                    args: vec![],
+                    is_virtual: true,
+                },
+            )],
+            term: Terminator::Return(None),
+            exceptional: vec![],
+        };
+        prog.bodies.insert(
+            main.clone(),
+            Body {
+                is_static: true,
+                key: main.clone(),
+                entry: BlockId(0),
+                vars: vec![VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Int,
+                }],
+                obligations: vec![],
+                blocks: vec![caller_block],
+            },
+        );
+        // Base.run is empty. Sub.run carries the obligation.
+        for (mk, obs, stmts) in [
+            (base.clone(), vec![], vec![]),
+            (
+                sub.clone(),
+                vec![Obligation {
+                    id: ObligationId(0),
+                    kind: ObligationKind::Assertion,
+                    cond: Operand::int(0),
+                    line: None,
+                    bytecode_offset: 0,
+                    guarded: false,
+                }],
+                vec![Stmt::Check(ObligationId(0))],
+            ),
+        ] {
+            prog.bodies.insert(
+                mk.clone(),
+                Body {
+                    is_static: false,
+                    key: mk.clone(),
+                    entry: BlockId(0),
+                    vars: vec![],
+                    obligations: obs,
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        bytecode_offset: 0,
+                        stmts,
+                        term: Terminator::Return(None),
+                        exceptional: vec![],
+                    }],
+                },
+            );
+        }
+
+        let mut cuts = BTreeSet::new();
+        cuts.insert((main.clone(), BlockId(0)));
+        let at_risk = obligations_at_risk(&prog, &cuts);
+
+        assert!(
+            at_risk.contains(&(sub.clone(), ObligationId(0))),
+            "a cut reaching a virtual call to Base.run must put Sub.run's \
+             obligation at risk; following only the static target omits it, \
+             and an omitted obligation is discharged rather than refused"
         );
     }
 

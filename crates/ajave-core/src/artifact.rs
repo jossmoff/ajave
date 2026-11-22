@@ -210,9 +210,21 @@ impl Interest {
     pub const RESIDUAL: Interest = Interest(1 << 4);
     pub const QUERY: Interest = Interest(1 << 5);
     pub const LEMMA: Interest = Interest(1 << 6);
+    /// An invariant **map** — one assertion per program point for a whole
+    /// method — as distinct from `INVARIANT`, which is a single point claim.
+    ///
+    /// A separate bit on purpose. A consumer that wants maps does not want to
+    /// be woken for every point claim: `interval-ai` publishes one point
+    /// invariant per discharged obligation, so an engine waiting for a
+    /// certified map would be re-entered hundreds of times for artifacts it
+    /// cannot use. The whole purpose of `Interest` is to make a blocked engine
+    /// wake on what it is actually waiting for -- the defect #37 recorded was
+    /// exactly a declaration that named a kind nobody produced while omitting
+    /// the one that mattered.
+    pub const INVARIANT_MAP: Interest = Interest(1 << 7);
 
     /// Every kind. The default, because over-declaring is the cheap mistake.
-    pub const ANY: Interest = Interest(0x7f);
+    pub const ANY: Interest = Interest(0xff);
 
     pub const fn union(self, other: Interest) -> Interest {
         Interest(self.0 | other.0)
@@ -340,6 +352,47 @@ pub struct Invariant {
     /// `Scope::Point(at)` is the historical behaviour and what every producer
     /// meant before this existed; a heap claim must say `Scope::Heap` instead,
     /// because its truth does not depend on which method is executing.
+    pub scope: Scope,
+}
+
+/// What holds at each program point of one method, on every execution.
+///
+/// # Why a map and not a set of points
+///
+/// Inductiveness is a property of the **map**. "Holds initially" is a claim
+/// about the entry; "is preserved" relates the assertion at an edge's source
+/// to the assertion at its target. Neither can be stated about one assertion
+/// in isolation, which is why `invariant_check::check_inductive` could only
+/// ever confirm *sufficient and locally preserved* -- a strictly weaker
+/// property its own doc warns the caller about, and the reason nothing has
+/// ever been promoted to `InvStatus::Inductive`.
+///
+/// `Invariant` is not replaced. A single-point claim is still the right
+/// artifact for a local fact, and it is what the interval hint path reads.
+/// This is the unit that can be *certified*.
+///
+/// # What a consumer may conclude
+///
+/// For each `(point, formula)` entry: `formula` holds on every execution that
+/// reaches `point`. A point **absent** from `entries` carries no claim —
+/// read it as `true`, never as a contradiction, or an unmentioned point would
+/// look unreachable.
+///
+/// `status: Inductive` additionally means a certifier has checked initiation
+/// at the entry and preservation across every CFG edge. `Candidate` means
+/// nobody has checked anything, and per `InvStatus`'s own contract it is never
+/// enough on its own to discharge.
+///
+/// `VarId`s in every formula are relative to `method`'s body. A consumer
+/// looking at a different body must not read this — the
+/// context-relative-identifier fault `CLAUDE.md` records as having cost 32
+/// points.
+#[derive(Clone, Debug)]
+pub struct InvariantMap {
+    pub id: u32,
+    pub method: MethodKey,
+    pub entries: std::collections::BTreeMap<ProgramPoint, Expr>,
+    pub status: InvStatus,
     pub scope: Scope,
 }
 
@@ -499,6 +552,7 @@ pub struct Lemma {
 pub enum Artifact {
     Status(ObligationRef, Status),
     Invariant(Invariant),
+    InvariantMap(InvariantMap),
     Precision(ProgramPoint, Precision),
     Trace(AbstractTrace),
     Residual(Condition),
@@ -517,6 +571,7 @@ impl Artifact {
         match self {
             Artifact::Status(..) => Interest::STATUS,
             Artifact::Invariant(_) => Interest::INVARIANT,
+            Artifact::InvariantMap(_) => Interest::INVARIANT_MAP,
             Artifact::Precision(..) => Interest::PRECISION,
             Artifact::Trace(_) => Interest::TRACE,
             Artifact::Residual(_) => Interest::RESIDUAL,

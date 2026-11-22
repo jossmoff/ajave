@@ -95,6 +95,38 @@ Also outstanding and independent: #105, where `interval_state_as_formula`
 publishes a multi-variable conjunction that the only reader structurally cannot
 parse.
 
+### Update, 2026-11-22: #105 was worth +10 points
+
+Fixed in `f26ed94` and measured afterwards, which is the only reason the size is
+known. Five `no-runtime-exception` tasks — `InsertionSort-MemUnsat01` and four
+`MergeSortIterative` variants — are UNKNOWN at main (`21ec85c`) and TRUE at
+`f26ed94`, at +2 each. They were the whole of a score delta that had been
+credited to four later commits and a different branch.
+
+The reader required the formula to be *exactly* `And(lo <= v, v <= hi)`, so any
+state narrowing two or more variables parses as `And(And(..),..)` and was
+dropped whole — no hints at all, not even for the variables it could read. With
+the portfolio cut to `interval-ai` alone on both builds, the engine proves the
+*identical* obligations either way (15/27 in `merge`, 7/9 in `main`, 4/4 in
+`iterativeMergesort`); what changes is who closes the other twelve:
+
+```
+main 21ec85c:   Main.merge#18 -> Open
+f26ed94:        Main.merge#18 -> Discharged { by: smt-bmc-fpa, proof: Exhaustive }
+```
+
+So this document's prediction was right and understated: the leverage was not
+only in making step 4 converge, it was in the reader that discarded what step 4
+already published. Note which engine consumes it — `smt-bmc-fpa`, the second
+BMC pass, not `smt-bmc`. An ablation naming `smt-bmc` does not remove it, which
+is a separate defect recorded in [`measurement-validity.md`](measurement-validity.md).
+
+Why nothing caught it for its whole lifetime: dropping an unparsed conjunct
+yields `Top`, which is sound, so the defect is a *pure* precision loss and
+`UNKNOWN` is the absorbing state of every oracle this repository has. See
+[`measurement-validity.md`](measurement-validity.md) §4 for the argument and the
+two rules that follow.
+
 ## The methodological note
 
 Of four theories formed about this path, three were wrong and one was discarded

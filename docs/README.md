@@ -17,6 +17,18 @@
 - [`assessment-2026-08-31.md`](assessment-2026-08-31.md) — a point-in-time
   competitive assessment. Dated on purpose: its scores are a snapshot, not
   the current numbers. For those, run `tools/bench.py`.
+- [`proposals/lia-faithfulness.md`](proposals/lia-faithfulness.md) — why the
+  LIA transition relation was not a sound over-approximation of the JVM in
+  four enumerated places, the theorem that lets an invariant be proved in
+  unbounded integers and still hold on a wrapping machine, and the ghost
+  length model. Read with [`contracts.md`](contracts.md) §2, which records why
+  `InvariantMap` still has no consumer.
+- [`measurement-validity.md`](measurement-validity.md) — why a gate that
+  carries no expected-verdict label can pass while measuring nothing, the
+  vacuity literature it is an instance of, and why a soundness-preserving
+  precision loss is invisible to every oracle here except the score. Read with
+  [`interval-ai-hint-path.md`](interval-ai-hint-path.md), which is the worked
+  example.
 - [`strategies/`](strategies/) — one file per verification strategy
   (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before
@@ -48,6 +60,7 @@ table mirrors it. `Direction` is what the blackboard lets an engine conclude —
 | `kinduction` | Over | — | Base and step case over a single loop |
 | `chc` | Over | — | Horn clauses through Z3's Spacer |
 | `imc` | Over | — | Interpolation-based model checking |
+| `houdini` | Over | — | Candidate-elimination invariant synthesis; off unless `AJAVE_HOUDINI=1` |
 | `cegar` | Over | — | Predicate abstraction with refinement |
 
 **7 of the 13 engines have no strategy doc.** That breaks the rule below, which asks

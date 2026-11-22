@@ -282,3 +282,74 @@ ajave/jvm-exceptions/ImplicitThrowReachesItsHandlerOnlyForSomeInputs.yml valid-a
 # a TRUE here is a real capability gain and should be celebrated, not
 # suppressed (2026-10-29).
 ajave/heap/NegativeIsNeverFoundBecauseOnlyNonNegativeIsStored.yml valid-assert
+
+# The relational-bounds gap, in six lines. UNKNOWN by design today: the
+# interval domain is `BTreeMap<VarId, Interval>` and cannot express
+# `i < a.length`, which is the entire content of the proof. A TRUE here means
+# a weakly relational domain landed, and is a real capability gain
+# (gh #119, 2026-10-30).
+ajave/jvm-arrays/FillLoopOfUnboundedLengthStaysInBounds.yml no-runtime-exception
+# The copy-chain half of the same gap. `a[j] = a[j] + 1` reaches the store
+# three copies removed from the index the guard constrained, so a relational
+# domain that does not transfer facts across `x = y` loses them before the
+# obligation. Bytecode-specific, not domain-specific (gh #119, 2026-10-30).
+ajave/jvm-arrays/NestedFillLoopRelatesBothIndicesToTheLength.yml no-runtime-exception
+# The non-strict guard shape, 24% of the budget population. `i <= n-1` needs
+# two relations composed -- `i <= t` and `t < n` -- because `i <= len` alone is
+# false exactly at the off-by-one (gh #119, 2026-10-30).
+ajave/jvm-arrays/NonStrictGuardBoundsTheIndexJustAsWell.yml no-runtime-exception
+# The flattened-matrix lemma: `a[i*s + j]` against `new T[m*s]`, which is
+# non-linear and beyond Pentagons, difference bounds and Octagons alike. Both
+# halves of the obligation need it -- the abstract interval for the index
+# overflows, so even `idx >= 0` is otherwise unprovable (gh #119, 2026-10-31).
+ajave/jvm-arrays/FlattenedMatrixIndexStaysInBounds.yml no-runtime-exception
+
+# Pentagons reduction: a relation must tighten the interval, not only answer
+# comparisons. The second is deliberately unproven -- it names the one fact
+# (a parameter's upper bound crossing a call) that is still missing.
+ajave/jvm-arrays/OuterCounterKeepsItsLowerBoundAcrossAnInnerLoop.yml valid-assert
+ajave/jvm-arrays/FlattenedMatrixIndexAcrossACall.yml no-runtime-exception
+
+# gh #88: a call declared "modelled" but encoded as a free variable. The hash
+# of a literal is a constant, and the BMC used to claim it could be anything.
+ajave/jvm-strings/LiteralStringHashIsAConstantNotAFreeVariable.yml valid-assert
+
+# Large-block encoding (gh #128). The first is the minimal program: 24
+# one-armed ifs, which the old reachability join declined on every one and so
+# forked, exhausting MAX_FORKS. The second pins the Alarm family, 893 blocks in
+# one Simulink-generated method, which went from 0 to 36 points across both
+# properties -- it is the task that shows the path-length bound was capping the
+# size of method the engine could traverse at all, not its effort.
+ajave/engine-bmc/AChainOfOneArmedIfsMustNotForkPerBranch.yml valid-assert
+sv-comp/java-ranger-regression/alarm/Alarm_prop2.yml valid-assert
+# The FALSE twin. Merging is new discharge surface, and the TRUE twin cannot
+# tell a correct merge from one that silently loses an arm -- losing an arm
+# still leaves the invariant holding. Here the lost arm is the one carrying the
+# violation, so the same bug reads as a wrong TRUE at -32.
+ajave/engine-bmc/AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant.yml valid-assert
+
+# gh #130: an invariant proved in LIA must not prune a bitvector search.
+# Synthesis published a map that was inductive over unbounded integers, the
+# hint path handed it to the BMC, and the BMC pruned the throwing path while
+# still claiming all_paths_complete -- a wrong TRUE at -32. The first is the
+# corpus task it fired on; the second is the minimal program.
+sv-comp/algorithms/BellmanFord-FunUnsat01.yml no-runtime-exception
+ajave/engine-ai/ALiaProvedBoundMustNotPruneABitvectorSearch.yml no-runtime-exception
+
+# gh #130 follow-up: making the LIA relation faithful, and spending it.
+# `docs/proposals/lia-faithfulness.md`. Four canaries, all four already
+# correct before the change -- that is the point. The defects they name live in
+# the LIA encoder, and the engines answering them do not use it, so these pin
+# the mechanism against a future unstarving rather than record a gain.
+#
+# The float pair: a double comparison encoded as an integer comparison of bit
+# patterns, and `d2i` encoded as a widening identity. Both are FALSE tasks that
+# the old encoding makes look safe, so the failure mode is a wrong TRUE (-32).
+ajave/jvm-floats/ADoubleComparisonIsNotAnIntegerComparisonOfBitPatterns.yml valid-assert
+ajave/jvm-floats/ACastFromDoubleTruncatesTowardZero.yml valid-assert
+# The TRUE pair: the ghost length array, and the bound whose overflow-freedom
+# needs a relation. Guarded preservation makes the synthesis path strictly
+# stricter, so these exist to stay TRUE -- a regression means the guard leaked
+# out of the LIA path into an engine that was answering without it.
+ajave/engine-ai/TwoReadsOfOneArrayLengthAreTheSameNumber.yml valid-assert
+ajave/engine-ai/ALowerBoundSurvivesOnlyIfTheIncrementIsBounded.yml valid-assert
