@@ -107,6 +107,27 @@ struct Cli {
           default_missing_value = "")]
     interpret: Option<String>,
 
+    /// Ask, per obligation, what *kind* of fact would discharge it, and exit.
+    ///
+    /// A census, not a verdict: prints one TSV row per obligation and no
+    /// verdict line, for the same reason `--interpret` prints none.
+    ///
+    /// It exists because three capability directions were each estimated to be
+    /// worth points and measured exactly zero. Every bucket in
+    /// `tools/blocker_census.py` is named after what *blocks* a verdict, and
+    /// removing the blocker leaves the obligation unprovable underneath — so
+    /// the question that should have been asked first is what facts the corpus
+    /// actually needs. Abduction answers it directly: given the obligation's
+    /// error formula, what added hypothesis makes it unreachable?
+    #[arg(long = "abduct-census")]
+    abduct_census: bool,
+
+    /// Per-obligation vocabulary cap for `--abduct-census`. The scalar grammar
+    /// is quadratic in the variable count and the widest corpus method carries
+    /// 112 variables, so this is what stops one body dominating a run.
+    #[arg(long = "abduct-census-cap", default_value = "240")]
+    abduct_census_cap: usize,
+
     /// Write the deterministic shadow `Verifier` sources into this directory
     /// and exit. The JVM half of `tools/lifter_differential.py` compiles them,
     /// so the harness feeds a real JVM through exactly the stub `JvmReplay`
@@ -461,6 +482,453 @@ struct ViolationInfo {
 /// reachable program. Paired with the orchestrator's existing
 /// `timing step <engine> <ms>ms discharged=N violated=M` lines, this is enough
 /// to answer "what does each engine cost, and pay, on programs like this one".
+/// Ask what shape of fact each obligation needs, and print one row per
+/// obligation.
+///
+/// # Why a census instead of another domain
+///
+/// On 2026-11-22 four capability directions were estimated and three measured
+/// exactly zero: a raised loop-unroll cap converted 0 of 69 tasks, suppressing
+/// refuted witnesses converted 0 of 79, forced FPA converted 1 of 8. The cause
+/// generalises — every bucket in `tools/blocker_census.py` is named after what
+/// *blocks* a verdict, so removing the blocker leaves whatever the obligation
+/// actually needs still missing. `InsertionSort-FunSat01 [valid-assert]` is the
+/// clean case: suppress its refuted witness, the obligation goes `Open`, and
+/// nothing discharges it, because the assertion needs **sortedness**.
+///
+/// So this asks the corpus rather than guessing at it. The query is the
+/// obligation's own error formula from `interpolation::encode_body_lia` — the
+/// same encoding `imc`, `cegar` and `invariant_check` consume, so the census
+/// measures the production encoding and not a second one written for it.
+///
+/// # What a row means, and what it does not
+///
+/// A row says *a fact of this shape is sufficient*. It does not say the fact is
+/// true of the program, nor inductive, nor safe to publish: every abduct here
+/// is stated over mathematical integers, and on a JVM `0 <= sum` is false the
+/// moment the addition wraps. Turning one into a proof needs initiation and the
+/// overflow-guarded preservation query of `docs/proposals/lia-faithfulness.md`
+/// §3. This mode publishes nothing and asserts nothing.
+fn run_abduct_census(prog: &Program, cap: usize) {
+    use ajave_engines::abduct;
+    use ajave_engines::interpolation::encode_body_lia;
+
+    // Read the symbol names out of the declarations the encoder emitted rather
+    // than rebuilding them from the naming convention. The convention is
+    // deliberately inconsistent -- `ghost_len` is unprefixed where `arr0_1` is
+    // prefixed, and `interpolation.rs` explains at length why -- so a second
+    // copy of it here would be exactly the producer/consumer disagreement that
+    // `Bounded { k }` cost us once already.
+    fn declared(decls: &str, sort: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in decls.lines() {
+            let l = line.trim();
+            let Some(rest) = l.strip_prefix("(declare-fun ") else {
+                continue;
+            };
+            let Some((name, tail)) = rest.split_once(' ') else {
+                continue;
+            };
+            // Strip exactly one closing paren -- the one that closes
+            // `declare-fun` -- not every trailing paren.
+            //
+            // `trim_end_matches(')')` was the first version and it is greedy,
+            // so `() (Array Int Int))` reduced to `() (Array Int Int` and no
+            // array sort ever matched. Every body therefore reported zero
+            // arrays, the quantified grammar was never built, and the census
+            // was on course to conclude that array facts are not what the
+            // corpus needs -- from a run in which it had not once asked.
+            let Some(ty) = tail.trim_end().strip_suffix(')') else {
+                continue;
+            };
+            if ty.trim() == format!("() {sort}") {
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    println!(
+        "# abduct-census\tbudget_ms={}\tcap={cap}",
+        std::env::var("AJAVE_ABDUCT_BUDGET_MS").unwrap_or_else(|_| "5000".into())
+    );
+    println!("method\toid\tkind\tshape\tms\tfact");
+
+    let mut keys: Vec<_> = prog.bodies.keys().cloned().collect();
+    keys.sort();
+    let mut tally: std::collections::BTreeMap<&'static str, usize> = Default::default();
+
+    for k in keys {
+        let body = &prog.bodies[&k];
+        if body.obligations.is_empty() {
+            continue;
+        }
+        for ob in &body.obligations {
+            let enc = encode_body_lia(body, &[ob.id], "");
+            let errors: Vec<String> = enc
+                .error_formulas
+                .iter()
+                .filter(|(id, _)| *id == ob.id)
+                .map(|(_, f)| f.clone())
+                .collect();
+            if errors.is_empty() {
+                continue;
+            }
+            // An obligation checked in several blocks has one clause per block,
+            // and the obligation holds only if *none* of them is reachable --
+            // `imc` disjoins them for the same reason. Taking the first would
+            // ask about one path and report the answer as if it covered all.
+            let error = if errors.len() == 1 {
+                errors[0].clone()
+            } else {
+                format!("(or {})", errors.join(" "))
+            };
+
+            // Pre-state symbols only. The post-state copies (`v3p`,
+            // `ghost_lenp`) exist so a transition relation can talk about the
+            // successor; an invariant is a fact about *a* state, and offering
+            // the primed copies as vocabulary would let the census report a
+            // fact no invariant domain could ever express.
+            let prestate = |v: Vec<String>| -> Vec<String> {
+                v.into_iter().filter(|n| !n.ends_with('p')).collect()
+            };
+            let all_vars = prestate(declared(&enc.declarations, "Int"));
+            let all_arrays: Vec<String> = prestate(declared(&enc.declarations, "(Array Int Int)"))
+                .into_iter()
+                // `ghost_len` holds lengths indexed by reference, not contents
+                // indexed by position, so an element template over it would be
+                // a category error.
+                .filter(|n| n != "ghost_len")
+                .collect();
+
+            // Narrow the vocabulary to the symbols the obligation itself
+            // mentions.
+            //
+            // The first census run offered every variable in the body, and the
+            // widest method here carries 43 of them. A pairwise scalar grammar
+            // over 43 variables is ~2600 productions, enumerative SyGuS does
+            // not finish it inside any sane budget, and the census then reports
+            // "no scalar fact suffices" for obligations a two-variable relation
+            // would have discharged. A vocabulary that cannot be searched is
+            // indistinguishable from a vocabulary that does not contain the
+            // answer, which is the same failure as a gate that disables
+            // nothing: the output is identical to the informative one.
+            // Two different scopes, and the asymmetry is forced by the
+            // encoding.
+            //
+            // **Integers come from the error formula alone.** A block clause
+            // relates the whole state pre to post, giving every unchanged
+            // variable its own `vip = vi` conjunct, so *every* variable in the
+            // body appears in it. Narrowing the integer vocabulary on the
+            // clause is therefore a no-op dressed as a filter: it returned all
+            // 44 variables plus 44 length terms, 88 operands, ~7700 pairwise
+            // productions, and a grammar that size is not searched inside any
+            // budget. A vocabulary that cannot be searched is indistinguishable
+            // from one that lacks the answer.
+            //
+            // **Arrays come from the clause as well.** An array is read where
+            // the program reads it, which for a guarded assertion is the
+            // predecessor's branch, not the error formula. There are few arrays
+            // per body, so including the clause costs nothing here.
+            let edges_here = incoming_edges(&enc, body, ob.id);
+            let toks = |t: &str| -> std::collections::BTreeSet<String> {
+                t.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|x| !x.is_empty())
+                    .map(|x| x.to_string())
+                    .collect()
+            };
+            let mentioned = toks(&error);
+            let mut wide = mentioned.clone();
+            for e in &edges_here {
+                wide.extend(toks(&e.clause));
+                for g in &e.ghost {
+                    wide.extend(toks(g));
+                }
+            }
+            let pick = |all: &[String], from: &std::collections::BTreeSet<String>| -> Vec<String> {
+                all.iter().filter(|n| from.contains(*n)).cloned().collect()
+            };
+
+            // Integer *terms*, not variable names. An array length is
+            // `(select ghost_len r)` in this encoding, so `i < a.length` --
+            // the most common missing fact in an array-bounds obligation --
+            // is not a relation between two variables and a name-only
+            // vocabulary cannot state it.
+            let mut terms = pick(&all_vars, &mentioned);
+            if terms.len() < 2 {
+                // Too narrow to state a relation. Widen to the clause's
+                // variables, but capped: a partial vocabulary that is searched
+                // beats a complete one that is not.
+                terms = pick(&all_vars, &wide).into_iter().take(10).collect();
+            }
+            let refs: Vec<String> = terms.clone();
+            for r in &refs {
+                terms.push(format!("(select ghost_len {r})"));
+            }
+            let arrays = pick(&all_arrays, &wide);
+
+            // `(set-logic ALL)` after the options and before the
+            // declarations. Without it cvc5 writes four lines of advice to
+            // stdout per query, which lands in the middle of the TSV this mode
+            // exists to produce.
+            let prelude = format!("(set-logic ALL)\n{}", enc.edge_preamble());
+
+            // The post-state symbols, so an abduct that constrains the
+            // successor can be told apart from one that states an invariant.
+            // Without this screen the first census run reported 95% of rows as
+            // "a fact exists outside the offered vocabulary", when what
+            // existed was `v2p = 2147483648`.
+            let poststate: Vec<String> = declared(&enc.declarations, "Int")
+                .into_iter()
+                .chain(declared(&enc.declarations, "(Array Int Int)"))
+                .filter(|n| n.ends_with('p'))
+                .collect();
+
+            if std::env::var("AJAVE_ABDUCT_DEBUG").as_deref() == Ok("1") {
+                eprintln!(
+                    "abduct-census {}.{} oid={} error={}\n  terms={:?}\n  arrays={:?}",
+                    k.class, k.name, ob.id.0, error, terms, arrays
+                );
+            }
+
+            let vocab = abduct::Vocab {
+                terms: &terms,
+                arrays: &arrays,
+                poststate: &poststate,
+                cap,
+            };
+            let t0 = std::time::Instant::now();
+            let v = classify_over_edges(&prelude, &error, &enc, &edges_here, &vocab);
+            let ms = t0.elapsed().as_millis();
+            match v {
+                Ok(v) => {
+                    *tally.entry(v.shape.tag()).or_default() += 1;
+                    println!(
+                        "{}.{}\t{}\t{:?}\t{}\t{ms}\t{}",
+                        k.class,
+                        k.name,
+                        ob.id.0,
+                        ob.kind,
+                        v.shape.tag(),
+                        v.fact.as_deref().unwrap_or("-")
+                    );
+                }
+                Err(e) => {
+                    *tally.entry("error").or_default() += 1;
+                    println!(
+                        "{}.{}\t{}\t{:?}\terror\t{ms}\t{}",
+                        k.class,
+                        k.name,
+                        ob.id.0,
+                        ob.kind,
+                        e.replace('\n', " ")
+                    );
+                }
+            }
+        }
+    }
+
+    let total: usize = tally.values().sum();
+    println!("# totals over {total} obligation(s)");
+    for (tag, n) in &tally {
+        let pct = if total > 0 {
+            100.0 * *n as f64 / total as f64
+        } else {
+            0.0
+        };
+        println!("# {tag}\t{n}\t{pct:.1}%");
+    }
+}
+
+/// Ask the census question across every edge into the obligation's block.
+///
+/// # Why not at the block the check is in
+///
+/// That was the first formulation and it is malformed for most of the corpus.
+/// A Java `assert` compiles to a guarded jump into a failure block, so the
+/// obligation's error clause in that block is `(= 0 0)` — unconditional, and
+/// correctly so: once control is there the property has already failed, and
+/// safety means the block is **unreachable**. Abduction requires the
+/// hypothesis to be *consistent* with the premises, and the only ψ entailing
+/// `¬true` is `false`, so cvc5 answers nothing. The census would then have
+/// reported "no fact of any shape discharges this" for every assertion in the
+/// corpus — a confident, wrong, and entirely self-consistent result.
+///
+/// It was caught only because `InsertionSort-FunSat01` is a case whose needed
+/// fact is known independently (sortedness), which is the argument for keeping
+/// a known-answer control in any census.
+///
+/// # The shape asked instead
+///
+/// For each edge `A → B` where `B` holds the check, find ψ over `A`'s state
+/// with
+///
+/// ```text
+/// ψ  ⊨  ¬( clause_{A→B}  ∧  ghost  ∧  error′ )
+/// ```
+///
+/// which is exactly `interpolation::preservation_query` with the pre-state
+/// assertion left unknown — abduction over the preservation query. The error
+/// is primed because `B`'s entry state *is* the edge's post-state.
+///
+/// The overflow disjunct is included, matching `preservation_query`: a fact
+/// sufficient only when the arithmetic does not wrap is not sufficient on a
+/// JVM, and a census that quietly asked the easier question would overstate
+/// every domain it measures.
+///
+/// # Aggregating across edges
+///
+/// Every incoming edge must be excluded, so the obligation needs the *hardest*
+/// thing any edge needs — `max` over `Shape`, whose variant order is written
+/// worst-last for this. Reporting the easiest edge would be the same
+/// overstatement in a different place.
+/// The edges whose target holds the obligation's check.
+///
+/// Shared by the vocabulary narrowing and the classifier so the two cannot
+/// disagree about which edges the census is asking about — the producer and
+/// consumer fault `Bounded { k }` cost us once already.
+fn incoming_edges<'a>(
+    enc: &'a ajave_engines::interpolation::LiaEncoding,
+    body: &ajave_ir::Body,
+    oid: ajave_ir::ObligationId,
+) -> Vec<&'a ajave_engines::interpolation::EdgeClause> {
+    let check_blocks: Vec<ajave_ir::BlockId> = body
+        .blocks
+        .iter()
+        .filter(|b| {
+            b.stmts
+                .iter()
+                .any(|st| matches!(st, ajave_ir::Stmt::Check(o) if *o == oid))
+        })
+        .map(|b| b.id)
+        .collect();
+
+    // Walk back through edges that carry no guard.
+    //
+    // A Java `assert` compiles to a guarded jump into a failure block, so the
+    // edge *into* the check block is pure frame -- measured on
+    // `InsertionSort-FunSat01` as
+    // `(and (= arr5_2p arr5_2) (= ghost_lenp ghost_len) (= v0p v0) …)`. No
+    // pre-state fact entails the negation of a frame, because a frame is
+    // satisfiable from every pre-state, so asking there is vacuous and the
+    // only abducts on offer are post-state contradictions. The guard that
+    // decides the obligation sits further back, and that is the edge worth
+    // asking about.
+    //
+    // Depth-bounded, and the bound is a real limit on the instrument rather
+    // than a tuning constant: a guard more than this many unguarded edges
+    // behind the check is simply not found, and the obligation is reported on
+    // whatever edge the walk ended at. Breadth-first so the *nearest* guard
+    // is the one used.
+    const MAX_WALK: usize = 8;
+    let mut frontier: Vec<ajave_ir::BlockId> = check_blocks;
+    let mut seen: std::collections::BTreeSet<u32> = frontier.iter().map(|b| b.0).collect();
+    let mut out: Vec<&ajave_engines::interpolation::EdgeClause> = Vec::new();
+
+    for _ in 0..MAX_WALK {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<ajave_ir::BlockId> = Vec::new();
+        let mut progressed = false;
+        for e in enc
+            .edge_clauses
+            .iter()
+            .filter(|e| e.to.map(|t| frontier.contains(&t)).unwrap_or(false))
+        {
+            if ajave_engines::abduct::is_frame_only(&e.clause) && e.overflow.is_none() {
+                // Nothing to contradict here; keep walking. An edge with an
+                // overflow condition is *not* skipped even if its clause is a
+                // frame: the overflow disjunct is a real constraint a fact can
+                // be required to exclude.
+                if seen.insert(e.from.0) {
+                    next.push(e.from);
+                    progressed = true;
+                }
+            } else {
+                out.push(e);
+            }
+        }
+        if !out.is_empty() || !progressed {
+            break;
+        }
+        frontier = next;
+    }
+    out
+}
+
+fn classify_over_edges(
+    prelude: &str,
+    error: &str,
+    enc: &ajave_engines::interpolation::LiaEncoding,
+    incoming: &[&ajave_engines::interpolation::EdgeClause],
+    vocab: &ajave_engines::abduct::Vocab<'_>,
+) -> Result<ajave_engines::abduct::Verdict, String> {
+    use ajave_engines::abduct;
+
+    // Prime only the symbols that *have* a post-state copy.
+    //
+    // Not "every unprimed symbol": the `Encoder` mints per-block fresh binders
+    // like `e8_f0` for intermediate values, and those are existential within
+    // one clause with no successor copy. Priming them produced
+    // `Symbol 'e8_f0p' not declared as a variable` on every `ArrayBounds`
+    // obligation in the body — 8 of 42 rows, and loudly rather than silently
+    // only because `abduce_with_grammar` was made to return `Err` on solver
+    // errors rather than an empty answer.
+    let declared_names: std::collections::BTreeSet<String> = enc
+        .declarations
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("(declare-fun ")
+                .and_then(|r| r.split_once(' '))
+                .map(|(n, _)| n.to_string())
+        })
+        .collect();
+    let has_post: Vec<String> = declared_names
+        .iter()
+        .filter(|n| !n.ends_with('p') && declared_names.contains(&format!("{n}p")))
+        .cloned()
+        .collect();
+    let error_post = abduct::prime_formula(error, &has_post);
+
+    if incoming.is_empty() {
+        // The check sits in the entry block, so there is no edge to exclude and
+        // the question is the block-local one after all: what fact about the
+        // entry state rules the violation out?
+        return abduct::classify(prelude, &[], &format!("(not {error})"), vocab);
+    }
+
+    let mut worst: Option<abduct::Verdict> = None;
+    for e in incoming {
+        let mut conj: Vec<String> = Vec::new();
+        match &e.overflow {
+            Some(ovf) => conj.push(format!("(or {} {ovf})", e.clause)),
+            None => conj.push(e.clause.clone()),
+        }
+        conj.extend(e.ghost.iter().cloned());
+        conj.push(error_post.clone());
+        let goal = format!("(not (and {}))", conj.join(" "));
+        match std::env::var("AJAVE_ABDUCT_DEBUG").as_deref() {
+            Ok("1") => eprintln!("  edge {:?} -> {:?}  goal_len={}", e.from, e.to, goal.len()),
+            Ok("2") => eprintln!("  edge {:?} -> {:?}  clause={}", e.from, e.to, e.clause),
+            _ => {}
+        }
+        let v = abduct::classify(prelude, &[], &goal, vocab)?;
+        let keep = match &worst {
+            None => true,
+            Some(w) => v.shape > w.shape,
+        };
+        if keep {
+            worst = Some(v);
+        }
+    }
+    Ok(worst.unwrap_or(abduct::Verdict {
+        shape: abduct::Shape::Nothing,
+        fact: None,
+    }))
+}
+
 fn emit_program_shape(prog: &ajave_ir::Program, plan: &ajave_core::plan::Plan) {
     use ajave_engines::body_shape;
     let Some(entry) = &prog.entry else { return };
@@ -933,6 +1401,16 @@ fn main() {
             print!("{}", prog.bodies[&k].render());
         }
         println!();
+    }
+
+    // Abduction census, off the verification path entirely.
+    //
+    // Here, after lifting and IR reduction, for the reason given on
+    // `--interpret`: a measurement is only evidence about the production
+    // pipeline if it runs on the IR the production pipeline builds.
+    if cli.abduct_census {
+        run_abduct_census(&prog, cli.abduct_census_cap);
+        return;
     }
 
     // Interpreter mode, off the verification path entirely.
