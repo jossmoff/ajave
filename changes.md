@@ -2,6 +2,87 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-22 — abduction as a measurement instrument, and what it says about arrays
+
+Four capability directions were estimated and three measured exactly zero (a
+raised unroll cap: 0 of 69; suppressed refuted witnesses: 0 of 79; forced FPA:
+1 of 8). The common cause is that every bucket in the blocker census is named
+after what *blocks* a verdict, so removing the blocker leaves the obligation
+unprovable underneath. `InsertionSort-FunSat01 [valid-assert]` is the clean
+case: suppress its refuted witness and the obligation goes `Open`, and nobody
+proves it, because the assertion needs **sortedness** and nothing in the
+portfolio can state a fact quantified over array indices.
+
+So rather than build a fifth domain on a guess, ask the corpus what facts it
+needs. `crates/ajave-engines/src/abduct.rs` is that instrument. Given premises
+`Γ` and a goal `φ`, abduction returns a simple `ψ` with `Γ ∧ ψ ⊨ φ` consistent
+— it inverts the enumerate-and-filter shape of every invariant mechanism we
+have (Houdini over a pool, intervals over a lattice). Dillig, Dillig and Aiken
+brought it into verification (PLDI 2012, OOPSLA 2013); Reynolds, Barbosa,
+Larraz and Tinelli made it scale by enumerative SyGuS (IJCAR 2020), shipped as
+cvc5's `get-abduct`. cvc5 is already linked statically in-process for `nra`, so
+this cost a Cargo feature flag (`parser`) and no new dependency.
+
+### Three findings, each of which would have wrecked the census at scale
+
+**Raw `get-abduct` returns sufficient-but-degenerate answers.** For a nullness
+goal it returns *the goal itself*, `(not (= r nullref))`. For a quantified
+sortedness goal it returns `(and (= n 2) (= (select a 0) (select a 1)))`,
+satisfying the ∀ by shrinking its range to one index. Both entail the goal and
+say nothing. Run over 2675 obligations unchecked, the census would have
+collected mostly restated goals and reported a distribution that meant nothing
+— the same shape of error as the inert ablation in the entry below, caught this
+time before the measurement rather than after. IJCAR 2020's offer of
+"progressively weaker solutions" is the published acknowledgement of exactly
+this.
+
+**Unbounded enumeration diverges.** `(get-abduct-next)` on the *smallest*
+nullness goal in the suite ran **79 minutes at 100% of a core and 643 MB
+resident** without answering. Every script now carries
+`(set-option :tlimit-per …)`, overridable by `AJAVE_ABDUCT_BUDGET_MS`, because
+a query that can run forever is a census that never finishes — and worse, one
+that finishes having silently skipped whatever it hung on. Bounded at 5 s the
+same query returns two real abducts in milliseconds, the first being `(= r q)`:
+*r aliases a reference already known non-null*, which is the actual shape of a
+nullness proof.
+
+**A grammar is what makes the answers usable.** Restricting the vocabulary so
+the goal's own atoms are unavailable turns the useless `(= len n)` into
+`(<= n len)` — the fact a human would supply — in under 10 ms.
+
+### The result that chooses the next build
+
+The open question was whether the array-content facts the hard obligations need
+can be reached at all. Measured:
+
+| query | answer | cost |
+|---|---|---|
+| sortedness, unguided | `(and (= n 2) …)` — range-shrunk | ~20 s |
+| sortedness, template in grammar | the sortedness formula, exactly | **20 ms** |
+| sortedness, 8-template library | the sortedness formula | **15 ms** |
+
+Guided by a template, cvc5 returns
+`∀k. 0 ≤ k < n−1 ⟹ a[k] ≤ a[k+1]` for a goal of `a[0] ≤ a[1]`, three orders of
+magnitude faster than it returns garbage unguided. That is an architecture
+answer, not a datapoint: the candidate generator for an array-content domain is
+a **template library plus grammar-restricted abduction**, not free-form
+synthesis, and it is cheap enough to run per obligation.
+
+Stated against itself, because the number flatters the result: four of those
+eight templates entail the goal, so cvc5 returned *a* sufficient template and
+most likely simply the first in grammar order. This is not evidence that it
+discriminates, and emphatically not that it returns the **weakest** sufficient
+fact — which is the one that matters, since a too-strong fact is the one least
+likely to survive preservation. The pipeline therefore stays: abduce a set,
+put each candidate through initiation and the overflow-guarded preservation
+query of `docs/proposals/lia-faithfulness.md` §3, keep what survives. Ranking
+inside the solver is not something to rely on.
+
+Nothing in this module publishes an artifact. Every abduct is stated over
+mathematical integers, and on a JVM `0 ≤ sum` is false the moment the addition
+wraps, so publishing one unchecked would manufacture #130's wrong TRUE faster
+than Houdini could.
+
 ## 2026-11-22 — a silent ablation, and where the +10 actually came from
 
 Attribution of a measured score change, which found that most of what the
