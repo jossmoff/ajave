@@ -707,6 +707,12 @@ with `type:experiment` and `status:explored`.
 
 ## Part 7 — Recommended order, and why
 
+Two numbers decide this ordering and both are derived above rather than
+asserted: **582 points are uncollectible today for a file-format reason**
+(§0.5), and **the remaining capability headroom is 592 points in TRUE against
+59 in FALSE** (§0.6). So: fix the serialisation first, then spend every
+capability hour on proving programs correct.
+
 1. **T0.1 + T0.2 together** — the GraphML emitter and a score that models
    confirmation. They must ship together: the emitter without the scoring fix
    is unmeasurable, and the scoring fix without the emitter just tells us our
@@ -719,17 +725,37 @@ with `type:experiment` and `status:explored`.
    +609 afterwards. Nothing else on this list should be started first.
 2. **T0.3** — meta-category scoring. An afternoon, and it changes which of the
    next two items is bigger.
-3. **T1.1 nullness** — largest obligation population (55%), half the available
-   points now that `no-runtime-exception` is a full category, and the cheapest
-   domain of the three.
+3. **T1.1 nullness** — largest obligation population (1468 of 2675, 55%), and
+   it lands squarely on the TRUE side of §0.6: a `NullDeref` obligation is what
+   stands between us and a `no-runtime-exception` **TRUE**, which is now a full
+   base category rather than a demo. Cheapest of the three domains, biggest
+   population, right side of the ledger. Carry the soundness inversion from
+   T1.1: unannotated is maybe-null, narrowed only on evidence — the opposite of
+   every industrial Java nullness tool.
 4. **T1.4 Spacer sweep** — zero code, runs while something else is being
    written, and it is the one remaining documented lever on the quantified
    array question.
 5. **T1.2 Pentagons** — best-evidenced new capability. Close #130 first.
 6. **T1.3 strings via cvc5** — unlocks the securibench population without the
    cheating that killed the taint engine.
-7. **T2.1 / T2.2 / T2.3** — the structural work, in whichever order the
-   measurements from 3–6 justify.
+7. **N1's cheap half, at any time** — the corpus-wide `already-valid` ratio.
+   One bounded SMT query per obligation, and if InsertionSort's 23.8% holds it
+   says a quarter of our open obligations need no invariant at all and are lost
+   to routing. That number changes the value of items 3, 5 and 7, so it is
+   worth having early even though the instrument that produces it failed at its
+   original job.
+8. **T2.1 / T2.2 / T2.3** — the structural work, in whichever order the
+   measurements from 3–7 justify.
+9. **S1 upstream the mislabelled benchmark** — a 34-point swing on one task and
+   it removes the asterisk from every external comparison. Placed last only
+   because it is someone else's merge queue, not ours; start the conversation
+   early because it is deadline-bound.
+
+Deliberately **not** on this list, with the arithmetic recorded above:
+a scheduler (T3.2, 36-task ceiling), an incorrectness-logic/bi-abduction engine
+(§0.7, capped at 59 points until the real-world split says otherwise), a Java
+validation-track entry (S4, the track is C-only), and cross-task caching
+(S5, structurally impossible).
 
 Every one of these is subject to the rules that are already written down and
 were learned expensively: run `--set smoke --check` before scoring; `--repeat N`
