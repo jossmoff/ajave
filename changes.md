@@ -87,6 +87,23 @@ The list now carries the ids a running portfolio reports, `smt-bmc-fpa`,
 fourteen) and the previous stage-4 result should be read as weaker than it was
 reported, not as evidence.
 
+The harness also had to be taught to *show* the new warning. `run_guarded`
+captures stderr, `verdict()` was the only function that saw it, and it looked
+only at stdout — so the binary's warning was written and then dropped, and a
+re-run reported zero unmatched names while two of its fourteen rows were inert.
+It now records which ids disabled nothing and says so beside the totals, since
+silence about an inert row is indistinguishable from a real negative result:
+
+```
+378 ablated run(s); 4 answer(s) merely lost
+2 engine(s) were never in the portfolio, so those ablations removed nothing
+  cegar, imc
+PASS — no verdict flipped.
+```
+
+So the re-run is twelve real engine ablations against the previous nine, with
+the BMC genuinely removed in one of them for the first time.
+
 ## 2026-11-22 — making the LIA transition relation faithful
 
 `docs/proposals/lia-faithfulness.md`. The previous entry's P4 was blocked on

@@ -79,11 +79,20 @@ def resolve(yml):
     return [os.path.join(base, i) for i in data["input_files"]], props
 
 
+# Engine ids an ablation named while the portfolio did not contain them, so the
+# run removed nothing. The binary warns on stderr; `verdict` is the only place
+# that sees stderr, and discarding it is how a row of inert ablations passed for
+# a row of real ones.
+INERT = set()
+
+
 def verdict(inputs, prop, timeout, disable=None):
     env = dict(os.environ)
     if disable:
         env["AJAVE_DISABLE"] = disable
     r = run_guarded([AJAVE, "--property", prop] + inputs, timeout=timeout, env=env)
+    if disable and "disabled nothing" in (r.stderr or ""):
+        INERT.add(disable)
     if r.timed_out:
         return "TIMEOUT"
     lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
@@ -133,6 +142,13 @@ def main():
                       f"{eng}: {base} -> {got}")
 
     print(f"\n{checked} ablated run(s); {weakened} answer(s) merely lost")
+    # An ablation of an engine that was never in the portfolio proves nothing,
+    # and silence about it is indistinguishable from a real negative result.
+    if INERT:
+        print(f"\n{len(INERT)} engine(s) were never in the portfolio, so those "
+              f"ablations removed nothing and their rows are not evidence:")
+        print(f"  {', '.join(sorted(INERT))}")
+        print("  (imc needs AJAVE_SMTINTERPOL_JAR; cegar needs cegar.available())")
     if flips:
         print(f"\n{len(flips)} verdict(s) FLIPPED between TRUE and FALSE.")
         print("Removing an engine can only remove evidence, so a flip means two")
