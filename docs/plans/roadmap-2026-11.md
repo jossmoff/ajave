@@ -807,6 +807,64 @@ Concretely, this means:
   tier (T1.1, T1.2) over the heavy symbolic tier, and it is exactly the profile
   JLiSA scored 1311 with.
 
+### T3.1b — Two architectures for the library problem, and why ours is right
+
+Since library breadth is the bottleneck T3.1 identifies, it is worth knowing
+how the tool that beat us solves it — because the answer is "completely
+differently", and the comparison clarifies what we should and should not copy.
+
+**JBMC writes executable models.** It ships a **Java Operational Model**
+(`core-models.jar`), hand-written Java derived from OpenJDK 8 and simplified
+for verification: performance optimisations stripped "such as in container
+implementations", `assume` statements and CPROVER built-ins standing in for
+arrays and strings, described as "exact but verification-friendly". It covers
+the common `java.lang` classes and a few `java.util` ones. Loading the real JDK
+is explicitly rejected as producing a model "far too large". An unmodelled call
+gets a warning and a nondeterministic return — the same default as our
+`Contract::OPAQUE`.
+
+**We write declarative contracts.** `ajave_models::contract_of` states
+preconditions and effects per `(class, name, desc)`, with
+`Contract::at_least_as_conservative_as` giving the refinement order and
+`tools/contract_monotonicity.py` checking consumers respect it.
+
+The trade is real and runs in both directions:
+
+| | executable models (JBMC) | declarative contracts (ours) |
+|---|---|---|
+| consistency with the verifier's own semantics | automatic — it is just Java, lifted identically | must be argued per entry |
+| cost of a wrong entry | a modelling bug, found like any other | a **wrong TRUE, −32** (issue #48: 22 of them) |
+| cost per method | high — write and maintain real code | low — one table row |
+| effect on the BMC | every call inlines code; this is the "far too large" problem in miniature | none |
+| usable by an abstract domain | no — a domain would have to analyse the model | **yes** — a contract *is* a transfer function |
+| JDK version coupling | tight (their jar breaks on JDK 22+) | loose |
+
+The last two rows are why our architecture is the right one *for us*: §0.6 says
+our headroom is on the TRUE side, §0.5b says that means
+`no-runtime-exception` TRUE answers, and the engines that produce those are
+abstract domains, which consume contracts directly and cannot consume
+executable models at all. JBMC is a bounded model checker, so inlining real
+code is natural for it and ruinous for an interval domain.
+
+So: keep contracts, and fix the thing contracts are bad at — **validation per
+entry**, which is exactly N3.
+
+**One licence constraint, recorded because it is easy to get wrong.**
+`diffblue/java-models-library` is open source under **GPL2 with a classpath
+exception**; ajave is **MIT**. The classpath exception exists so that programs
+*linking* the models are not infected — it does not make the source a safe
+basis for deriving our own. So:
+
+- **Do not derive contract text from reading it.** That is a derivative-work
+  question we should not have, and `CLAUDE.md` rule 5 already names the correct
+  source of truth: "does the Javadoc/JLS guarantee this cannot throw for *any*
+  input".
+- **Its class list is a different matter.** Which signatures a serious Java
+  verifier found worth modelling is a fact about priorities, not an expression,
+  and using it to order our own work is defensible. Even so, prefer deriving
+  that list from **our own corpus**: measure which unmodelled signatures
+  actually block obligations, which is both licence-clean and better targeted.
+
 ### T3.2 — Do not invest in scheduling
 
 Recording this as a deliberate negative, because it is where a plausible
@@ -1257,6 +1315,12 @@ run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
   Execution on the JVM* (competition contribution); *SPouT: Symbolic Path
   Recording during Testing*; *JDart: Portfolio Solving, Breadth-First Search
   and SMT-Lib Strings* (SV-COMP 2021).
+
+**The library problem**
+- Cordeiro, Kroening, Schrammel et al. *JBMC: A Bounded Model Checking Tool for
+  Java Bytecode*. arXiv 2302.02381; TACAS 2019 competition contribution.
+- `diffblue/java-models-library` — the Java Operational Model, OpenJDK 8 based,
+  GPL2 with classpath exception. **Read the licence note in T3.1b before using.**
 
 **Nullness**
 - Banerjee, Clapp, Sridharan. *NullAway: Practical Type-Based Null Safety for
