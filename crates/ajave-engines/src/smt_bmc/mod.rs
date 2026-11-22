@@ -1152,15 +1152,33 @@ impl Engine for SmtBmc {
             info!("smt-bmc: assumed {learned} bound(s) supplied by another engine");
         }
 
-        // EXPERIMENT KNOB, not for merge. `AJAVE_BMC_NO_VIOLATE=1` suppresses
-        // violation publication while keeping every proof this engine makes.
+        // Measurement knob, **off by default**. `AJAVE_BMC_NO_VIOLATE=1`
+        // suppresses violation publication while keeping every proof this
+        // engine makes.
         //
         // It exists to measure one number: of the 79 task-property pairs that
         // have nothing open and a witness JVM replay refutes, how many would be
         // TRUE if the false claim were simply absent? Disabling the other Under
         // engines cannot answer that, because these violations are this
         // engine's own -- measured on 10 of the 79, all still UNKNOWN with
-        // concolic, concrete, nra and float-search removed.
+        // concolic, concrete, nra and float-search removed. The answer, with
+        // this knob, was **0 of 79** (gh #133 and `changes.md` 2026-11-22).
+        //
+        // Kept rather than deleted, which needs justifying because it is an
+        // env-gated branch in a hot path:
+        //
+        // * It is the only way to make that experiment non-inert. Without it
+        //   the obvious ablation (`AJAVE_DISABLE=concolic,concrete,...`) leaves
+        //   the intervention unapplied and reports a vacuous "0 flipped" --
+        //   exactly the failure `docs/measurement-validity.md` is about, and
+        //   exactly how this knob came to be written.
+        // * Suppressing a violation can only ever weaken a verdict to UNKNOWN.
+        //   It removes evidence; it cannot manufacture a wrong answer in either
+        //   direction, so an accidental `=1` costs points and not correctness.
+        //
+        // Registered in `docs/plans/cooperation-options.md` with its
+        // measurement, per `CLAUDE.md`: an off-by-default mechanism is
+        // unfinished, and saying so is the condition for leaving it.
         let suppress_violations = std::env::var("AJAVE_BMC_NO_VIOLATE").as_deref() == Ok("1");
         let mut advanced = false;
         for (method, oid, witness) in violations {
