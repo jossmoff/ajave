@@ -287,6 +287,56 @@ which is not a Java property in SV-COMP 2026 — the only two are `valid-assert`
 and `no-runtime-exception`. It scores nothing and should be excluded from
 scoring runs.)*
 
+### 0.5c The corpus is not one population — and the real-world tasks are already here
+
+Task counts by family in `benchmarks/sv-comp`:
+
+| family | tasks | what it is |
+|---|---|---|
+| `autostub` | **244** | JDK API coverage — one TRUE and one FALSE per library method |
+| `jbmc-regression` | 177 | JBMC's own regression suite |
+| `securibench` | 113 | string/taint security benchmarks |
+| `jpf-regression` | 104 | Java PathFinder's suite |
+| `float-nonlinear-calculation` | 87 | transcendentals (`Math.sin` and friends) |
+| **`argv-tasks`** | **70** | **the ARG-V real-world GitHub population** |
+| `MinePump` | 64 | a product-line family |
+| `java-ranger-regression` | 41 | |
+| `algorithms` | 40 | the crafted sorting/graph tasks |
+| `float_unboundedloop` | 30 | |
+| `jayhorn-recursive` | 23 | |
+| `jdart-regression` | 16 | |
+| `objects`, `juliet-java`, `rtems-lock-model` | 24 | |
+
+Two things fall out of this that change the reading of everything above.
+
+**First: `autostub` is the single largest family at 244 tasks, and it confirms
+the "exactly twice" pattern from Part 10.** It is a generated JDK-API coverage
+suite — which is why `contract_of` has 277 method names, and why the
+boxed-primitive long tail is already modelled. A seventh of the corpus is
+library-model coverage, and we have already taken it.
+
+**Second: the ARG-V real-world tasks are already in our corpus**, as
+`argv-tasks` — 70 tasks, **104 task-property pairs, max score 171**. So the
+split measurement T3.1 asks for is not future work; it can be computed from any
+full run we have already done. That is the cheapest unexploited measurement
+available, and it is the one that decides whether §0.7's
+incorrectness-logic/bi-abduction avenue is capped at 59 points or is the main
+event.
+
+Their label distribution is also structurally different from the rest:
+
+| | TRUE | FALSE |
+|---|---|---|
+| `argv-tasks` `valid-assert` | 26 | 25 |
+| `argv-tasks` `no-runtime-exception` | 41 | 12 |
+| **corpus-wide** `valid-assert` | 312 | **701** |
+
+**The real-world tasks are label-balanced where the corpus overall is 69%
+FALSE on `valid-assert`.** So on realistic code, `valid-assert` TRUE answers
+matter far more than the corpus-wide figure suggests — which points the same
+way as §0.6 and §0.5b, and makes the invariant work *more* valuable for the
+corpus we are heading toward, not less.
+
 ### 0.6 Where the remaining headroom is, and it is not where the interesting work is
 
 Combining §0.2's decomposition of the official maximum (T = 1090 true tasks,
