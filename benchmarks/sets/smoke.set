@@ -335,3 +335,21 @@ ajave/engine-bmc/AMergedRegionMustNotLoseTheArmThatBreaksTheInvariant.yml valid-
 # corpus task it fired on; the second is the minimal program.
 sv-comp/algorithms/BellmanFord-FunUnsat01.yml no-runtime-exception
 ajave/engine-ai/ALiaProvedBoundMustNotPruneABitvectorSearch.yml no-runtime-exception
+
+# gh #130 follow-up: making the LIA relation faithful, and spending it.
+# `docs/proposals/lia-faithfulness.md`. Four canaries, all four already
+# correct before the change -- that is the point. The defects they name live in
+# the LIA encoder, and the engines answering them do not use it, so these pin
+# the mechanism against a future unstarving rather than record a gain.
+#
+# The float pair: a double comparison encoded as an integer comparison of bit
+# patterns, and `d2i` encoded as a widening identity. Both are FALSE tasks that
+# the old encoding makes look safe, so the failure mode is a wrong TRUE (-32).
+ajave/jvm-floats/ADoubleComparisonIsNotAnIntegerComparisonOfBitPatterns.yml valid-assert
+ajave/jvm-floats/ACastFromDoubleTruncatesTowardZero.yml valid-assert
+# The TRUE pair: the ghost length array, and the bound whose overflow-freedom
+# needs a relation. Guarded preservation makes the synthesis path strictly
+# stricter, so these exist to stay TRUE -- a regression means the guard leaked
+# out of the LIA path into an engine that was answering without it.
+ajave/engine-ai/TwoReadsOfOneArrayLengthAreTheSameNumber.yml valid-assert
+ajave/engine-ai/ALowerBoundSurvivesOnlyIfTheIncrementIsBounded.yml valid-assert

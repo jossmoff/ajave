@@ -599,6 +599,26 @@ pub fn encode_body_lia(
         ));
     }
 
+    // The ghost length array, declared unconditionally.
+    //
+    // In `declarations` rather than in `ghost_preamble` because the term
+    // `(select ghost_len a)` appears in the *transition relation* -- that is
+    // the whole point of P2, and an undeclared symbol makes z3 report an
+    // unknown constant and **drop the whole assertion**, which for `imc` and
+    // `cegar` would silently discard the transition relation. Its
+    // *assumptions* stay in `ghost_preamble`; a declaration is about sorts, an
+    // axiom is about values, and only the second changes what a consumer that
+    // does not opt in may conclude.
+    //
+    // Unconditional, not only for bodies that allocate: an array-typed
+    // parameter has no allocation site in this body and its length is still a
+    // thing an invariant may talk about.
+    let lenq = crate::invariant_check::LENGTH_ARRAY;
+    decls.push_str(&format!("(declare-fun {prefix}{lenq} () (Array Int Int))\n"));
+    decls.push_str(&format!("(declare-fun {prefix}{lenq}p () (Array Int Int))\n"));
+    let len_pre = format!("{prefix}{lenq}");
+    let len_post = format!("{prefix}{lenq}p");
+
     let array_sites = array_sites_of(body);
     let sites: std::collections::BTreeSet<ajave_ir::AllocSite> =
         array_sites.values().copied().collect();
@@ -636,10 +656,15 @@ pub fn encode_body_lia(
     //
     // `None` as the target means control leaves the method (return, throw,
     // halt), so there is no successor assertion to preserve.
-    let mut edge_clauses: Vec<(BlockId, Option<BlockId>, String)> = Vec::new();
+    let mut edge_clauses: Vec<EdgeClause> = Vec::new();
     let mut error_clauses: Vec<(ObligationId, String)> = Vec::new();
 
     for block in &body.blocks {
+        // Where this block's edges begin, so the per-edge fields can be filled
+        // in **one** place at the end of the iteration rather than at each of
+        // the six `push` sites. A field set at six sites is a field forgotten
+        // at one of them, and the one that matters is `overflow`.
+        let edges_before = edge_clauses.len();
         let mut var_exprs: Vec<String> = (0..n_vars).map(|i| format!("{prefix}v{i}")).collect();
         let mut path_conds: Vec<String> = Vec::new();
 
@@ -664,16 +689,14 @@ pub fn encode_body_lia(
         // variables, so the preservation check was `inv ∧ T ∧ ¬inv` over one
         // state — trivially UNSAT, and therefore confirming regardless. Two
         // defects, each concealing the other.
-        let is_wide = |op: &Operand| -> bool {
-            match op {
-                Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
-                Operand::Var(v) => body
-                    .vars
-                    .get(v.0 as usize)
-                    .map(|vi| vi.ty.is_wide())
-                    .unwrap_or(false),
-                _ => false,
-            }
+        // The operand's JVM type, which answers both of `Encoder`'s questions:
+        // the width an overflow condition is computed at, and whether the
+        // operand is floating-point. The second is what enforces the float
+        // quarantine (`docs/proposals/lia-faithfulness.md` §2.2); this closure
+        // used to answer only the first, and that is why floats leaked into
+        // integer terms here.
+        let operand_ty = |op: &Operand| -> Option<ajave_ir::Ty> {
+            smt_text::operand_ty(body, op)
         };
 
         // Current symbolic value of each site's array, starting at its
@@ -711,6 +734,27 @@ pub fn encode_body_lia(
                             let o = smt_text::encode_operand(&theory, obj, &var_exprs);
                             Some(format!("(select {cur} {o})"))
                         }
+                        // `a.length`, as a read of the ghost array at the
+                        // receiver. Before this there was no arm at all: it
+                        // fell through to `Encoder::rvalue`'s `_ => fresh`, so
+                        // two reads of one array's length were *unrelated*
+                        // integers, `new int[n]` did not relate the array to
+                        // `n`, and the JVMS guarantee `length >= 0` was absent.
+                        // `invariant_check::render` therefore had to decline
+                        // `Expr::Length`, which dropped every length fact the
+                        // interval domain publishes.
+                        //
+                        // This strengthens `transition`, which `imc` and
+                        // `cegar` consume, and the strengthening is sound: for
+                        // a fixed receiver `(select ghost_len a)` is as
+                        // unconstrained as the fresh binder it replaces, so the
+                        // only states it removes are ones where a single array
+                        // has two different lengths, and those are not JVM
+                        // states.
+                        Rvalue::ArrayLength(o) => {
+                            let r = smt_text::encode_operand(&theory, o, &var_exprs);
+                            Some(format!("(select {len_pre} {r})"))
+                        }
                         Rvalue::ArrayLoad { arr, idx } => {
                             match operand_site(arr, &array_sites)
                                 .and_then(|st| arr_exprs.get(&st).cloned())
@@ -726,8 +770,28 @@ pub fn encode_body_lia(
                     };
                     let expr = match expr {
                         Some(e) => e,
-                        None => enc.rvalue(rv, &var_exprs, &is_wide),
+                        None => enc.rvalue(rv, &var_exprs, &operand_ty),
                     };
+                    // `new T[n]` fixes the array's length to `n`, and on the
+                    // normal continuation that length is non-negative.
+                    //
+                    // The second is not an extra assumption about `n`: if
+                    // `n < 0` the JVM throws `NegativeArraySizeException` and
+                    // there is no array, so the normal successor is
+                    // unreachable. The throwing behaviour stays
+                    // over-approximated by the block's exceptional edge (whose
+                    // clause is `true`) and by the `NegArraySize` obligation's
+                    // error formula.
+                    //
+                    // In `path_conds` for the same reason the freshness facts
+                    // are: an error formula snapshots them at its `Check`, so a
+                    // fact added after the loop never reaches it, and these
+                    // hold from the allocation onward.
+                    if let Rvalue::NewArray { len, .. } = rv {
+                        let n = smt_text::encode_operand(&theory, len, &var_exprs);
+                        path_conds.push(format!("(= (select {len_pre} {expr}) {n})"));
+                        path_conds.push(format!("(>= (select {len_pre} {expr}) 0)"));
+                    }
                     if matches!(rv, Rvalue::New { .. } | Rvalue::NewArray { .. }) {
                         // Pushed *here*, not after the loop: an error formula
                         // snapshots `path_conds` at its `Check`, so a
@@ -802,12 +866,14 @@ pub fn encode_body_lia(
         // are 32- and 64-bit: `x + 1 > x` holds in the encoding and fails on a
         // JVM. The conditions come from `Encoder`, shared with CHC so the two
         // cannot drift (#77).
-        if !enc.side_conditions.is_empty() {
-            let ovf = if enc.side_conditions.len() == 1 {
-                enc.side_conditions[0].clone()
-            } else {
-                format!("(or {})", enc.side_conditions.join(" "))
-            };
+        let block_overflow: Option<String> = if enc.side_conditions.is_empty() {
+            None
+        } else if enc.side_conditions.len() == 1 {
+            Some(enc.side_conditions[0].clone())
+        } else {
+            Some(format!("(or {})", enc.side_conditions.join(" ")))
+        };
+        if let Some(ovf) = block_overflow.clone() {
             let mut conds = path_conds.clone();
             conds.push(ovf);
             let cond = if conds.len() == 1 {
@@ -874,7 +940,7 @@ pub fn encode_body_lia(
                         Terminator::Goto(t) => Some(*t),
                         _ => None,
                     };
-                    edge_clauses.push((block.id, to, clause.clone()));
+                    edge_clauses.push(EdgeClause::new(block.id, to, clause.clone()));
                     block_clauses.push(clause);
                 }
             }
@@ -889,7 +955,7 @@ pub fn encode_body_lia(
                 if !then_conds.is_empty() {
                     let c = format!("(and {})", then_conds.join(" "));
                     if let Terminator::Branch { then_, .. } = &block.term {
-                        edge_clauses.push((block.id, Some(*then_), c.clone()));
+                        edge_clauses.push(EdgeClause::new(block.id, Some(*then_), c.clone()));
                     }
                     block_clauses.push(c);
                 }
@@ -901,7 +967,7 @@ pub fn encode_body_lia(
                 if !else_conds.is_empty() {
                     let c = format!("(and {})", else_conds.join(" "));
                     if let Terminator::Branch { else_, .. } = &block.term {
-                        edge_clauses.push((block.id, Some(*else_), c.clone()));
+                        edge_clauses.push(EdgeClause::new(block.id, Some(*else_), c.clone()));
                     }
                     block_clauses.push(c);
                 }
@@ -920,7 +986,7 @@ pub fn encode_body_lia(
                     case_conds.push(format!("(= {} {})", val_expr, cv));
                     case_conds.extend(assigns.iter().cloned());
                     let c = format!("(and {})", case_conds.join(" "));
-                    edge_clauses.push((block.id, Some(*target), c.clone()));
+                    edge_clauses.push(EdgeClause::new(block.id, Some(*target), c.clone()));
                     block_clauses.push(c);
                     neg_cases.push(format!("(not (= {} {}))", val_expr, cv));
                 }
@@ -932,7 +998,7 @@ pub fn encode_body_lia(
                 if !def_conds.is_empty() {
                     let c = format!("(and {})", def_conds.join(" "));
                     if let Terminator::Switch { default, .. } = &block.term {
-                        edge_clauses.push((block.id, Some(*default), c.clone()));
+                        edge_clauses.push(EdgeClause::new(block.id, Some(*default), c.clone()));
                     }
                     block_clauses.push(c);
                 }
@@ -968,8 +1034,133 @@ pub fn encode_body_lia(
         // `transition`, keeps this hole for single-point claims — recorded as
         // an issue rather than fixed silently here.
         for exc in &block.exceptional {
-            edge_clauses.push((block.id, Some(exc.target), "true".to_string()));
+            edge_clauses.push(EdgeClause::new(block.id, Some(exc.target), "true".to_string()));
         }
+
+        // The per-edge fields, in one place for every edge out of this block.
+        //
+        // `ghost`: the length array is immutable (JVMS §6.5), so its only
+        // threading constraint is the identity. It is carried here rather than
+        // through `mk_assign` so that `transition` -- which `imc` and `cegar`
+        // consume -- is not widened with a post-state they never read.
+        //
+        // `overflow`: the block's own arithmetic conditions, which
+        // `preservation_query` turns into a second disjunct of the transition
+        // with an unconstrained post-state — overflow as an exceptional edge.
+        // The exceptional edges get it too, which is inert there: their clause
+        // is already `true`, and `true ∨ ovf` is `true`.
+        for e in edge_clauses[edges_before..].iter_mut() {
+            e.ghost.push(format!("(= {len_post} {len_pre})"));
+            e.overflow = block_overflow.clone();
+        }
+    }
+
+    // `ghost_preamble`: the assumptions the *edge* encoding rests on.
+    //
+    // Kept out of `declarations` so `imc` and `cegar` are unaffected. They are
+    // sound for them too -- every axiom here removes only states no JVM can
+    // represent -- but "sound for them" is not "measured for them", and an
+    // over-approximating engine's proofs are what would change.
+    let mut ghost_preamble = String::new();
+
+    // # Integer range axioms, and why (P) is vacuous without them
+    //
+    // LIA integers are unbounded and nothing here said otherwise. So guarded
+    // preservation on `x := x + 1` asks whether `x + 1 > 2147483647` is
+    // possible given whatever the invariant says, and in LIA a bound like
+    // `x < n` does not help because `n` may be 2^40. It is always possible, so
+    // every candidate dies and the empty map is the only fixpoint for any
+    // method containing arithmetic. P3 and P4 are only meaningful together.
+    //
+    // **Soundness.** Every value a JVM local of type `int` can hold lies in
+    // [-2^31, 2^31-1] (JVMS §2.3.1), and a `long` in the 64-bit range, so the
+    // axiom removes no reachable state. It restricts the LIA state space to a
+    // superset of -- in fact, on these coordinates, exactly -- the JVM's. An
+    // over-approximating proof over a superset is sound.
+    //
+    // It is also a precision *gain* for initiation: an entry assertion now
+    // only has to hold of states a JVM can represent.
+    //
+    // Three deliberate omissions, each conservative (see
+    // `docs/proposals/lia-faithfulness.md` §4):
+    //
+    // * **Binders are not constrained.** `Encoder::binders` records a sort,
+    //   not a width, and `LiaTheory::sort_of` answers `Int` for both, so the
+    //   information is not recoverable here. Unconstrained is loose, hence
+    //   sound -- and the axiom reaches a binder anyway exactly where it is
+    //   justified: `v := binder` on an edge yields `v' = binder` beside
+    //   `range(v')`, which bounds the binder because it was stored into a
+    //   typed variable.
+    // * **References are not constrained.** `Ty::Ref`/`Str` are abstract
+    //   identifiers with `0` for null, not JVM integers. Bounding them would
+    //   be a claim about a representation this encoding invented.
+    // * **Array and field cells are not constrained.** That needs a
+    //   quantifier, and a quantifier in every query risks `unknown`, which
+    //   refuses the proof.
+    let range_of = |t: ajave_ir::Ty| -> Option<(&'static str, &'static str)> {
+        match t {
+            // `Ty::Int` also carries byte, short, char and boolean; the 32-bit
+            // range is sound for all of them, just not tight.
+            ajave_ir::Ty::Int => Some(("(- 2147483648)", "2147483647")),
+            ajave_ir::Ty::Long => Some(("(- 9223372036854775808)", "9223372036854775807")),
+            ajave_ir::Ty::Float | ajave_ir::Ty::Double => None,
+            ajave_ir::Ty::Ref | ajave_ir::Ty::Str => None,
+        }
+    };
+    //
+    // # Pre-state only, and this is the subtle part
+    //
+    // The axiom must **not** be asserted of `v{i}p`. The post-state is where
+    // LIA and the JVM disagree: this relation says `xp = x + 1` where a JVM
+    // says `xp = wrap(x + 1)`, so `xp` is only the JVM's value when nothing
+    // overflowed. Asserting `range(xp)` beside `xp = x + 1` therefore does not
+    // *state a fact* — it **removes the overflowing transition from the
+    // model**, which is the unsound "assume no overflow" that
+    // `preservation_query`'s doc warns about, arriving through the axioms
+    // instead of through the query.
+    //
+    // It is also self-concealing: with `range(xp)` present, `ovf` is
+    // unsatisfiable on every edge, so the guard this plan exists to add
+    // silently does nothing and `0 <= sum` is "preserved" by `sum = sum + 2`
+    // again. `an_overflowing_increment_does_not_preserve_a_lower_bound` is the
+    // test that would fail.
+    //
+    // A *reference*'s post-state is not affected: references do not wrap, so
+    // the length axioms below are asserted of both states.
+    for (i, vi) in body.vars.iter().enumerate() {
+        if let Some((min, max)) = range_of(vi.ty) {
+            let name = format!("{prefix}v{i}");
+            ghost_preamble.push_str(&format!(
+                "(assert (and (<= {min} {name}) (<= {name} {max})))\n"
+            ));
+        }
+    }
+
+    // # Array lengths are non-negative, instantiated at each reference
+    //
+    // The JVMS invariant for every array that exists. The allocation-site
+    // facts in `path_conds` cover arrays this body creates; an array-typed
+    // *parameter* has no allocation site here, so without these nothing says
+    // its length is non-negative and no `ArrayBounds` lower bound is provable.
+    //
+    // Ground instances rather than `(forall ((r Int)) (>= (select ghost_len r) 0))`
+    // deliberately: a quantifier in every query risks turning `unsat` into
+    // `unknown`, and `unknown` refuses the proof.
+    //
+    // A non-array reference's cell is constrained too, which is harmless: the
+    // cell is otherwise unconstrained and nothing reads it, because
+    // `Expr::Length` is only produced for references the interval domain
+    // tracked as arrays.
+    for (i, vi) in body.vars.iter().enumerate() {
+        if vi.ty != ajave_ir::Ty::Ref {
+            continue;
+        }
+        ghost_preamble.push_str(&format!(
+            "(assert (>= (select {len_pre} {prefix}v{i}) 0))\n"
+        ));
+        ghost_preamble.push_str(&format!(
+            "(assert (>= (select {len_post} {prefix}v{i}p) 0))\n"
+        ));
     }
 
     // The transition relation is the disjunction of all block clauses.
@@ -990,17 +1181,151 @@ pub fn encode_body_lia(
         edge_clauses,
         error_formulas,
         n_vars,
+        ghost_preamble,
+    }
+}
+
+/// One CFG edge's transition, with everything a query over it must not forget.
+///
+/// # Why this is a struct and not a tuple
+///
+/// Checking an invariant across an edge needs three things beyond the clause:
+/// the ghost facts that hold on it, the overflow conditions the invariant must
+/// exclude, and the axioms the ghost sorts rest on. A consumer that assembles
+/// that query by hand and forgets the overflow disjunct gets the **unsound**
+/// behaviour, silently -- which is how `algorithms/BellmanFord-FunUnsat01`
+/// became a wrong TRUE. Two consumers assembled it by hand and a third was
+/// coming.
+///
+/// So the data carries its own obligations, and `LiaEncoding::preservation_query`
+/// is the only code in the tree that writes a preservation script. See
+/// `docs/proposals/lia-faithfulness.md` §6, and `CLAUDE.md` on `Bounded { k }`
+/// for the general form of this mistake.
+pub struct EdgeClause {
+    pub from: ajave_ir::BlockId,
+    /// `None` where control leaves the method (return, throw, halt), so there
+    /// is no successor assertion to preserve.
+    pub to: Option<ajave_ir::BlockId>,
+    /// The transition relation restricted to this edge. **Byte-identical to
+    /// the matching disjunct of `transition`**, which `imc` and `cegar`
+    /// consume; `edge_clauses_are_the_disjuncts_of_transition` pins that.
+    pub clause: String,
+    /// Extra conjuncts true of this edge that `transition` deliberately omits,
+    /// because widening `transition` would change what `imc` and `cegar`
+    /// reason about: ghost-length threading and allocation-site length facts.
+    pub ghost: Vec<String>,
+    /// This edge's arithmetic overflow conditions, as one disjunct, over the
+    /// **pre**-state. `None` when the source block has no overflowing
+    /// arithmetic.
+    ///
+    /// A consumer may not assume this false. It must require the invariant to
+    /// *exclude* it — see `preservation_query`.
+    pub overflow: Option<String>,
+}
+
+impl EdgeClause {
+    fn new(from: ajave_ir::BlockId, to: Option<ajave_ir::BlockId>, clause: String) -> Self {
+        EdgeClause {
+            from,
+            to,
+            clause,
+            ghost: Vec::new(),
+            overflow: None,
+        }
     }
 }
 
 pub struct LiaEncoding {
     pub declarations: String,
     pub transition: String,
-    /// `(from, to, clause)` per CFG edge; `to` is `None` where control leaves
-    /// the method. The disjunction of the clauses is `transition`.
-    pub edge_clauses: Vec<(ajave_ir::BlockId, Option<ajave_ir::BlockId>, String)>,
+    /// One entry per CFG edge. The disjunction of the `clause` fields is
+    /// `transition`.
+    pub edge_clauses: Vec<EdgeClause>,
     pub error_formulas: Vec<(ajave_ir::ObligationId, String)>,
     pub n_vars: usize,
+    /// Declarations and assumptions the *edge* encoding needs and `transition`
+    /// does not: the ghost length array, and the integer range axioms.
+    ///
+    /// Separate from `declarations` so that formula stays byte-identical for
+    /// `imc` and `cegar`. Reached through `edge_preamble`, never directly.
+    pub ghost_preamble: String,
+}
+
+impl LiaEncoding {
+    /// Everything a query over the edge encoding must declare and assume.
+    pub fn edge_preamble(&self) -> String {
+        format!("{}{}", self.declarations, self.ghost_preamble)
+    }
+
+    /// The initiation query for an assertion at the entry block.
+    ///
+    /// A method's entry state is its unconstrained parameters, so there is no
+    /// precondition to assume: the assertion must be **valid**, which is UNSAT
+    /// of its negation. The range axioms make this weaker, and therefore more
+    /// provable, than it was: the assertion now only has to hold of states a
+    /// JVM can represent.
+    pub fn initiation_query(&self, assertion: &str) -> String {
+        format!(
+            "{}\n(assert (not {assertion}))\n(check-sat)\n",
+            self.edge_preamble()
+        )
+    }
+
+    /// The preservation query for `post` at `edge.to`, assuming `pre` at
+    /// `edge.from`. **UNSAT means preserved, on a JVM and not only in LIA.**
+    ///
+    /// # The shape
+    ///
+    /// `pre ∧ ghost ∧ (clause ∨ ovf) ∧ ¬post′`
+    ///
+    /// # Why the overflow condition is a *disjunct of the transition*
+    ///
+    /// Overflow is an exceptional edge in disguise, and the encoding already
+    /// knows how to model one of those: with an **unconstrained post-state**.
+    ///
+    /// This relation says `xp = x + 1` where a JVM says `xp = wrap(x + 1)`, so
+    /// the clause describes the JVM's step only when nothing overflowed. When
+    /// something did, we know nothing about the successor beyond that it is
+    /// some state — which is exactly `ovf` as a disjunct with no post-state
+    /// constraint. The assertion at the target then has to hold of an
+    /// arbitrary state, i.e. be valid, precisely as it must across a `throw`.
+    ///
+    /// Two shapes were tried before this one and both are wrong:
+    ///
+    /// * `pre ∧ clause ∧ ¬ovf ∧ ¬post′` — *assuming* no overflow. Unsound: it
+    ///   proves the invariant of overflow-free runs and says nothing about the
+    ///   run that wraps.
+    /// * `pre ∧ clause ∧ (¬post′ ∨ ovf)` — requiring the invariant to
+    ///   *exclude* overflow. Sound, but needlessly destructive: it deletes
+    ///   every candidate at the target of any edge whose arithmetic the source
+    ///   cannot bound, including candidates that are **valid** and so cannot
+    ///   be broken by a wrap. A tautology about a variable the block never
+    ///   touches died under it.
+    ///
+    /// The form here is sound for both cases of the induction. If the JVM step
+    /// does not overflow it satisfies `clause`, so UNSAT gives `post′`. If it
+    /// does, the pre-state satisfies `ovf` — which depends on the pre-state
+    /// alone — so the real `(s, s′)` pair satisfies the disjunction anyway and
+    /// UNSAT gives `post′` again. See `docs/proposals/lia-faithfulness.md` §3,
+    /// and `smt_text::lia_overflow_cond` for the arithmetic.
+    ///
+    /// `ghost` is asserted **outside** the disjunction: an array's length is
+    /// immutable, so `ghost_lenp = ghost_len` holds across a wrapped step as
+    /// much as a faithful one, and putting it inside would throw the fact away
+    /// exactly where it is still true.
+    pub fn preservation_query(&self, edge: &EdgeClause, pre: &str, post: &str) -> String {
+        let mut script = self.edge_preamble();
+        script.push_str(&format!("\n(assert {pre})\n"));
+        for g in &edge.ghost {
+            script.push_str(&format!("(assert {g})\n"));
+        }
+        match &edge.overflow {
+            Some(ovf) => script.push_str(&format!("(assert (or {} {ovf}))\n", edge.clause)),
+            None => script.push_str(&format!("(assert {})\n", edge.clause)),
+        }
+        script.push_str(&format!("(assert (not {post}))\n(check-sat)\n"));
+        script
+    }
 }
 
 /// Extract predicate atoms from an interpolant formula string.
@@ -1072,4 +1397,167 @@ fn split_sexp_args(s: &str) -> Vec<String> {
         args.push(arg.to_string());
     }
     args
+}
+
+#[cfg(test)]
+mod lia_encoding_tests {
+    use super::*;
+    use crate::houdini::tests_support::counting_loop;
+
+    /// `transition` is what `imc` and `cegar` reason about, and `EdgeClause`
+    /// exists to carry per-edge information *without* changing it. This pins
+    /// the relationship the struct's doc asserts: every clause is a disjunct
+    /// of `transition` and every disjunct is some edge's clause.
+    ///
+    /// Checked as a multiset, because two edges may legitimately carry the
+    /// same clause (two `case` labels onto one target), and as exact strings,
+    /// because a difference of a single space would mean two encoders.
+    #[test]
+    fn edge_clauses_are_the_disjuncts_of_transition() {
+        let body = counting_loop();
+        let enc = encode_body_lia(&body, &[], "");
+
+        // Exceptional edges are deliberately absent from `transition`; this
+        // fixture has none, so the two sets must match exactly.
+        assert!(
+            body.blocks.iter().all(|b| b.exceptional.is_empty()),
+            "fixture must have no exceptional edges for this comparison"
+        );
+
+        let mut from_edges: Vec<&str> = enc
+            .edge_clauses
+            .iter()
+            .map(|e| e.clause.as_str())
+            .collect();
+        from_edges.sort_unstable();
+
+        // `transition` is `(or c1 c2 ...)`; recover the disjuncts by matching
+        // parentheses rather than by splitting, since the clauses contain
+        // spaces and nested parens.
+        let t = enc.transition.as_str();
+        assert!(t.starts_with("(or "), "unexpected shape: {t}");
+        let inner = &t[4..t.len() - 1];
+        let mut disjuncts: Vec<&str> = Vec::new();
+        let (mut depth, mut start) = (0i32, 0usize);
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => {
+                    if depth == 0 {
+                        start = i;
+                    }
+                    depth += 1;
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        disjuncts.push(&inner[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        disjuncts.sort_unstable();
+        assert_eq!(
+            from_edges, disjuncts,
+            "an edge clause is not a disjunct of `transition`, so `imc` and \
+             `cegar` are reasoning about a different relation from the checker"
+        );
+    }
+
+    /// The trap that concealed the overflow guard for one iteration of this
+    /// work, as a test.
+    ///
+    /// A range axiom on the **post**-state does not state a fact: this
+    /// relation says `xp = x + 1` where a JVM says `xp = wrap(x + 1)`, so
+    /// `range(xp)` beside `xp = x + 1` removes the overflowing transition from
+    /// the model instead of describing it. With it present every `ovf` is
+    /// unsatisfiable and `an_overflowing_increment_does_not_preserve_a_lower_bound`
+    /// starts passing for the wrong reason.
+    #[test]
+    fn range_axioms_are_asserted_of_the_pre_state_only() {
+        let enc = encode_body_lia(&counting_loop(), &[], "");
+        assert!(
+            enc.ghost_preamble.contains("(<= v0 2147483647)"),
+            "the pre-state range axiom is what makes the guard non-vacuous: {}",
+            enc.ghost_preamble
+        );
+        assert!(
+            !enc.ghost_preamble.contains("v0p"),
+            "a post-state range axiom silently assumes no overflow: {}",
+            enc.ghost_preamble
+        );
+    }
+
+    /// The guard reaches the query as a disjunct of the transition, not as a
+    /// disjunct of the negated conclusion. Those differ exactly where the
+    /// target's assertion is valid — see `preservation_query`'s doc.
+    #[test]
+    fn the_overflow_condition_is_a_disjunct_of_the_transition() {
+        let enc = encode_body_lia(&counting_loop(), &[], "");
+        // bb2 is `x := x + 1`, the only arithmetic in the fixture.
+        let edge = enc
+            .edge_clauses
+            .iter()
+            .find(|e| e.from == ajave_ir::BlockId(2))
+            .expect("bb2 has an outgoing edge");
+        let ovf = edge
+            .overflow
+            .as_deref()
+            .expect("an int add must carry an overflow condition");
+        assert!(ovf.contains("2147483647"), "32-bit bound: {ovf}");
+
+        let q = enc.preservation_query(edge, "true", "(<= 0 v0p)");
+        assert!(
+            q.contains(&format!("(or {} {ovf})", edge.clause)),
+            "the overflow condition must be disjoined with the clause: {q}"
+        );
+        assert!(
+            q.contains("(assert (not (<= 0 v0p)))"),
+            "the conclusion is negated on its own: {q}"
+        );
+    }
+
+    /// A block with no arithmetic carries no overflow condition, so the guard
+    /// costs nothing where there is nothing to guard.
+    #[test]
+    fn a_block_without_arithmetic_carries_no_overflow_condition() {
+        let enc = encode_body_lia(&counting_loop(), &[], "");
+        // bb0 assigns a constant; bb1 compares. Neither adds, subtracts or
+        // multiplies, which is what `smt_text::overflowing` admits.
+        for b in [0u32, 1] {
+            for e in enc
+                .edge_clauses
+                .iter()
+                .filter(|e| e.from == ajave_ir::BlockId(b))
+            {
+                assert!(
+                    e.overflow.is_none(),
+                    "bb{b} has no overflowing arithmetic, got {:?}",
+                    e.overflow
+                );
+            }
+        }
+    }
+
+    /// Every edge carries the ghost length identity, including the ones that
+    /// leave the method — a length is immutable however control departs.
+    #[test]
+    fn every_edge_threads_the_ghost_length_array() {
+        let enc = encode_body_lia(&counting_loop(), &[], "");
+        assert!(!enc.edge_clauses.is_empty());
+        for e in &enc.edge_clauses {
+            assert!(
+                e.ghost.iter().any(|g| g == "(= ghost_lenp ghost_len)"),
+                "bb{} -> {:?} is missing the length identity: {:?}",
+                e.from.0,
+                e.to,
+                e.ghost
+            );
+        }
+        assert!(
+            enc.declarations.contains("(declare-fun ghost_len () (Array Int Int))"),
+            "the term appears in `transition`, so the declaration must be in \
+             `declarations` or z3 drops the assertion that uses it"
+        );
+    }
 }

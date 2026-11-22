@@ -248,15 +248,20 @@ impl Engine for HoudiniEngine {
                 status,
                 scope: Scope::Method(mk.clone()),
             };
-            // `INT_WRAPPING`, declared rather than discovered.
+            // `INT_WRAPPING`, still declared, and now conservatively so.
             //
-            // Preservation is checked in LIA, which does not wrap where Java's
-            // `int` does, so every arithmetic conclusion here holds only on an
-            // overflow-free path. Publishing this as `EXACT` — which
-            // `publish` defaults to — is what let a consumer prune on it and
-            // produce a wrong TRUE. "Declare approximations honestly.
-            // Under-declaring means a more faithful engine never gets the
-            // obligation back; over-declaring only wastes time."
+            // Guarded preservation means the arithmetic conclusions in this
+            // map no longer rest on an overflow-free path: a candidate whose
+            // wrap the map cannot exclude has been deleted. On that argument
+            // the honest tag would be `EXACT`.
+            //
+            // It stays `INT_WRAPPING` until that argument is measured rather
+            // than reasoned. The tag is what decides whether a more faithful
+            // engine ever gets the obligation back, and `CLAUDE.md` gives the
+            // tie-break: "Under-declaring means a more faithful engine never
+            // gets the obligation back; over-declaring only wastes time, so
+            // when in doubt, declare." Dropping it is a one-line change to
+            // make once there is a number behind it.
             if bb
                 .publish_with(
                     EngineId("houdini"),
@@ -278,24 +283,31 @@ impl Engine for HoudiniEngine {
                 r.queries
             );
 
-            // **No discharge, for now.**
+            // **Still no discharge, and the reason has changed.**
             //
-            // The map is inductive in LIA, and a discharge is a claim about a
-            // JVM. `map_implies_safety` would assert the map against the
-            // obligation's error formula, so a bound that only survives
-            // without wrapping would close an obligation that can really fire
-            // — the same defect that reached a consumer through the hint path,
-            // arriving by a shorter route.
+            // The blocker named here — "a bound that only survives without
+            // wrapping would close an obligation that can really fire" — is
+            // fixed. `LiaEncoding::preservation_query` now carries the
+            // overflow condition as a disjunct of the transition, so a
+            // surviving candidate is one that holds on a JVM and not only in
+            // LIA (`docs/proposals/lia-faithfulness.md` §3). A map reaching
+            // this point has been through that, twice: once as elimination's
+            // stopping condition and once as `check_map_inductive`.
             //
-            // The repair is known, and is the one `lia_overflow_cond`'s doc
-            // describes for error conditions: carry the overflow disjunct
-            // through preservation, so a surviving candidate is one that holds
-            // *and* cannot overflow. That is #77's problem in a new place and
-            // is not done here.
+            // What is not done is the *measurement*. Turning on a discharge
+            // path is a change to what may be answered TRUE, and `CLAUDE.md`
+            // is explicit that such a change must be measured on valid-assert
+            // **and** no-runtime-exception before it is believed — the
+            // `all_calls_resolved` loosening scored a clean-looking +22 on NRE
+            // while putting eight wrong TRUEs on VA. The first number to have
+            // is how often a non-trivial map survives at all now that the
+            // guard deletes bounds whose overflow-freedom needs a relation the
+            // pool cannot express.
             //
-            // So this engine publishes and does not conclude. That makes it a
-            // producer with no consumer, which is recorded in
-            // `docs/contracts.md` rather than left to be discovered.
+            // So this engine still publishes and does not conclude, and it is
+            // still a producer with no consumer, recorded in
+            // `docs/contracts.md`. The difference is that the next step is a
+            // measurement rather than a soundness repair.
         }
 
         if advanced {

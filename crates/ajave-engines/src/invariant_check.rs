@@ -77,6 +77,28 @@ pub fn depth_array_name(f: &ajave_ir::FieldKey) -> String {
     format!("depth_{}_{}", f.class.replace('/', "_"), f.name)
 }
 
+/// The SMT array holding every array's length, indexed by the **reference**.
+///
+/// `(select ghost_len r)` is `r.length`. McCarthy's theory of arrays (1962)
+/// applied the way Burstall (1972) applies it to fields, which is how Boogie,
+/// VCC, Why3 and Dafny all encode array lengths, and how `field_array_name`
+/// already encodes fields here: aliasing is the solver's problem, and two
+/// references to one array have one length without any points-to analysis.
+///
+/// Indexed by reference and not by `AllocSite` because that is what the claim
+/// language says. `Expr::Length { obj }` is a fact about a reference, and
+/// `ai.rs` gives the reason — it "survives reassignment", unlike
+/// `array_len_var`, which is a fact about a local and dies with it.
+///
+/// **Immutable.** JVMS §6.5: `newarray` takes the length as an operand and
+/// `arraylength` returns it unchanged. Nothing writes this array, so the only
+/// threading constraint is the identity `ghost_lenp = ghost_len`, which each
+/// `EdgeClause` carries in its `ghost` field.
+///
+/// Named with a `ghost_` prefix so it cannot collide with a sanitised field
+/// name: `field_array_name` emits `fld_*` and `depth_array_name` `depth_*`.
+pub const LENGTH_ARRAY: &str = "ghost_len";
+
 /// `java/lang/Object` is not an SMT-LIB symbol.
 pub fn field_array_name(f: &ajave_ir::FieldKey) -> String {
     let sanitise = |t: &str| {
@@ -192,17 +214,26 @@ pub(crate) fn render(e: &Expr, post: bool) -> Option<String> {
         // means the producer published a claim it had no business making, and
         // the safe reading of a claim we cannot interpret is to refuse the
         // discharge rather than to guess at it.
-        Expr::Depth { field, obj } => {
-            if !(field.desc.starts_with('L') || field.desc.starts_with('[')) {
-                return None;
-            }
-            format!(
-                "(select {}{} {})",
-                depth_array_name(field),
-                if post { "p" } else { "" },
-                render(obj, post)?
-            )
-        }
+        // Declined, and this is a *correction* rather than a limit.
+        //
+        // This arm used to emit `(select depth_C_f obj)`, and **nothing
+        // declares that array**: `depth_array_name` occurs twice in the tree
+        // and both are in this file. z3 reports an unknown constant, drops the
+        // whole assertion, and answers on what is left -- the mechanism
+        // `interpolation.rs` records. The direction happens to be
+        // conservative (a query missing its assertion comes back `sat`, which
+        // deletes a candidate and refuses a discharge), but it is exactly the
+        // fault the comments on `Select` and `Field` exist to prevent: a
+        // checker reading a symbol the transition relation never writes
+        // confirms invariants about nothing.
+        //
+        // `Expr::Depth` has **zero producers**, so declining costs nothing
+        // today. Building a second ghost model on speculation is what
+        // `CLAUDE.md` refuses: "Adding a variant to `Artifact` with neither a
+        // producer nor a consumer is not design, it is a comment with a type."
+        // When an engine maintains depth the way `ghost_len` is now
+        // maintained, this arm comes back with it.
+        Expr::Depth { .. } => return None,
         // Null is the integer 0, which is the representation every encoder in
         // the tree already chose for it -- `smt_encode` emits
         // `bv_const(0, 32)`, `concrete` and `concurrent_exec` use `Ref(0)`,
@@ -218,22 +249,28 @@ pub(crate) fn render(e: &Expr, post: bool) -> Option<String> {
         // ordering two references -- and is discharged here, at the one place
         // that is allowed to know how references are represented.
         Expr::Null => "0".to_string(),
-        // Declined, and this is the honest answer rather than a gap.
+        // `r.length`, as a read of the ghost length array at the reference.
         //
-        // `encode_body_lia` does not encode `Rvalue::ArrayLength`: there is no
-        // ghost length array in the transition relation for a length claim to
-        // read. Rendering one would mean inventing a name the transition
-        // relation never writes, so preservation would be a question about a
-        // symbol nothing constrains -- which is exactly the failure the
-        // comments on `Select` and `Field` above exist to prevent, and it
-        // would confirm length invariants about nothing.
+        // The naming must match `encode_body_lia`'s exactly, for the same
+        // reason `Select` and `Field` must, which is why it comes from the
+        // shared `LENGTH_ARRAY` rather than being spelled here.
         //
-        // So a length claim refuses the discharge until the LIA encoder tracks
-        // ghost lengths the way both CHC encoders already do. `Expr::Length`
-        // is still worth having before then: engines that *do* model lengths
-        // (CHC, and the interval domain's own `array_lens`) can exchange the
-        // fact, and the obligation is simply not certifiable yet.
-        Expr::Length { .. } => return None,
+        // The post-state reads `ghost_lenp` even though an array's length is
+        // immutable, because the *receiver* is not: `i < a.length` after the
+        // step is `(< ip (select ghost_lenp ap))`. Each `EdgeClause` carries
+        // `(= ghost_lenp ghost_len)` in its `ghost` field, so the immutability
+        // is stated as a constraint in the relation rather than inferred here.
+        //
+        // This arm declined until the LIA encoder tracked lengths at all. It
+        // was not a gap that could be closed from this side: rendering a name
+        // the transition relation never writes would have made preservation a
+        // question about an unconstrained symbol.
+        Expr::Length { obj } => format!(
+            "(select {}{} {})",
+            LENGTH_ARRAY,
+            if post { "p" } else { "" },
+            render(obj, post)?
+        ),
         // A double is held as a bit pattern and means nothing in LIA; an
         // `Apply` is an unmodelled library call by construction.
         Expr::Double(_) | Expr::Apply { .. } => return None,
@@ -346,10 +383,7 @@ pub fn check_map_inductive(body: &Body, map: &InvariantMap, solver: &str) -> Cer
         None => return CertResult::Inconclusive,
         Some(None) => {}
         Some(Some(e)) => {
-            let script = format!(
-                "{}\n(assert (not {e}))\n(check-sat)\n",
-                enc.declarations
-            );
+            let script = enc.initiation_query(&e);
             match is_unsat(solver, &script) {
                 Some(true) => {}
                 Some(false) => {
@@ -362,24 +396,25 @@ pub fn check_map_inductive(body: &Body, map: &InvariantMap, solver: &str) -> Cer
     }
 
     // 2. Preservation, one query per edge.
-    for (from, to, clause) in &enc.edge_clauses {
-        let Some(to) = to else { continue };
-        let (pre, post) = (at(*from, false), at(*to, true));
+    for edge in &enc.edge_clauses {
+        let Some(to) = edge.to else { continue };
+        let (pre, post) = (at(edge.from, false), at(to, true));
         let (Some(pre), Some(post)) = (pre, post) else {
             return CertResult::Inconclusive;
         };
         let Some(post) = post else { continue };
         let pre = pre.unwrap_or_else(|| "true".to_string());
-        let script = format!(
-            "{}\n(assert {pre})\n(assert {clause})\n(assert (not {post}))\n(check-sat)\n",
-            enc.declarations
-        );
+        // The guarded query, built by the one method allowed to build it. A
+        // `Refuted` here may now mean either "not preserved" or "the map does
+        // not exclude this edge's overflow", and the two are the same defect
+        // for a consumer: the map is not an invariant of the JVM program.
+        let script = enc.preservation_query(edge, &pre, &post);
         match is_unsat(solver, &script) {
             Some(true) => {}
             Some(false) => {
                 debug!(
-                    "invariant-check: map {} not preserved on bb{} -> bb{}",
-                    map.id, from.0, to.0
+                    "invariant-check: map {} not preserved (or not overflow-free) on bb{} -> bb{}",
+                    map.id, edge.from.0, to.0
                 );
                 return CertResult::Refuted;
             }
@@ -444,9 +479,14 @@ pub fn map_implies_safety(
             errors.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
         )
     };
+    // `edge_preamble`, not `declarations`: the range axioms and the
+    // length non-negativity facts are needed here as much as on an edge. A
+    // sufficiency query over unbounded integers asks whether the invariant
+    // rules out a violation in states no JVM can reach, and refuses the
+    // discharge when it cannot.
     let script = format!(
         "{}\n(assert {pre})\n(assert {error})\n(check-sat)\n",
-        enc.declarations
+        enc.edge_preamble()
     );
     match is_unsat(solver, &script) {
         Some(true) => CertResult::Confirmed,
@@ -849,18 +889,18 @@ mod tests {
         );
     }
 
-    /// `Expr::Length` is expressible and deliberately **not** checkable:
-    /// `encode_body_lia` does not track a ghost length, so there is no array
-    /// in the transition relation for the claim to read. Declining refuses the
-    /// discharge, which is the safe direction; confirming it would be a claim
-    /// about a symbol nothing constrains.
+    /// A length claim is now *checkable*, and correctly refuses to discharge a
+    /// **null dereference**: `(select ghost_len r) > 0` is satisfiable with
+    /// `r = 0`, so it does not rule out the violation.
     ///
-    /// This test is the guard on that decision. If someone later teaches the
-    /// LIA encoder ghost lengths, this test fails and must be replaced by a
-    /// `Confirmed` one -- which is the correct way to find out that the
-    /// `return None` in `render` has become wrong.
+    /// This replaces `a_length_claim_refuses_the_discharge_until_lia_tracks_ghost_lengths`,
+    /// which asserted `Inconclusive` because `render` declined `Expr::Length`
+    /// entirely. That test existed to fail the moment the encoder learned
+    /// lengths, and it did. The outcome is still a refusal — but for the right
+    /// reason, from a solver that can now read the claim, rather than because
+    /// the claim was unreadable.
     #[test]
-    fn a_length_claim_refuses_the_discharge_until_lia_tracks_ghost_lengths() {
+    fn a_length_claim_is_read_and_still_cannot_discharge_a_dereference() {
         let Some(s) = solver() else { return };
         let r = check_inductive(
             &body_deref(),
@@ -874,8 +914,255 @@ mod tests {
         );
         assert_eq!(
             r,
-            CertResult::Inconclusive,
-            "a length claim must refuse, not confirm, while LIA has no length"
+            CertResult::Refuted,
+            "a non-empty array may still be a null reference"
+        );
+    }
+
+    /// `v1 := new int[v0]`, then `v2 := v1.length`.
+    ///
+    /// bb0: v1 := new int[v0]; v2 := v1.length  -> bb1
+    /// bb1: check, return
+    fn body_new_array() -> Body {
+        let site = ajave_ir::AllocSite {
+            block: BlockId(0),
+            index: 0,
+        };
+        Body {
+            is_static: true,
+            key: mk(),
+            entry: BlockId(0),
+            vars: vec![
+                VarInfo { kind: VarKind::Local(0), ty: Ty::Int },
+                VarInfo { kind: VarKind::Local(1), ty: Ty::Ref },
+                VarInfo { kind: VarKind::Local(2), ty: Ty::Int },
+            ],
+            obligations: vec![Obligation {
+                id: ObligationId(0),
+                kind: ObligationKind::Assertion,
+                cond: Operand::Var(VarId(2)),
+                guarded: false,
+                bytecode_offset: 0,
+                line: None,
+            }],
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    bytecode_offset: 0,
+                    stmts: vec![
+                        Stmt::Assign(
+                            VarId(1),
+                            Rvalue::NewArray {
+                                elem: "I".into(),
+                                len: Operand::Var(VarId(0)),
+                                site,
+                            },
+                        ),
+                        Stmt::Assign(VarId(2), Rvalue::ArrayLength(Operand::Var(VarId(1)))),
+                    ],
+                    term: Terminator::Goto(BlockId(1)),
+                    exceptional: vec![],
+                },
+                Block {
+                    id: BlockId(1),
+                    bytecode_offset: 1,
+                    stmts: vec![Stmt::Check(ObligationId(0))],
+                    term: Terminator::Return(None),
+                    exceptional: vec![],
+                },
+            ],
+        }
+    }
+
+    fn map_at(block: BlockId, formula: Expr) -> InvariantMap {
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            ProgramPoint { method: mk(), block, index: 0 },
+            formula,
+        );
+        InvariantMap {
+            id: 1,
+            method: mk(),
+            entries,
+            status: ajave_core::artifact::InvStatus::Candidate,
+            scope: ajave_core::artifact::Scope::Method(mk()),
+        }
+    }
+
+    /// The fact the ghost array exists to carry: after `new int[n]`, the
+    /// array's length **is** `n`, and `arraylength` reads back that same value.
+    ///
+    /// Before P2 this was unprovable twice over. `Rvalue::ArrayLength` had no
+    /// arm in `encode_body_lia`, so it fell through to an unconstrained binder
+    /// — a *fresh* one per read, so two reads of one length were unrelated —
+    /// and `render(Expr::Length)` declined, so the claim could not even be
+    /// stated to the solver.
+    #[test]
+    fn an_array_length_equals_its_allocation_size_and_reads_back() {
+        let Some(s) = solver() else { return };
+        let r = check_map_inductive(
+            &body_new_array(),
+            &map_at(
+                BlockId(1),
+                Expr::bin(
+                    Op::Eq,
+                    Expr::length(Expr::Var(VarId(1))),
+                    Expr::Var(VarId(2)),
+                ),
+            ),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "`a.length == v2` must hold where `v2 := a.length`"
+        );
+    }
+
+    /// The negative control. Without it, `Confirmed` above could come from the
+    /// checker waving through anything mentioning `Length`.
+    #[test]
+    fn a_false_length_claim_is_refuted() {
+        let Some(s) = solver() else { return };
+        let r = check_map_inductive(
+            &body_new_array(),
+            &map_at(
+                BlockId(1),
+                Expr::bin(
+                    Op::Eq,
+                    Expr::length(Expr::Var(VarId(1))),
+                    Expr::bin(Op::Add, Expr::Var(VarId(2)), Expr::Int(1)),
+                ),
+            ),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Refuted,
+            "`a.length == v2 + 1` is false where `v2 := a.length`"
+        );
+    }
+
+    /// The JVMS invariant, for an array this body never allocates.
+    ///
+    /// `v1` is a parameter here, so the allocation-site facts say nothing about
+    /// it; the non-negativity comes from `ghost_preamble`'s ground instances.
+    /// Without them no `ArrayBounds` lower bound is provable for any array
+    /// reaching a method from outside, which is most of them.
+    #[test]
+    fn a_parameter_arrays_length_is_non_negative() {
+        let Some(s) = solver() else { return };
+        let r = check_map_inductive(
+            &body_deref(),
+            &map_at(
+                BlockId(0),
+                Expr::bin(Op::Le, Expr::Int(0), Expr::length(Expr::Var(VarId(1)))),
+            ),
+            s,
+        );
+        assert_eq!(
+            r,
+            CertResult::Confirmed,
+            "JVMS: an array that exists has a non-negative length"
+        );
+    }
+
+    /// The mechanism of the p0, at the pass whose job is to catch it.
+    ///
+    /// `{bb1: 0 <= x, bb2: 0 <= x}` over `x := 0; while (x < n) x++;` was
+    /// `Confirmed` before guarded preservation, and it is **not** an invariant
+    /// of the Java program: `x = Integer.MAX_VALUE` satisfies `0 <= x`, and
+    /// `x++` wraps it negative. That is the same shape as the `0 <= sum`
+    /// across `sum = sum + 2` that made `algorithms/BellmanFord-FunUnsat01`
+    /// answer TRUE on a program that throws.
+    ///
+    /// No entry for the entry block, so initiation passes trivially and the
+    /// `Refuted` can only come from preservation.
+    #[test]
+    fn an_overflowing_increment_does_not_preserve_a_lower_bound() {
+        let Some(s) = solver() else { return };
+        let body = crate::houdini::tests_support::counting_loop();
+        let bound = Expr::bin(Op::Le, Expr::Int(0), Expr::Var(VarId(0)));
+        let mut entries = std::collections::BTreeMap::new();
+        for b in [BlockId(1), BlockId(2)] {
+            entries.insert(
+                ProgramPoint { method: body.key.clone(), block: b, index: 0 },
+                bound.clone(),
+            );
+        }
+        let map = InvariantMap {
+            id: 1,
+            method: body.key.clone(),
+            entries,
+            status: ajave_core::artifact::InvStatus::Candidate,
+            scope: ajave_core::artifact::Scope::Method(body.key.clone()),
+        };
+        assert_eq!(
+            check_map_inductive(&body, &map, s),
+            CertResult::Refuted,
+            "nothing in this map rules out the wrap on the back edge"
+        );
+    }
+
+    /// The positive control for the test above, and the demonstration that the
+    /// guard is a precision cost rather than a wall.
+    ///
+    /// Adding `x < n` at the loop body makes the map genuinely inductive: the
+    /// pre-state range axiom gives `n <= Integer.MAX_VALUE`, so `x < n`
+    /// implies `x + 1 <= MAX_VALUE` and the overflow disjunct is
+    /// unsatisfiable. Without the range axiom this would still fail, because
+    /// LIA's `n` could be 2^40 — which is why P3 and P4 are only meaningful
+    /// together.
+    #[test]
+    fn the_same_bound_is_confirmed_once_the_map_bounds_the_increment() {
+        let Some(s) = solver() else { return };
+        let body = crate::houdini::tests_support::counting_loop();
+        let bound = Expr::bin(Op::Le, Expr::Int(0), Expr::Var(VarId(0)));
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            ProgramPoint { method: body.key.clone(), block: BlockId(1), index: 0 },
+            bound.clone(),
+        );
+        entries.insert(
+            ProgramPoint { method: body.key.clone(), block: BlockId(2), index: 0 },
+            Expr::bin(
+                Op::And,
+                bound,
+                Expr::bin(Op::Lt, Expr::Var(VarId(0)), Expr::Var(VarId(1))),
+            ),
+        );
+        let map = InvariantMap {
+            id: 2,
+            method: body.key.clone(),
+            entries,
+            status: ajave_core::artifact::InvStatus::Candidate,
+            scope: ajave_core::artifact::Scope::Method(body.key.clone()),
+        };
+        assert_eq!(
+            check_map_inductive(&body, &map, s),
+            CertResult::Confirmed,
+            "`x < n` bounds the increment, so the wrap is excluded"
+        );
+    }
+
+    /// `Expr::Depth` renders a `depth_*` array **nothing declares**, so the
+    /// query z3 saw was missing an assertion. It now declines, and this pins
+    /// that: the alternative is a checker confirming claims about an
+    /// unconstrained symbol.
+    #[test]
+    fn a_depth_claim_is_declined_because_no_encoder_maintains_one() {
+        let f = ajave_ir::FieldKey {
+            class: "Node".into(),
+            name: "next".into(),
+            desc: "LNode;".into(),
+        };
+        assert_eq!(
+            render(
+                &Expr::Depth { field: f, obj: Box::new(Expr::Var(VarId(1))) },
+                false
+            ),
+            None,
+            "a depth claim must be declined while no encoder maintains depth"
         );
     }
 

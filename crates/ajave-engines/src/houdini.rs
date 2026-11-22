@@ -40,9 +40,27 @@
 //! goes: `candidates` draws on what the other engines already computed rather
 //! than on syntax templates alone.
 //!
-//! Every limit of the checker applies: the shared LIA encoder, no floats, and
-//! `Expr::Length` not yet renderable. A candidate the encoder cannot state is
-//! dropped from the pool at the start rather than silently treated as `true`.
+//! Every limit of the checker applies: the shared LIA encoder and no floats.
+//! A candidate the encoder cannot state is dropped from the pool at the start
+//! rather than silently treated as `true`.
+//!
+//! # The second weakness, which guarded preservation created
+//!
+//! Preservation is now guarded: a candidate survives an edge only if the
+//! conjunction at the source rules out that edge's arithmetic *wrapping*, or
+//! the candidate is valid (see `LiaEncoding::preservation_query`). That is
+//! what makes a surviving map an invariant of the Java program rather than of
+//! its unbounded-integer shadow — and it bites hardest on exactly the shape
+//! Houdini is weakest at.
+//!
+//! `0 <= x` in `x := 0; while (x < n) x++;` is a true invariant whose
+//! overflow-freedom depends on the *relation* `x < n`, so it survives only if
+//! `x < n` is itself a candidate at the body. A conjunction of unary bounds
+//! cannot express "the increment is bounded"; an implication can
+//! (`x < n => x + 1 <= n`), which is why implication candidates after Lahiri &
+//! Qadeer's clausal predicate abstraction are the next widening rather than a
+//! bigger pool. `a_bound_whose_overflow_freedom_needs_a_relation_dies_without_it`
+//! is this paragraph as a test.
 
 use std::collections::BTreeMap;
 
@@ -184,7 +202,7 @@ pub fn synthesise(
                     break 'outer;
                 }
                 let (_, _, pre, _) = &usable[i];
-                let script = format!("{}\n(assert (not {pre}))\n(check-sat)\n", enc.declarations);
+                let script = enc.initiation_query(pre);
                 queries += 1;
                 match is_unsat(solver, &script) {
                     Some(true) => keep.push(i),
@@ -199,13 +217,13 @@ pub fn synthesise(
         }
 
         // Preservation, per CFG edge.
-        for (from, to, clause) in &enc.edge_clauses {
-            let Some(to) = to else { continue };
+        for edge in &enc.edge_clauses {
+            let Some(to) = edge.to else { continue };
             if !alive.contains_key(&to.0) {
                 continue;
             }
             // An unannotated source carries no claim, which reads as `true`.
-            let pre = conj_at(&alive, from.0, false).unwrap_or_else(|| "true".to_string());
+            let pre = conj_at(&alive, edge.from.0, false).unwrap_or_else(|| "true".to_string());
             let idxs = alive.get(&to.0).cloned().unwrap_or_default();
             let mut keep = Vec::new();
             for i in idxs {
@@ -213,10 +231,13 @@ pub fn synthesise(
                     break 'outer;
                 }
                 let (_, _, _, post) = &usable[i];
-                let script = format!(
-                    "{}\n(assert {pre})\n(assert {clause})\n(assert (not {post}))\n(check-sat)\n",
-                    enc.declarations
-                );
+                // Guarded preservation, built by `LiaEncoding`. A candidate
+                // survives only if it is preserved **and** the conjunction at
+                // the source excludes this edge's arithmetic overflow -- so
+                // what survives is an invariant of the JVM program and not
+                // only of its unbounded-integer shadow. See
+                // `docs/proposals/lia-faithfulness.md` §3.
+                let script = enc.preservation_query(edge, &pre, post);
                 queries += 1;
                 match is_unsat(solver, &script) {
                     Some(true) => keep.push(i),
@@ -396,13 +417,24 @@ mod tests {
     fn x() -> Expr { Expr::Var(VarId(0)) }
     fn n() -> Expr { Expr::Var(VarId(1)) }
 
-    /// The plan's fixture. `0 <= x` survives (x starts at 0 and only
-    /// increments); `false` and `x <= -1` cannot.
+    /// `0 <= x` survives at the loop header — but only because `x < n` is in
+    /// the pool, and that is the whole content of guarded preservation.
+    ///
+    /// The back edge increments: `xp = x + 1`. A candidate at the header must
+    /// now also exclude that edge's overflow, and from `0 <= x` alone it
+    /// cannot — `x = Integer.MAX_VALUE` satisfies `0 <= x`, and a JVM wraps it
+    /// to a negative number, so `{bb1: 0 <= x}` is genuinely **not** an
+    /// inductive map of the Java program. With `x < n` alive at the body, the
+    /// pre-state range axiom gives `n <= MAX`, hence `x + 1 <= MAX`, and the
+    /// overflow disjunct is unsatisfiable.
+    ///
+    /// `false` and `x <= -1` still cannot survive, which is the control.
     #[test]
     fn elimination_keeps_what_is_inductive_and_drops_what_is_not() {
         let Some(s) = solver() else { return };
         let pool = vec![
             Expr::bin(Op::Le, Expr::Int(0), x()),
+            Expr::bin(Op::Lt, x(), n()),
             Expr::bin(Op::Le, x(), Expr::Int(-1)),
             Expr::Bool(false),
         ];
@@ -417,6 +449,49 @@ mod tests {
             at_header.as_deref(),
             Some("(0 <= v0)"),
             "only the true lower bound may survive at the loop header"
+        );
+    }
+
+    /// The same loop, with `x < n` taken out of the pool: `0 <= x` now dies.
+    ///
+    /// This is the behaviour change guarded preservation buys, stated as the
+    /// loss it is. Houdini finds only conjunctions of candidates, so a bound
+    /// whose overflow-freedom depends on a *relation* between variables is
+    /// unprovable unless that relation is itself a candidate. The path forward
+    /// is implication candidates (`p => q`, after Lahiri & Qadeer's clausal
+    /// predicate abstraction), which can express `x < n => x + 1 <= n`
+    /// directly; see `docs/proposals/lia-faithfulness.md` §7.
+    ///
+    /// Before the guard, `0 <= x` survived here — and that is exactly the
+    /// unsoundness, not a precision win: nothing in the map ruled out the
+    /// wrap.
+    #[test]
+    fn a_bound_whose_overflow_freedom_needs_a_relation_dies_without_it() {
+        let Some(s) = solver() else { return };
+        let pool = vec![Expr::bin(Op::Le, Expr::Int(0), x())];
+        let r = synthesise(&counting_loop(), &pool, &[], s, DEFAULT_MAX_QUERIES);
+        assert!(r.converged);
+        assert!(
+            !r.entries.iter().any(|(p, _)| p.block == BlockId(1)),
+            "`0 <= x` is not inductive at the header without a bound on `n`: {:?}",
+            r.entries.values().map(|f| f.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A candidate whose preservation needs no arithmetic is unaffected by the
+    /// guard. Without this, the test above could be passing because the guard
+    /// deletes everything everywhere.
+    #[test]
+    fn a_candidate_on_an_unincremented_variable_still_survives() {
+        let Some(s) = solver() else { return };
+        // `n` is never assigned in this body, so `n = n` across every edge and
+        // no overflow condition mentions it.
+        let pool = vec![Expr::bin(Op::Eq, n(), n())];
+        let r = synthesise(&counting_loop(), &pool, &[], s, DEFAULT_MAX_QUERIES);
+        assert!(r.converged);
+        assert!(
+            r.entries.iter().any(|(p, _)| p.block == BlockId(1)),
+            "a tautology about an unassigned variable must survive the guard"
         );
     }
 
@@ -486,14 +561,21 @@ mod tests {
     }
 
     /// A candidate the LIA encoder cannot state is dropped from the pool, not
-    /// treated as `true`. `Expr::Length` is the live case: expressible in the
-    /// vocabulary, not yet renderable.
+    /// treated as `true`. `Expr::Apply` is the permanent case: an unmodelled
+    /// library call has no LIA term by construction.
+    ///
+    /// `Expr::Length` used to be the example here and no longer is — the ghost
+    /// length array made it renderable, which was the point of P2.
     #[test]
     fn an_unrenderable_candidate_is_dropped_from_the_pool() {
         let Some(s) = solver() else { return };
         let pool = vec![
-            Expr::bin(Op::Le, Expr::Int(0), x()),
-            Expr::bin(Op::Gt, Expr::length(n()), Expr::Int(0)),
+            Expr::bin(Op::Eq, n(), n()),
+            Expr::bin(
+                Op::Gt,
+                Expr::call("java/lang/Math", "random", "()D", vec![]),
+                Expr::Int(0),
+            ),
         ];
         let r = synthesise(&counting_loop(), &pool, &[], s, DEFAULT_MAX_QUERIES);
         assert!(r.converged);
@@ -504,8 +586,8 @@ mod tests {
             .map(|(_, f)| f.to_string());
         assert_eq!(
             at_header.as_deref(),
-            Some("(0 <= v0)"),
-            "the length candidate must be dropped, not conjoined as true"
+            Some("(v1 == v1)"),
+            "the library application must be dropped, not conjoined as true"
         );
     }
 }

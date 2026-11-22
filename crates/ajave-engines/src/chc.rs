@@ -791,16 +791,19 @@ fn lia_operand(op: &Operand, var_map: &HashMap<usize, String>) -> String {
 /// copies a value that was itself havoced where it was produced, and the
 /// unmodelled forms already havoc.
 fn rvalue_is_float(rv: &Rvalue, is_float: &dyn Fn(&Operand) -> bool) -> bool {
-    match rv {
-        Rvalue::Bin(_, a, b) => is_float(a) || is_float(b),
-        Rvalue::Neg(o) => is_float(o),
-        Rvalue::Cmp(_, a, b) => is_float(a) || is_float(b),
-        Rvalue::Cast(to, from, _) => matches!(
-            (to, from),
-            (Ty::Float | Ty::Double, _) | (_, Ty::Float | Ty::Double)
-        ),
-        _ => false,
-    }
+    // Delegated, not reimplemented. This file holds one of the tree's two LIA
+    // encoders, and `CLAUDE.md` records the seam: "fixes to one silently leave
+    // the other exposed". A second copy of the quarantine predicate is exactly
+    // that seam, and the copies had already diverged -- `smt_text`'s consults
+    // `CmpKind`, so an `fcmpl` whose operand types the caller could not resolve
+    // is caught there and was not caught here.
+    smt_text::rvalue_is_float(rv, &|o| {
+        if is_float(o) {
+            Some(Ty::Double)
+        } else {
+            Some(Ty::Int)
+        }
+    })
 }
 
 fn lia_rvalue(
@@ -3098,17 +3101,8 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
             .map(|f| (f.clone(), bvfld_src(f)))
             .collect();
         let mut enc = smt_text::Encoder::new(&BitvectorTheory, "bvf_");
-        let is_wide = |op: &Operand| -> bool {
-            match op {
-                Operand::Const(Const::Long(_)) | Operand::Const(Const::Double(_)) => true,
-                Operand::Var(v) => body
-                    .vars
-                    .get(v.0 as usize)
-                    .map(|vi| vi.ty.is_wide())
-                    .unwrap_or(false),
-                _ => false,
-            }
-        };
+        // `Encoder::rvalue` reads the operand's type itself now, so the
+        // width closure this block used to build is gone with it.
         let is_float = |op: &Operand| -> bool {
             match op {
                 Operand::Const(Const::Float(_)) | Operand::Const(Const::Double(_)) => true,
@@ -3229,7 +3223,7 @@ fn encode_chc_single(body: &Body, obligations: &[ObligationId]) -> String {
                     } else {
                         // The encoder reports its own binders, so the old
                         // recover-by-string-prefix on "bv_fresh" is gone.
-                        enc.rvalue(rv, &var_map, &is_wide)
+                        enc.rvalue(rv, &var_map, &|op| smt_text::operand_ty(body, op))
                     };
                     for (name, _) in enc.binders.drain(..) {
                         let w = width_map.get(&(vid.0 as usize)).copied().unwrap_or(32);

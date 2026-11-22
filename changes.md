@@ -2,6 +2,205 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-22 — making the LIA transition relation faithful
+
+`docs/proposals/lia-faithfulness.md`. The previous entry's P4 was blocked on
+overflow-guarded preservation, filed as #130. Fixing it properly meant first
+establishing what the premise of such a guard is, and that turned up three more
+holes in the same encoder plus one capability gap big enough to change what the
+synthesis path can talk about at all.
+
+### Loose is fine, wrong is fatal, and there were exactly four wrong places
+
+An `Over` engine may over-approximate freely: if the encoded relation `T`
+contains every JVM step, "no `T`-execution reaches the error" implies "no JVM
+execution does". `encode_body_lia` leans on this correctly in many places —
+`models_binop` declines `Div`, `Rem` and every bitwise operator, unresolvable
+heap reads and unmodelled calls become unconstrained binders, exceptional edges
+carry the clause `true`. All loose, all sound.
+
+The danger is a term that *excludes* a real behaviour, making `T` smaller than
+the JVM's step relation. An audit of the encoder for that property found four,
+and the finiteness of that list is what made the rest of the work tractable —
+the soundness premise of the theorem below is an enumerable claim about one
+function.
+
+**Overflow** (#77, #130) was known. `(+ v0 1)` is not `iadd`, and the
+`lia_overflow_cond` disjunct reached `error_formulas` — covering `imc` and
+`cegar`, which prove unreachability of error — but not `edge_clauses`, which is
+what the per-edge preservation checks use.
+
+**Three float leaks** were not. LIA has no float sort, and the encoder let
+float-typed values be read as integers in three places: a `double` constant
+became `encode_zero()`, i.e. the literal `0`; `models_cast` tested only widths,
+and `lia_width(Ty::Float)` is 32, so `f2i` looked like a widening and
+`encode_cast` returned the operand unchanged; and `Rvalue::Cmp` was encoded
+with `encode_cmp` unconditionally, comparing two IEEE-754 bit patterns as
+signed integers. The last is the sharpest: every negative double has its sign
+bit set, so for two negative doubles the integer order is the *reverse* of the
+float order. Monniaux (TOPLAS 2008) is the general warning.
+
+`invariant_check` screens claims that *mention* a float variable, which is why
+none of this produced a wrong answer through that path. The screen is not
+sufficient — via `f2i` or `dcmpg` a float value reaches an **integer**-typed
+variable, and a claim about that variable passes the screen while resting on a
+bit pattern.
+
+The fix is one principle enforced at one place: **a floating-point operand may
+not flow into any integer-valued term.** `Encoder::rvalue` now takes the
+operand's JVM type rather than a `wide: Fn -> bool`, and havocs any rvalue that
+reads or produces a float before consulting the theory. `Rvalue::Cmp` is
+decided by its `CmpKind` as well as by its operands, because the kind is the
+bytecode's own answer and stays correct where variable types do not resolve.
+
+CHC's second LIA encoder (`chc::lia_rvalue`) had implemented exactly this
+quarantine, with the comment "wrong rather than coarse", since the #77 work.
+The shared `Encoder` — the one `imc`, `cegar`, `invariant_check` and `houdini`
+read — had not. `chc::rvalue_is_float` now delegates to the `smt_text` version
+rather than keeping a copy, because the copies had already diverged: only the
+shared one consults `CmpKind`.
+
+### The theorem, and why the guard is a disjunct of the transition
+
+Write `ovf_b` for the disjunction of a block's overflow conditions, a predicate
+on the *pre*-state.
+
+> **(I)** `¬M(entry)` is UNSAT. **(P)** for every edge `b → c`,
+> `M(b) ∧ (T_{b→c} ∨ ovf_b) ∧ ¬M(c)′` is UNSAT.
+> Then every JVM-reachable `(b, s)` satisfies `M(b)`.
+
+The step case splits. If block `b` did not overflow, `T_{b→c}` describes the
+step and (P) gives `M(c)`. If it did, the pre-state satisfies `ovf_b`, so the
+real `(s, s′)` pair satisfies the disjunction via a disjunct that **constrains
+the post-state not at all** — and (P) gives `M(c)` again.
+
+That is the design: **overflow is an exceptional edge in disguise.** The
+relation says `xp = x + 1` where a JVM says `xp = wrap(x + 1)`, so when
+something wraps we know nothing about the successor beyond that it is some
+state — which is precisely how `block.exceptional` is already modelled. No new
+machinery, and the same shape of argument.
+
+Two other formulations were built first and both are wrong:
+
+* `M(b) ∧ T ∧ ¬ovf_b ∧ ¬M(c)′`, *assuming* no overflow, is unsound: it proves
+  the invariant of overflow-free runs and says nothing about the run that wraps.
+* `M(b) ∧ T ∧ (¬M(c)′ ∨ ovf_b)`, requiring the invariant to *exclude*
+  overflow, is sound — and was what the plan specified — but needlessly
+  destructive. It deletes every candidate at the target of any edge whose
+  arithmetic the source cannot bound, **including candidates that are valid**
+  and so cannot be broken by a wrap. A tautology about a variable the block
+  never touches died under it.
+
+### The axiom that is needed, and the axiom that silently undoes everything
+
+LIA integers are unbounded, and nothing in the encoder said otherwise. So
+guarded preservation asks whether `x + 1 > 2147483647` is possible, and a bound
+like `x < n` does not help because LIA's `n` may be 2^40. It is always
+possible, every candidate dies, and **the empty map is the only fixpoint for
+any method containing arithmetic.** So the range axiom
+`-2^31 <= v <= 2^31-1` per `Int`-typed variable is not a refinement; without it
+the guard proves nothing. This is the bounded-integer discipline of Why3
+(Filliâtre & Paskevich, ESOP 2013) and SPARK/GNATprove: reason in unbounded
+integers, discharge a range condition per operation.
+
+The axiom must be **pre-state only**, and this is the trap. The post-state is
+exactly where LIA and the JVM disagree. Asserting `range(xp)` beside
+`xp = x + 1` does not state a fact — it removes the overflowing transition from
+the model, which is the unsound "assume no overflow" arriving through the
+axioms instead of through the query. It is self-concealing: with it present
+every `ovf` is unsatisfiable, so the guard does nothing and every test of the
+guard passes for the wrong reason.
+
+It was written that way, built, and the counting-loop fixture passed. It was
+caught by asking *why* the fixture still passed, not by a test — so it now has
+one (`range_axioms_are_asserted_of_the_pre_state_only`), and removing the
+post-state axiom immediately failed two tests that had been green.
+
+A reference's post-state is unaffected: references do not wrap.
+
+### There were no ghost lengths at all
+
+`encode_body_lia` had **no arm for `Rvalue::ArrayLength`**. It fell through
+`Encoder::rvalue`'s `_ => self.fresh(false)`, which mints a *fresh*
+unconstrained integer per read. So two reads of one array's length were
+unrelated, `new int[n]` did not relate the array to `n`, and the JVMS guarantee
+`length >= 0` was absent. `invariant_check::render` therefore had to decline
+`Expr::Length` — which meant all 1,486 length conjuncts the interval domain
+publishes were dropped from Houdini's pool and from the certifier. P1 of the
+predecessor plan built a vocabulary for 87.5% of the open obligation set and
+the encoder could read half of it.
+
+The model is one SMT array indexed by the **reference**: McCarthy's theory of
+arrays (1962) applied the way Burstall (1972) applies it to fields, which is
+how Boogie, VCC, Why3 and Dafny all encode lengths and how this encoder already
+handles fields. Indexing by reference rather than `AllocSite` is forced by the
+claim language — `Expr::Length { obj }` is a fact about a reference, which
+`ai.rs` notes "survives reassignment" — and it is also the truth: two
+references to one array have one length, which a site-indexed model cannot
+state. Length is immutable (JVMS §6.5), so the only threading constraint is the
+identity `ghost_lenp = ghost_len`, carried per edge.
+
+`Expr::Depth` turned out to have the defect its neighbours' comments warn
+about: `render` emitted `(select depth_C_f obj)` and **nothing declares that
+array** — `depth_array_name` occurs twice in the tree, both in the same file.
+z3 reports an unknown constant, drops the whole assertion, and answers on what
+is left. Conservative by luck. It has zero producers, so it now declines.
+
+### One struct, so the unsound query cannot be written
+
+The guard added three things a preservation query must not forget. A consumer
+that forgets the overflow disjunct gets the **unsound** behaviour silently, and
+two consumers were assembling that query by hand with a third coming. So
+`edge_clauses` stopped being a `(from, to, clause)` tuple and became an
+`EdgeClause` carrying `ghost` and `overflow`, with
+`LiaEncoding::preservation_query` the only code in the tree that writes a
+preservation script. The per-edge fields are filled at **one** site per block
+rather than at the six `push` sites, because a field set at six sites is a
+field forgotten at one of them.
+
+`transition` is not byte-identical any more, and the honest claim is about
+direction rather than equality. The float quarantine makes it *looser* (a wrong
+term becomes an unconstrained binder). The ghost length makes it
+*tighter-but-sound*: for a fixed receiver the select is as unconstrained as the
+binder it replaces, so the only states removed are ones where a single array
+has two different lengths. `ghost_len`'s declaration has to live in
+`declarations` rather than `ghost_preamble` because the term now appears in
+`transition`, and an undeclared symbol makes z3 drop the assertion containing
+it — which for `imc` and `cegar` would silently discard the transition
+relation. `edge_clauses_are_the_disjuncts_of_transition` pins the rest.
+
+### What this is worth, measured rather than claimed
+
+Four minimal benchmarks, each with ground truth argued from IEEE-754, the JLS
+or the JVMS and confirmed on a real JVM. **All four were already correct on
+`c5d78d8`**, the commit before this work — run on a base-commit build before
+the headers were written, per `CLAUDE.md`'s rule that a flagged difference must
+be reproduced on the base commit before it is attributed.
+
+So the defects were real and latent, which is the shape `CLAUDE.md` describes
+under "unsoundness masked by an unrelated conservative gate": *"k-induction,
+CHC and the StringBuffer model were each harmless only because something
+starved them. Removing a gate does not create these; it reveals them."* The
+starvation here is specific and worth recording: the engines answering these
+tasks are the bitvector BMC and the interval domain's real float domain, not
+LIA consumers; and of the LIA consumers, `imc` does not run at all without
+`AJAVE_SMTINTERPOL_JAR` (changes.md:7255), leaving `cegar`, `invariant_check`
+and `houdini`.
+
+The cost is visible and lands where Houdini is weakest. `0 <= i` in
+`i := 0; while (i < n) i++;` is a true invariant whose inductiveness depends on
+a **relation** between two variables, so it survives only if `i < n` is itself
+a candidate at the loop body — a conjunction of unary bounds cannot say "the
+increment is bounded". That is not a flaw in the guard; `{header: 0 <= i}`
+genuinely is not an inductive map of the Java program. It is an argument for
+implication candidates (`i < n => i + 1 <= n`, after Lahiri & Qadeer's clausal
+predicate abstraction) as the next widening, rather than a bigger pool.
+
+`houdini_engine` still publishes and discharges nothing, and the reason has
+changed from a soundness repair to a measurement: turning on a discharge path
+changes what may be answered TRUE, and `CLAUDE.md` is explicit that such a
+change is measured on both properties before it is believed.
+
 ## 2026-11-21 — invariant synthesis, and the wrong TRUE it produced
 
 Four phases of `docs/proposals/invariant-synthesis.md` built and measured. The

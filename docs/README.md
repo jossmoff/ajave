@@ -17,6 +17,12 @@
 - [`assessment-2026-08-31.md`](assessment-2026-08-31.md) — a point-in-time
   competitive assessment. Dated on purpose: its scores are a snapshot, not
   the current numbers. For those, run `tools/bench.py`.
+- [`proposals/lia-faithfulness.md`](proposals/lia-faithfulness.md) — why the
+  LIA transition relation was not a sound over-approximation of the JVM in
+  four enumerated places, the theorem that lets an invariant be proved in
+  unbounded integers and still hold on a wrapping machine, and the ghost
+  length model. Read with [`contracts.md`](contracts.md) §2, which records why
+  `InvariantMap` still has no consumer.
 - [`strategies/`](strategies/) — one file per verification strategy
   (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before
