@@ -41,9 +41,25 @@ BENCH = os.path.join(ROOT, "benchmarks")
 # `[profile.release-checked]` in Cargo.toml.
 AJAVE = os.environ.get("AJAVE_BIN") or os.path.join(ROOT, "target", "release", "ajave")
 
+# The ids a *running* portfolio reports, not the module names. An id that
+# matches no engine disables nothing, and until 2026-11-22 the binary said so
+# only at `info!` -- so a name that had drifted read as "removing this engine
+# changes nothing", which is the conclusion this harness exists to draw.
+#
+# `smt-bmc-fpa` is the one that mattered. The BMC is constructed twice: a cheap
+# integer pass (`smt-bmc`) and a second floating-point pass whose `Engine::id`
+# returns `smt-bmc-fpa` so attribution shows which decided what. Ablating
+# `smt-bmc` therefore left the FPA pass running, and on the MergeSortIterative
+# tasks that pass discharges 12 of the 27 obligations in `merge` -- so "removing
+# the BMC loses nothing" was measured against a BMC that was still half there.
+#
+# `imc` is kept deliberately even though it is absent without
+# AJAVE_SMTINTERPOL_JAR: the warning now names it, and an inert ablation is
+# honest as long as it is visible.
 ENGINES = [
     "presolve", "concurrency", "concrete", "nra", "float-search",
-    "interval-ai", "smt-bmc", "k-induction", "chc", "imc", "cegar",
+    "interval-ai", "smt-bmc", "smt-bmc-fpa", "k-induction", "chc", "imc",
+    "cegar", "concolic", "ranges",
 ]
 DECIDED = {"TRUE", "FALSE"}
 

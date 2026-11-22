@@ -2,6 +2,91 @@
 
 Noteworthy implementation details, design decisions, and novel techniques that may be worth discussing in a paper.
 
+## 2026-11-22 — a silent ablation, and where the +10 actually came from
+
+Attribution of a measured score change, which found that most of what the
+number was credited to had nothing to do with it, and that a mandatory oracle
+had been reporting more coverage than it had.
+
+### The gain is one commit, and it is a consumer-side pattern match
+
+`feat/lia-faithfulness` measured 2170 against a 2159 baseline. Splitting the
+delta per task, then per commit, with a build at each point:
+
+| | tasks | points | earned by |
+|---|---|---|---|
+| sorting NRE proofs | 5 | +10 | `f26ed94` alone |
+| `argv-tasks/CustomViewAbove` | 0 | 0 | already TRUE on main |
+| #66 FALSE flake | 1 | +1 | contention |
+| `feat/lia-faithfulness` | 0 | 0 | soundness only |
+
+Solving `x + y = 1376`, `2x + y = 2170` gives 794 TRUE / 582 FALSE against the
+baseline's 789/581, so the delta is exactly +5 TRUE and +1 FALSE — not the "+6
+tasks" an aggregate correct-count suggests. `CustomViewAbove` is the instructive
+one: TRUE on main, on `c5d78d8` and on the branch when run alone, yet unproven
+in both the baseline and the full run. Its baseline time is 30.7s. It is the
+coin-flip task `CLAUDE.md` warns about, and it looked like a gain only in a
+subset re-run that had the machine to itself.
+
+All five real gains are `no-runtime-exception` proofs on integer sorting
+programs with no `float` or `double` anywhere in them. They are UNKNOWN on main
+(`21ec85c`), TRUE at `f26ed94`, and TRUE at every later commit — so P1 carries
+the whole +10 and the three commits after it (`80f3c28`, `fcc45c4`, `91d963c`)
+add nothing measurable, while `91d963c` introduced the wrong TRUE that
+`c5d78d8` had to remove.
+
+The mechanism, with the portfolio cut to `interval-ai` alone on both builds:
+the engine proves the *identical* obligations either way (15/27 in `merge`,
+7/9 in `main`, 4/4 in `iterativeMergesort`), so its reasoning did not change.
+What changed is who closes the other twelve:
+
+```
+main 21ec85c:   Main.merge#18 -> Open
+f26ed94:        Main.merge#18 -> Discharged { by: smt-bmc-fpa, proof: Exhaustive }
+```
+
+`interval-ai` publishes a certificate per discharge; `interval_hints_for_method`
+reads those certificates back into per-variable bounds; the BMC consumes them to
+bound its search (`smt-bmc: loaded 119 AI interval hints`). The old reader
+required the formula to be *exactly* `And(lo <= v, v <= hi)` and `continue`d
+otherwise — so any state narrowing two or more variables is `And(And(..),..)`
+and was dropped whole. The domain had the facts all along; the consumer
+discarded every multi-variable one. Producer and consumer disagreeing about an
+artifact, with the consumer's refusal invisible, which is the shape
+`CLAUDE.md` lists first among faults between engines.
+
+### `AJAVE_DISABLE` ignored names that matched nothing
+
+Found by mis-typing one. `AJAVE_DISABLE=zzz` ran the full portfolio and printed
+nothing, so a mis-aimed ablation reads as "removing this engine changes
+nothing" — the exact conclusion the harness exists to draw. Three of this
+session's ablations were wrong this way (`smt-bmc`, `kinduction`, `ai` against a
+portfolio that spells them `smt-bmc-fpa`, `k-induction`, `interval-ai`), and on
+the strength of one of them a correct explanation was retracted and replaced
+with a guess.
+
+The binary now warns to **stderr**, naming the unmatched names and listing the
+ids present in the run. A warning rather than a refusal: `imc` is not
+constructed without `AJAVE_SMTINTERPOL_JAR` and `cegar` only when
+`cegar.available()`, so refusing would break `engine_ablation.py` on a clean
+checkout. Stderr rather than `info!` because the whole failure was that nothing
+said anything without `-v`.
+
+### The ablation oracle never removed the BMC
+
+`tools/engine_ablation.py` listed eleven ids. `imc` and `cegar` are frequently
+absent, so those two ablations were inert. Worse, the BMC is constructed
+**twice** — a cheap integer pass and a second floating-point pass whose
+`Engine::id` returns `smt-bmc-fpa` so attribution shows which decided what — and
+the list named only `smt-bmc`. On the MergeSortIterative tasks the surviving FPA
+pass discharges 12 of the 27 obligations in `merge`, so "removing the BMC flips
+nothing" was measured against a BMC that was still half present.
+
+The list now carries the ids a running portfolio reports, `smt-bmc-fpa`,
+`concolic` and `ranges` included. This costs runs (eleven ablations to
+fourteen) and the previous stage-4 result should be read as weaker than it was
+reported, not as evidence.
+
 ## 2026-11-22 — making the LIA transition relation faithful
 
 `docs/proposals/lia-faithfulness.md`. The previous entry's P4 was blocked on

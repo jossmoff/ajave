@@ -407,6 +407,7 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
             .filter(|s| !s.is_empty())
             .collect();
         if !disabled.is_empty() {
+            let present: Vec<String> = engines.iter().map(|e| e.id().0.to_string()).collect();
             engines.retain(|e| {
                 let keep = !disabled.iter().any(|d| d == e.id().0);
                 if !keep {
@@ -414,6 +415,33 @@ fn build_engine_portfolio(ascii_only: bool) -> Vec<Box<dyn Engine>> {
                 }
                 keep
             });
+            // A name that matched nothing used to be silently ignored, which
+            // turns a mis-typed ablation into a full-portfolio run that reads
+            // as "this engine was not needed". Three ablations in one session
+            // were wrong this way: `smt-bmc`, `kinduction` and `ai` against a
+            // portfolio that spells them `smt-bmc-fpa`, `k-induction` and
+            // `interval-ai`.
+            //
+            // A warning, not a refusal, because an absent name is legitimate:
+            // `imc` is not constructed at all without `AJAVE_SMTINTERPOL_JAR`,
+            // so `engine_ablation.py` would die on a clean checkout. Stderr
+            // rather than `info!`, so it is visible without `-v` -- the whole
+            // failure was that nothing said anything.
+            let unmatched: Vec<&String> =
+                disabled.iter().filter(|d| !present.contains(d)).collect();
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "WARNING: AJAVE_DISABLE named {} engine(s) that are not in this \
+                     portfolio and disabled nothing: {}",
+                    unmatched.len(),
+                    unmatched
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                eprintln!("         ids present in this run: {}", present.join(", "));
+            }
         }
     }
     engines
