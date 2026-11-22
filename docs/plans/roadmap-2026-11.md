@@ -672,6 +672,203 @@ fact was known independently — distinguished a finding from a bug.
 
 ---
 
+## Part 8 — Novel avenues: things nobody in this field appears to be doing
+
+Everything above is an application of a known technique. This part is the
+speculative half, and each item here comes from **our own data** rather than
+from a paper — which is why the prior-art checks matter and are recorded.
+Ordered by (value × confidence) / cost.
+
+### N1 — Obligation-level scheduling, and the 24% that needs nothing
+
+The abduction census failed as a *shape* census (issue #133), but one of its
+measurements is sound regardless of every defect that sank the rest, because it
+needs no grammar and no vocabulary: **`already_valid`** simply asks whether the
+obligation's goal follows from the preamble with no added hypothesis.
+
+On `InsertionSort-FunSat01`, **10 of 42 obligations (23.8%) came back
+`already-valid`** — every incoming edge is safe with no invariant at all.
+
+If that ratio survives corpus-wide, it is the most important number nobody has
+measured: **roughly a quarter of our open obligations need nothing from any
+invariant domain.** They are provable from the range axioms and ghost facts
+alone, and they are open anyway — lost to *routing*, not to capability. No
+amount of Pentagons, nullness or array reasoning converts them, which is
+precisely the failure mode that made three capability directions measure zero.
+
+**First action, and it is cheap:** run `--abduct-census` corpus-wide and report
+*only* the `already-valid` ratio, discarding the shape columns. One SMT query
+per obligation, bounded by `AJAVE_ABDUCT_BUDGET_MS`. This is a sound
+measurement built from an instrument whose other outputs are not, and saying
+which is which is the whole discipline of `docs/measurement-validity.md`.
+
+**Then the avenue itself.** If the losses are routing, the fix is routing.
+Every verifier in this competition schedules *whole programs* — a portfolio
+picks a configuration per task. Our blackboard is already per-*obligation*:
+`open_for(models_faithfully)`, `Completeness::discharge_blocker`, and
+`Blackboard::since` exist precisely to let one engine pick up what another put
+down, obligation by obligation. Nobody appears to schedule at that granularity.
+
+Prior art to build on rather than reinvent: **conditional model checking**
+(Beyer, Henzinger, Keremoglu, Wendler, FSE 2012) has a verifier emit a
+*condition* describing what it did not verify, which the next tool continues
+from; and **reducer-based conditional verifiers** (Beyer, Jakobs et al., ICSE
+2018) turn that condition back into a program. Our `Artifact::Residual` variant
+is exactly this idea — and it is one of the kinds `CLAUDE.md` records as having
+had **zero producers**. Implementing `Residual` properly *is* conditional model
+checking at obligation granularity.
+
+Note this is **not** the scheduler rejected in T3.2. That was a *time* budget
+reallocator against a 36-task timeout ceiling. This is about which engine ever
+*sees* an obligation, which is a different and much larger population.
+
+### N2 — Unsat-core reuse with renaming, across 2675 obligations
+
+We solve 2675 obligations largely independently, and 1468 of them are
+`NullDeref` — overwhelmingly the same few syntactic patterns repeated. Our own
+metamorphic harness is built on the fact that obligations across methods
+occupy overlapping ids and identical shapes.
+
+Published and recent: **Cache-a-lot** (arXiv 2504.07642, 2025) extends unsat
+result reuse by attempting **variable substitutions**, so a core applies to
+formulas that differ only by renaming, reporting **up to 74% unsat-core reuse
+against a 41% baseline**. And **F\*** records the unsat core for each
+discharged obligation and replays it later, "in milliseconds instead of
+minutes", falling back to a full solve when replay fails.
+
+Neither is applied at per-obligation granularity in a verifier portfolio. For
+us the payoff is not elegance, it is budget: every obligation discharged from a
+cached core is budget returned to the obligations that need real work, which is
+the same resource the `structural` bucket is starving for.
+
+**Two soundness caveats, both from the sources and both load-bearing:**
+
+- Z3's cores are **not guaranteed minimal**, so reuse must be validated, not
+  assumed — replay-or-fallback (F\*'s design) is the sound shape.
+- **Quantifier triggers do not appear in Z3's unsat core.** We turn on
+  `fp.spacer.q3.use_qgen` by default (D1), so any core taken from a quantified
+  Spacer proof is missing the instantiations that made it work. Reusing such a
+  core elsewhere would be unsound. Cores must be tagged with whether
+  quantifiers participated, and quantified cores excluded from reuse — or the
+  reuse restricted to the quantifier-free LIA queries, where it is safe.
+
+### N3 — Contract mining by adversarial probing, as a *soundness oracle*
+
+Our largest looming bottleneck is library breadth (T3.1: the new corpus is real
+GitHub Java, exercising fields and cross-class interactions). Our largest
+historical soundness incident is the same surface: **issue #48 found 22
+wrongly-allowlisted methods**, accumulated because "the list was grown until
+the benchmark corpus passed".
+
+The literature confirms this is unsolved rather than solved: the JDK's
+specifications are "largely implicit in its documentation, written in natural
+language", and automatic specification mining "has been hard to use and often
+requires significant user involvement". Existing work either verifies
+hand-written JML contracts (KeY on OpenJDK) or mines contracts from execution
+traces for other domains. Nobody auto-derives a *verifier's* library allowlist.
+
+**We already own the hard half.** `tools/validate_jdk_allowlist.py` establishes
+ground truth "by running the signature on a real JVM with adversarial arguments
+(empty receivers, out-of-range indices, nulls, overflow boundaries)". That is
+the oracle. What is missing is the generator: enumerate the JDK surface the
+corpus actually touches, probe every signature, and derive `Contract`s instead
+of writing them.
+
+**The key asymmetry, which is what makes this safe and is easy to get wrong:**
+
+> A probe that finds a throwing input **proves** the method is partial.
+> A probe that finds none **proves nothing at all.**
+
+So probing is a **refutation** instrument. It can automatically and
+continuously *remove* wrong allowlist entries — which is exactly what #48
+needed and what no current gate provides — and it can never justify adding one.
+That direction is also the sound one: omission costs precision, a wrong entry
+costs correctness.
+
+Concretely: a CI job that probes every allowlist entry on every JDK version we
+support and fails on any entry it can make throw. Today the allowlist is
+checked by two hand-maintained lists that must be kept in sync with each other.
+
+### N4 — An LLM as the *documentation reader*, with the JVM as falsifier
+
+This is the one place a language model belongs in this project, and it is not
+where the literature puts it.
+
+The invariant-synthesis papers (Clause2Inv, LaM4Inv, LORIS) use LLMs to propose
+*invariants*. For a competition tool that is a poor fit: it must run offline and
+deterministically, and a solver-based generator already works (T2.2).
+
+But N3 leaves a real gap: probing can refute an allowlist entry and never
+justify one, and `CLAUDE.md` rule 5 says justification must come from "the
+Javadoc/JLS guarantee … for *any* input" — i.e. from **natural-language
+documentation**. Reading natural-language specifications and proposing a formal
+contract is the task LLMs are actually good at, and it is the task that
+currently consumes human attention one signature at a time.
+
+The division of labour is sound because the roles are right:
+
+- **Generator:** proposes a `Contract` for `(class, name, desc)` from the
+  Javadoc, citing the sentence it relied on.
+- **Falsifier:** the existing adversarial JVM probe tries to break it. Anything
+  it breaks is discarded automatically.
+- **Admission:** human or CI review of what survives, with the cited sentence
+  attached.
+- **Runtime:** nothing. Contracts are baked in; the competition binary makes no
+  network call and is bit-for-bit reproducible.
+
+This is sound-by-construction in the only sense that matters here: no proposal
+enters without surviving a real-JVM falsification attempt, and the thing being
+automated is *reading documentation*, not *proving theorems*. It is also the
+highest-leverage response to T3.1, because library breadth is a specification
+problem rather than a reasoning problem.
+
+Guardrail: this generates **specifications**, never witnesses or invariants. A
+model-proposed witness value would be the hardcoded-constant cheating that got
+the taint engine reverted. The boundary is firm.
+
+### N5 — The real JVM as the refinement oracle (DASH/SYNERGY, re-pointed)
+
+`JvmReplay` currently **refutes 76 of our witnesses** (56 of them all-zero).
+Today that information is used once — to suppress a FALSE verdict — and then
+discarded. It is thrown-away refutation evidence about path feasibility.
+
+SYNERGY/DASH/YOGI use *test generation* to choose the frontier of an abstract
+counterexample and decide how to refine. The novel substitution for our setting
+is that our oracle is **the actual language runtime**, not a generated test: a
+refuted witness is a proof that a specific path is infeasible *under real JVM
+semantics*, including every corner where our model and the JVM differ — which
+is exactly where an invented test oracle would be wrong too.
+
+So: feed refutations back as blocking lemmas. The blackboard already has the
+artifact kind (`Lemma`), the direction discipline for it (`RefutedBy` is
+`Under`/`Exact`), and `Blackboard::contested()` to report engines that disagree.
+The 56 all-zero refutations in particular suggest the concrete engine's
+single all-zero probe is generating a systematically infeasible path that
+nothing learns from.
+
+### N6 — What this part is not
+
+Surveyed and deliberately not proposed, with reasons, so the list is closed:
+
+- **Neural/learned obligation triage.** Non-deterministic, unexplainable, and
+  it would be fitted to the corpus we score on — the overfitting `CLAUDE.md`
+  forbids, in its purest form.
+- **Probabilistic or quantitative verification.** The properties are safety;
+  there is nothing to be quantitative about.
+- **Cross-task caching of verified summaries.** Real projects share libraries,
+  so caching across tasks is tempting — but SV-COMP runs each task
+  independently and in isolation, so it is both against the spirit and
+  unavailable in the harness. Cross-*class* summaries within one task (T3.1)
+  are the legitimate version.
+- **Trace abstraction / automata-based verification.** Legitimate and powerful
+  (UAutomizer won C.Overall with 31472), but a from-scratch build of a third
+  proof paradigm. Noted in Part 5, not proposed.
+- **Termination and no-deadlock engines.** Not Java properties in SV-COMP 2026
+  — the only two are `valid-assert` and `no-runtime-exception`. Our concurrency
+  engine should therefore serve those two on threaded programs and no more.
+
+---
+
 ## References
 
 **Competition**
@@ -745,6 +942,21 @@ fact was known independently — distinguished a finding from a bug.
 - LORIS: *Guiding LLM-based Loop Invariant Synthesis via Feedback on Local
   Reasoning Errors*. arXiv 2605.17914.
 - Clause2Inv (ISSTA 2025); LaM4Inv (BMC-filtered LLM candidates).
+
+**Novel avenues (Part 8)**
+- Beyer, Henzinger, Keremoglu, Wendler. *Conditional model checking: a
+  technique to pass information between verifiers*. FSE 2012.
+- Beyer, Jakobs, Lemberger, Wehrheim. *Reducer-based construction of
+  conditional verifiers*. ICSE 2018.
+- *Cache-a-lot: Pushing the Limits of Unsatisfiable Core Reuse in SMT-Based
+  Program Analysis*. arXiv 2504.07642, 2025.
+- F\* unsat-core hints: replaying proofs "in milliseconds instead of minutes".
+- Lee, Jin, Meredith, Roşu. *Towards Categorizing and Formalizing the JDK API*.
+  Tech report, UIUC 2012.
+- *Experience Report on Formally Verifying Parts of OpenJDK's API with KeY*.
+  arXiv 1811.10818.
+- Beckert et al. / Godefroid et al. on SYNERGY, DASH and YOGI — test-driven
+  abstraction refinement at the frontier.
 
 **Internal**
 - `docs/measurement-validity.md` — the theory of a gate that measures nothing.
