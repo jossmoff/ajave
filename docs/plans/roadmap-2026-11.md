@@ -122,11 +122,58 @@ Read that table carefully, because it rewrites our priorities:
   unsound discharge does to a score, and it is the strongest available argument
   for our 0-wrong discipline.
 
-Our own full-corpus measurement at `0cb403b` is **2170 points over 1785 runs,
-1376 correct, 0 wrong**. That is not directly comparable to 2821/1731 — our
-corpus is not the official task set, and `tools/bench.py` scores a correct
-FALSE as +1 **unconditionally**, with no witness confirmation. Which brings us
-to the first item.
+### 0.5 What our own score actually is — the decisive arithmetic
+
+Our full-corpus measurement at `0cb403b` is **2170 points over 1785 runs, 1376
+correct, 0 wrong**. Those three numbers are enough to decompose it, because the
+scheme has only two positive rates and we have no wrong answers:
+
+```
+2·Tc + 1·Fc = 2170      (the score)
+  Tc +   Fc = 1376      (correct answers)
+→ Tc = 794 correct TRUE
+  Fc = 582 correct FALSE
+```
+
+**582 correct FALSE answers.** Note that the estimate in issue #127 was 581 —
+derived independently, by a different route, and it lands within one. That is
+about as good a cross-check as this kind of arithmetic gets.
+
+Now apply the competition's actual rules from §0.1–0.2. Every correct TRUE is a
+clean +2 because Java correctness witnesses are demo-mode or unsupported. Every
+correct FALSE requires a **confirmed format-1.0 violation witness**, and we emit
+2.0 only, so every one of them is `correct-unconfirmed` and scores **0**:
+
+| | points |
+|---|---|
+| What `bench.py` reports | **2170** |
+| What the competition would award | **1588** (= 2·794) |
+| Uncollectible today | **582 — 26.8% of our reported score** |
+
+And against the field:
+
+| | score | margin over JBMC |
+|---|---|---|
+| JBMC, SV-COMP 2026 winner | 1561 | — |
+| us today, competition-equivalent | **1588** | **+27** |
+| us with #127 fixed | **2170** | **+609** |
+
+**Read that margin.** On our own number we look like we would win comfortably.
+Under the rules as written we are **27 points ahead of the winner** — inside
+the noise of a single timeout swing, on a machine whose timeout count has
+moved by 20 points between identical builds. We do not currently have a
+defensible lead. We have one *unrealised* lead worth 582 points sitting in a
+file-format mismatch.
+
+Caveats, stated because the number is load-bearing: our corpus is 1785 runs
+rather than the official 1731 tasks, so the populations are not identical; the
+meta-category normalisation of §0.3 is not applied to either figure; and
+JBMC's 1561 was measured by the official harness on the official set. So the
+**+27** is not a reliable margin. The reliable part is the magnitude: **we are
+not being paid for roughly 27% of what we report, and the fix requires no new
+verification capability.**
+
+Which brings us to the first item.
 
 ---
 
@@ -173,11 +220,24 @@ Wit4Java re-checks after mocking `Verifier.nondet*` with Mockito.
 So the gap really is formatting plus assumption syntax, not evidence. That is
 an unusually cheap 600-ish points.
 
-Why it is urgent anyway: one secondary source claims SV-COMP **2027** will
-require Java violation witnesses in the YAML format, which would make our 2.0
-emitter correct again. That claim is *unverified* and should be checked against
-the 2027 rules before it influences anything — but it argues for building the
-emitter behind a format selector rather than replacing 2.0 outright.
+**On the 2027 question, which decides whether this is worth building at all.**
+Two third-party issue trackers claim SV-COMP 2027 will require Java violation
+witnesses in YAML (one says "format 2.3+ for Java; GraphML is no longer
+listed"), which would make our existing 2.0 emitter nearly correct and this
+item nearly worthless. Checked against the authoritative source: the
+**SV-COMP 2027 rules page is still a placeholder**, and where it is not, it
+says the Input and Output section "remains also the same as in SV-COMP 2026"
+and the Scoring Schema "remains also the same as in SV-COMP 2026".
+
+So as of 2026-11-22 the 2026 requirement stands and GraphML 1.0 is what pays.
+But the claim is credible enough, and the cost of being wrong high enough, that
+the emitter should be built **behind a format selector** keyed on category —
+not as a replacement of the 2.0 path. That way a rules change is a
+configuration change. Re-check `https://sv-comp.sosy-lab.org/2027/rules.php`
+before starting, since it is explicitly due to be expanded, and note that the
+`sv-witnesses` schema release in circulation for 2027 is **2.3**, so if the
+switch does come our 2.0 emitter needs a version bump too, not just a
+re-enable.
 
 **Estimated value: up to our entire correct-FALSE count.** Measure it, do not
 guess it: see T0.2.
@@ -578,6 +638,11 @@ with `type:experiment` and `status:explored`.
    is unmeasurable, and the scoring fix without the emitter just tells us our
    number was wrong. Highest value, lowest risk, no new verification
    capability, and it corrects every comparison we have published.
+
+   To put it in one line: **this is worth 582 points, which is more than every
+   other item in this document combined, and it is a serialisation bug.** Our
+   defensible margin over the SV-COMP 2026 winner is +27 until it is fixed and
+   +609 afterwards. Nothing else on this list should be started first.
 2. **T0.3** — meta-category scoring. An afternoon, and it changes which of the
    next two items is bigger.
 3. **T1.1 nullness** — largest obligation population (55%), half the available
