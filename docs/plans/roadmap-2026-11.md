@@ -17,7 +17,7 @@ Six numbers, each derived below rather than asserted:
 | JBMC, the SV-COMP 2026 Java winner | **1561** |
 | So our defensible margin today | **+27** |
 | Our margin with the witness format fixed | **+609** |
-| Remaining capability headroom: TRUE vs FALSE | **592 pts vs 59 pts** |
+| Remaining capability headroom: TRUE vs FALSE | **498 pts vs 160 pts** |
 
 The mechanism: Java **TRUE** answers need no witness (correctness witnesses are
 demo-mode or unsupported), so all 794 of ours score a clean +2. Java **FALSE**
@@ -43,12 +43,21 @@ nullness aliasing fact. Then Pentagons (`x ∈ [a,b] ∧ x < y`), on three
 independent lines of its own.
 
 **What not to build**, with the arithmetic recorded: a scheduler (36-task
-ceiling), an incorrectness-logic/bi-abduction engine (the most exciting thing
-here, capped at 59 points until a real-world split measurement says otherwise),
-a Java validation-track entry (the track is C-only), and cross-task caching
-(structurally impossible). Four further candidates — the boxed-primitive long
-tail, transcendental bounds, Spacer's quantified generalisation, and
-collections — were measured and are **already done**.
+ceiling), a Java validation-track entry (the track is C-only), and cross-task
+caching (structurally impossible). Four further candidates — the
+boxed-primitive long tail, transcendental bounds, Spacer's quantified
+generalisation, and collections — were measured and are **already done**.
+
+**One correction worth reading before you trust anything else here.** An
+earlier draft of this document put the TRUE/FALSE headroom at "592 vs 59, a
+10× ratio" and declined an incorrectness-logic engine on that basis. That
+divided our own correct counts by the *official* task counts — mixing corpora
+with different label splits. Done consistently the figures are **498 vs 160,
+a 3.1× ratio** (§0.6), and the real-world split measurement (§0.5d) shows our
+FALSE coverage is **59% on `argv-tasks` against 78% corpus-wide**. So
+bug-finding is *not* exhausted, and §0.7 is no longer a rejection. The
+conclusions that survive unchanged are the two big ones: fix the witness
+format first, and put most capability hours into TRUE answers.
 
 **The competition is not saturated.** The winner scores 55% of the maximum
 while losing 315 tasks to unconfirmed witnesses and carrying 13 wrong proofs;
@@ -337,33 +346,102 @@ matter far more than the corpus-wide figure suggests — which points the same
 way as §0.6 and §0.5b, and makes the invariant work *more* valuable for the
 corpus we are heading toward, not less.
 
+### 0.5d The per-family breakdown of the full run, which settles three questions
+
+Full corpus at `15a3ffe`, 1785 runs in 4683s, 1376 correct, **0 WRONG**, score
+**2170**, `--check` PASS against the 1785-entry baseline. Broken down by family:
+
+| family | runs | T ok | F ok | unproven | score | **competition** | solved |
+|---|---|---|---|---|---|---|---|
+| `jbmc-regression` | 354 | 195 | 73 | 86 | 463 | 390 | 76% |
+| **`autostub`** | 244 | **0** | **217** | 27 | 217 | **0** | 89% |
+| `securibench` | 226 | 82 | 74 | 70 | 238 | 164 | 69% |
+| `jpf-regression` | 208 | 150 | 53 | 5 | 353 | 300 | 98% |
+| `float-nonlinear-calculation` | 174 | 89 | 53 | 32 | 231 | 178 | 82% |
+| `MinePump` | 128 | 72 | 54 | 2 | 198 | 144 | 98% |
+| **`argv-tasks`** | 104 | 35 | 22 | 47 | 92 | 70 | **55%** |
+| `java-ranger-regression` | 81 | 54 | 4 | 23 | 112 | 108 | 72% |
+| `algorithms` | 80 | 22 | 8 | 50 | 52 | 44 | 38% |
+| `float_unboundedloop` | 60 | 46 | 1 | 13 | 93 | 92 | 78% |
+| `jayhorn-recursive` | 46 | 26 | 8 | 12 | 60 | 52 | 74% |
+| `jdart-regression` | 32 | 14 | 10 | 8 | 38 | 28 | 75% |
+| `objects` | 28 | 9 | 5 | 14 | 23 | 18 | 50% |
+| **`juliet-java`** | 18 | **0** | **0** | 18 | **0** | 0 | **0%** |
+| `rtems-lock-model` | 2 | 0 | 0 | 2 | 0 | 0 | 0% |
+| **TOTAL** | **1785** | **794** | **582** | 409 | **2170** | **1588** | 77% |
+
+The totals confirm §0.5's algebra empirically rather than by solving
+simultaneous equations: 794 correct TRUE and 582 correct FALSE, measured.
+
+**Three findings follow that could not be guessed from the aggregate.**
+
+**(1) `autostub` is 37% of the entire witness loss, and we are good at it.**
+244 runs, **zero** correct TRUE, **217** correct FALSE, 89% solved — and
+**0 points under competition rules**. This one generated family is the single
+largest concentration of #127's cost, and it is the family we handle best.
+It also explains the corpus-wide `valid-assert` skew toward FALSE (§0.5b): a
+seventh of the corpus is a FALSE-heavy generated suite. If T0.1 ships and
+nothing else does, 217 of the 582 points recovered come from here.
+
+**(2) We degrade on real-world code, exactly as ARG-V predicted of everyone
+else.** `argv-tasks` is the ARG-V population:
+
+| | `argv-tasks` | corpus-wide |
+|---|---|---|
+| TRUE coverage | 35/67 = **52%** | 794/1043 = 76% |
+| FALSE coverage | 22/37 = **59%** | 582/742 = 78% |
+| share of available points | 92/171 = **54%** | 2170/2828 = 77% |
+
+ARG-V's paper reports that MLB, GDart, Java-Ranger and JBMC all "decrease
+substantially" on its benchmarks. **So do we**, by roughly the same margin —
+77% of available points corpus-wide against 54% here. We are not differentiated
+on realistic code; we are merely in the same boat, and the boat is where the
+corpus is going (1345 → 1731 tasks in one year).
+
+The FALSE figure is the consequential one. **59% against 78%** means we miss
+two violations in five on real code, and that is the measurement §0.7 named as
+the condition for taking compositional bug-finding seriously. It has been met.
+
+**(3) `juliet-java` is 18 runs and 0% solved.** A whole family, nothing
+proved, no points. 18 pairs is small, but a uniformly-zero family is a
+concentrated and identifiable capability gap rather than a scatter of hard
+tasks — and it is the one row in this table where we are beaten by doing
+nothing at all. Juliet is a security-flaw suite (CWE test cases), so this is
+plausibly the same string/taint gap as `securibench` (69%, 70 unproven),
+pointing again at T1.3. **Diagnose it before building anything**: 18 identical
+failures usually have one cause, and a single fix may take the family.
+
 ### 0.6 Where the remaining headroom is, and it is not where the interesting work is
 
-Combining §0.2's decomposition of the official maximum (T = 1090 true tasks,
-F = 641 false tasks) with §0.5's decomposition of our own score (794 correct
-TRUE, 582 correct FALSE):
+**Corrected 2026-11-22, after the full run.** The first version of this section
+divided our own correct counts by the *official* task counts — our numerators
+against someone else's denominators, across corpora with different TRUE/FALSE
+splits (ours 1043/742 over 1785 pairs, the official 1090/641 over 1731 tasks).
+That gave "592 points in TRUE against 59 in FALSE, a 10× ratio". It is wrong,
+and the error mattered: it is what demoted §0.7.
+
+Done consistently inside our own corpus:
 
 | | we get | available | headroom | **points left** |
 |---|---|---|---|---|
-| TRUE (+2 each) | 794 | 1090 | 296 tasks | **592** |
-| FALSE (+1 each) | 582 | 641 | 59 tasks | **59** |
+| TRUE (+2 each) | 794 | 1043 | 249 tasks | **498** |
+| FALSE (+1 each) | 582 | 742 | 160 tasks | **160** |
 
-**Our FALSE coverage is already 91%. Our TRUE coverage is 73%.** So there is
-**ten times more score available on the TRUE side** — 592 points against 59.
+**TRUE coverage 76%, FALSE coverage 78% — and 3.1× more points available in
+TRUE, not 10×.** Both figures are confirmed empirically by the per-family
+breakdown of the full run (§0.5d), which sums to exactly 794 and 582.
 
-This single table should govern every capability decision below, and it has
-three consequences that are not obvious:
+What survives the correction, and what does not:
 
-1. **Capability work belongs on the TRUE side.** Proving programs correct —
-   nullness, Pentagons, array invariants, CHC configuration — is where the
-   points are. Bug-finding is nearly exhausted on this corpus.
-2. **The two large prizes are the same size and wildly different in cost.**
-   The witness gap is 582 points and is a serialisation bug. The entire
-   remaining TRUE capability headroom is 592 points and is years of research.
-   That is not a close call about what to do first.
-3. **Anything that improves FALSE-finding is capped at 59 points** on the
-   current corpus, however elegant. Which brings us to the most interesting
-   thing in this document, and why it is not ranked first.
+1. **Capability work still belongs mostly on the TRUE side.** 498 against 160
+   is a clear preference, and the 1.31× NRE weighting (§0.5b) pushes the same
+   way. This conclusion holds.
+2. **The witness fix still dominates everything.** 582 points for a
+   serialisation change against 498 for all remaining TRUE capability. This
+   conclusion holds and is in fact strengthened, since the comparison is now
+   582 vs 498 rather than 582 vs 592.
+3. **"FALSE-finding is nearly exhausted" does not hold.** 160 points is not 59.
+   That is a real population, and §0.7 is corrected accordingly.
 
 ### 0.7 Incorrectness logic and bi-abduction — the find, and its honest demotion
 
@@ -390,20 +468,28 @@ Why it looks tailor-made for us:
 - **It is Infer's technology, and Infer runs on millions of lines of real
   Java** — the exact population T3.1 says is arriving.
 
-And yet: **it is a FALSE-finder, and §0.6 caps FALSE-finding at 59 points.**
-Three to six months of work on a separation-logic engine, for at most 59
-points, while a GraphML emitter is worth 582 and a nullness domain is worth a
-share of 592. So it is **not proposed for the current corpus**, and recording
-that is the whole point of doing the arithmetic before the design.
+And yet it is a **FALSE-finder**, so its ceiling is whatever FALSE headroom
+exists. I first wrote that this capped it at 59 points and declined it on that
+basis. **Both halves of that were wrong**, and the correction is recorded here
+rather than quietly patched:
 
-The condition under which it becomes a top item is specific and worth watching
-for: our 91% FALSE coverage is measured on *today's* corpus, which is mostly
-crafted algorithms. ARG-V's own finding is that all four top 2025 verifiers
-"decrease substantially" on realistic code. If a split measurement (T3.1) shows
-our FALSE coverage on the real-world population is far below 91%, then the 59
-is wrong, the headroom is real, and this becomes the right answer — because
-compositional under-approximate reasoning is the published technique for
-bug-finding at that scale, and nothing else on this list is.
+- The cap is **160 points**, not 59 (§0.6's arithmetic error).
+- And the condition I wrote down for promoting it **has already been met.** I
+  said: "if a split measurement shows our FALSE coverage on the real-world
+  population is far below [the corpus figure], then the cap is wrong." The
+  split is now measured (§0.5d): on `argv-tasks` our FALSE coverage is
+  **59%**, against **78%** corpus-wide. On realistic code we miss two in five
+  violations.
+
+So the honest position is: **this is no longer excluded.** It remains ranked
+below the witness fix (582 points, days of work) and below nullness (498
+points of TRUE headroom concentrated in the property where a point is worth
+1.31×), because 160 points for a separation-logic engine is still the worst
+ratio on this list. But it is the right answer for the corpus we are heading
+toward, and the thing to do before committing either way is cheap: compute the
+`argv-tasks` FALSE breakdown by obligation kind and see whether the 15 missing
+violations there are compositional-reasoning failures or something duller, like
+an unmodelled library call.
 
 Also worth keeping from that literature regardless of whether we build the
 engine: Pulse deliberately **does not support inductive predicates** (list
@@ -1027,9 +1113,10 @@ with `type:experiment` and `status:explored`.
 
 Two numbers decide this ordering and both are derived above rather than
 asserted: **582 points are uncollectible today for a file-format reason**
-(§0.5), and **the remaining capability headroom is 592 points in TRUE against
-59 in FALSE** (§0.6). So: fix the serialisation first, then spend every
-capability hour on proving programs correct.
+(§0.5), and **the remaining capability headroom is 498 points in TRUE against
+160 in FALSE** (§0.6). So: fix the serialisation first — it is worth more than
+all remaining TRUE capability combined — then spend most capability hours on
+proving programs correct.
 
 1. **T0.1 + T0.2 together** — the GraphML emitter and a score that models
    confirmation. They must ship together: the emitter without the scoring fix
