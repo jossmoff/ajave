@@ -1183,6 +1183,74 @@ Surveyed and deliberately not proposed, with reasons, so the list is closed:
 
 ---
 
+## Part 10 — Measured as already addressed
+
+Four opportunities that looked promising when derived from the corpus and turn
+out to be done. Recorded because negative information prevents re-work, and
+because what survives this filter is a much sharper claim than what went in.
+
+**The long tail of boxed-primitive statics.** Counting JDK calls across the
+1498 corpus sources shows a striking pattern: dozens of methods appearing
+**exactly twice** — `Integer.bitCount`, `Long.rotateLeft`,
+`Integer.numberOfLeadingZeros`, `Short.reverseBytes`, `Character.isMirrored`,
+`Character.getDirectionality`, and ~100 more. Appearing exactly twice is the
+signature of a systematically generated family (one TRUE and one FALSE task per
+method), which would make each a cheap two-task win, and almost all of them are
+pure total functions that cannot throw — i.e. free `no-runtime-exception`
+TRUEs, the exact side §0.6 says the headroom is on.
+
+**Already done.** `contract_of` knows **277 distinct method names**, and all ten
+sampled at random from that tail are modelled in two to four places each. This
+is a large part of why our NRE position is strong.
+
+**Sound over-approximation of transcendentals.** `Math.sin` appears 180 times
+in the corpus, `cos` 98, `pow` 89, `sqrt` 52, `log` 43 — 462 occurrences in the
+top five alone, and the largest identifiable JDK population by far. Our `nra`
+engine is `Direction::Under` (falsification), so it finds FALSE and cannot prove
+TRUE; proving TRUE needs sound *bounds*.
+
+**Already done.** `math_interval.rs` provides exactly that —
+"Sound interval abstractions for `java.lang.Math`", `eval(target, args) ->
+Option<Range>`, consumed by `interval.rs`. Its module doc makes the same
+argument from the same evidence I reconstructed independently, down to citing
+JLiSA's bronze medal, and gives the worked `coral3` example where
+`sin ⊆ [0, 0.708)` and `cos ⊆ (0.707, 1]` on `[0, π/4)` settle the assertion
+with no solving at all.
+
+**Quantified generalisation in Spacer.** `fp.spacer.q3.use_qgen=true` with
+`fp.spacer.ground_pobs=false` — on by default at `chc.rs:3501`, documented as
+D1, measured neutral on smoke and worth one task. Only `fp.spacer.global`
+remains unpulled (T1.4).
+
+**Collections.** They barely appear: `Arrays.copyOfRange` ×6, `Arrays.asList`
+×5, `Collections.enumeration` ×4, `Collections.sort` ×3, `Collections.singleton`
+×3. Against 462 transcendental calls. Collection modelling is not a current
+bottleneck, which is worth knowing because it is where intuition about "real
+Java" sends you first.
+
+### What this filter leaves
+
+Library and model breadth is **not** the bottleneck on the *current* corpus.
+That makes two things sharper:
+
+1. **T3.1's argument is about the future corpus, not this one.** The claim is
+   not "we model the JDK badly" — we model this corpus's JDK usage well. It is
+   that ARG-V-style real code will use a different and wider surface, and the
+   evidence for that is ARG-V's own finding that all four top 2025 verifiers
+   degrade substantially on it. So the action is the **split measurement**, not
+   a modelling sprint.
+2. **The two real items stand almost alone.** After this filter the list is
+   short: **582 points in a witness format** (T0.1, a serialisation bug) and
+   **nullness, 1468 of 2675 open obligations** on the side of the ledger where
+   1462 points sit (T1.1). Everything else in this document is smaller, slower,
+   or conditional on a measurement not yet taken.
+
+That is a more useful roadmap than one which lists twenty plausible things, and
+it is only this short because the easy candidates were measured rather than
+assumed.
+
+---
+
 ## Part 9 — Avenues in the competition's structure, not in the code
 
 Three of these are new; two are checked-and-unavailable, recorded so they are
