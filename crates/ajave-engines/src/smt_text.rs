@@ -617,10 +617,7 @@ mod tests {
             Rvalue::Neg(v(1)),
         ] {
             let (e, side) = lia(&rv);
-            assert!(
-                e.starts_with("f_f"),
-                "{rv:?} must be havoced, got {e}"
-            );
+            assert!(e.starts_with("f_f"), "{rv:?} must be havoced, got {e}");
             // And the bogus overflow condition over bit patterns is gone with
             // it. It used to reach `error_formulas`, where a disjunct that is
             // satisfiable for unrelated reasons weakens every proof using it.

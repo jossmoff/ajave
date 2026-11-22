@@ -704,9 +704,7 @@ pub fn encode_body_lia(
         // quarantine (`docs/proposals/lia-faithfulness.md` §2.2); this closure
         // used to answer only the first, and that is why floats leaked into
         // integer terms here.
-        let operand_ty = |op: &Operand| -> Option<ajave_ir::Ty> {
-            smt_text::operand_ty(body, op)
-        };
+        let operand_ty = |op: &Operand| -> Option<ajave_ir::Ty> { smt_text::operand_ty(body, op) };
 
         // Current symbolic value of each site's array, starting at its
         // pre-state constant and rewritten by each store.
@@ -1043,7 +1041,11 @@ pub fn encode_body_lia(
         // `transition`, keeps this hole for single-point claims — recorded as
         // an issue rather than fixed silently here.
         for exc in &block.exceptional {
-            edge_clauses.push(EdgeClause::new(block.id, Some(exc.target), "true".to_string()));
+            edge_clauses.push(EdgeClause::new(
+                block.id,
+                Some(exc.target),
+                "true".to_string(),
+            ));
         }
 
         // The per-edge fields, in one place for every edge out of this block.
@@ -1433,11 +1435,8 @@ mod lia_encoding_tests {
             "fixture must have no exceptional edges for this comparison"
         );
 
-        let mut from_edges: Vec<&str> = enc
-            .edge_clauses
-            .iter()
-            .map(|e| e.clause.as_str())
-            .collect();
+        let mut from_edges: Vec<&str> =
+            enc.edge_clauses.iter().map(|e| e.clause.as_str()).collect();
         from_edges.sort_unstable();
 
         // `transition` is `(or c1 c2 ...)`; recover the disjuncts by matching
@@ -1564,7 +1563,8 @@ mod lia_encoding_tests {
             );
         }
         assert!(
-            enc.declarations.contains("(declare-fun ghost_len () (Array Int Int))"),
+            enc.declarations
+                .contains("(declare-fun ghost_len () (Array Int Int))"),
             "the term appears in `transition`, so the declaration must be in \
              `declarations` or z3 drops the assertion that uses it"
         );

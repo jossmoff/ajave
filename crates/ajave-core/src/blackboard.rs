@@ -809,19 +809,19 @@ impl Blackboard {
             }
             for (v1, (lo, hi)) in bounds {
                 let (v1, lo, hi) = (&v1, &lo, &hi);
-            // Two claims for one (block, variable) are **intersected**, not
-            // overwritten. The log is append-only and several engines may
-            // publish bounds for the same point; each `Over` invariant is a
-            // claim that holds there, so their conjunction holds too, and the
-            // meet is the strongest thing a consumer may conclude.
-            //
-            // This was a plain `insert`, so whichever claim the log happened
-            // to carry last won and the others vanished. That is not unsound
-            // given honest producers — every claim is true — but it made the
-            // answer depend on publication order, and it meant a producer bug
-            // could only ever be found by reading the producer. It took a
-            // JVM-confirmed contradiction to find exactly such a bug in
-            // `ai::join_block_intervals`.
+                // Two claims for one (block, variable) are **intersected**, not
+                // overwritten. The log is append-only and several engines may
+                // publish bounds for the same point; each `Over` invariant is a
+                // claim that holds there, so their conjunction holds too, and the
+                // meet is the strongest thing a consumer may conclude.
+                //
+                // This was a plain `insert`, so whichever claim the log happened
+                // to carry last won and the others vanished. That is not unsound
+                // given honest producers — every claim is true — but it made the
+                // answer depend on publication order, and it meant a producer bug
+                // could only ever be found by reading the producer. It took a
+                // JVM-confirmed contradiction to find exactly such a bug in
+                // `ai::join_block_intervals`.
                 out.entry((block, *v1))
                     .and_modify(|(l, h): &mut (i64, i64)| {
                         *l = (*l).max(*lo);

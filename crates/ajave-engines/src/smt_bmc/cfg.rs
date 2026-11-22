@@ -188,7 +188,10 @@ impl CfgInfo {
             joins.push(Some(j));
         }
 
-        if tally.merged + tally.exits_method + tally.back_edge + tally.region_escapes
+        if tally.merged
+            + tally.exits_method
+            + tally.back_edge
+            + tally.region_escapes
             + tally.over_cap
             > 0
         {
@@ -613,7 +616,11 @@ mod tests {
     #[test]
     fn region_escapes_stays_zero_on_every_shape_here() {
         let shapes = vec![
-            vec![br(1, 2), Terminator::Goto(BlockId(2)), Terminator::Return(None)],
+            vec![
+                br(1, 2),
+                Terminator::Goto(BlockId(2)),
+                Terminator::Return(None),
+            ],
             vec![
                 br(1, 2),
                 Terminator::Goto(BlockId(3)),
@@ -621,7 +628,11 @@ mod tests {
                 Terminator::Return(None),
             ],
             vec![br(1, 2), Terminator::Return(None), Terminator::Return(None)],
-            vec![br(1, 2), Terminator::Goto(BlockId(0)), Terminator::Return(None)],
+            vec![
+                br(1, 2),
+                Terminator::Goto(BlockId(0)),
+                Terminator::Return(None),
+            ],
             vec![
                 br(1, 4),
                 br(2, 3),

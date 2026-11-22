@@ -355,7 +355,10 @@ pub fn check_map_inductive(body: &Body, map: &InvariantMap, solver: &str) -> Cer
                 .map(|vi| matches!(vi.ty, Ty::Float | Ty::Double))
                 .unwrap_or(true)
         }) {
-            debug!("invariant-check: map {} mentions a float or unknown var", map.id);
+            debug!(
+                "invariant-check: map {} mentions a float or unknown var",
+                map.id
+            );
             return CertResult::Inconclusive;
         }
     }
@@ -476,7 +479,11 @@ pub fn map_implies_safety(
     } else {
         format!(
             "(or {})",
-            errors.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+            errors
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
         )
     };
     // `edge_preamble`, not `declarations`: the range axioms and the
@@ -933,9 +940,18 @@ mod tests {
             key: mk(),
             entry: BlockId(0),
             vars: vec![
-                VarInfo { kind: VarKind::Local(0), ty: Ty::Int },
-                VarInfo { kind: VarKind::Local(1), ty: Ty::Ref },
-                VarInfo { kind: VarKind::Local(2), ty: Ty::Int },
+                VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Int,
+                },
+                VarInfo {
+                    kind: VarKind::Local(1),
+                    ty: Ty::Ref,
+                },
+                VarInfo {
+                    kind: VarKind::Local(2),
+                    ty: Ty::Int,
+                },
             ],
             obligations: vec![Obligation {
                 id: ObligationId(0),
@@ -977,7 +993,11 @@ mod tests {
     fn map_at(block: BlockId, formula: Expr) -> InvariantMap {
         let mut entries = std::collections::BTreeMap::new();
         entries.insert(
-            ProgramPoint { method: mk(), block, index: 0 },
+            ProgramPoint {
+                method: mk(),
+                block,
+                index: 0,
+            },
             formula,
         );
         InvariantMap {
@@ -1086,7 +1106,11 @@ mod tests {
         let mut entries = std::collections::BTreeMap::new();
         for b in [BlockId(1), BlockId(2)] {
             entries.insert(
-                ProgramPoint { method: body.key.clone(), block: b, index: 0 },
+                ProgramPoint {
+                    method: body.key.clone(),
+                    block: b,
+                    index: 0,
+                },
                 bound.clone(),
             );
         }
@@ -1120,11 +1144,19 @@ mod tests {
         let bound = Expr::bin(Op::Le, Expr::Int(0), Expr::Var(VarId(0)));
         let mut entries = std::collections::BTreeMap::new();
         entries.insert(
-            ProgramPoint { method: body.key.clone(), block: BlockId(1), index: 0 },
+            ProgramPoint {
+                method: body.key.clone(),
+                block: BlockId(1),
+                index: 0,
+            },
             bound.clone(),
         );
         entries.insert(
-            ProgramPoint { method: body.key.clone(), block: BlockId(2), index: 0 },
+            ProgramPoint {
+                method: body.key.clone(),
+                block: BlockId(2),
+                index: 0,
+            },
             Expr::bin(
                 Op::And,
                 bound,
@@ -1158,7 +1190,10 @@ mod tests {
         };
         assert_eq!(
             render(
-                &Expr::Depth { field: f, obj: Box::new(Expr::Var(VarId(1))) },
+                &Expr::Depth {
+                    field: f,
+                    obj: Box::new(Expr::Var(VarId(1)))
+                },
                 false
             ),
             None,

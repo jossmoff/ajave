@@ -215,7 +215,9 @@ pub enum Expr {
     /// length is not unmodelled: the IR has `Rvalue::ArrayLength` and both CHC
     /// encoders track it. Routing it through `Apply` would make every length
     /// claim look optional to every consumer.
-    Length { obj: Box<Expr> },
+    Length {
+        obj: Box<Expr>,
+    },
     /// A named library method applied to arguments. Present so a claim can be
     /// *about* `Math.sin(x)` without anyone having to model it — which is the
     /// whole point of being able to ask.
@@ -249,9 +251,7 @@ impl Expr {
     }
 
     pub fn length(obj: Expr) -> Expr {
-        Expr::Length {
-            obj: Box::new(obj),
-        }
+        Expr::Length { obj: Box::new(obj) }
     }
 
     /// `0 <= index < Length{obj}` — the safety condition of an `ArrayBounds`

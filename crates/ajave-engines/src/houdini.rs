@@ -348,9 +348,18 @@ mod tests {
             key: mk(),
             entry: BlockId(0),
             vars: vec![
-                VarInfo { kind: VarKind::Local(0), ty: Ty::Int },
-                VarInfo { kind: VarKind::Local(1), ty: Ty::Int },
-                VarInfo { kind: VarKind::Local(2), ty: Ty::Int },
+                VarInfo {
+                    kind: VarKind::Local(0),
+                    ty: Ty::Int,
+                },
+                VarInfo {
+                    kind: VarKind::Local(1),
+                    ty: Ty::Int,
+                },
+                VarInfo {
+                    kind: VarKind::Local(2),
+                    ty: Ty::Int,
+                },
             ],
             obligations: vec![Obligation {
                 id: ObligationId(0),
@@ -414,8 +423,12 @@ mod tests {
         }
     }
 
-    fn x() -> Expr { Expr::Var(VarId(0)) }
-    fn n() -> Expr { Expr::Var(VarId(1)) }
+    fn x() -> Expr {
+        Expr::Var(VarId(0))
+    }
+    fn n() -> Expr {
+        Expr::Var(VarId(1))
+    }
 
     /// `0 <= x` survives at the loop header — but only because `x < n` is in
     /// the pool, and that is the whole content of guarded preservation.
@@ -474,7 +487,10 @@ mod tests {
         assert!(
             !r.entries.iter().any(|(p, _)| p.block == BlockId(1)),
             "`0 <= x` is not inductive at the header without a bound on `n`: {:?}",
-            r.entries.values().map(|f| f.to_string()).collect::<Vec<_>>()
+            r.entries
+                .values()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -541,7 +557,10 @@ mod tests {
         assert!(
             r.entries.is_empty(),
             "nothing survived, so the map must say nothing: {:?}",
-            r.entries.values().map(|f| f.to_string()).collect::<Vec<_>>()
+            r.entries
+                .values()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -556,7 +575,10 @@ mod tests {
         let Some(s) = solver() else { return };
         let pool = vec![Expr::bin(Op::Le, Expr::Int(0), x()), Expr::Bool(false)];
         let r = synthesise(&counting_loop(), &pool, &[], s, 1);
-        assert!(!r.converged, "a budget of one query cannot have tested a pool of two");
+        assert!(
+            !r.converged,
+            "a budget of one query cannot have tested a pool of two"
+        );
         assert!(r.queries <= 1, "budget was not respected: {}", r.queries);
     }
 

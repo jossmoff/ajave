@@ -112,9 +112,7 @@ fn safety_condition(body: &ajave_ir::Body, oid: ajave_ir::ObligationId) -> Optio
                 // A reference condition's safety *is* non-nullness, and saying
                 // it that way rather than as `r != 0` keeps the claim in the
                 // vocabulary a consumer can type-check.
-                Some(ajave_ir::Ty::Ref) | Some(ajave_ir::Ty::Str) => {
-                    Expr::non_null(Expr::Var(*v))
-                }
+                Some(ajave_ir::Ty::Ref) | Some(ajave_ir::Ty::Str) => Expr::non_null(Expr::Var(*v)),
                 _ => Expr::bin(Op::Ne, Expr::Var(*v), Expr::Int(0)),
             })
         }
