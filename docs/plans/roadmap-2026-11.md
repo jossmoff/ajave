@@ -869,6 +869,106 @@ Surveyed and deliberately not proposed, with reasons, so the list is closed:
 
 ---
 
+## Part 9 — Avenues in the competition's structure, not in the code
+
+Three of these are new; two are checked-and-unavailable, recorded so they are
+not re-proposed.
+
+### S1 — Upstream the benchmark label we believe is wrong
+
+We hold a position that one SV-COMP task is **mislabelled**: our FALSE on
+`ReverseInterpolator` is right and the benchmark's expected TRUE is wrong,
+which costs us **−32** every run. Separately, our `valid-assert` score is
+**+33 against stock sv-benchmarks** because of a local correction, which means
+every external comparison we publish has to subtract it first.
+
+Both facts point the same way: **fix it upstream.** Java tasks enter the corpus
+through pull requests to `sv-benchmarks`, and the competition explicitly
+accommodates this kind of dispute — the report notes that for voted expected
+results, "tool developers can inspect the results and convince the community
+that a voted expected result is in fact wrong", after which the task is
+removed.
+
+This is the cheapest legitimate points on the entire list after #127: a −32
+becomes a +2 (a 34-point swing on one task), our local correction stops being a
+divergence from the official corpus, and every comparison we make becomes
+honest without an asterisk. It costs a well-argued pull request with a JLS/JVMS
+citation and a real-JVM demonstration — both of which `CLAUDE.md` already
+requires us to have produced before believing our own verdict.
+
+Do this early. Corpus changes have a deadline ("all Java verification tasks
+used in the competition must be part of the SV-COMP benchmark collection prior
+to the benchmark contribution deadline"), so it is time-boxed in a way code is
+not.
+
+### S2 — Contribute benchmarks, deliberately
+
+The corpus is grown by contribution (T3.1: ARG-V added 68 tasks from 1,261
+scraped repositories). We have `benchmarks/ajave/` — a suite of minimal
+programs, each with ground truth argued from the JLS/JVMS and confirmed on a
+real JVM, built under a mandatory rule that every engine finding gets one.
+`benchmarks/ajave/jvm-floats/NaNComparisonIsAlwaysFalse` is three lines with a
+derivation from IEEE-754 and the `dcmpg` bytecode.
+
+That is a higher evidentiary standard than "scraped from GitHub and checked by
+four verifiers". Several of them are exactly the kind of capability-boundary
+task the corpus is short of.
+
+The honest tension, and it must be stated: contributing tasks we are good at is
+self-serving, and tasks that pin *our* capability boundary are not obviously
+general. The defensible subset is the ones encoding **JVM semantics** rather
+than our architecture — the float and string semantics cases, where ground
+truth comes from the specification and any verifier should agree. Those are a
+contribution; a task shaped around our blackboard is not.
+
+### S3 — SV-LIB: wide open, and a demo category
+
+SV-COMP 2026 introduced **SV-LIB**, with **254 verification tasks**, evaluated
+against **3 verifiers and 1 validator**. The best score was ~165 of a maximum
+391 (42%). By comparison, Java has 11 verifiers and C has 61.
+
+The format's pitch is directly relevant to us: "one of the key features of the
+format is **clear formal semantics, painfully missing for languages like C and
+Java**". Most of our hard-won engineering is JVM-semantics modelling —
+`contract_of`, the allowlist, float bit patterns, exception tables — and a
+format with defined semantics removes that entire cost class.
+
+But: it is a **demo** category, so it earns no medals and does not affect the
+standings, and retargeting a frontend is a real build. So this is a **watch
+item, not a proposal**: if SV-LIB is promoted to a regular category (as
+`no-runtime-exception` just was, from demo to base), it becomes the least
+contested scoring surface in the competition, and the decision should be
+revisited immediately rather than from scratch.
+
+### S4 — Checked and unavailable: there is no Java validation track
+
+This looked like the best idea in this section until I read the rules. Java has
+only **3 validators** against C's 16, one of them (JCWIT) inactive, and we
+already own a working Java violation-witness replayer — `JvmReplay` currently
+*refutes* 76 of our own witnesses, so it already discriminates. Entering as a
+validator looked like medals in a nearly-empty category.
+
+It is not available. The validation track's tasks are "the handcrafted
+validation tasks in **C.ValidationCrafted** and all validation tasks generated
+by verifiers on the verification tasks in **C.Overall**". Java witnesses are
+validated in order to score the *verification* track; there is no Java
+validation category to compete in, and the medal tables (Tables 14–16) list
+only C meta categories.
+
+What survives from the idea: building a GraphML **reader** so we can validate
+our own witnesses end-to-end is still worth it, because it is the honest
+version of T0.2 and it de-risks the writer in T0.1. Just not for points of its
+own.
+
+### S5 — Checked and unavailable: no cross-task caching
+
+Noted in Part 8 N6 and repeated here because it is a structural rather than a
+technical limit: each tool execution is independent, so nothing learned on one
+task may be carried to the next. Verified in the resource rules — each verifier
+run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
+
+---
+
 ## References
 
 **Competition**
