@@ -1405,6 +1405,97 @@ run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
 
 ---
 
+## Appendix — how to re-derive every number here
+
+`CLAUDE.md` holds that a number produced without stated conditions is not
+evidence. That applies to this document, so here is how to check it. Several
+claims below are load-bearing for the whole ranking; if one is wrong, the
+ranking changes.
+
+**Official competition figures** — Beyer & Strejček, TACAS 2026. Extract the
+text and read Table 1 (witness formats per base category), Table 2 (verification
+scoring), Table 3 (validation scoring), Table 12 (all Java verifiers) and
+Table 13 (medalists):
+
+```sh
+pdftotext 2026-TACAS.Evaluating_Software_Verifiers_for_C_Java_and_SV-LIB.pdf out.txt
+grep -n -i java out.txt
+```
+
+The three claims to check first, because everything rests on them:
+1. `Java.valid-assert.` correctness witnesses are **1.0 demo**;
+   `Java.no-runtime-exception.` correctness witnesses are **–**. (Table 1.)
+2. "If there is no supported witness format or the only supported witness
+   format is in demo mode, the witness generation is **not required**."
+3. Violation witnesses for both Java categories are **1.0**, not demo, and
+   False-correct is "+1 … the violation witness **was confirmed**".
+
+(1)+(2) give "every TRUE is a free +2"; (3) gives "every FALSE needs GraphML".
+If any of the three is misread, §0.5's 582 is wrong.
+
+**The official max decomposition** (T = 1090, F = 641): solve `2T + F = 2821`
+and `T + F = 1731` from Table 12's header ("1731 tasks, max. score 2821").
+
+**Our score decomposition** (794 TRUE, 582 FALSE): solve `2Tc + Fc = 2170` and
+`Tc + Fc = 1376` from the full-corpus run. Valid **only because we have zero
+wrong answers** — any `−32` or `−16` term breaks the system, so re-derive it
+from the run's own counts rather than reusing these numbers after a regression.
+
+**Our corpus's label distribution** (1043 TRUE / 742 FALSE / max 2828, and the
+per-property split):
+
+```sh
+python3 - <<'EOF'
+import pathlib, re, collections
+c = collections.Counter()
+for y in pathlib.Path("benchmarks/sv-comp").rglob("*.yml"):
+    for m in re.finditer(r"property_file:\s*(\S+)[\s\S]*?expected_verdict:\s*(\w+)",
+                         y.read_text(errors="ignore")):
+        c[(m.group(1).split('/')[-1].replace('.prp',''), m.group(2))] += 1
+for k in sorted(c): print(k, c[k])
+EOF
+```
+
+**The 1.31× meta-category weighting**: with `n₁ = 1013` (valid-assert) and
+`n₂ = 771` (NRE) from the above, differentiate
+`(s₁/n₁ + s₂/n₂)·(n₁+n₂)/2` — the marginal values are `(n₁+n₂)/(2n₁) = 0.881`
+and `(n₁+n₂)/(2n₂) = 1.157`. **This one is sensitive to the category sizes**,
+which are our corpus's rather than the official ones, so recompute it from the
+official per-category task counts before relying on the exact figure. The
+*direction* (NRE worth more) holds for any `n₂ < n₁`.
+
+**Array allocation counts** (196 total, 53 constant, 38 of length ≤ 8): the
+regex over `benchmarks/sv-comp/**/*.java` in T1.5(b). Counts *source
+allocations*, not obligations, and that distinction is the whole argument in
+that section — do not quote it as an obligation count.
+
+**JDK call distribution** (`Math.sin` ×180 etc.): the `([A-Z]\w+)\.(\w+)\(`
+scan in Part 10. Crude — it cannot distinguish a user class named `Matrix` from
+a JDK one, so it is filtered against a hand-written list of JDK class names and
+will miss instance calls through variables. Good enough for ranking
+populations, not for coverage claims.
+
+**Contract coverage** (277 method names): `grep -roh '"[a-z][A-Za-z0-9_]*"'`
+over `crates/ajave-models/src/*.rs`, deduplicated. An **over**-estimate — it
+counts every lowercase string literal, not only method names — so treat it as
+"the same order of magnitude as the corpus's JDK surface", which is all the
+argument needs.
+
+**Obligation populations** (1468 `NullDeref` and 900 `ArrayBounds` of 2675):
+from earlier blocker-census runs, not re-measured here. **Re-measure before
+committing to T1.1** — it is the single number the top capability
+recommendation rests on, and `tools/blocker_census.py` reports obligation
+counts from the orchestrator's own open-set.
+
+**Anything from a run**: on an idle machine, `--require-idle`, after
+`tools/cleanup.sh`, with `--repeat N` before quoting, and `--set smoke --check`
+green first. The Apple indexing daemons (`mds_stores`, `mediaanalysisd`) hold
+this machine near load 3 for long stretches and have twice blocked a baseline
+re-record; that is a real constraint on when measurements can be taken, not an
+excuse to take them anyway.
+
+---
+
 ## References
 
 **Competition**
