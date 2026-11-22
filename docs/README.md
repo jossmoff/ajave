@@ -34,6 +34,11 @@
   array length, the ICE/Horn-ICE lineage it comes from, why a wrapping-sound
   teacher is the part the literature does not supply, and the stage-1 exit
   criterion that would falsify the whole thing.
+- [`proposals/research-what-is-unexplored.md`](proposals/research-what-is-unexplored.md)
+  — four direction guesses measured in one afternoon, three at zero; what the
+  nulls jointly say the obstacle is (quantified facts about array *contents*);
+  the interpolation and abduction capability already linked into the binary; and
+  three theory lines with the novel parts separated from the merely-new-to-us.
 - [`strategies/`](strategies/) — one file per verification strategy
   (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before

@@ -7,7 +7,7 @@ use ajave_ir::*;
 use ajave_models;
 use log::debug;
 
-use super::{ExploreCtx, SavedState, MAX_CALL_DEPTH, MAX_LOOP_UNROLL};
+use super::{max_loop_unroll, ExploreCtx, SavedState, MAX_CALL_DEPTH};
 use ajave_core::artifact::{Approximations, ProgramPoint};
 
 /// Whether a havoced method call could throw a RuntimeException.
@@ -1419,7 +1419,7 @@ impl<'a> ExploreCtx<'a> {
             let loop_key = (self.body.key.to_string(), target.0);
             let count = self.loop_visits.entry(loop_key).or_insert(0);
             *count += 1;
-            if *count > MAX_LOOP_UNROLL {
+            if *count > max_loop_unroll() {
                 self.mark_incomplete("handle_goto");
             } else {
                 self.explore_block_until(target, 0, stop_at);

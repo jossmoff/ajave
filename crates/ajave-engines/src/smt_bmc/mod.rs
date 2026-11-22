@@ -67,7 +67,29 @@ const MAX_VIOLATIONS: usize = 50;
 const MAX_CALL_DEPTH: u32 = 15;
 
 /// Maximum number of times a loop back-edge may be taken on a single path.
-const MAX_LOOP_UNROLL: u32 = 5;
+///
+/// A fitted constant, and until 2026-11-22 an **unswept** one. `AJAVE_BMC_SCALE`
+/// deliberately does not scale it — see the note on `budget_scale` — so the
+/// recorded result that "a larger BMC budget converts nothing" was measured
+/// with this value held at 5 throughout. Meanwhile `handle_goto`, which is
+/// where this cap trips, is the dominant truncation site in the blocker census:
+/// 46 of 254 TRUE-expected unproven pairs, all of them reported as having
+/// budget still in hand.
+///
+/// `AJAVE_MAX_LOOP_UNROLL` exists so the sensitivity can be measured rather
+/// than assumed, which `CLAUDE.md` asks for of every fitted constant. It is an
+/// experiment knob: the default is unchanged, and a sweep is a measurement, not
+/// a licence to raise it.
+fn max_loop_unroll() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("AJAVE_MAX_LOOP_UNROLL")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(5)
+    })
+}
 
 /// Maximum total block visits across all paths. Prevents exponential blowup
 /// from loops with internal branches: e.g. 5 unrolls × 3 branches per
@@ -1130,8 +1152,21 @@ impl Engine for SmtBmc {
             info!("smt-bmc: assumed {learned} bound(s) supplied by another engine");
         }
 
+        // EXPERIMENT KNOB, not for merge. `AJAVE_BMC_NO_VIOLATE=1` suppresses
+        // violation publication while keeping every proof this engine makes.
+        //
+        // It exists to measure one number: of the 79 task-property pairs that
+        // have nothing open and a witness JVM replay refutes, how many would be
+        // TRUE if the false claim were simply absent? Disabling the other Under
+        // engines cannot answer that, because these violations are this
+        // engine's own -- measured on 10 of the 79, all still UNKNOWN with
+        // concolic, concrete, nra and float-search removed.
+        let suppress_violations = std::env::var("AJAVE_BMC_NO_VIOLATE").as_deref() == Ok("1");
         let mut advanced = false;
         for (method, oid, witness) in violations {
+            if suppress_violations {
+                continue;
+            }
             let oref = ObligationRef { method, id: oid };
             debug!(
                 "smt-bmc: publishing violation at {oref:?}, witness={:?}",
