@@ -173,6 +173,80 @@ JBMC's 1561 was measured by the official harness on the official set. So the
 not being paid for roughly 27% of what we report, and the fix requires no new
 verification capability.**
 
+### 0.6 Where the remaining headroom is, and it is not where the interesting work is
+
+Combining §0.2's decomposition of the official maximum (T = 1090 true tasks,
+F = 641 false tasks) with §0.5's decomposition of our own score (794 correct
+TRUE, 582 correct FALSE):
+
+| | we get | available | headroom | **points left** |
+|---|---|---|---|---|
+| TRUE (+2 each) | 794 | 1090 | 296 tasks | **592** |
+| FALSE (+1 each) | 582 | 641 | 59 tasks | **59** |
+
+**Our FALSE coverage is already 91%. Our TRUE coverage is 73%.** So there is
+**ten times more score available on the TRUE side** — 592 points against 59.
+
+This single table should govern every capability decision below, and it has
+three consequences that are not obvious:
+
+1. **Capability work belongs on the TRUE side.** Proving programs correct —
+   nullness, Pentagons, array invariants, CHC configuration — is where the
+   points are. Bug-finding is nearly exhausted on this corpus.
+2. **The two large prizes are the same size and wildly different in cost.**
+   The witness gap is 582 points and is a serialisation bug. The entire
+   remaining TRUE capability headroom is 592 points and is years of research.
+   That is not a close call about what to do first.
+3. **Anything that improves FALSE-finding is capped at 59 points** on the
+   current corpus, however elegant. Which brings us to the most interesting
+   thing in this document, and why it is not ranked first.
+
+### 0.7 Incorrectness logic and bi-abduction — the find, and its honest demotion
+
+The most compelling technique I found in this research pass is the
+**incorrectness logic** line: IL as the formal dual of Hoare logic for *proving
+bugs exist* (O'Hearn), **Incorrectness Separation Logic** marrying it to the
+frame rule (CAV 2020), and **bi-abduction** (Calcagno, Distefano, O'Hearn,
+Yang, POPL 2009) ported to the under-approximate setting to give compositional,
+per-method specification inference — the basis of Infer-Pulse and Pulse-X.
+Reported fix rates: Pulse-X 61% against Infer's 23–59%, and Pulse at Facebook
+82%. A 2025 paper extends the line to object-oriented programs.
+
+Why it looks tailor-made for us:
+
+- **It is literally abduction**, and after this week we have abduction
+  in-process via cvc5. `abduct.rs` is the primitive bi-abduction is built on.
+- **It is compositional.** Per-method specs with a frame rule, so it never
+  unrolls a whole program — which is exactly the wall our BMC hits
+  (`back_edge` 50% of branching refusals, the whole `structural` bucket).
+- **It cannot cause a wrong TRUE.** IL is under-approximate, so its results
+  are `Direction::Under`: may violate, may not discharge. Our blackboard
+  already enforces that at publish, and `JvmReplay` already certifies every
+  violation on a real JVM before we answer FALSE.
+- **It is Infer's technology, and Infer runs on millions of lines of real
+  Java** — the exact population T3.1 says is arriving.
+
+And yet: **it is a FALSE-finder, and §0.6 caps FALSE-finding at 59 points.**
+Three to six months of work on a separation-logic engine, for at most 59
+points, while a GraphML emitter is worth 582 and a nullness domain is worth a
+share of 592. So it is **not proposed for the current corpus**, and recording
+that is the whole point of doing the arithmetic before the design.
+
+The condition under which it becomes a top item is specific and worth watching
+for: our 91% FALSE coverage is measured on *today's* corpus, which is mostly
+crafted algorithms. ARG-V's own finding is that all four top 2025 verifiers
+"decrease substantially" on realistic code. If a split measurement (T3.1) shows
+our FALSE coverage on the real-world population is far below 91%, then the 59
+is wrong, the headroom is real, and this becomes the right answer — because
+compositional under-approximate reasoning is the published technique for
+bug-finding at that scale, and nothing else on this list is.
+
+Also worth keeping from that literature regardless of whether we build the
+engine: Pulse deliberately **does not support inductive predicates** (list
+segments and such) and uses a simplified bi-abduction over pure assertions
+instead. That is a strong hint about where the cost/benefit knee sits for any
+heap reasoning we add.
+
 Which brings us to the first item.
 
 ---
@@ -1042,6 +1116,17 @@ run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
 - LORIS: *Guiding LLM-based Loop Invariant Synthesis via Feedback on Local
   Reasoning Errors*. arXiv 2605.17914.
 - Clause2Inv (ISSTA 2025); LaM4Inv (BMC-filtered LLM candidates).
+
+**Incorrectness logic and bi-abduction (§0.7)**
+- O'Hearn. *Incorrectness Logic*. POPL 2020.
+- Raad, Berdine, Dang, Dreyer, O'Hearn, Villard. *Local Reasoning about the
+  Presence of Bugs: Incorrectness Separation Logic*. CAV 2020.
+- Calcagno, Distefano, O'Hearn, Yang. *Compositional Shape Analysis by Means of
+  Bi-Abduction*. POPL 2009.
+- Le, Raad, Villard, Berdine, Distefano, O'Hearn. *Finding Real Bugs in Big
+  Programs with Incorrectness Logic*. OOPSLA 2022 (Pulse-X).
+- *Inferring Incorrectness Specifications for Object-Oriented Programs*,
+  2025.
 
 **Novel avenues (Part 8)**
 - Beyer, Henzinger, Keremoglu, Wendler. *Conditional model checking: a
