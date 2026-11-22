@@ -173,6 +173,66 @@ JBMC's 1561 was measured by the official harness on the official set. So the
 not being paid for roughly 27% of what we report, and the fix requires no new
 verification capability.**
 
+### 0.5b The two properties are mirror images, and nobody has acted on it
+
+Counted from our corpus's own `.yml` labels (1785 task-property pairs):
+
+| property | TRUE | FALSE | tasks | max pts | **pts in TRUE** | **pts in FALSE** |
+|---|---|---|---|---|---|---|
+| `valid-assert` | 312 | 701 | 1013 | 1325 | 624 | **701** |
+| `no-runtime-exception` | 731 | 40 | 771 | 1502 | **1462** | 40 |
+
+First, a sanity check that validates everything else in this document: our
+corpus totals **1043 TRUE, 742 FALSE, max score 2828**, against the official
+**1090 / 641 / 2821**. Different populations, near-identical aggregate — so our
+corpus is a good proxy and the arithmetic in §0.5–0.6 transfers.
+
+Now the structure, which is the finding. **`valid-assert` is 69% FALSE tasks.
+`no-runtime-exception` is 95% TRUE tasks.** They are near mirror images, and
+almost everything follows from that:
+
+- **The witness fix (#127) is overwhelmingly a `valid-assert` story.** 701 of
+  the 742 FALSE labels live there. T0.1 is not a general improvement; it is
+  almost entirely one category.
+- **The TRUE capability headroom is overwhelmingly a `no-runtime-exception`
+  story.** 1462 of its 1502 available points are TRUE answers. Every invariant
+  domain we build is, in practice, an NRE play.
+- **And `NullDeref` is 1468 of 2675 open obligations.** A `NullDeref`
+  obligation is precisely what stands between us and an NRE TRUE.
+
+Those three facts compose into the clearest statement available about where
+this tool's remaining value sits:
+
+> **The largest single point concentration in the corpus is
+> `no-runtime-exception` TRUE answers — 1462 points — and the dominant blocker
+> on them is nullness, 55% of all open obligations.**
+
+That is T1.1, reached independently of the abduction work, the literature, and
+the competitor analysis. It is the one recommendation in this document that
+four separate lines of evidence agree on.
+
+**One more consequence, and it upgrades T0.3.** The meta-category formula
+normalises each base category by its own task count before combining, and the
+two categories are *different sizes* (1013 against 771). Differentiating
+`(s₁/n₁ + s₂/n₂)·(n₁+n₂)/2`:
+
+| a point gained in | marginal value in `Java.Overall` |
+|---|---|
+| `valid-assert` | 0.881 |
+| `no-runtime-exception` | **1.157** |
+
+**A point in `no-runtime-exception` is worth 1.31× a point in `valid-assert`.**
+I earlier guessed this normalisation would be near-neutral. It is not — it is a
+31% weighting difference, it points the same way as everything else in this
+section, and we are currently blind to it because `bench.py` sums raw points.
+T0.3 is therefore not bookkeeping; it is the difference between ranking two
+candidate improvements correctly and incorrectly.
+
+*(Corpus hygiene note found while counting: one task declares `no-deadlock`,
+which is not a Java property in SV-COMP 2026 — the only two are `valid-assert`
+and `no-runtime-exception`. It scores nothing and should be excluded from
+scoring runs.)*
+
 ### 0.6 Where the remaining headroom is, and it is not where the interesting work is
 
 Combining §0.2's decomposition of the official maximum (T = 1090 true tasks,
@@ -342,6 +402,11 @@ they cost precision rather than correctness — but they are also exactly the
 witnesses that would fail Wit4Java. The two checks should share a path.
 
 ### T0.3 — Compute the meta-category score the way the competition does
+
+**Upgraded by §0.5b: this is worth 31%, not nothing.** Our two categories are
+different sizes (1013 and 771 task-property pairs), so a point in
+`no-runtime-exception` is worth **1.31×** a point in `valid-assert` in the
+meta score. Summing raw points makes us blind to that.
 
 `Java.Overall` is a meta category:
 
