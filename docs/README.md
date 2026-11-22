@@ -23,6 +23,12 @@
   unbounded integers and still hold on a wrapping machine, and the ghost
   length model. Read with [`contracts.md`](contracts.md) §2, which records why
   `InvariantMap` still has no consumer.
+- [`measurement-validity.md`](measurement-validity.md) — why a gate that
+  carries no expected-verdict label can pass while measuring nothing, the
+  vacuity literature it is an instance of, and why a soundness-preserving
+  precision loss is invisible to every oracle here except the score. Read with
+  [`interval-ai-hint-path.md`](interval-ai-hint-path.md), which is the worked
+  example.
 - [`strategies/`](strategies/) — one file per verification strategy
   (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before
