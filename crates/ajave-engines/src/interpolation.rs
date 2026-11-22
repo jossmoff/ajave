@@ -613,11 +613,20 @@ pub fn encode_body_lia(
     // Unconditional, not only for bodies that allocate: an array-typed
     // parameter has no allocation site in this body and its length is still a
     // thing an invariant may talk about.
-    let lenq = crate::invariant_check::LENGTH_ARRAY;
-    decls.push_str(&format!("(declare-fun {prefix}{lenq} () (Array Int Int))\n"));
-    decls.push_str(&format!("(declare-fun {prefix}{lenq}p () (Array Int Int))\n"));
-    let len_pre = format!("{prefix}{lenq}");
-    let len_post = format!("{prefix}{lenq}p");
+    // **Unprefixed**, matching `field_array_name` and `depth_array_name` rather
+    // than `arr_name`. That looks inconsistent and is the deliberate choice:
+    // `invariant_check::render` spells ghost symbols without a prefix, so a
+    // prefixed declaration here would make the checker read a different array
+    // from the one the transition relation writes. Producer and consumer
+    // disagreeing about a symbol is the fault the comments on `Select` and
+    // `Field` exist to prevent, and `Expr::Depth` is what it looks like when
+    // it happens. Every caller passes `""` today, so this is latent — which is
+    // exactly when to get it right. `the_checker_and_the_encoder_spell_the_length_array_alike`
+    // is the test.
+    let len_pre = crate::invariant_check::LENGTH_ARRAY.to_string();
+    let len_post = format!("{len_pre}p");
+    decls.push_str(&format!("(declare-fun {len_pre} () (Array Int Int))\n"));
+    decls.push_str(&format!("(declare-fun {len_post} () (Array Int Int))\n"));
 
     let array_sites = array_sites_of(body);
     let sites: std::collections::BTreeSet<ajave_ir::AllocSite> =
@@ -1559,5 +1568,42 @@ mod lia_encoding_tests {
             "the term appears in `transition`, so the declaration must be in \
              `declarations` or z3 drops the assertion that uses it"
         );
+    }
+
+    /// Producer and consumer must spell the ghost array identically.
+    ///
+    /// `invariant_check::render` emits ghost symbols unprefixed while
+    /// `arr_name` prefixes allocation arrays, so "which convention does this
+    /// one follow" is a live question with a wrong answer available. A
+    /// prefixed declaration would make the checker read an array the
+    /// transition relation never writes, and z3 answers such a query by
+    /// dropping the assertion and reporting on what is left — silently.
+    /// `Expr::Depth` is what that looks like in the tree.
+    ///
+    /// Asserted against the rendered claim rather than against a literal, so
+    /// the test fails if either side moves.
+    #[test]
+    fn the_checker_and_the_encoder_spell_the_length_array_alike() {
+        let enc = encode_body_lia(&counting_loop(), &[], "");
+        let pre = crate::invariant_check::render(
+            &ajave_core::term::Expr::length(ajave_core::term::Expr::Var(ajave_ir::VarId(1))),
+            false,
+        )
+        .expect("a length claim must render now");
+        let post = crate::invariant_check::render(
+            &ajave_core::term::Expr::length(ajave_core::term::Expr::Var(ajave_ir::VarId(1))),
+            true,
+        )
+        .expect("a length claim must render now");
+        assert_eq!(pre, "(select ghost_len v1)");
+        assert_eq!(post, "(select ghost_lenp v1p)");
+        for sym in ["ghost_len", "ghost_lenp"] {
+            assert!(
+                enc.declarations
+                    .contains(&format!("(declare-fun {sym} () (Array Int Int))")),
+                "`render` reads {sym}; the encoder must declare it: {}",
+                enc.declarations
+            );
+        }
     }
 }
