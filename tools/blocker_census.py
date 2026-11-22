@@ -559,7 +559,7 @@ def report(records, dump=None):
         "refuted-witness": "witness construction / replay fidelity (#25)",
         "timeout": "anytime engines, partly",
         "killed": "nothing — contention artefact, re-run on an idle machine",
-        "float-escalation": "letting the FPA pass reach it (theory exists, gh #48)",
+        "float-escalation": "letting the FPA pass reach it (theory exists, gh #56)",
         "no-candidate": "unknown — nothing published at all",
         "other": "unclassified blocker",
     }

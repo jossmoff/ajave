@@ -29,6 +29,11 @@
   precision loss is invisible to every oracle here except the score. Read with
   [`interval-ai-hint-path.md`](interval-ai-hint-path.md), which is the worked
   example.
+- [`proposals/learned-loop-invariants.md`](proposals/learned-loop-invariants.md)
+  — the measured case for learning relational loop invariants over nullness and
+  array length, the ICE/Horn-ICE lineage it comes from, why a wrapping-sound
+  teacher is the part the literature does not supply, and the stage-1 exit
+  criterion that would falsify the whole thing.
 - [`strategies/`](strategies/) — one file per verification strategy
   (`ajave-engines/src/*.rs`) and per abstract domain (`ajave-core::fixpoint::AbstractDomain` impls).
   **Every strategy that lands in the engine portfolio gets a file here before
