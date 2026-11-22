@@ -1405,6 +1405,52 @@ run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
 
 ---
 
+## Part 11 — The participation checklist, which is not optional and is dated
+
+Everything above assumes we can enter. The report spells out what entry
+requires, and none of it is code:
+
+For each verifier, the participating team creates:
+
+1. **a tool archive on Zenodo**, from which the tool is downloaded;
+2. **a `<tool>.yml`** in the **Formal-Methods Tools** repository, with basic
+   information, the name of its **jury representative**, and the Zenodo archive
+   identifier;
+3. **a tool-info module** in the **BenchExec** repository, specifying the
+   interface for running the tool and interpreting its result;
+4. **a merge request** to `category-structure.yml` in the **Benchmark
+   Definitions** repository, declaring the categories the tool participates in.
+
+Several of these are gated on other people's review cycles, and two have hard
+deadlines: benchmark contributions must be merged "prior to the benchmark
+contribution deadline" (which bounds S1 and S2), and a jury representative is a
+*person*, not a file.
+
+Three consequences worth planning around:
+
+- **The tool-info module decides how our output is read.** It is where "the
+  last line of stdout is the verdict" is formalised, and it is also where the
+  witness-file convention lands — so T0.1's format selector and the tool-info
+  module are the same conversation. A tool-info module that advertises the
+  wrong witness format would reproduce #127 from the outside.
+- **Resource limits are fixed and should be what we measure against.** Each
+  verifier run is limited to **15 GB of memory and 15 minutes of cumulative CPU
+  time on 4 processing units**. Our `--timeout` and worker counts should mirror
+  that, or our timeout counts predict nothing. (Validator runs get 2 processing
+  units and 7 GB, which is why S4's non-availability costs us nothing.)
+- **Inactive status is visible and consequential.** Tools without active team
+  support are marked `∅` in the results tables, keep legacy witness-format
+  support that active tools lose, and are excluded from some prize categories.
+  Java-Ranger — the 2025 winner — is marked inactive in 2026. Being present and
+  active is itself worth something.
+
+None of this is interesting, and all of it is on the critical path. It should be
+started before the capability work, not after, because it is latency rather
+than effort: a merge request to someone else's repository takes as long as it
+takes.
+
+---
+
 ## Appendix — how to re-derive every number here
 
 `CLAUDE.md` holds that a number produced without stated conditions is not
