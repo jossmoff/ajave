@@ -3,6 +3,60 @@
 Written 2026-11-22, after a research pass over the SV-COMP 2026 competition
 report, the current Java field, and the invariant-inference literature.
 
+## Executive summary
+
+**If you read one thing: we are not being paid for 26.8% of our reported score,
+and the fix is a file format.**
+
+Six numbers, each derived below rather than asserted:
+
+| | |
+|---|---|
+| Our reported score (`0cb403b`, 1785 runs, 0 wrong) | **2170** |
+| What SV-COMP's rules would actually award | **1588** |
+| JBMC, the SV-COMP 2026 Java winner | **1561** |
+| So our defensible margin today | **+27** |
+| Our margin with the witness format fixed | **+609** |
+| Remaining capability headroom: TRUE vs FALSE | **592 pts vs 59 pts** |
+
+The mechanism: Java **TRUE** answers need no witness (correctness witnesses are
+demo-mode or unsupported), so all 794 of ours score a clean +2. Java **FALSE**
+answers need a *confirmed* format-**1.0 GraphML** violation witness, and
+`witness.rs` is a format-2.0 YAML emitter — so all **582** of our correct FALSE
+answers score **0**. That is issue #127, now confirmed against the official
+rules rather than inferred, and it is worth more than every other item in this
+document combined.
+
+Two traps in the obvious fix, both from the official report: emitting GraphML
+*alongside* `witness.yml` makes the task **unsolved** rather than fixed
+("if a verifier generates both files, `witness.graphml` is ignored"), and
+`bench.py` awards FALSE points with no reference to a witness, so the fix is
+unmeasurable until the scorer models confirmation.
+
+**Then, for capability: build nullness.** Four independent lines of evidence
+converge on it — it is 1468 of 2675 open obligations (55%); `no-runtime-exception`
+is 95% TRUE-labelled with 1462 of its 1502 points in TRUE answers, and a
+`NullDeref` obligation is exactly what blocks those; an NRE point is worth
+**1.31×** a `valid-assert` point under the meta-category formula; and the one
+usable signal the abduction instrument produced on real obligations was a
+nullness aliasing fact. Then Pentagons (`x ∈ [a,b] ∧ x < y`), on three
+independent lines of its own.
+
+**What not to build**, with the arithmetic recorded: a scheduler (36-task
+ceiling), an incorrectness-logic/bi-abduction engine (the most exciting thing
+here, capped at 59 points until a real-world split measurement says otherwise),
+a Java validation-track entry (the track is C-only), and cross-task caching
+(structurally impossible). Four further candidates — the boxed-primitive long
+tail, transcendental bounds, Spacer's quantified generalisation, and
+collections — were measured and are **already done**.
+
+**The competition is not saturated.** The winner scores 55% of the maximum
+while losing 315 tasks to unconfirmed witnesses and carrying 13 wrong proofs;
+JayHorn scored **−2472**. Soundness and witness hygiene outweigh coverage, which
+is the profile we already have.
+
+---
+
 This document exists because the last four capability directions were chosen by
 reading our own blocker census, and three of them measured **exactly zero**
 (raised unroll cap: 0 of 69 tasks; suppressed refuted witnesses: 0 of 79;
