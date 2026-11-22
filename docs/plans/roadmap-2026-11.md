@@ -519,10 +519,42 @@ QUIC3 — **does not arise** for that subset: intervals alone then prove
 element-wise facts exactly.
 
 This will not help `InsertionSort-FunSat01`, whose array is `new int[N]` for
-nondeterministic `N`. But it costs almost nothing and the population is
-plausibly large; the measurement to do first is simply **how many arrays in the
-corpus have a constant length, and how small** — a frontend query, no engine
-work, and it bounds the value before any is spent.
+nondeterministic `N`. I said the measurement to do first was how many corpus
+arrays have a constant length, so I did it — a regex over the 1498 Java sources
+in `benchmarks/sv-comp`:
+
+| | count | share |
+|---|---|---|
+| array allocations found | 196 | — |
+| constant length | 53 | 27.0% |
+| **constant and length ≤ 8** | **38** | **19.4%** |
+| constant, length 9–32 | 13 | 6.6% |
+| non-constant length | 143 | 73.0% |
+
+Most common constant lengths: 1 (×10), 10 (×10), 3 (×8), 2 (×7), 4 (×6).
+
+**So expansion applies to 38 of 196 allocation sites.** Two readings, and both
+belong in the decision:
+
+- *Pessimistic:* 196 array allocations across 1498 files is not many. Arrays
+  are rarer in this corpus than the volume of array-invariant literature
+  implies, and expansion touches a fifth of those.
+- *Optimistic:* sites are not obligations. 900 of 2675 open obligations are
+  `ArrayBounds`, so arrays are obligation-*dense* — a single site inside a loop
+  generates many checks. If the 19% of sites carries ~19% of those
+  obligations, expansion is in range of ~170 obligations, which is not trivial.
+
+The honest conclusion is that this is **cheap and low-ceiling**, so it goes
+after (a) rather than before it, and it is a candidate to drop entirely if (a)
+and T1.2 together already discharge the small-constant-array population —
+which they plausibly do, since intervals handle `a[0]` and `a[1]` on a length-2
+array without any expansion at all.
+
+The broader calibration is worth stating because it cuts against the direction
+this project has been drifting in: **the quantified-array thread — FunArray,
+QUIC3, the abduction census, sortedness templates — targets a population of a
+few hundred obligations, while `NullDeref` is 1468 of 2675.** The array work is
+intellectually the most interesting thing here and it is not where the mass is.
 
 **(c) Trace partitioning.** Rival and Mauborgne's domain (ESOP 2005, TOPLAS
 2007) abstracts over a *partition* of traces rather than the set of all traces,
