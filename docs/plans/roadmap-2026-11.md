@@ -487,6 +487,65 @@ timeouts. The lesson is that a string capability must not be bought with an IR
 change that hurts the BMC — `CLAUDE.md`'s "IR changes must not regress other
 engines" rule was written from this.
 
+### T1.5 — The Astrée precision recipe: thresholds, array expansion, partitioning
+
+Astrée is the most successful industrial abstract interpreter, and its authors
+published the list of what actually buys precision. Theirs reads: "expansion of
+small arrays, widening with several thresholds, loop unrolling, trace
+partitioning, **relations between loop counters and other variables**".
+
+That last item is T1.2 again, arrived at from a third direction. Three of the
+others we do not do at all, and each is cheap, standard, and lands on the TRUE
+side of §0.6.
+
+**(a) Widening with thresholds.** Astrée's interval domain "by default applies
+simple preset widening thresholds (enriched with dynamically computed ones)" —
+on widening, a variable jumps to the *least threshold above* its current value
+rather than straight to ∞. Candidate thresholds come from the program text:
+array lengths, loop bounds, integer literals, `Integer.MAX_VALUE`.
+
+This matters to us for a reason beyond precision. `CLAUDE.md` names
+`widen_delay` among the constants "chosen by raising them until specific
+benchmarks passed", i.e. a standing overfitting liability by our own rules.
+Threshold widening **replaces a fitted constant with a mechanism derived from
+the program under analysis** — it generalises to programs we have never seen,
+which is exactly the test that file sets. A cheap precision win that also
+retires a known liability is a rare combination.
+
+**(b) Expansion of small arrays.** For an array whose length is a known small
+constant, treat each element as its own variable. The entire quantified-array
+problem — the one that sank the abduction census and motivates FunArray and
+QUIC3 — **does not arise** for that subset: intervals alone then prove
+element-wise facts exactly.
+
+This will not help `InsertionSort-FunSat01`, whose array is `new int[N]` for
+nondeterministic `N`. But it costs almost nothing and the population is
+plausibly large; the measurement to do first is simply **how many arrays in the
+corpus have a constant length, and how small** — a frontend query, no engine
+work, and it bounds the value before any is spent.
+
+**(c) Trace partitioning.** Rival and Mauborgne's domain (ESOP 2005, TOPLAS
+2007) abstracts over a *partition* of traces rather than the set of all traces,
+recovering disjunctive precision where a plain join destroys it, then merging
+partitions once they stop paying. The reported effect is stark — ten abstract
+states where partitioned against two where merged — and the design point is
+that "partitions are merged soon enough that the widening operator does not
+need to collapse them".
+
+We already own the dual knob: large-block encoding *merges* regions, and the
+LBE census says `merged` 34.6%. Partitioning is the decision not to merge, kept
+locally. Astrée inserts partitioning directives **automatically after a
+preliminary analysis**, which is the design to copy — a two-pass scheme, not a
+hand-tuned directive list, because a hand-tuned list is overfitting with extra
+steps. Mopsa now supports bounded trace partitioning too, so there is a second
+implementation to learn from.
+
+Order within this item: **(a) then (b) then (c)**. Threshold widening is the
+cheapest and retires a liability; array expansion needs one frontend
+measurement before it is worth building; trace partitioning is the largest and
+should wait until Pentagons exists, since partitioning a weak domain buys less
+than partitioning a relational one.
+
 ### T1.4 — Sweep `fp.spacer.global` (global guidance / GSpacer)
 
 Pure measurement, no new code, and the last documented lever in the
@@ -1116,6 +1175,10 @@ run is separately limited to 15 GB and 15 minutes of CPU on 4 processing units.
 - Cousot, Cousot, Logozzo. *A parametric segmentation functor for fully
   automatic and scalable array content analysis* (FunArray). POPL 2011.
 - Costantini, Ferrara, Cortesi. *Static analysis of string values*. ICFEM 2011.
+- Rival, Mauborgne. *Trace partitioning in abstract interpretation based static
+  analyzers*. ESOP 2005; *The Trace Partitioning Abstract Domain*. TOPLAS 2007.
+- Cousot, Cousot, Feret, Miné, Rival et al. *Why does Astrée scale up?*
+  FMSD 2010; *The Astrée Static Analyzer*. ESOP 2005.
 - Negrini, Arceri, Ferrara, Cortesi. *Twinning automata and regular expressions
   for string static analysis* (Tarsis). VMCAI 2021; journal version JSEP 2024.
 
