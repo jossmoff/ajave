@@ -193,6 +193,412 @@ pub fn abduce_with_grammar(
         .find(|o| o.contains("define-fun") && !o.contains("none")))
 }
 
+/// What kind of fact an open obligation turned out to need.
+///
+/// This is the census's whole output, and the five cases are chosen so that
+/// each one sends the work somewhere different. The first is the one the
+/// previous four capability probes were missing: three directions measured
+/// exactly zero because each bucket in `tools/blocker_census.py` is named
+/// after what *blocks* a verdict, and an obligation can be blocked while
+/// needing no invariant at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Shape {
+    /// The goal is already valid with no added hypothesis. **No invariant is
+    /// missing**: whatever keeps this obligation open is upstream — a
+    /// truncated search, an unmodelled call — and no invariant domain, however
+    /// good, converts it.
+    AlreadyValid,
+    /// A relation between integer variables suffices. The scalar learner
+    /// (Houdini over a relational pool, `docs/proposals/learned-loop-invariants.md`)
+    /// is the build that serves these.
+    Scalar,
+    /// An index-quantified fact about array contents suffices. Nothing in the
+    /// portfolio can state one of these; it is what FunArray-style
+    /// segmentation (Cousot/Cousot/Logozzo POPL 2011) or quantified SyGuS
+    /// (FreqHorn, CAV 2019) exists for.
+    Quantified,
+    /// Some fact exists, but outside both vocabularies offered. Worth reading
+    /// individually — it is where a vocabulary is missing rather than a domain.
+    Outside,
+    /// An abduct exists and is **not a fact about a state**: it constrains
+    /// post-state symbols.
+    ///
+    /// These are not near-misses, they are artefacts, and they dominated the
+    /// first census run at 95% of rows. The mechanism is worth stating because
+    /// it is a property of our own encoding: the integer range axioms are
+    /// asserted over the **pre-state only** (`docs/proposals/lia-faithfulness.md`
+    /// §3 argues why, and `interpolation.rs` enforces it), so nothing stops a
+    /// hypothesis asserting `v2p = 2147483648` — a post-state outside the
+    /// 32-bit range. That is consistent in LIA and excludes the error
+    /// vacuously. `Verifier.nondetInt` produced exactly that.
+    ///
+    /// An invariant is a predicate on one state, so a hypothesis over the
+    /// successor was never a candidate. Counting these as "a fact exists"
+    /// would have reported a capability that does not exist.
+    Unusable,
+    /// No abduct inside the budget. Either genuinely unprovable or too
+    /// expensive to locate; the budget travels with the row so the two are not
+    /// conflated.
+    Nothing,
+}
+
+impl Shape {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Shape::AlreadyValid => "already-valid",
+            Shape::Scalar => "scalar",
+            Shape::Quantified => "quantified",
+            Shape::Outside => "outside",
+            Shape::Unusable => "unusable-poststate",
+            Shape::Nothing => "nothing",
+        }
+    }
+}
+
+/// One obligation's answer.
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    pub shape: Shape,
+    /// The abduct cvc5 returned, with `(define-fun A () Bool …)` stripped.
+    pub fact: Option<String>,
+}
+
+/// Is `goal` valid under `premises` with no extra hypothesis?
+///
+/// Asked **before** any abduction, because an obligation that needs no fact is
+/// not evidence for any invariant domain, and counting it as one is how a
+/// census manufactures a mandate. UNSAT of the negation is validity; anything
+/// else (SAT, unknown, a budget expiry) is treated as "a fact is needed",
+/// which errs toward more work rather than less.
+pub fn already_valid(prelude: &str, premises: &[&str], goal: &str) -> Result<bool, String> {
+    let mut s = preamble(prelude, premises);
+    s.push_str(&format!("(assert (not {goal}))\n(check-sat)\n"));
+    let out = run_script(&s)?;
+    Ok(out.iter().any(|o| o.trim() == "unsat"))
+}
+
+/// Strip cvc5's `(define-fun A () Bool …)` wrapper down to the formula.
+fn unwrap_define(s: &str) -> String {
+    let t = s.trim();
+    let marker = "() Bool ";
+    match t.find(marker) {
+        Some(i) => {
+            let body = &t[i + marker.len()..];
+            body.strip_suffix(')').unwrap_or(body).trim().to_string()
+        }
+        None => t.to_string(),
+    }
+}
+
+/// A grammar of relations between integer-sorted **terms**.
+///
+/// Terms, not variable names, and that distinction is the whole reason the
+/// first census run returned nothing usable. An array's length in this
+/// encoding is `(select ghost_len r)`, so the single most common missing fact
+/// in an array-bounds obligation -- `i < a.length` -- is not a relation
+/// between two variables at all. A grammar built from variable names cannot
+/// state it, and the census then reports "no scalar fact suffices" for
+/// precisely the population a scalar domain serves.
+///
+/// Pairwise, which is quadratic and therefore capped. `(<= a b)` and `(< a b)`
+/// over ordered pairs plus equality: the asymmetric forms both ways give the
+/// full ordering vocabulary without needing negation in the grammar.
+pub fn scalar_grammar(vars: &[String], cap: usize) -> Option<String> {
+    let mut prods: Vec<String> = Vec::new();
+    'outer: for (i, a) in vars.iter().enumerate() {
+        for b in vars.iter().skip(i + 1) {
+            for f in ["<=", "<", "="] {
+                prods.push(format!("({f} {a} {b})"));
+            }
+            prods.push(format!("(<= {b} {a})"));
+            prods.push(format!("(< {b} {a})"));
+            if prods.len() >= cap {
+                break 'outer;
+            }
+        }
+        // Against zero as well: `0 <= i` is the single most common missing
+        // fact in an array-bounds obligation and is not a pairwise relation.
+        prods.push(format!("(<= 0 {a})"));
+        prods.push(format!("(< 0 {a})"));
+        if prods.len() >= cap {
+            break 'outer;
+        }
+    }
+    if prods.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "((Start Bool)) ((Start Bool ({})))",
+        prods.join(" ")
+    ))
+}
+
+/// A grammar of index-quantified array-content templates.
+///
+/// Measured as the thing that works: unguided, cvc5 answers a sortedness goal
+/// in ~20 s with `(and (= n 2) …)`, shrinking the quantifier's range to one
+/// index. Given the template it returns the sortedness formula itself in 20 ms,
+/// and still does from a library of eight in 15 ms. So the generator is a
+/// template library, not free-form synthesis.
+///
+/// Each template is instantiated per (array, bound variable) pair. The bound
+/// is a program variable rather than a literal because the length of an array
+/// in this encoding is `(select ghost_len r)` for a reference the census
+/// cannot resolve to a site — using the integer variables as candidate bounds
+/// lets the solver pick whichever one happens to be the length.
+pub fn quantified_grammar(arrays: &[String], bounds: &[String], cap: usize) -> Option<String> {
+    let mut prods: Vec<String> = Vec::new();
+    'outer: for a in arrays {
+        for n in bounds {
+            for t in [
+                // sortedness, and strictly so
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k (- {n} 1))) (<= (select {a} k) (select {a} (+ k 1)))))"),
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k (- {n} 1))) (< (select {a} k) (select {a} (+ k 1)))))"),
+                // descending
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k (- {n} 1))) (>= (select {a} k) (select {a} (+ k 1)))))"),
+                // every element non-negative, and bounded by the bound
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k {n})) (<= 0 (select {a} k))))"),
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k {n})) (< (select {a} k) {n})))"),
+                // constant, and constant at a known value
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k {n})) (= (select {a} k) (select {a} 0))))"),
+                format!("(forall ((k Int)) (=> (and (<= 0 k) (< k {n})) (= (select {a} k) 0)))"),
+                // the first element is the minimum -- a prefix-max/min fact,
+                // which is what a partially-sorted loop establishes
+                format!("(forall ((k Int)) (=> (and (<= 1 k) (< k {n})) (<= (select {a} 0) (select {a} k))))"),
+            ] {
+                prods.push(t);
+                if prods.len() >= cap {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if prods.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "((Start Bool)) ((Start Bool ({})))",
+        prods.join(" ")
+    ))
+}
+
+/// Rewrite a formula into the post-state, token-wise.
+///
+/// `encode_body_lia` names the successor copy of every symbol by suffixing
+/// `p` -- `v12`/`v12p`, `ghost_len`/`ghost_lenp`, `arr0_1`/`arr0_1p` -- and an
+/// edge clause relates the unprimed state to the primed one. Composing an
+/// obligation's error formula with an edge therefore needs the error moved
+/// into the post-state, because the successor's entry state *is* the edge's
+/// post-state.
+///
+/// Token-wise against the declared symbol list, never by substring: `v1` is a
+/// substring of both `v1p` and `v12`, so a textual replace would prime `v12`
+/// into `v1p2` and double-prime anything already primed.
+pub fn prime_formula(formula: &str, symbols: &[String]) -> String {
+    let set: std::collections::BTreeSet<&str> = symbols.iter().map(|s| s.as_str()).collect();
+    let mut out = String::with_capacity(formula.len() + 16);
+    let mut tok = String::new();
+    let flush = |tok: &mut String, out: &mut String| {
+        if !tok.is_empty() {
+            if set.contains(tok.as_str()) {
+                out.push_str(tok);
+                out.push('p');
+            } else {
+                out.push_str(tok);
+            }
+            tok.clear();
+        }
+    };
+    for c in formula.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            tok.push(c);
+        } else {
+            flush(&mut tok, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut tok, &mut out);
+    out
+}
+
+/// Is this edge clause nothing but the frame — no guard, no assignment?
+///
+/// # Why anything needs to know
+///
+/// A Java `assert` compiles to a guarded jump into a failure block, and the
+/// failure block's *own* error clause is `(= 0 0)`: once control is there the
+/// property has already failed. Safety therefore means the block is
+/// unreachable — and `encode_body_lia` has **no program counter**. Its
+/// `transition` is a flat disjunction over blocks and its `error_formulas` are
+/// keyed by obligation, so "control is not in block 19" is not a state
+/// predicate the encoding can express at all. The engines that do discharge
+/// these carry block identity themselves: CHC has a predicate per block, IMC
+/// unrolls with one.
+///
+/// Measured consequence, on `InsertionSort-FunSat01`: the edge into the check
+/// block is `(and (= arr5_2p arr5_2) (= ghost_lenp ghost_len) (= v0p v0) …)`,
+/// pure frame. No pre-state fact entails its negation, because a frame is
+/// satisfiable from every pre-state. The only abducts available were
+/// post-state contradictions like `(= v0p 2147483648)`, and a census that
+/// believed them would have reported "a fact exists, outside the vocabulary"
+/// for every assertion in the corpus.
+///
+/// So a census question asked at an unguarded edge is vacuous, and this is how
+/// it is detected: walk back to the nearest edge that actually constrains
+/// something.
+///
+/// Syntactic and deliberately conservative — an unrecognised conjunct counts
+/// as a guard, so the walk stops early rather than wandering past the
+/// condition it is looking for.
+pub fn is_frame_only(clause: &str) -> bool {
+    let inner = match clause.trim().strip_prefix("(and ") {
+        Some(r) => r.strip_suffix(')').unwrap_or(r),
+        // A single conjunct with no `and` wrapper is still judged on its own.
+        None => clause.trim(),
+    };
+    let mut conjuncts = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for c in inner.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(c);
+                if depth == 0 {
+                    conjuncts.push(std::mem::take(&mut cur));
+                }
+            }
+            _ if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if conjuncts.is_empty() {
+        return false;
+    }
+    conjuncts.iter().all(|c| is_frame_conjunct(c))
+}
+
+/// `(= Xp Y)` where both sides are plain symbols and the left is a post-state
+/// copy: a frame conjunct, carrying no constraint on the pre-state.
+fn is_frame_conjunct(c: &str) -> bool {
+    let Some(body) = c
+        .trim()
+        .strip_prefix("(= ")
+        .and_then(|r| r.strip_suffix(')'))
+    else {
+        // `(and …)` nested one level deeper is how the encoder writes a
+        // single-element group; recurse rather than call it a guard.
+        if let Some(r) = c
+            .trim()
+            .strip_prefix("(and ")
+            .and_then(|r| r.strip_suffix(')'))
+        {
+            return is_frame_only(&format!("(and {r})"));
+        }
+        return false;
+    };
+    let parts: Vec<&str> = body.split_whitespace().collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let plain = |s: &str| s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    plain(parts[0]) && plain(parts[1]) && parts[0].ends_with('p')
+}
+
+/// The vocabulary a census row is allowed to answer in.
+///
+/// A struct rather than five positional arguments because `poststate` is the
+/// one that is easy to forget and the one whose absence silently invalidates
+/// the whole run — see `Shape::Unusable`.
+pub struct Vocab<'a> {
+    /// Integer-sorted **terms** over the pre-state, including `(select
+    /// ghost_len r)` length terms. Not just variable names.
+    pub terms: &'a [String],
+    /// Content arrays, excluding the length array.
+    pub arrays: &'a [String],
+    /// Post-state symbols. Any abduct mentioning one of these is not a fact
+    /// about a state and is reported as `Shape::Unusable`.
+    pub poststate: &'a [String],
+    /// Production cap. A grammar too large to search is indistinguishable
+    /// from one that does not contain the answer.
+    pub cap: usize,
+}
+
+/// Does `fact` mention a post-state symbol?
+///
+/// Token-wise, not by substring: `v1` is a substring of `v1p` and of `v12`, so
+/// a substring test would both over- and under-report.
+fn mentions_any(fact: &str, syms: &[String]) -> bool {
+    let toks: std::collections::BTreeSet<&str> = fact
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .collect();
+    syms.iter().any(|s| toks.contains(s.as_str()))
+}
+
+/// Classify one obligation: what shape of fact would discharge it?
+///
+/// Asked cheapest-first, and the order is the point. Validity first, because
+/// an obligation needing nothing is not evidence for any domain. Then scalar,
+/// because a scalar fact is both cheaper to find and cheaper to check than a
+/// quantified one, and a census that offered the quantified grammar first
+/// would report array work for obligations a relational pool already covers.
+///
+/// The unrestricted probe runs last and only to distinguish "no fact exists"
+/// from "a fact exists that we cannot use". Its answer is screened against
+/// `Vocab::poststate` before it is believed.
+pub fn classify(
+    prelude: &str,
+    premises: &[&str],
+    goal: &str,
+    v: &Vocab<'_>,
+) -> Result<Verdict, String> {
+    if already_valid(prelude, premises, goal)? {
+        return Ok(Verdict {
+            shape: Shape::AlreadyValid,
+            fact: None,
+        });
+    }
+    if let Some(g) = scalar_grammar(v.terms, v.cap) {
+        if let Some(a) = abduce_with_grammar(prelude, premises, goal, &g)? {
+            return Ok(Verdict {
+                shape: Shape::Scalar,
+                fact: Some(unwrap_define(&a)),
+            });
+        }
+    }
+    if let Some(g) = quantified_grammar(v.arrays, v.terms, v.cap) {
+        if let Some(a) = abduce_with_grammar(prelude, premises, goal, &g)? {
+            return Ok(Verdict {
+                shape: Shape::Quantified,
+                fact: Some(unwrap_define(&a)),
+            });
+        }
+    }
+    match abduce(prelude, premises, goal)? {
+        Some(a) => {
+            let fact = unwrap_define(&a);
+            let shape = if mentions_any(&fact, v.poststate) {
+                Shape::Unusable
+            } else {
+                Shape::Outside
+            };
+            Ok(Verdict {
+                shape,
+                fact: Some(fact),
+            })
+        }
+        None => Ok(Verdict {
+            shape: Shape::Nothing,
+            fact: None,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +781,69 @@ mod tests {
         let dt = t0.elapsed();
         println!("library of {} templates -> {:?}", templates.len(), got);
         println!("library selection took {dt:?}");
+    }
+
+    /// A malformed grammar must be an error, not an empty answer.
+    ///
+    /// This is the inert-measurement failure mode in its purest form. cvc5
+    /// reports a bad grammar on stdout and carries on; `run_script` collects
+    /// that text, no line contains `define-fun`, and the wrapper returned
+    /// `Ok(None)` -- byte-identical to "no fact of this shape suffices". A
+    /// census built on that reports a capability boundary wherever it has a
+    /// typo. `docs/measurement-validity.md` is about exactly this shape.
+    #[test]
+    fn a_malformed_grammar_is_an_error_not_an_empty_answer() {
+        let r = abduce_with_grammar(
+            "(set-logic QF_LIA)\n(declare-fun i () Int)\n(declare-fun n () Int)",
+            &["(and (<= 0 i) (< i n))"],
+            "(< i n)",
+            "((Start Bool)) ((Start Bool ((<= n THIS_SYMBOL_IS_NOT_DECLARED))))",
+        );
+        println!("malformed grammar -> {r:?}");
+        assert!(
+            r.is_err(),
+            "a grammar naming an undeclared symbol came back as Ok, so a typo \
+             is indistinguishable from a capability boundary"
+        );
+    }
+
+    /// Priming must be token-wise. `v1` is a substring of `v1p` and of `v12`.
+    #[test]
+    fn priming_a_formula_does_not_corrupt_overlapping_names() {
+        let syms: Vec<String> = ["v1", "v12", "ghost_len"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = prime_formula(
+            "(and (<= v1 v12) (>= (select ghost_len v1) 0) (= v1p v1p))",
+            &syms,
+        );
+        assert_eq!(
+            got, "(and (<= v1p v12p) (>= (select ghost_lenp v1p) 0) (= v1p v1p))",
+            "a substring rewrite would have produced v1p2 and v1pp"
+        );
+    }
+
+    /// The frame detector, against the real clause that exposed the need for it.
+    #[test]
+    fn a_pure_frame_edge_is_recognised_and_a_guarded_one_is_not() {
+        // Verbatim from `InsertionSort-FunSat01`, edge BlockId(18) -> BlockId(19).
+        let frame = "(and (and (= arr5_2p arr5_2)) (= ghost_lenp ghost_len) \
+                     (= v0p v0) (= v1p v1) (= v12p v12))";
+        assert!(
+            is_frame_only(frame),
+            "the edge into the check block carries no guard and must be seen as such"
+        );
+        // The same shape with one branch condition added is a guard.
+        let guarded = "(and (not (= v1 0)) (= v0p v0) (= v1p v1))";
+        assert!(
+            !is_frame_only(guarded),
+            "a branch condition must stop the walk-back"
+        );
+        // An assignment is not a frame either: it constrains the post-state
+        // from the pre-state in a way a fact can contradict.
+        let assign = "(and (= v3p (+ v3 1)) (= v1p v1))";
+        assert!(!is_frame_only(assign), "an assignment is not a frame");
     }
 
     /// Shape 3, and the one that decides whether Theory B is needed: a fact
